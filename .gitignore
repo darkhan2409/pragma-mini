@@ -1,0 +1,21 @@
+venv/
+__pycache__/
+*.py[cod]
+
+.vscode/
+.idea/
+
+data/raw/
+data/processed/
+data/tokenized/
+data/artifacts/
+data/runs/
+
+*.pt
+*.pth
+*.npz
+.pytest_cache/
+
+# документы и локальные артефакты
+*.docx
+data/artifacts/

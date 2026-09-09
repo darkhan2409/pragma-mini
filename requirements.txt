@@ -1,0 +1,6 @@
+numpy
+pandas>=3.0.5,<4.0
+pyarrow>=25.0.1,<26.0
+scikit-learn>=1.9,<2.0
+scipy
+tokenizers>=0.23.1,<0.24

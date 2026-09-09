@@ -1,0 +1,40 @@
+[project]
+name = "mini-pragma"
+version = "1.0.0"
+description = "HCB-подобный синтетический генератор банковских событий: 7 потоков, единая лента, реальные дефекты данных"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "pandas>=3.0.5,<4.0",
+    "pyarrow>=25.0.1,<26.0",
+    "scikit-learn>=1.9,<2.0",
+    "scipy",
+    "tokenizers>=0.23.1,<0.24",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=9,<10"]
+torch = ["torch==2.13.0"]
+
+[project.scripts]
+mini-pragma-emit = "src.generator.emit:main"
+mini-pragma-calibrate = "src.generator.calibrate:main"
+mini-pragma-preprocess = "src.preprocessing.run:main"
+mini-pragma-tokenize = "src.tokenizer.run:main"
+mini-pragma-encoder-smoke = "src.model.smoke:main"
+mini-pragma-history-smoke = "src.model.history_smoke:main"
+mini-pragma-train = "src.model.train:main"
+mini-pragma-downstream = "src.model.downstream:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["src", "src.generator", "src.generator.v2", "src.preprocessing", "src.tokenizer", "src.model"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
