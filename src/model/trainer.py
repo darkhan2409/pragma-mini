@@ -28,7 +28,14 @@ from .checkpoint import (
 )
 from .config import ACTIVATIONS, STRUCTURE_SESSION, STRUCTURES, config_from_tokenizer
 from .batching import BatchError
-from .data import ClientStore, EpochSampler, FixedSplit, session_keys_from_examples
+from .data import (
+    CUTOFF_POLICIES,
+    CUTOFFS_ALL,
+    ClientStore,
+    EpochSampler,
+    FixedSplit,
+    session_keys_from_examples,
+)
 from .history_batching import metadata_from_examples, prepare_history_batch, to_model_inputs
 from .losses import mlm_loss
 from .metrics import MetricAccumulator, UnigramTable, render_metrics
@@ -201,6 +208,11 @@ class TrainConfig:
     max_train_clients: int | None = 512
     max_val_clients: int | None = 64
 
+    # Какие срезы клиента идут в ОБУЧЕНИЕ: все помесячные или
+    # только последний. Валидация не меняется никогда — иначе
+    # две схемы мерились бы разными линейками.
+    train_cutoffs: str = CUTOFFS_ALL
+
     top_k: int = 5
     epsilon: float = 1e-8
 
@@ -244,6 +256,12 @@ class TrainConfig:
 
         if self.lr <= 0:
             raise ValueError("lr должен быть положительным")
+
+        if self.train_cutoffs not in CUTOFF_POLICIES:
+            raise ValueError(
+                f"train_cutoffs должен быть одним из {CUTOFF_POLICIES}, "
+                f"получено {self.train_cutoffs!r}"
+            )
 
         if self.precision not in PRECISIONS:
             raise ValueError(f"precision должен быть одним из {PRECISIONS}, получено {self.precision!r}")
@@ -377,6 +395,7 @@ class TrainConfig:
             "max_consecutive_skips": self.max_consecutive_skips,
             "max_train_clients": self.max_train_clients,
             "max_val_clients": self.max_val_clients,
+            "train_cutoffs": self.train_cutoffs,
             "top_k": self.top_k,
             "epsilon": self.epsilon,
             "dropout": self.dropout,
@@ -1209,6 +1228,10 @@ def store_for(
         clients=client_whitelist(config),
         sessions=config.uses_sessions,
         shared=shared,
+        # Отбор среза касается только обучения: val_time и
+        # test_time и так по одному примеру на клиента, а
+        # val_client должен остаться прежней линейкой.
+        cutoffs=config.train_cutoffs if split == "train" else CUTOFFS_ALL,
     )
 
 

@@ -23,6 +23,7 @@ from .config import STRUCTURES
 from src.tokenizer.masking import SCHEMES
 
 from .checkpoint import verify_checkpoint
+from .data import CUTOFF_POLICIES
 from .targets import TARGET_POLICIES
 from .trainer import (
     ARCHITECTURE_FIELDS,
@@ -201,6 +202,9 @@ def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--accumulation-steps", type=int, default=None)
     parser.add_argument("--target-policy", choices=TARGET_POLICIES, default=None)
+    # Какие срезы клиента идут в обучение. last это один
+    # пример на клиента, самый поздний cutoff.
+    parser.add_argument("--train-cutoffs", choices=CUTOFF_POLICIES, default=None)
     parser.add_argument("--mask-scheme", choices=SCHEMES, default=None)
     parser.add_argument(
         "--stream-validation",
@@ -261,6 +265,7 @@ OVERRIDES: tuple[str, ...] = (
     "epochs",
     "accumulation_steps",
     "target_policy",
+    "train_cutoffs",
     "mask_scheme",
     "stream_validation",
     "best_metric",
@@ -467,6 +472,7 @@ def describe_checkpoint(path: Path) -> dict:
     print()
     print(f"структура               {model_config.get('structure')}, d_model {model_config.get('d_model')}")
     print(f"политика целей          {train_config.get('target_policy')}")
+    print(f"срезы обучения          {train_config.get('train_cutoffs')}")
     print(f"схема масок             {train_config.get('mask_scheme')}")
     print(f"seed / val_seed         {train_config.get('seed')} / {train_config.get('val_seed')}")
     print(f"эпох / batch            {train_config.get('epochs')} / {train_config.get('batch_size')}")

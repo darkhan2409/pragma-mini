@@ -71,6 +71,28 @@ def select_clients(
     return unique if max_clients is None else unique[: int(max_clients)]
 
 
+CUTOFFS_ALL = "all"
+CUTOFFS_LAST = "last"
+
+CUTOFF_POLICIES = (CUTOFFS_ALL, CUTOFFS_LAST)
+
+
+def last_row_per_client(rows: list[dict]) -> list[int]:
+    """
+    По одному примеру на клиента: самый поздний cutoff.
+
+    Строки уже упорядочены по (client_id, cutoff), поэтому
+    последнее вхождение клиента и есть его последний срез.
+    """
+
+    picked: dict[int, int] = {}
+
+    for index, row in enumerate(rows):
+        picked[int(row["client_id"])] = index
+
+    return [picked[client_id] for client_id in sorted(picked)]
+
+
 def rows_for_clients(examples: pa.Table, client_ids) -> np.ndarray:
     """
     Строки examples.parquet выбранных клиентов в порядке (client_id, cutoff).
@@ -167,6 +189,7 @@ class ClientStore:
         clients: Iterable[int] | None = None,
         sessions: bool = False,
         shared: "ClientStore | None" = None,
+        cutoffs: str = CUTOFFS_ALL,
     ):
 
         self.dataset = dataset
@@ -181,6 +204,16 @@ class ClientStore:
         self.row_index = rows_for_clients(self.data.examples, self.client_ids)
 
         self.rows = self.data.examples.take(pa.array(self.row_index)).to_pylist()
+
+        self.cutoffs = cutoffs
+
+        if cutoffs not in CUTOFF_POLICIES:
+            raise ValueError(f"cutoffs должен быть одним из {CUTOFF_POLICIES}, получено {cutoffs!r}")
+
+        if cutoffs == CUTOFFS_LAST:
+            keep = last_row_per_client(self.rows)
+            self.row_index = self.row_index[keep]
+            self.rows = [self.rows[index] for index in keep]
 
         # Ленты можно взять по ссылке у другого набора: val_time
         # и test_time это те же train-клиенты и тот же файл
