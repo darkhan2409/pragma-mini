@@ -53,7 +53,7 @@ param(
     [ValidateSet('start', 'status', 'logs', 'stop', 'resume', 'resume-interrupted', 'check')]
     [string] $Action = 'status',
 
-    [ValidateSet('epoch', 'smoke')]
+    [ValidateSet('epoch', 'last', 'smoke')]
     [string] $Preset = 'epoch',
 
     [int] $Lines = 20,
@@ -109,6 +109,49 @@ if ($Preset -eq 'epoch') {
         '--batch-size', '2',
         '--eval-batch-size', '2',
         '--eval-every', '20000',
+        '--log-every', '200',
+        '--checkpoint-every', '2000'
+    )
+}
+elseif ($Preset -eq 'last') {
+
+    # Арка B сравнения: один пример на клиента, самый поздний
+    # cutoff. Данные, словарь, маски, seed и валидация те же,
+    # что у эпохи, потолок объявлен в 10 эпох заранее -
+    # продолжить прогон с другим бюджетом нельзя.
+
+    $Name = 'v21_10k_last'
+
+    $TrainArgs = @(
+        '-u', '-m', 'src.model.train', 'run',
+        '--name', 'v21_10k',
+        '--out', "data/runs/$Name/run",
+        '--device', 'cuda',
+        '--structure', 'session',
+        '--d-model', '128',
+        '--n-heads', '4',
+        '--dim-feedforward', '512',
+        '--profile-layers', '1',
+        '--event-layers', '3',
+        '--session-layers', '1',
+        '--history-layers', '2',
+        '--max-events', 'none',
+        '--train-clients', 'none',
+        '--val-clients', 'none',
+        '--train-cutoffs', 'last',
+        '--masking-mode', 'combined',
+        '--token-rate', '0.15',
+        '--event-rate', '0.10',
+        '--key-rate', '0.10',
+        '--mask-scheme', 'example',
+        '--target-policy', 'history',
+        '--epochs', '10',
+        '--stream-validation',
+        '--best-metric', 'recent',
+        '--final-splits', 'test_client,test_time',
+        '--batch-size', '2',
+        '--eval-batch-size', '2',
+        '--eval-every', '4000',
         '--log-every', '200',
         '--checkpoint-every', '2000'
     )
