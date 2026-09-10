@@ -221,3 +221,19 @@ def test_downstream_examples_features_and_models_are_leak_free_and_fit_on_train_
     assert report["models"]["features_boosting"]["train"]["roc_auc"] is not None
 
     assert render_downstream(report)
+
+    # Категории это последние колонки блока признаков и остаются
+    # на своих местах, когда справа приписаны эмбеддинги. На
+    # маленькой фикстуре подмена не видна: у эмбеддинга там мало
+    # различных значений, и boosting принимает их молча.
+    from src.model.downstream import N_CATEGORICAL, categorical_mask
+
+    width = report["features"]["n"]
+
+    alone = categorical_mask(width)
+    with_vectors = categorical_mask(width + 128, width)
+
+    assert alone.sum() == N_CATEGORICAL
+    assert with_vectors.sum() == N_CATEGORICAL
+    assert list(np.flatnonzero(alone)) == list(np.flatnonzero(with_vectors))
+    assert not with_vectors[width:].any()

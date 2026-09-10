@@ -674,9 +674,19 @@ def encode(features: np.ndarray, encoder) -> np.ndarray:
     return np.concatenate([numeric, categorical.astype(np.float64)], axis=1)
 
 
-def categorical_mask(width: int) -> np.ndarray:
+def categorical_mask(width: int, n_features: int | None = None) -> np.ndarray:
+    """
+    Категории это последние колонки БЛОКА ПРИЗНАКОВ, а не матрицы.
+
+    Когда к признакам приписаны эмбеддинги, конец матрицы это уже
+    размерности вектора клиента: пометить их категориальными значит
+    отдать boosting'у 128 непрерывных величин как метки классов.
+    """
+
+    n_features = width if n_features is None else n_features
+
     mask = np.zeros(width, dtype=bool)
-    mask[width - N_CATEGORICAL :] = True
+    mask[n_features - N_CATEGORICAL : n_features] = True
     return mask
 
 
@@ -856,7 +866,7 @@ def run_downstream(
     combined = HistGradientBoostingClassifier(
         **BOOSTING,
         random_state=seed,
-        categorical_features=categorical_mask(both["train"].shape[1]),
+        categorical_features=categorical_mask(both["train"].shape[1], width),
     ).fit(both["train"], labels["train"])
 
     report = {
