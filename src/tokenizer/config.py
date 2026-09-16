@@ -102,12 +102,22 @@ def artifacts_dir(name: str) -> Path:
     return ARTIFACTS_DIR / name
 
 
-def vocab_dir(name: str) -> Path:
-    return ARTIFACTS_DIR / name / VOCAB_SUBDIR
+def vocab_dir(name: str, tag: str | None = None) -> Path:
+    """
+    Каталог словаря.
+
+    Без тега это каталог baseline. Режим со склейкой обязан
+    называть свой тег: иначе он тихо
+    затёр бы baseline.
+    """
+
+    subdir = VOCAB_SUBDIR if tag is None else f"{VOCAB_SUBDIR}__{tag}"
+
+    return ARTIFACTS_DIR / name / subdir
 
 
-def tokenized_dir(name: str) -> Path:
-    return TOKENIZED_DIR / name
+def tokenized_dir(name: str, tag: str | None = None) -> Path:
+    return TOKENIZED_DIR / (name if tag is None else f"{name}__{tag}")
 
 
 # ------------------------------------------------------------

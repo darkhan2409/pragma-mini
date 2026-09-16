@@ -14,6 +14,7 @@ import torch
 from src.tokenizer.config import EVT_ID, PAD_ID, USR_ID
 from src.tokenizer.dataset import Record, TokenBatch, TokenizedDataset, collate
 from src.tokenizer.encode import PROFILE_WIDTH, encode_pairs
+from src.tokenizer.vocab import NO_FIELD
 from src.model.batching import (
     BatchError,
     check_batch,
@@ -25,7 +26,8 @@ from src.model.batching import (
 )
 from src.model.config import ModelConfig
 
-from tests.test_tok_encode import toy_vocab
+from tests.helpers_data import toy_vocab
+
 
 
 # ============================================================
@@ -56,6 +58,17 @@ def real_batch(tok_run) -> TokenBatch:
     data = TokenizedDataset(tok_run["tokenized"], "train", vocab_dir=tok_run["vocab"])
 
     return collate([data.load(index) for index in range(4)])
+
+
+def _fields_of(key_ids):
+    """
+    field_id синтетической записи: мини-словарь собран как
+    baseline, поэтому key token это N_SPECIAL + field_id.
+    """
+
+    keys = np.asarray(key_ids, dtype=np.int64)
+
+    return np.where(keys >= 6, keys - 6, NO_FIELD).astype(np.int16)
 
 
 @pytest.fixture(scope="module")
@@ -209,6 +222,7 @@ def test_arrays_of_different_length_are_caught(toy_config):
         key_ids=np.array([EVT_ID, 6], np.int32),
         value_ids=np.array([EVT_ID, 9], np.int32),
         positions=np.array([0, 1], np.int16),
+        field_ids=_fields_of(np.array([EVT_ID, 6], np.int32)),
     )
 
     object.__setattr__(record, "value_ids", np.array([EVT_ID], np.int32))
@@ -222,6 +236,7 @@ def test_empty_record_is_caught(toy_config):
         key_ids=np.array([], np.int32),
         value_ids=np.array([], np.int32),
         positions=np.array([], np.int16),
+        field_ids=_fields_of(np.array([], np.int32)),
     )
 
 
@@ -239,6 +254,7 @@ def test_pad_inside_content_is_caught(toy_config):
         key_ids=np.array([EVT_ID, PAD_ID], np.int32),
         value_ids=np.array([EVT_ID, 9], np.int32),
         positions=np.array([0, 1], np.int16),
+        field_ids=_fields_of(np.array([EVT_ID, PAD_ID], np.int32)),
     )
 
     with pytest.raises(BatchError, match=r"\[PAD\]"):
@@ -250,6 +266,7 @@ def test_id_outside_the_vocabulary_is_caught(toy_config):
         key_ids=np.array([EVT_ID, 6], np.int32),
         value_ids=np.array([EVT_ID, toy_config.vocab_size], np.int32),
         positions=np.array([0, 1], np.int16),
+        field_ids=_fields_of(np.array([EVT_ID, 6], np.int32)),
     )
 
     with pytest.raises(BatchError, match="выходит за словарь"):
@@ -261,6 +278,7 @@ def test_negative_id_is_caught(toy_config):
         key_ids=np.array([EVT_ID, -1], np.int32),
         value_ids=np.array([EVT_ID, 9], np.int32),
         positions=np.array([0, 1], np.int16),
+        field_ids=_fields_of(np.array([EVT_ID, -1], np.int32)),
     )
 
     with pytest.raises(BatchError, match="выходит за словарь"):
@@ -272,6 +290,7 @@ def test_position_beyond_the_table_is_caught(toy_config):
         key_ids=np.array([EVT_ID, 6], np.int32),
         value_ids=np.array([EVT_ID, 9], np.int32),
         positions=np.array([0, toy_config.max_position_embeddings], np.int16),
+        field_ids=_fields_of(np.array([EVT_ID, 6], np.int32)),
     )
 
     with pytest.raises(BatchError, match="не помещается в таблицу позиций"):
@@ -297,6 +316,7 @@ def test_lead_not_at_position_zero_is_caught(toy_config):
         key_ids=np.array([EVT_ID, 6], np.int32),
         value_ids=np.array([EVT_ID, 9], np.int32),
         positions=np.array([1, 2], np.int16),
+        field_ids=_fields_of(np.array([EVT_ID, 6], np.int32)),
     )
 
     with pytest.raises(BatchError, match="на позиции"):

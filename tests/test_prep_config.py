@@ -4,17 +4,15 @@
 
 from __future__ import annotations
 
-import pytest
 
 from src.generator.config import EVENT_TYPES, PROFILE_DYNAMIC_FIELDS, PROFILE_FIELDS
-from src.generator.emit import SCHEMAS, schemas_for
-from src.generator.timeline import PAYLOAD_BUILDERS, payload_builders
-from src.generator.version import RAW_SCHEMA_REVISION, REVISIONS
+from src.generator.emit import SCHEMAS
+from src.generator.timeline import PAYLOAD_BUILDERS
 from src.preprocessing.config import (
+
     EVENT_TYPE_PROFILE,
     KIND_CATEGORICAL,
     KIND_METADATA,
-    KIND_NUMERIC,
     LATENT_NAMES,
     NAMESPACE_TABLE,
     REGISTRY,
@@ -26,7 +24,7 @@ from src.preprocessing.config import (
     predictable_specs,
     specs_for,
 )
-from tests.test_raw_schema import LATENT_COLUMNS
+from tests.helpers_data import LATENT_COLUMNS
 
 
 # ============================================================
@@ -65,39 +63,37 @@ def test_registry_covers_every_raw_column():
             assert expected <= described, (namespace, sorted(expected - described))
 
 
-@pytest.mark.parametrize("revision", REVISIONS)
-def test_payload_fields_follow_generator_order(revision: int):
+def test_payload_fields_follow_generator_order():
     """
     Порядок полей payload совпадает с порядком генератора.
 
-    Проверяется каждая ревизия схемы: ключи payload и колонки
-    таблицы обязаны меняться вместе, иначе лента разойдётся
-    с таблицами именно там, где это труднее всего заметить.
+    Ключи payload и колонки таблицы обязаны меняться вместе,
+    иначе лента разойдётся с таблицами именно там, где это
+    труднее всего заметить.
     """
 
-    schemas = schemas_for(revision)
+    schemas = SCHEMAS
 
-    for source, builder in payload_builders(revision).items():
+    for source in PAYLOAD_BUILDERS:
 
         from src.generator.config import EVENT_TYPE_BY_SOURCE
 
         event_type = EVENT_TYPE_BY_SOURCE[source]
 
         if source == "profile":
-            assert payload_fields(event_type, revision) == tuple(PROFILE_DYNAMIC_FIELDS)
+            assert payload_fields(event_type) == tuple(PROFILE_DYNAMIC_FIELDS)
             continue
 
-        assert payload_fields(event_type, revision) == tuple(schemas[source].names[2:])
+        assert payload_fields(event_type) == tuple(schemas[source].names[2:])
 
 
-@pytest.mark.parametrize("revision", REVISIONS)
-def test_payload_schema_types_match_raw(revision: int):
+def test_payload_schema_types_match_raw():
 
-    schemas = schemas_for(revision)
+    schemas = SCHEMAS
 
     for event_type in EVENT_TYPES:
 
-        schema = payload_schema(event_type, revision)
+        schema = payload_schema(event_type)
 
         table = NAMESPACE_TABLE[event_type]
 
@@ -143,7 +139,6 @@ def test_mcc_is_categorical():
 
 
 def test_service_fields_are_metadata():
-    assert REGISTRY[("app_screen", "session_id")].kind == KIND_METADATA
     assert REGISTRY[("timeline", "seq")].kind == KIND_METADATA
     assert REGISTRY[("timeline", "client_id")].kind == KIND_METADATA
     assert REGISTRY[("profile", "snapshot_month")].kind == KIND_METADATA

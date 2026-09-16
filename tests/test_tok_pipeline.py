@@ -18,6 +18,22 @@ import pyarrow.parquet as pq
 import pytest
 
 from src.preprocessing.artifacts import tree_digests
+
+
+def tokenizer_digests(root) -> dict[str, str]:
+    """
+    Отпечатки того, что пишет САМ tokenizer.
+
+    Sidecar сессий собирает следующая ступень конвейера и кладёт
+    его в тот же каталог, поэтому из сравнения он исключён: речь
+    о воспроизводимости токенизации, а не всего, что рядом.
+    """
+
+    return {
+        name: digest
+        for name, digest in tree_digests(root).items()
+        if not name.startswith("sessions/")
+    }
 from src.preprocessing.config import CLIENT_GROUPS, DATASET_NAMES
 from src.tokenizer.config import IncompatibleArtifactsError
 from src.tokenizer.dataset import TokenizedDataset
@@ -48,7 +64,7 @@ def test_second_run_is_byte_identical(tok_run, tmp_path):
         quiet=True,
     )
 
-    assert tree_digests(again / "tokenized") == tree_digests(tok_run["tokenized"])
+    assert tokenizer_digests(again / "tokenized") == tokenizer_digests(tok_run["tokenized"])
     assert tree_digests(again / "vocab") == tree_digests(tok_run["vocab"])
 
 
@@ -85,7 +101,7 @@ def test_run_in_subprocess_is_byte_identical(tok_run, tmp_path):
 
     assert result.returncode == 0, result.stderr[-2000:]
 
-    assert tree_digests(other / "tokenized") == tree_digests(tok_run["tokenized"])
+    assert tokenizer_digests(other / "tokenized") == tokenizer_digests(tok_run["tokenized"])
     assert tree_digests(other / "vocab") == tree_digests(tok_run["vocab"])
 
 

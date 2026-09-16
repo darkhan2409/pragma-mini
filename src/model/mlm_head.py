@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from src.preprocessing.artifacts import read_json
 from src.tokenizer.config import FIELD_VALUE_IDS_FILE, IncompatibleArtifactsError
-from src.tokenizer.vocab import Vocab
+from src.tokenizer.vocab import N_FIELDS, Vocab
 
 from .config import ModelConfig
 
@@ -53,10 +53,16 @@ class TargetError(ValueError):
 
 class FieldTable:
     """
-    Границы кандидатов каждого поля и перевод global ↔ local.
+    Кандидаты каждого поля и перевод token ↔ local.
 
-    Массивы индексируются token ID, поэтому перевод целого
-    batch'а это одна векторная операция без словарей.
+    Массивы индексируются **field_id**, а не token ID: поле это
+    и есть домен предсказания, и он один и тот же во всех
+    режимах словаря. В semantic-режиме два поля делят key token,
+    и таблица по токену слила бы их в одну строку.
+
+    Перевод идёт через плотную local_lookup словаря: вычитанием
+    смещения он больше не выражается, потому что в shared-режиме
+    кандидаты поля не обязаны идти подряд.
     """
 
     def __init__(self, vocab: Vocab):
@@ -65,35 +71,33 @@ class FieldTable:
 
         self.first_value_id = vocab.first_value_id
 
-        size = vocab.size
+        rows = N_FIELDS + 1
 
-        self.value_start = np.full(size, -1, dtype=np.int64)
-        self.value_end = np.full(size, -1, dtype=np.int64)
-        self.n_candidates = np.zeros(size, dtype=np.int64)
-        self.predictable = np.zeros(size, dtype=bool)
+        self.n_candidates = np.zeros(rows, dtype=np.int64)
+        self.predictable = np.zeros(rows, dtype=bool)
 
         self._name: dict[int, str] = {}
         self._kind: dict[int, str] = {}
 
-        for entry in vocab.keys:
-            self.value_start[entry.id] = entry.value_start
-            self.value_end[entry.id] = entry.value_end
-            self.n_candidates[entry.id] = entry.n_values
-            self.predictable[entry.id] = entry.predictable
-            self._name[entry.id] = entry.key
-            self._kind[entry.id] = entry.kind
+        for entry in vocab.fields:
+            self.n_candidates[entry.field_id] = entry.n_values
+            self.predictable[entry.field_id] = entry.predictable
+            self._name[entry.field_id] = entry.key
+            self._kind[entry.field_id] = entry.kind
+
+        self.candidates = vocab.candidates()
 
         # Поле с одним кандидатом предсказывать нечем.
         self.degenerate = self.predictable & (self.n_candidates < 2)
 
         self.trainable = self.predictable & (self.n_candidates >= 2)
 
-        self.trainable_key_ids: tuple[int, ...] = tuple(
-            int(entry.id) for entry in vocab.keys if self.trainable[entry.id]
+        self.trainable_field_ids: tuple[int, ...] = tuple(
+            int(entry.field_id) for entry in vocab.fields if self.trainable[entry.field_id]
         )
 
-        self.degenerate_key_ids: tuple[int, ...] = tuple(
-            int(entry.id) for entry in vocab.keys if self.degenerate[entry.id]
+        self.degenerate_field_ids: tuple[int, ...] = tuple(
+            int(entry.field_id) for entry in vocab.fields if self.degenerate[entry.field_id]
         )
 
     # --------------------------------------------------------
@@ -112,22 +116,28 @@ class FieldTable:
 
         fields = artifact.get("fields", {})
 
-        if len(fields) != vocab.n_keys:
+        if len(fields) != vocab.n_fields:
             raise IncompatibleArtifactsError(
-                f"{FIELD_VALUE_IDS_FILE}: полей {len(fields)}, а в словаре ключей {vocab.n_keys}"
+                f"{FIELD_VALUE_IDS_FILE}: полей {len(fields)}, а в словаре {vocab.n_fields}"
             )
 
-        for entry in vocab.keys:
+        for entry in vocab.fields:
 
             item = fields.get(entry.key)
 
             if item is None:
                 raise IncompatibleArtifactsError(f"{FIELD_VALUE_IDS_FILE}: нет поля {entry.key}")
 
-            if int(item["key_id"]) != entry.id:
+            if int(item["field_id"]) != entry.field_id:
                 raise IncompatibleArtifactsError(
-                    f"{FIELD_VALUE_IDS_FILE}: у поля {entry.key} ID {item['key_id']}, "
-                    f"в словаре {entry.id}"
+                    f"{FIELD_VALUE_IDS_FILE}: у поля {entry.key} field_id {item['field_id']}, "
+                    f"в словаре {entry.field_id}"
+                )
+
+            if int(item["key_token_id"]) != entry.key_token_id:
+                raise IncompatibleArtifactsError(
+                    f"{FIELD_VALUE_IDS_FILE}: у поля {entry.key} key token {item['key_token_id']}, "
+                    f"в словаре {entry.key_token_id}"
                 )
 
             if bool(item["predictable"]) != entry.predictable or item["kind"] != entry.kind:
@@ -135,57 +145,64 @@ class FieldTable:
                     f"{FIELD_VALUE_IDS_FILE}: описание поля {entry.key} не совпадает со словарём"
                 )
 
-            if list(item["value_ids"]) != list(range(entry.value_start, entry.value_end)):
+            # Порядок значим: локальный индекс это позиция в этом
+            # списке, а у numeric он обязан равняться номеру
+            # корзины. Сравнение множеств пропустило бы перестановку.
+            if list(item["value_ids"]) != list(entry.candidates):
                 raise IncompatibleArtifactsError(
-                    f"{FIELD_VALUE_IDS_FILE}: кандидаты поля {entry.key} не совпадают с "
-                    f"диапазоном словаря [{entry.value_start}, {entry.value_end})"
+                    f"{FIELD_VALUE_IDS_FILE}: кандидаты поля {entry.key} не совпадают со словарём "
+                    "по составу или по порядку"
                 )
 
         return FieldTable(vocab)
 
     # --------------------------------------------------------
 
-    def name(self, key_id: int) -> str:
-        return self._name.get(int(key_id), f"key_{int(key_id)}")
+    def name(self, field_id: int) -> str:
+        return self._name.get(int(field_id), f"field_{int(field_id)}")
 
-    def kind(self, key_id: int) -> str:
-        return self._kind.get(int(key_id), "unknown")
+    def kind(self, field_id: int) -> str:
+        return self._kind.get(int(field_id), "unknown")
 
-    def size_of(self, key_id: int) -> int:
-        return int(self.n_candidates[int(key_id)])
+    def size_of(self, field_id: int) -> int:
+        return int(self.n_candidates[int(field_id)])
 
-    def is_trainable(self, key_id: int) -> bool:
-        return bool(self.trainable[int(key_id)])
+    def is_trainable(self, field_id: int) -> bool:
+        return bool(self.trainable[int(field_id)])
+
+    def key_token_of(self, field_id: int) -> int:
+        return int(self.vocab.key_token_by_field[int(field_id)])
 
     # --------------------------------------------------------
 
-    def check_targets(self, key_ids: np.ndarray, values: np.ndarray) -> None:
+    def check_targets(self, field_ids: np.ndarray, values: np.ndarray) -> None:
         """
         Каждая цель это настоящее значение своего поля.
 
-        Одного вычитания смещения мало: чужое значение дало бы
-        локальный индекс в диапазоне соседнего поля и молча
-        обучало бы голову неверной метке.
+        Чужое значение отвергается по таблице кандидатов, а не по
+        диапазону: в shared-режиме значение соседнего поля может
+        иметь token id внутри «диапазона» этого поля и молча
+        обучило бы голову неверной метке.
         """
 
-        keys = np.asarray(key_ids, dtype=np.int64)
+        fields = np.asarray(field_ids, dtype=np.int64)
         found = np.asarray(values, dtype=np.int64)
 
-        if keys.shape != found.shape:
-            raise TargetError(f"ключей {keys.shape}, значений {found.shape}")
+        if fields.shape != found.shape:
+            raise TargetError(f"полей {fields.shape}, значений {found.shape}")
 
-        if keys.size == 0:
+        if fields.size == 0:
             return
 
-        if int(keys.min()) < 0 or int(keys.max()) >= self.value_start.size:
-            raise TargetError("ключ вне словаря")
+        if int(fields.min()) < 0 or int(fields.max()) >= self.predictable.size:
+            raise TargetError("field_id вне пространства полей")
 
-        bad = np.flatnonzero(~self.predictable[keys])
+        bad = np.flatnonzero(~self.predictable[fields])
 
         if bad.size:
             position = int(bad[0])
             raise TargetError(
-                f"поле {self.name(int(keys[position]))} не помечено predictable, "
+                f"поле {self.name(int(fields[position]))} не помечено predictable, "
                 "его значения не могут быть целями"
             )
 
@@ -194,64 +211,72 @@ class FieldTable:
         if bad.size:
             position = int(bad[0])
             raise TargetError(
-                f"цель {int(found[position])} поля {self.name(int(keys[position]))} это "
+                f"цель {int(found[position])} поля {self.name(int(fields[position]))} это "
                 "special-токен, а не значение словаря"
             )
 
-        outside = (found < self.value_start[keys]) | (found >= self.value_end[keys])
+        if int(found.max()) >= self.vocab.size:
+            raise TargetError("цель вне словаря")
 
-        bad = np.flatnonzero(outside)
+        local = self.candidates.to_local(fields, found)
+
+        bad = np.flatnonzero(local < 0)
 
         if bad.size:
             position = int(bad[0])
-            key = int(keys[position])
+            field = int(fields[position])
             raise TargetError(
-                f"цель {int(found[position])} не принадлежит полю {self.name(key)} "
-                f"с диапазоном [{int(self.value_start[key])}, {int(self.value_end[key])})"
+                f"цель {int(found[position])} не входит в {self.size_of(field)} кандидатов "
+                f"поля {self.name(field)}"
             )
 
-    def to_local(self, key_ids: np.ndarray, values: np.ndarray) -> np.ndarray:
+    def to_local(self, field_ids: np.ndarray, values: np.ndarray) -> np.ndarray:
         """
-        Global value ID в локальный индекс кандидата поля.
+        Value token в локальный индекс кандидата поля.
         """
 
-        self.check_targets(key_ids, values)
+        self.check_targets(field_ids, values)
 
-        keys = np.asarray(key_ids, dtype=np.int64)
+        return self.candidates.to_local(field_ids, values)
 
-        return np.asarray(values, dtype=np.int64) - self.value_start[keys]
+    def to_global(self, field_ids: np.ndarray, local: np.ndarray) -> np.ndarray:
 
-    def to_global(self, key_ids: np.ndarray, local: np.ndarray) -> np.ndarray:
-
-        keys = np.asarray(key_ids, dtype=np.int64)
+        fields = np.asarray(field_ids, dtype=np.int64)
         index = np.asarray(local, dtype=np.int64)
 
-        if index.size and (int(index.min()) < 0 or bool((index >= self.n_candidates[keys]).any())):
+        if index.size and (int(index.min()) < 0 or bool((index >= self.n_candidates[fields]).any())):
             raise TargetError("локальный индекс вне числа кандидатов поля")
 
-        return index + self.value_start[keys]
+        return self.candidates.to_global(fields, index)
 
     # --------------------------------------------------------
 
     def as_dict(self) -> dict:
         return {
-            "n_keys": self.vocab.n_keys,
+            "n_fields": self.vocab.n_fields,
+            "n_keys": self.vocab.n_key_tokens,
+            "modes": self.vocab.modes,
             "first_value_id": int(self.first_value_id),
             "trainable": {
-                self.name(key_id): {
-                    "key_id": int(key_id),
-                    "kind": self.kind(key_id),
-                    "n_candidates": self.size_of(key_id),
+                self.name(field_id): {
+                    "field_id": int(field_id),
+                    "key_token_id": self.key_token_of(field_id),
+                    "kind": self.kind(field_id),
+                    "n_candidates": self.size_of(field_id),
                 }
-                for key_id in self.trainable_key_ids
+                for field_id in self.trainable_field_ids
             },
             "degenerate": {
-                self.name(key_id): {"key_id": int(key_id), "n_candidates": self.size_of(key_id)}
-                for key_id in self.degenerate_key_ids
+                self.name(field_id): {
+                    "field_id": int(field_id),
+                    "n_candidates": self.size_of(field_id),
+                }
+                for field_id in self.degenerate_field_ids
             },
             "rule": (
                 "голову получает predictable-поле хотя бы с двумя кандидатами; "
-                "поле с одним кандидатом помечается degenerate и в loss и агрегаты не входит"
+                "поле с одним кандидатом помечается degenerate и в loss и агрегаты не входит; "
+                "домен предсказания это ПОЛЕ, а не key token"
             ),
         }
 
@@ -267,7 +292,7 @@ class FieldLogits:
     Logits одного поля и номера его позиций в batch.
     """
 
-    key_id: int
+    field_id: int
     index: torch.Tensor
     logits: torch.Tensor
 
@@ -291,9 +316,9 @@ class MLMHead(nn.Module):
 
         self.config = config
 
-        self.key_ids: tuple[int, ...] = tuple(table.trainable_key_ids)
+        self.field_ids: tuple[int, ...] = tuple(table.trainable_field_ids)
 
-        if not self.key_ids:
+        if not self.field_ids:
             raise ValueError("нет ни одного поля хотя бы с двумя кандидатами: голову строить не из чего")
 
         activation = nn.GELU() if config.activation == "gelu" else nn.ReLU()
@@ -308,22 +333,10 @@ class MLMHead(nn.Module):
         # Все головы существуют до optimizer.
         self.heads = nn.ModuleDict(
             {
-                str(key_id): nn.Linear(config.d_model, table.size_of(key_id))
-                for key_id in self.key_ids
+                str(field_id): nn.Linear(config.d_model, table.size_of(field_id))
+                for field_id in self.field_ids
             }
         )
-
-        # Событие внутри сессии: добавляется его состояние из
-        # Session Encoder. Строится ПОСЛЕДНИМ, чтобы при одном
-        # seed общие веса обеих структур совпадали.
-        self.fuse_session = None
-
-        if config.uses_sessions:
-            self.fuse_session = nn.Sequential(
-                nn.Linear(4 * config.d_model, config.d_model),
-                nn.GELU() if config.activation == "gelu" else nn.ReLU(),
-                nn.LayerNorm(config.d_model, eps=config.layer_norm_eps),
-            )
 
     # --------------------------------------------------------
 
@@ -332,16 +345,10 @@ class MLMHead(nn.Module):
         h_local: torch.Tensor,
         h_event: torch.Tensor,
         h_usr: torch.Tensor,
-        key_ids: torch.Tensor,
-        within=None,
+        field_ids: torch.Tensor,
     ) -> list[FieldLogits]:
         """
         Позиции группируются по полю, каждая группа идёт в свою голову.
-
-        within это (индексы, состояния внутри сессии) для целей,
-        попавших в сессию. У них своя входная проекция из четырёх
-        частей; у остальных прежняя из трёх. Головы полей общие:
-        различается только то, из чего собран вход.
         """
 
         if not (h_local.shape == h_event.shape == h_usr.shape):
@@ -353,45 +360,21 @@ class MLMHead(nn.Module):
         if h_local.ndim != 2 or h_local.shape[1] != self.config.d_model:
             raise TargetError(f"ожидалось [n, {self.config.d_model}], получено {tuple(h_local.shape)}")
 
-        if key_ids.ndim != 1 or int(key_ids.numel()) != int(h_local.shape[0]):
+        if field_ids.ndim != 1 or int(field_ids.numel()) != int(h_local.shape[0]):
             raise TargetError(
-                f"ключей {tuple(key_ids.shape)}, а представлений {int(h_local.shape[0])}"
+                f"полей {tuple(field_ids.shape)}, а представлений {int(h_local.shape[0])}"
             )
 
-        if key_ids.numel() == 0:
+        if field_ids.numel() == 0:
             return []
 
         z = self.fuse(torch.cat([h_local, h_event, h_usr], dim=-1))
-
-        if within is not None:
-
-            if self.fuse_session is None:
-                raise TargetError(
-                    "переданы состояния внутри сессии, но модель собрана без "
-                    "Session Encoder: структуры входа и модели не совпадают"
-                )
-
-            index, h_within = within
-
-            if int(h_within.shape[0]) != int(index.numel()):
-                raise TargetError(
-                    f"состояний внутри сессии {int(h_within.shape[0])}, "
-                    f"а индексов {int(index.numel())}"
-                )
-
-            grouped = self.fuse_session(
-                torch.cat(
-                    [h_local[index], h_within, h_event[index], h_usr[index]], dim=-1
-                )
-            )
-
-            z = z.index_copy(0, index, grouped)
 
         out: list[FieldLogits] = []
 
         # unique возвращает возрастающий порядок: состав batch на
         # него не влияет, отчёты воспроизводимы.
-        for key in torch.unique(key_ids).tolist():
+        for key in torch.unique(field_ids).tolist():
 
             name = str(int(key))
 
@@ -403,9 +386,9 @@ class MLMHead(nn.Module):
 
             head = self.heads[name]
 
-            index = torch.nonzero(key_ids == key, as_tuple=True)[0]
+            index = torch.nonzero(field_ids == key, as_tuple=True)[0]
 
-            out.append(FieldLogits(key_id=int(key), index=index, logits=head(z[index])))
+            out.append(FieldLogits(field_id=int(key), index=index, logits=head(z[index])))
 
         return out
 
@@ -414,13 +397,3 @@ class MLMHead(nn.Module):
     def n_parameters(self) -> int:
         return sum(parameter.numel() for parameter in self.parameters())
 
-
-def build_head(config: ModelConfig, table: FieldTable, device=None) -> MLMHead:
-    """
-    Сборка на CPU, затем перенос: как у энкодеров, чтобы веса не
-    зависели от устройства.
-    """
-
-    head = MLMHead(config, table)
-
-    return head if device is None else head.to(device)

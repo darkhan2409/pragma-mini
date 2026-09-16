@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 import torch
 
-from src.tokenizer.vocab import KeyEntry, ValueEntry, Vocab
+from src.tokenizer.vocab import FieldEntry, KeyToken, ValueEntry, Vocab
 from src.model.metrics import (
     STATUS_DEGENERATE,
     STATUS_NO_TARGETS,
@@ -38,20 +38,26 @@ def metrics_vocab() -> Vocab:
     Два предсказуемых поля и одно вырожденное.
     """
 
-    keys = [
-        KeyEntry(6, "m__two", "m", "two", "categorical", True, "string", 9, 11),
-        KeyEntry(7, "m__eight", "m", "eight", "numeric", True, "int64", 11, 19),
-        KeyEntry(8, "m__one", "m", "one", "categorical", True, "string", 19, 20),
+    fields = [
+        FieldEntry(0, "m__two", "m", "two", "categorical", True, "string", 6, (9, 10)),
+        FieldEntry(1, "m__eight", "m", "eight", "numeric", True, "int64", 7, tuple(range(11, 19))),
+        FieldEntry(2, "m__one", "m", "one", "categorical", True, "string", 8, (19,)),
+    ]
+
+    key_tokens = [
+        KeyToken(6, "m__two", (0,)),
+        KeyToken(7, "m__eight", (1,)),
+        KeyToken(8, "m__one", (2,)),
     ]
 
     values = [
-        ValueEntry(9, 6, "m__two", "no", 1),
-        ValueEntry(10, 6, "m__two", "yes", 1),
-        *[ValueEntry(11 + index, 7, "m__eight", str(index), 1) for index in range(8)],
-        ValueEntry(19, 8, "m__one", "only", 1),
+        ValueEntry(9, "no", "string", False, 1, (0,)),
+        ValueEntry(10, "yes", "string", False, 1, (0,)),
+        *[ValueEntry(11 + index, str(index), "int64", False, 1, (1,)) for index in range(8)],
+        ValueEntry(19, "only", "string", False, 1, (2,)),
     ]
 
-    return Vocab(keys, values)
+    return Vocab(fields, key_tokens, values)
 
 
 def unigram_artifact() -> dict:
@@ -85,22 +91,22 @@ def unigram(table) -> UnigramTable:
 
 def test_value_encoding_maps_strings_to_local_indices(table, unigram):
     # "no" это первый кандидат поля, "yes" второй.
-    probabilities = np.exp(unigram.log_probs[6])
+    probabilities = np.exp(unigram.log_probs[0])
 
     assert probabilities.tolist() == pytest.approx([0.25, 0.75])
-    assert unigram.mode[6] == 1
+    assert unigram.mode[0] == 1
 
 
 def test_bucket_encoding_uses_the_index_directly(table, unigram):
-    probabilities = np.exp(unigram.log_probs[7])
+    probabilities = np.exp(unigram.log_probs[1])
 
     assert probabilities[0] == pytest.approx(0.5)
     assert probabilities[1] == pytest.approx(0.5 / 7)
-    assert unigram.mode[7] == 0
+    assert unigram.mode[1] == 0
 
 
 def test_degenerate_field_gets_no_distribution(table, unigram):
-    assert not unigram.has(8)
+    assert not unigram.has(2)
 
 
 def test_unmatched_values_are_reported(table):
@@ -119,7 +125,7 @@ def test_unmatched_values_are_reported(table):
     assert unigram.coverage["m__two"] == pytest.approx(0.5)
 
     # Масса несопоставленного значения не достаётся кандидатам.
-    probabilities = np.exp(unigram.log_probs[6])
+    probabilities = np.exp(unigram.log_probs[0])
 
     assert probabilities[1] > 0.99
 
@@ -144,11 +150,11 @@ def test_epsilon_is_a_floor_and_the_result_is_normalised(table):
 
     unigram = UnigramTable(artifact, table.vocab, table, epsilon=1e-6)
 
-    probabilities = np.exp(unigram.log_probs[6])
+    probabilities = np.exp(unigram.log_probs[0])
 
     assert probabilities.sum() == pytest.approx(1.0)
     assert probabilities[0] == pytest.approx(1e-6, rel=1e-3)
-    assert np.isfinite(unigram.log_probs[6]).all()
+    assert np.isfinite(unigram.log_probs[0]).all()
 
 
 def test_missing_field_is_listed(table):
@@ -157,7 +163,7 @@ def test_missing_field_is_listed(table):
     unigram = UnigramTable(artifact, table.vocab, table)
 
     assert unigram.missing == ["m__eight"]
-    assert not unigram.has(7)
+    assert not unigram.has(1)
 
 
 def test_the_artifact_is_not_modified(table):
@@ -183,7 +189,7 @@ def two_field_batch() -> tuple[list[FieldLogits], torch.Tensor]:
     logits = torch.tensor([[math.log(0.8), math.log(0.2)]]).repeat(4, 1)
 
     return (
-        [FieldLogits(6, torch.arange(4), logits)],
+        [FieldLogits(0, torch.arange(4), logits)],
         torch.tensor([0, 0, 0, 1], dtype=torch.long),
     )
 
@@ -197,7 +203,7 @@ def test_model_cross_entropy_matches_the_hand_calculation(table, unigram):
 
     report = accumulator.finalize()
 
-    item = next(entry for entry in report["fields"] if entry["key_id"] == 6)
+    item = next(entry for entry in report["fields"] if entry["field_id"] == 0)
 
     expected = (3 * -math.log(0.8) + -math.log(0.2)) / 4
 
@@ -214,7 +220,7 @@ def test_unigram_cross_entropy_and_gain(table, unigram):
 
     accumulator.update(field_logits, targets)
 
-    item = next(entry for entry in accumulator.finalize()["fields"] if entry["key_id"] == 6)
+    item = next(entry for entry in accumulator.finalize()["fields"] if entry["field_id"] == 0)
 
     # p(no) = 0.25, p(yes) = 0.75
     expected = (3 * -math.log(0.25) + -math.log(0.75)) / 4
@@ -236,7 +242,7 @@ def test_accuracy_and_unigram_accuracy(table, unigram):
 
     accumulator.update(field_logits, targets)
 
-    item = next(entry for entry in accumulator.finalize()["fields"] if entry["key_id"] == 6)
+    item = next(entry for entry in accumulator.finalize()["fields"] if entry["field_id"] == 0)
 
     # Модель всегда предсказывает 0, цели 0,0,0,1.
     assert item["accuracy"] == pytest.approx(0.75)
@@ -252,7 +258,7 @@ def test_macro_f1_counts_the_whole_candidate_set(table, unigram):
 
     accumulator.update(field_logits, targets)
 
-    item = next(entry for entry in accumulator.finalize()["fields"] if entry["key_id"] == 6)
+    item = next(entry for entry in accumulator.finalize()["fields"] if entry["field_id"] == 0)
 
     # Класс 0: P = 3/4, R = 1 → F1 = 6/7. Класс 1: ни одного
     # предсказания → 0, как при zero_division=0.
@@ -267,16 +273,16 @@ def test_top_k_only_when_there_are_more_candidates(table, unigram):
     logits[1, 0] = 5.0
 
     accumulator.update(
-        [FieldLogits(7, torch.arange(2), logits)], torch.tensor([7, 3], dtype=torch.long)
+        [FieldLogits(1, torch.arange(2), logits)], torch.tensor([7, 3], dtype=torch.long)
     )
 
     report = accumulator.finalize()
 
-    wide = next(entry for entry in report["fields"] if entry["key_id"] == 7)
+    wide = next(entry for entry in report["fields"] if entry["field_id"] == 1)
 
     assert wide["top_k_accuracy"] == pytest.approx(0.5)
 
-    narrow = next(entry for entry in report["fields"] if entry["key_id"] == 6)
+    narrow = next(entry for entry in report["fields"] if entry["field_id"] == 0)
 
     assert narrow["top_k_accuracy"] is None
 
@@ -289,11 +295,11 @@ def test_undefined_gain_when_the_baseline_is_certain(table):
     accumulator = MetricAccumulator(table, unigram, epsilon=1e-8)
 
     accumulator.update(
-        [FieldLogits(6, torch.arange(2), torch.zeros(2, 2))],
+        [FieldLogits(0, torch.arange(2), torch.zeros(2, 2))],
         torch.tensor([0, 0], dtype=torch.long),
     )
 
-    item = next(entry for entry in accumulator.finalize()["fields"] if entry["key_id"] == 6)
+    item = next(entry for entry in accumulator.finalize()["fields"] if entry["field_id"] == 0)
 
     assert item["status"] == STATUS_UNDEFINED
     assert item["nce_gain"] is None
@@ -309,8 +315,8 @@ def test_fields_without_targets_and_degenerate_fields(table, unigram):
 
     report = accumulator.finalize()
 
-    quiet = next(entry for entry in report["fields"] if entry["key_id"] == 7)
-    single = next(entry for entry in report["fields"] if entry["key_id"] == 8)
+    quiet = next(entry for entry in report["fields"] if entry["field_id"] == 1)
+    single = next(entry for entry in report["fields"] if entry["field_id"] == 2)
 
     assert quiet["status"] == STATUS_NO_TARGETS
     assert single["status"] == STATUS_DEGENERATE
@@ -339,17 +345,17 @@ def test_aggregates_are_computed_over_the_whole_set(table, unigram):
     right_targets = torch.tensor([1, 0, 0], dtype=torch.long)
 
     split = MetricAccumulator(table, unigram)
-    split.update([FieldLogits(6, torch.arange(5), left)], left_targets)
-    split.update([FieldLogits(6, torch.arange(3), right)], right_targets)
+    split.update([FieldLogits(0, torch.arange(5), left)], left_targets)
+    split.update([FieldLogits(0, torch.arange(3), right)], right_targets)
 
     whole = MetricAccumulator(table, unigram)
     whole.update(
-        [FieldLogits(6, torch.arange(8), torch.cat([left, right]))],
+        [FieldLogits(0, torch.arange(8), torch.cat([left, right]))],
         torch.cat([left_targets, right_targets]),
     )
 
-    a = next(entry for entry in split.finalize()["fields"] if entry["key_id"] == 6)
-    b = next(entry for entry in whole.finalize()["fields"] if entry["key_id"] == 6)
+    a = next(entry for entry in split.finalize()["fields"] if entry["field_id"] == 0)
+    b = next(entry for entry in whole.finalize()["fields"] if entry["field_id"] == 0)
 
     for name in ("n_targets", "ce_model", "ce_unigram", "accuracy", "macro_f1", "nce_gain"):
         assert a[name] == pytest.approx(b[name]), name
@@ -360,11 +366,11 @@ def test_field_balanced_and_token_weighted_aggregates_differ(table, unigram):
 
     # Узкое поле: одна позиция. Широкое: четыре.
     accumulator.update(
-        [FieldLogits(6, torch.tensor([0]), torch.zeros(1, 2))],
+        [FieldLogits(0, torch.tensor([0]), torch.zeros(1, 2))],
         torch.tensor([0], dtype=torch.long),
     )
     accumulator.update(
-        [FieldLogits(7, torch.arange(4), torch.zeros(4, 8))],
+        [FieldLogits(1, torch.arange(4), torch.zeros(4, 8))],
         torch.tensor([0, 1, 2, 3], dtype=torch.long),
     )
 
@@ -385,24 +391,24 @@ def test_mean_gain_skips_fields_without_a_baseline(table):
     accumulator = MetricAccumulator(table, unigram)
 
     accumulator.update(
-        [FieldLogits(6, torch.tensor([0]), torch.zeros(1, 2))],
+        [FieldLogits(0, torch.tensor([0]), torch.zeros(1, 2))],
         torch.tensor([0], dtype=torch.long),
     )
     accumulator.update(
-        [FieldLogits(7, torch.arange(2), torch.zeros(2, 8))],
+        [FieldLogits(1, torch.arange(2), torch.zeros(2, 8))],
         torch.tensor([0, 1], dtype=torch.long),
     )
 
     report = accumulator.finalize()
 
-    wide = next(entry for entry in report["fields"] if entry["key_id"] == 7)
+    wide = next(entry for entry in report["fields"] if entry["field_id"] == 1)
 
     assert wide["status"] == "no_unigram"
     assert wide["nce_gain"] is None
     assert wide["ce_model"] is not None
 
     # В среднем gain участвует только поле с baseline.
-    narrow = next(entry for entry in report["fields"] if entry["key_id"] == 6)
+    narrow = next(entry for entry in report["fields"] if entry["field_id"] == 0)
 
     assert report["mean_nce_gain"] == pytest.approx(narrow["nce_gain"])
 

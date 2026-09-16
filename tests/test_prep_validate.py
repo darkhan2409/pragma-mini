@@ -96,7 +96,6 @@ def test_report_lists_expected_checks(prep_raw_dir):
         "payload_keys_match_contract",
         "payload_parses",
         "timeline_matches_tables",
-        "labels_shape",
     } <= names
 
 
@@ -264,19 +263,6 @@ def test_broken_schema_is_caught(prep_raw_dir, tmp_path):
     rewrite(raw_dir, "banners", table.drop_columns(["offer"]))
 
     assert "schemas_match" in failing_checks(raw_dir)
-
-
-def test_label_window_change_is_caught(prep_raw_dir, tmp_path):
-    raw_dir = copy_raw(prep_raw_dir, tmp_path / "labels")
-
-    table = pq.read_table(raw_dir / "labels.parquet")
-
-    start = table.column("label_start").to_pylist()
-    start[0] = datetime(2025, 1, 1)
-
-    rewrite(raw_dir, "labels", set_column(table, "label_start", pa.array(start, pa.timestamp("us"))))
-
-    assert "labels_shape" in failing_checks(raw_dir)
 
 
 def test_missing_manifest_is_an_error(tmp_path):

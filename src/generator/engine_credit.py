@@ -1,0 +1,393 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+from . import params as params_module
+from .config import INITIATOR_BANK, INITIATOR_CLIENT, INITIATOR_SYSTEM
+from .engine import _HANDLERS, _emit_money
+from .finance import loans as loan_rules
+from .finance.entities import CONTRACT_CLOSED
+from .life import stress as stress_module
+from .rng import NS_LOAN, keyed_rng, stable_hash
+from .simulate import ClientState
+from .world.dictionaries import MCC_SALARY
+
+
+# ============================================================
+# ОБСЛУЖИВАНИЕ КРЕДИТА
+# ============================================================
+#
+#   график -> срок платежа -> автосписание или пополнение
+#   -> пропуск -> вехи DPD -> восстановление или
+#   реструктуризация -> закрытие
+#
+# Остаток основного долга убывает ровно на основную часть
+# платежа, а просрочка следует из нарушенного графика, а не
+# из отдельного розыгрыша.
+# ============================================================
+
+
+def loan_payload(contract_id: str, loan, **extra) -> dict:
+
+    body = {
+        "contract_id": contract_id,
+        "installment_no": None,
+        "amount_due": None,
+        "amount_paid": None,
+        "principal_outstanding": loan.principal_outstanding,
+        "days_past_due": loan.dpd,
+        "due_date": None,
+        "cause_event_id": None,
+        "reason": None,
+    }
+
+    body.update(extra)
+
+    return body
+
+
+def _on_installment_due(sim, state: ClientState, ts: datetime, payload: dict) -> None:
+
+    contract_id = payload["contract_id"]
+
+    loan = state.loans.get(contract_id)
+
+    if loan is None or loan.closed:
+        return
+
+    item = payload["installment"]
+
+    event = state.emit(
+        state.factory.make(
+            "installment_due",
+            ts,
+            loan_payload(
+                contract_id,
+                loan,
+                installment_no=item.number,
+                amount_due=item.amount,
+                due_date=item.due_date.date().isoformat(),
+                reason="schedule",
+            ),
+            initiator=INITIATOR_SYSTEM,
+            correlation_id=contract_id,
+            link_type="schedule",
+        )
+    )
+
+    loan_rules.register_due(loan, item, event.event_id)
+
+    if loan.autopay:
+        repay_loan(state, ts + timedelta(minutes=5), loan, item.amount, "system")
+
+
+def repay_loan(state: ClientState, ts: datetime, loan, amount: int, channel: str) -> None:
+    """
+    Платёж по кредиту: сначала деньги, затем отметка в графике.
+    """
+
+    if amount <= 0 or loan.closed:
+        return
+
+    item = loan.oldest_unpaid()
+
+    if item is None:
+        return
+
+    sources = state.ledger.payment_sources(ts, amount)
+
+    if not sources:
+        return
+
+    account = sources[0]
+
+    paid = loan_rules.apply_payment(loan, item, amount, ts)
+
+    if paid <= 0:
+        return
+
+    _emit_money(
+        state,
+        ts,
+        "loan_payment",
+        account.account_id,
+        paid,
+        "debit",
+        f"loan:{loan.contract_id}",
+        {
+            "channel": channel,
+            "contract_id": loan.contract_id,
+            "cause_event_id": item.due_event_id,
+            "reason": "installment",
+            "mcc": MCC_SALARY,
+            "merchant_country": "KZ",
+        },
+        INITIATOR_SYSTEM if channel == "system" else INITIATOR_CLIENT,
+        correlation_id=loan.contract_id,
+        link_type="schedule",
+    )
+
+    state.emit(
+        state.factory.make(
+            "installment_paid",
+            ts + timedelta(seconds=2),
+            loan_payload(
+                loan.contract_id,
+                loan,
+                installment_no=item.number,
+                amount_due=item.amount,
+                amount_paid=paid,
+                due_date=item.due_date.date().isoformat(),
+                cause_event_id=item.due_event_id,
+                reason="payment",
+            ),
+            initiator=INITIATOR_SYSTEM if channel == "system" else INITIATOR_CLIENT,
+            correlation_id=loan.contract_id,
+            link_type="schedule",
+        )
+    )
+
+    if loan.dpd > 0 and loan_rules.arrears_amount(loan) == 0:
+        _clear_arrears(state, ts, loan)
+
+
+def _clear_arrears(state: ClientState, ts: datetime, loan) -> None:
+
+    state.emit(
+        state.factory.make(
+            "arrears_cleared",
+            ts + timedelta(seconds=5),
+            loan_payload(loan.contract_id, loan, days_past_due=0, reason="arrears_cleared"),
+            initiator=INITIATOR_SYSTEM,
+            correlation_id=loan.contract_id,
+            link_type="schedule",
+        )
+    )
+
+    loan.dpd = 0
+    loan.delinquency_marks = ()
+
+
+def _on_loan_check(sim, state: ClientState, ts: datetime, payload: dict) -> None:
+
+    settings = params_module.active().products
+
+    contract_id = payload["contract_id"]
+
+    loan = state.loans.get(contract_id)
+
+    if loan is None or loan.closed:
+        return
+
+    stress = stress_module.level_at(state.stress_episodes, ts)
+
+    discipline = state.persona.trait("financial_discipline", ts)
+
+    rng = keyed_rng(NS_LOAN, state.ordinal, ts.toordinal(), stable_hash(contract_id) % 9973)
+
+    arrears = loan_rules.arrears_amount(loan)
+
+    if arrears > 0:
+
+        band = "high" if discipline > 0.66 else "mid" if discipline > 0.33 else "low"
+
+        cure = settings.cure_probability_per_day[band] * (1.0 - 0.6 * stress)
+
+        if rng.random() < cure:
+            repay_loan(state, ts + timedelta(seconds=30), loan, arrears, "app")
+
+    for item in loan.schedule:
+
+        if item.status != "due":
+            continue
+
+        if (ts - item.due_date).days <= settings.grace_days_before_missed:
+            continue
+
+        loan_rules.mark_missed(loan, item)
+
+        state.emit(
+            state.factory.make(
+                "installment_missed",
+                ts + timedelta(seconds=60),
+                loan_payload(
+                    contract_id,
+                    loan,
+                    installment_no=item.number,
+                    amount_due=item.amount,
+                    amount_paid=item.paid_amount or None,
+                    days_past_due=(ts - item.due_date).days,
+                    due_date=item.due_date.date().isoformat(),
+                    cause_event_id=item.due_event_id,
+                    reason="missed",
+                ),
+                initiator=INITIATOR_SYSTEM,
+                correlation_id=contract_id,
+                link_type="schedule",
+            )
+        )
+
+    dpd = loan_rules.days_past_due(loan, ts)
+
+    loan.dpd = dpd
+
+    milestone = loan_rules.milestone_reached(loan, dpd)
+
+    if milestone is not None:
+
+        loan.delinquency_marks = loan.delinquency_marks + (milestone,)
+
+        state.emit(
+            state.factory.make(
+                "delinquency_registered",
+                ts + timedelta(seconds=90),
+                loan_payload(
+                    contract_id,
+                    loan,
+                    amount_due=loan_rules.arrears_amount(loan),
+                    days_past_due=milestone,
+                    reason=f"dpd_{milestone}",
+                ),
+                initiator=INITIATOR_SYSTEM,
+                correlation_id=contract_id,
+                link_type="schedule",
+            )
+        )
+
+        if milestone >= 60 and rng.random() < settings.restructure_share_at_dpd60:
+
+            loan_rules.restructure(loan, ts, extra_months=int(rng.integers(3, 12)))
+
+            state.emit(
+                state.factory.make(
+                    "loan_restructured",
+                    ts + timedelta(seconds=120),
+                    loan_payload(contract_id, loan, days_past_due=0, reason="restructured"),
+                    initiator=INITIATOR_BANK,
+                    correlation_id=contract_id,
+                    link_type="schedule",
+                )
+            )
+
+    arrears = loan_rules.arrears_amount(loan)
+
+    if arrears == 0 and loan.principal_outstanding > 0:
+
+        chance = settings.early_repayment_share_per_year / 365.0
+        chance *= 0.4 + 1.6 * discipline
+        chance *= max(0.1, 1.0 - stress)
+
+        if rng.random() < chance and state.ledger.payment_sources(ts, loan_rules.payoff_amount(loan)):
+            close_loan(state, ts, loan, early=True)
+            return
+
+    if loan.principal_outstanding <= 0 and arrears == 0:
+        close_loan(state, ts, loan, early=False)
+
+
+def close_loan(state: ClientState, ts: datetime, loan, early: bool) -> None:
+
+    contract = state.contracts.get(loan.contract_id)
+
+    if early and loan.principal_outstanding > 0:
+
+        payoff = loan_rules.payoff_amount(loan)
+
+        sources = state.ledger.payment_sources(ts, payoff)
+
+        if not sources:
+            return
+
+        _emit_money(
+            state,
+            ts + timedelta(seconds=150),
+            "loan_payment",
+            sources[0].account_id,
+            payoff,
+            "debit",
+            f"loan:{loan.contract_id}",
+            {
+                "channel": "app",
+                "contract_id": loan.contract_id,
+                "reason": "early_repayment",
+                "merchant_country": "KZ",
+            },
+            INITIATOR_CLIENT,
+            correlation_id=loan.contract_id,
+            link_type="schedule",
+        )
+
+        loan.principal_outstanding = 0
+
+        for item in loan.schedule:
+            if item.status in ("scheduled", "due", "partially_paid", "missed"):
+                item.status = "paid"
+                item.paid_amount = item.amount
+
+        state.emit(
+            state.factory.make(
+                "early_repayment",
+                ts + timedelta(seconds=180),
+                loan_payload(
+                    loan.contract_id, loan, amount_due=payoff, amount_paid=payoff,
+                    days_past_due=0, reason="early_repayment",
+                ),
+                initiator=INITIATOR_CLIENT,
+                correlation_id=loan.contract_id,
+                link_type="schedule",
+            )
+        )
+
+    loan.closed = True
+
+    state.emit(
+        state.factory.make(
+            "loan_closed",
+            ts + timedelta(seconds=210),
+            loan_payload(loan.contract_id, loan, days_past_due=0,
+                         reason="early" if early else "scheduled"),
+            initiator=INITIATOR_SYSTEM,
+            correlation_id=loan.contract_id,
+            link_type="schedule",
+        )
+    )
+
+    if contract is not None:
+        contract.status = CONTRACT_CLOSED
+        contract.closed_at = ts
+        emit_product_closed(state, ts, contract, "loan_closed")
+
+
+def emit_product_closed(state: ClientState, ts: datetime, contract, reason: str) -> None:
+
+    state.emit(
+        state.factory.make(
+            "product_closed",
+            ts + timedelta(seconds=240),
+            {
+                "product_id": contract.product_id,
+                "product_code": contract.product_code,
+                "product_version": contract.product_version,
+                "tariff_version": contract.tariff_version,
+                "product_family": contract.product_family,
+                "contract_id": contract.contract_id,
+                "account_id": contract.account_id,
+                "card_id": contract.card_id,
+                "amount_or_limit": contract.amount_or_limit,
+                "term": contract.term,
+                "rate": contract.rate,
+                "reason": reason,
+                "timestamp_quality": "exact",
+            },
+            initiator=INITIATOR_SYSTEM,
+            correlation_id=contract.contract_id,
+            link_type="contract",
+        )
+    )
+
+
+_HANDLERS["installment_due"] = _on_installment_due
+_HANDLERS["loan_check"] = _on_loan_check
+
+
+__all__ = ["close_loan", "emit_product_closed", "loan_payload", "repay_loan"]

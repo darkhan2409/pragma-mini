@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import numpy as np
 import pytest
@@ -28,7 +28,7 @@ from src.tokenizer.config import (
 from src.tokenizer.dataset import Events, Example, TokenizedDataset, collate
 from src.tokenizer.encode import encode_pairs
 from src.tokenizer.masking import Masker, MaskingConfig
-from src.tokenizer.vocab import KeyEntry, ValueEntry, Vocab
+from src.tokenizer.vocab import FieldEntry, KeyToken, ValueEntry, Vocab
 from src.model.backbone import build_backbone
 from src.model.batching import BatchError
 from src.model.config import ModelConfig, config_from_tokenizer
@@ -41,12 +41,10 @@ from src.model.losses import mlm_loss
 from src.model.mlm_batching import build_targets, representations
 from src.model.mlm_head import FieldTable, MLMHead, TargetError
 
-from tests.test_tok_encode import toy_vocab
+from tests.helpers_data import BASE, mlm_example, toy_vocab
 
+from tests.helpers_model import mlm_config, prepared
 
-BASE = datetime(2025, 1, 1)
-
-COLORS = ("red", "blue")
 
 
 # ============================================================
@@ -54,99 +52,25 @@ COLORS = ("red", "blue")
 # ============================================================
 
 
-def mlm_config(vocab=None) -> ModelConfig:
-    vocab = vocab or toy_vocab()
-    return ModelConfig(vocab_size=vocab.size, max_position_embeddings=16, dropout=0.0)
-
-
-def mlm_example(
-    vocab,
-    client_id: int,
-    hours: list[float],
-    cutoff_hours: float,
-    colors: list[str] | None = None,
-    sizes: list[int] | None = None,
-) -> Example:
-    """
-    Событие это [EVT] плюс два предсказуемых поля.
-    """
-
-    count = len(hours)
-
-    colors = colors or [COLORS[index % len(COLORS)] for index in range(count)]
-    sizes = sizes or [index % 2 for index in range(count)]
-
-    records = [
-        encode_pairs(vocab, [("toy__color", color), ("toy__size", size)], EVT_ID)
-        for color, size in zip(colors, sizes)
-    ]
-
-    widths = np.array([len(record.key_ids) for record in records], dtype=np.int64)
-
-    offsets = np.zeros(len(records) + 1, dtype=np.int64)
-    np.cumsum(widths, out=offsets[1:])
-
-    events = Events(
-        key_ids=np.concatenate([record.key_ids for record in records]),
-        value_ids=np.concatenate([record.value_ids for record in records]),
-        positions=np.concatenate([record.positions for record in records]),
-        offsets=offsets,
-        event_type=np.array(["toy"] * len(records), dtype=object),
-        ts=np.array([np.datetime64(BASE + timedelta(hours=h), "us") for h in hours]),
-        seq=np.arange(len(records), dtype=np.int64),
-    )
-
-    return Example(
-        client_id=client_id,
-        cutoff=BASE + timedelta(hours=cutoff_hours),
-        dataset="toy",
-        client_group="train",
-        seq_end=len(records),
-        snapshot_ts=BASE - timedelta(hours=1),
-        profile=encode_pairs(vocab, [("toy__flag", True)], USR_ID),
-        events=events,
-    )
-
-
-def prepared(histories, cutoff_hours=48, max_events=10, vocab=None, rate=1.0, step=0):
-    """
-    Batch с масками, цели и вход модели.
-    """
-
-    vocab = vocab or toy_vocab()
-
-    examples = [
-        mlm_example(vocab, index, hours, cutoff_hours) for index, hours in enumerate(histories)
-    ]
-
-    masker = Masker(vocab, MaskingConfig(mode="token", seed=7, token_rate=rate))
-
-    history = prepare_history_batch(
-        collate(examples), metadata_from_examples(examples), max_events, masker=masker, step=step
-    )
-
-    table = FieldTable(vocab)
-
-    return history, build_targets(history, table), table
-
-
 def narrow_vocab() -> Vocab:
     """
     Предсказуемое поле с двумя значениями и предсказуемое с одним.
     """
 
-    keys = [
-        KeyEntry(6, "s__wide", "s", "wide", "categorical", True, "string", 8, 10),
-        KeyEntry(7, "s__narrow", "s", "narrow", "categorical", True, "string", 10, 11),
+    fields = [
+        FieldEntry(0, "s__wide", "s", "wide", "categorical", True, "string", 6, (8, 9)),
+        FieldEntry(1, "s__narrow", "s", "narrow", "categorical", True, "string", 7, (10,)),
     ]
+
+    key_tokens = [KeyToken(6, "s__wide", (0,)), KeyToken(7, "s__narrow", (1,))]
 
     values = [
-        ValueEntry(8, 6, "s__wide", "a", 3),
-        ValueEntry(9, 6, "s__wide", "b", 2),
-        ValueEntry(10, 7, "s__narrow", "only", 5),
+        ValueEntry(8, "a", "string", False, 3, (0,)),
+        ValueEntry(9, "b", "string", False, 2, (0,)),
+        ValueEntry(10, "only", "string", False, 5, (1,)),
     ]
 
-    return Vocab(keys, values)
+    return Vocab(fields, key_tokens, values)
 
 
 # ============================================================
@@ -159,17 +83,19 @@ def test_trainable_fields_are_predictable_with_two_candidates(tok_run):
 
     table = FieldTable.load(tokenizer.vocab, tok_run["vocab"])
 
-    for key_id in table.trainable_key_ids:
-        entry = tokenizer.vocab.key_entry_by_id(key_id)
+    for key_id in table.trainable_field_ids:
+        entry = tokenizer.vocab.field_entry_by_id(key_id)
         assert entry.predictable
         assert entry.n_values >= 2
 
-    for key_id in table.degenerate_key_ids:
-        assert tokenizer.vocab.key_entry_by_id(key_id).n_values < 2
+    for key_id in table.degenerate_field_ids:
+        assert tokenizer.vocab.field_entry_by_id(key_id).n_values < 2
 
-    predictable = sorted(entry.id for entry in tokenizer.vocab.keys if entry.predictable)
+    predictable = sorted(
+        entry.field_id for entry in tokenizer.vocab.fields if entry.predictable
+    )
 
-    assert sorted(table.trainable_key_ids + table.degenerate_key_ids) == predictable
+    assert sorted(table.trainable_field_ids + table.degenerate_field_ids) == predictable
 
 
 def test_local_and_global_are_inverse(tok_run):
@@ -180,11 +106,11 @@ def test_local_and_global_are_inverse(tok_run):
     keys = []
     values = []
 
-    for key_id in table.trainable_key_ids:
-        entry = tokenizer.vocab.key_entry_by_id(key_id)
-        for value in range(entry.value_start, entry.value_end):
-            keys.append(entry.id)
-            values.append(value)
+    for field_id in table.trainable_field_ids:
+        entry = tokenizer.vocab.field_entry_by_id(field_id)
+        for token in entry.candidates:
+            keys.append(entry.field_id)
+            values.append(token)
 
     keys = np.array(keys, dtype=np.int64)
     values = np.array(values, dtype=np.int64)
@@ -199,33 +125,33 @@ def test_special_value_is_not_a_target():
     table = FieldTable(toy_vocab())
 
     with pytest.raises(TargetError, match="special"):
-        table.to_local(np.array([6]), np.array([MISSING_ID]))
+        table.to_local(np.array([0]), np.array([MISSING_ID]))
 
 
 def test_value_of_another_field_is_rejected():
     table = FieldTable(toy_vocab())
 
     # 11 это первое значение toy__size, а ключ передан toy__color.
-    with pytest.raises(TargetError, match="не принадлежит полю"):
-        table.to_local(np.array([6]), np.array([11]))
+    with pytest.raises(TargetError, match="не входит в"):
+        table.to_local(np.array([0]), np.array([11]))
 
 
 def test_non_predictable_field_is_rejected():
     table = FieldTable(toy_vocab())
 
     with pytest.raises(TargetError, match="predictable"):
-        table.to_local(np.array([8]), np.array([13]))
+        table.to_local(np.array([2]), np.array([13]))
 
 
 def test_degenerate_field_has_no_head():
     table = FieldTable(narrow_vocab())
 
-    assert table.trainable_key_ids == (6,)
-    assert table.degenerate_key_ids == (7,)
+    assert table.trainable_field_ids == (0,)
+    assert table.degenerate_field_ids == (1,)
 
     head = MLMHead(ModelConfig(vocab_size=11, max_position_embeddings=8), table)
 
-    assert set(head.heads) == {"6"}
+    assert set(head.heads) == {"0"}
 
 
 def test_broken_artifact_is_rejected(tok_run, tmp_path):
@@ -263,10 +189,10 @@ def test_targets_point_at_the_right_token():
     assert targets.col.tolist() == [1, 2, 1, 2, 1, 2]
     assert targets.example.tolist() == [0] * 6
 
-    assert targets.key_ids.tolist() == [6, 7] * 3
+    assert targets.field_ids.tolist() == [0, 1] * 3
 
     # Цели это исходные значения, а не [MASK].
-    assert np.array_equal(targets.global_targets, table.to_global(targets.key_ids, targets.local_targets))
+    assert np.array_equal(targets.global_targets, table.to_global(targets.field_ids, targets.local_targets))
 
 
 def test_targets_map_back_to_the_untruncated_batch():
@@ -302,6 +228,7 @@ def test_degenerate_positions_are_dropped_and_counted():
         event_type=np.array(["toy"], dtype=object),
         ts=np.array([np.datetime64(BASE, "us")]),
         seq=np.zeros(1, dtype=np.int64),
+        field_ids=record.field_ids,
     )
 
     example = Example(
@@ -326,7 +253,7 @@ def test_degenerate_positions_are_dropped_and_counted():
     assert targets.n_masked == 2
     assert targets.n_degenerate == 1
     assert targets.n == 1
-    assert targets.key_ids.tolist() == [6]
+    assert targets.field_ids.tolist() == [0]
 
 
 def test_batch_without_masker_has_no_targets():
@@ -501,19 +428,19 @@ def test_logits_cover_exactly_the_field_candidates():
 
     with torch.no_grad():
         out = backbone(inputs, gather=targets.gather())
-        field_logits = head(*representations(out, tensors), tensors["key_ids"])
+        field_logits = head(*representations(out, tensors), tensors["field_ids"])
 
-    assert [item.key_id for item in field_logits] == [6, 7]
+    assert [item.field_id for item in field_logits] == [0, 1]
 
     for item in field_logits:
 
-        assert item.n_candidates == table.size_of(item.key_id)
+        assert item.n_candidates == table.size_of(item.field_id)
 
-        keys = np.full(item.n_targets, item.key_id, dtype=np.int64)
+        keys = np.full(item.n_targets, item.field_id, dtype=np.int64)
 
         chosen = table.to_global(keys, item.logits.argmax(dim=-1).numpy())
 
-        entry = table.vocab.key_entry_by_id(item.key_id)
+        entry = table.vocab.field_entry_by_id(item.field_id)
 
         assert (chosen >= entry.value_start).all()
         assert (chosen < entry.value_end).all()
@@ -529,14 +456,14 @@ def test_positions_are_grouped_by_field_without_loss():
 
     with torch.no_grad():
         out = backbone(inputs, gather=targets.gather())
-        field_logits = head(*representations(out, tensors), tensors["key_ids"])
+        field_logits = head(*representations(out, tensors), tensors["field_ids"])
 
     covered = torch.cat([item.index for item in field_logits]).sort().values
 
     assert covered.tolist() == list(range(targets.n))
 
     for item in field_logits:
-        assert bool((tensors["key_ids"][item.index] == item.key_id).all())
+        assert bool((tensors["field_ids"][item.index] == item.field_id).all())
 
 
 def test_head_creates_no_parameters_inside_forward():
@@ -548,7 +475,7 @@ def test_head_creates_no_parameters_inside_forward():
 
     with torch.no_grad():
         out = backbone(inputs, gather=targets.gather())
-        head(*representations(out, tensors), tensors["key_ids"])
+        head(*representations(out, tensors), tensors["field_ids"])
 
     assert head.n_parameters() == before
 
@@ -570,7 +497,7 @@ def test_empty_batch_gives_no_logits():
     assert head(empty, empty, empty, torch.zeros(0, dtype=torch.long)) == []
 
 
-def mask_one_field(history, key_id: int):
+def mask_one_field(history, field_id: int):
     """
     Маскирует только одно поле: соседнее остаётся видимым.
     """
@@ -582,7 +509,7 @@ def mask_one_field(history, key_id: int):
 
     values = np.asarray(history.tokens.value_ids).copy()
 
-    chosen = np.flatnonzero(np.asarray(history.tokens.key_ids) == key_id)
+    chosen = np.flatnonzero(np.asarray(history.tokens.field_ids) == field_id)
 
     targets = np.full(values.size, IGNORE_INDEX, dtype=np.int64)
     mask = np.zeros(values.size, dtype=bool)
@@ -622,7 +549,7 @@ def test_visible_neighbour_changes_the_logits():
 
         history = mask_one_field(
             prepare_history_batch(collate(examples), metadata_from_examples(examples), 10),
-            key_id=7,
+            field_id=1,
         )
 
         targets = build_targets(history, table)
@@ -631,12 +558,12 @@ def test_visible_neighbour_changes_the_logits():
 
         with torch.no_grad():
             out = backbone(to_model_inputs(history, config), gather=targets.gather())
-            return head(*representations(out, tensors), tensors["key_ids"])
+            return head(*representations(out, tensors), tensors["field_ids"])
 
     left = logits_for(["red", "red", "red"])
     right = logits_for(["blue", "blue", "blue"])
 
-    assert [item.key_id for item in left] == [7]
+    assert [item.field_id for item in left] == [1]
 
     assert not torch.allclose(left[0].logits, right[0].logits)
 
@@ -674,7 +601,7 @@ def test_fully_masked_event_hides_the_neighbour():
 
         with torch.no_grad():
             out = backbone(to_model_inputs(history, config), gather=targets.gather())
-            return head(*representations(out, tensors), tensors["key_ids"])
+            return head(*representations(out, tensors), tensors["field_ids"])
 
     left = logits_for(["red", "red", "red"])
     right = logits_for(["blue", "blue", "blue"])
@@ -697,7 +624,7 @@ def test_gradients_reach_the_head_and_the_whole_backbone():
 
     out = backbone(inputs, gather=targets.gather())
 
-    field_logits = head(*representations(out, tensors), tensors["key_ids"])
+    field_logits = head(*representations(out, tensors), tensors["field_ids"])
 
     result = mlm_loss(field_logits, tensors["local_targets"])
 
@@ -705,13 +632,13 @@ def test_gradients_reach_the_head_and_the_whole_backbone():
 
     checked = {
         "fuse": head.fuse[0].weight,
-        "head_color": head.heads["6"].weight,
-        "head_size": head.heads["7"].weight,
+        "head_color": head.heads["0"].weight,
+        "head_size": head.heads["1"].weight,
         "embeddings": backbone.pair.embeddings.token.weight,
         "event": backbone.pair.event.layers[0].linear1.weight,
         "profile": backbone.pair.profile.layers[0].linear1.weight,
         "history": backbone.history.layers[0].linear1.weight,
-        "time": backbone.time.linear.weight,
+        "calendar": backbone.calendar.output.weight,
     }
 
     for name, parameter in checked.items():
@@ -752,10 +679,10 @@ def test_real_batch_produces_valid_targets(tok_run):
     assert targets.n_fields > 1
 
     # Каждая цель это настоящее значение своего поля.
-    table.check_targets(targets.key_ids, targets.global_targets)
+    table.check_targets(targets.field_ids, targets.global_targets)
 
     assert (targets.local_targets >= 0).all()
-    assert (targets.local_targets < table.n_candidates[targets.key_ids]).all()
+    assert (targets.local_targets < table.n_candidates[targets.field_ids]).all()
 
     backbone = build_backbone(config, seed=4).eval()
     head = MLMHead(config, table).eval()
@@ -764,10 +691,10 @@ def test_real_batch_produces_valid_targets(tok_run):
 
     with torch.no_grad():
         out = backbone(to_model_inputs(history, config), gather=targets.gather())
-        field_logits = head(*representations(out, tensors), tensors["key_ids"])
+        field_logits = head(*representations(out, tensors), tensors["field_ids"])
 
     assert sum(item.n_targets for item in field_logits) == targets.n
 
     for item in field_logits:
-        assert item.n_candidates == table.size_of(item.key_id)
+        assert item.n_candidates == table.size_of(item.field_id)
         assert torch.isfinite(item.logits).all()

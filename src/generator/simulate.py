@@ -1,0 +1,821 @@
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+
+from . import params as params_module
+from .behaviour import adoption as adoption_module
+from .behaviour import communications as comm_module
+from .behaviour import fraud as fraud_behaviour
+from .behaviour import habits as habits_module
+from .behaviour import merchants as merchant_choice
+from .behaviour import needs as needs_module
+from .behaviour import outcomes as outcome_module
+from .behaviour import sessions as session_module
+from .behaviour import support as support_module
+from .config import (
+    HISTORY_END,
+    HISTORY_START,
+    INITIATOR_BANK,
+    INITIATOR_CLIENT,
+    INITIATOR_EXTERNAL,
+    INITIATOR_SYSTEM,
+    REGISTRY_START,
+)
+from .finance import cards as card_rules
+from .finance import deposits as deposit_rules
+from .finance import loans as loan_rules
+from .finance.entities import (
+    ACCOUNT_CARD,
+    ACCOUNT_CREDIT_CARD,
+    ACCOUNT_DEPOSIT,
+    CARD_ACTIVE,
+    CARD_BLOCKED,
+    CONTRACT_CLOSED,
+    Account,
+    Application,
+    Card,
+    Contract,
+    DepositState,
+    LoanState,
+    Offer,
+)
+from .finance.ledger import COUNTERPART_BANK, COUNTERPART_GOVERNMENT, Ledger
+from .life import calendar as cal
+from .life import events as life_events
+from .life import fraud as fraud_plan
+from .life import household as household_module
+from .life import income as income_module
+from .life import lifecycle as lifecycle_module
+from .life import stress as stress_module
+from .life.persona import Persona, draw_persona
+from .life.traits import event_shift
+from .observe import coverage as coverage_module
+from .observe.envelope import Event, EventFactory
+from .rng import (
+    COMPONENT_CONTENT,
+    NS_PRODUCT_TIME,
+    COMPONENT_OUTCOME,
+    NS_ADOPTION,
+    NS_CARD,
+    NS_DEPOSIT,
+    NS_FRAUD,
+    NS_LEDGER,
+    NS_LOAN,
+    NS_PROFILE,
+    NS_SUPPORT,
+    NS_TRANSFER,
+    event_rng,
+    keyed_rng,
+    stable_hash,
+)
+from .world import communities, products as product_catalog, relationships as graph_module
+from .world.dictionaries import (
+    CATEGORY_BY_NAME,
+    MCC_CASH,
+    MCC_SALARY,
+    MCC_TRANSFER,
+    PROFILE_TRACKED_FIELDS,
+)
+
+
+# ============================================================
+# СИМУЛЯЦИЯ СООБЩЕСТВА
+# ============================================================
+#
+# Сообщество это единица симуляции: связанные клиенты живут в
+# ОДНОЙ очереди событий, поэтому внутрибанковский перевод
+# доходит до получателя и влияет на его последующие решения.
+#
+# Порядок внутри дня задаётся временем действия, а не номером
+# клиента: решение принимается на состояние своей секунды.
+# ============================================================
+
+
+@dataclass
+class ClientState:
+    persona: Persona
+    factory: EventFactory
+    ledger: Ledger
+    events: list = field(default_factory=list)
+    truth: list = field(default_factory=list)
+    profile_versions: list = field(default_factory=list)
+
+    life_events: tuple = ()
+    stress_episodes: tuple = ()
+    pauses: tuple = ()
+    fraud_episodes: tuple = ()
+    income_streams: tuple = ()
+    payouts: tuple = ()
+    habits: object = None
+    traits: object = None
+
+    contracts: dict = field(default_factory=dict)
+    cards: dict = field(default_factory=dict)
+    loans: dict = field(default_factory=dict)
+    deposits: dict = field(default_factory=dict)
+    applications: dict = field(default_factory=dict)
+    offers: list = field(default_factory=list)
+
+    app_adopted_at: datetime | None = None
+    consent_at: datetime | None = None
+
+    state: str = lifecycle_module.STATE_PROSPECT
+    last_client_event: datetime | None = None
+    last_state_change: datetime | None = None
+    comm_fatigue: int = 0
+    recent_failure_at: datetime | None = None
+    decline_day: int = 0
+    decline_count: int = 0
+    fraud_alert_at: datetime | None = None
+    pending_notice: bool = False
+    returned_flag: bool = False
+
+    monthly_atm: int = 0
+    monthly_atm_count: int = 0
+    monthly_transfer: int = 0
+    monthly_cashback: int = 0
+    month_purchases: int = 0
+    pending_cashback: dict = field(default_factory=dict)
+    month_key: int = 0
+
+    profile_values: dict = field(default_factory=dict)
+    opening_state: dict = field(default_factory=dict)
+    purchases: list = field(default_factory=list)
+    open_bills: list = field(default_factory=list)
+    cases: list = field(default_factory=list)
+    closed_at: datetime | None = None
+
+    # --------------------------------------------------------
+
+    @property
+    def ordinal(self) -> int:
+        return self.persona.client_ordinal
+
+    @property
+    def client_id(self) -> str:
+        return self.persona.client_id
+
+    def emit(self, event: Event) -> Event:
+        self.events.append(event)
+        return event
+
+    def note(self, ts: datetime, kind: str, key: str, value) -> None:
+        self.truth.append(
+            {
+                "client_id": self.client_id,
+                "ts": ts,
+                "kind": kind,
+                "key": key,
+                "value": json.dumps(value, ensure_ascii=False, default=str),
+            }
+        )
+
+    def may_decline(self, ts: datetime) -> bool:
+        """
+        Разрешён ли ещё один наблюдаемый отказ в этот день.
+
+        Клиент, у которого не хватило денег, не повторяет
+        попытку десять раз подряд: после пары отказов он
+        перестаёт пробовать через этот банк.
+        """
+
+        limit = params_module.active().activity.max_declines_per_day
+
+        day = ts.toordinal()
+
+        if day != self.decline_day:
+            self.decline_day = day
+            self.decline_count = 0
+
+        if self.decline_count >= limit:
+            return False
+
+        self.decline_count += 1
+
+        return True
+
+    def held_codes(self, ts: datetime) -> frozenset:
+        return frozenset(
+            contract.product_code
+            for contract in self.contracts.values()
+            if contract.is_open_at(ts)
+        )
+
+    def held_counts(self, ts: datetime) -> dict:
+        counts: dict[str, int] = {}
+        for contract in self.contracts.values():
+            if contract.is_open_at(ts):
+                counts[contract.product_code] = counts.get(contract.product_code, 0) + 1
+        return counts
+
+    def open_contracts(self, ts: datetime) -> list:
+        return [item for item in self.contracts.values() if item.is_open_at(ts)]
+
+    def owned_families(self, ts: datetime) -> frozenset:
+        return frozenset(item.product_family for item in self.open_contracts(ts))
+
+    def assets(self) -> int:
+        return sum(
+            account.balance
+            for account in self.ledger.accounts.values()
+            if account.kind == ACCOUNT_DEPOSIT
+        )
+
+    def primary_card_account(self, ts: datetime) -> Account | None:
+        best = None
+        for account in self.ledger.accounts.values():
+            if account.kind != ACCOUNT_CARD or not account.is_open_at(ts):
+                continue
+            if best is None or account.balance > best.balance:
+                best = account
+        return best
+
+    def usable_card(self, account_id: str, ts: datetime) -> Card | None:
+        for card in self.cards.values():
+            if card.account_id == account_id and card.usable_at(ts):
+                return card
+        return None
+
+    def worst_dpd(self) -> int:
+        return max((state.dpd for state in self.loans.values() if not state.closed), default=0)
+
+
+@dataclass
+class Action:
+    ts: datetime
+    ordinal: int
+    order: int
+    kind: str
+    payload: dict
+
+
+@dataclass
+class CommunityResult:
+    events: list
+    profile_versions: list
+    coverage: list
+    truth_clients: list
+    truth_events: list
+    truth_relationships: list
+
+
+# ============================================================
+# ПОМОЩНИКИ
+# ============================================================
+
+
+def _money(value: float) -> int:
+    return int(round(value))
+
+
+def _account_id(client_id: str, kind: str, index: int) -> str:
+    return f"acc_{stable_hash('account', client_id, kind, index) % 10 ** 12:012d}"
+
+
+def _contract_id(client_id: str, code: str, index: int) -> str:
+    return f"ctr_{stable_hash('contract', client_id, code, index) % 10 ** 12:012d}"
+
+
+def _card_id(client_id: str, contract_id: str, index: int) -> str:
+    return f"crd_{stable_hash('card', client_id, contract_id, index) % 10 ** 12:012d}"
+
+
+def _application_id(client_id: str, ts: datetime, index: int) -> str:
+    return f"app_{stable_hash('application', client_id, ts.toordinal(), index) % 10 ** 12:012d}"
+
+
+def _transfer_id(client_id: str, ts: datetime, index: int) -> str:
+    return f"trf_{stable_hash('transfer', client_id, ts.toordinal(), index) % 10 ** 12:012d}"
+
+
+class CommunitySimulation:
+    """
+    Одно сообщество от начала до конца окна наблюдения.
+    """
+
+    def __init__(self, community_id: int, ordinals: tuple) -> None:
+
+        self.community_id = community_id
+        self.settings = params_module.active()
+
+        self.personas = {ordinal: draw_persona(ordinal) for ordinal in ordinals}
+
+        self.graph = graph_module.build_graph(community_id, ordinals, self.personas)
+
+        self.clients: dict[int, ClientState] = {}
+
+        for ordinal in ordinals:
+            self.clients[ordinal] = self._prepare(self.personas[ordinal])
+
+        self.by_client_id = {state.client_id: state for state in self.clients.values()}
+
+    # --------------------------------------------------------
+    # ПОДГОТОВКА
+    # --------------------------------------------------------
+
+    def _prepare(self, persona: Persona) -> ClientState:
+
+        state = ClientState(
+            persona=persona,
+            factory=EventFactory(persona.client_id, persona.is_test_account),
+            ledger=Ledger(persona.client_id),
+        )
+
+        state.life_events = life_events.plan_events(persona)
+        state.stress_episodes = stress_module.plan_episodes(persona, state.life_events)
+        state.pauses = lifecycle_module.plan_pauses(persona, state.life_events)
+        state.fraud_episodes = fraud_plan.plan_episodes(persona, state.life_events)
+        state.income_streams = income_module.build_streams(persona, state.life_events)
+
+        state.payouts = tuple(
+            sorted(
+                income_module.payouts(persona, state.income_streams, state.stress_episodes)
+                + income_module.vacation_payouts(persona, state.income_streams, state.life_events),
+                key=lambda item: item.ts,
+            )
+        )
+
+        state.habits = habits_module.build_habits(persona, state.life_events)
+
+        traits = persona.traits
+
+        for event in state.life_events:
+            shift = event_shift(event.kind, event.ts)
+            if shift is not None:
+                traits = traits.with_shift(shift)
+
+        state.traits = traits
+
+        state.app_adopted_at = coverage_module.app_adoption(persona.client_ordinal)
+        state.consent_at = coverage_module.consent_date(persona.client_ordinal)
+
+        state.profile_values = self._initial_profile(persona)
+
+        return state
+
+    def _initial_profile(self, persona: Persona) -> dict:
+
+        return {
+            "age": persona.age_at(HISTORY_START),
+            "gender": persona.gender,
+            "family_status": persona.family_status,
+            "children": persona.children,
+            "education": persona.education,
+            "region": persona.region,
+            "city": persona.settlement,
+            "housing_type": persona.housing_type,
+            "pensioner": persona.is_pensioner_at(HISTORY_START),
+            "income_type": persona.income_type,
+            "declared_income": persona.declared_income,
+            "industry": persona.industry,
+            "salary_day": persona.salary_day,
+            "relationship_months": persona.relationship_months_at(HISTORY_START),
+            "contracts_count": 0,
+            "active_contracts": 0,
+            "holds_credit_card": False,
+            "holds_debit_card": False,
+            "holds_deposit": False,
+            "credit_limit": None,
+            "credit_utilization": None,
+        }
+
+    # --------------------------------------------------------
+    # ПРОДУКТЫ
+    # --------------------------------------------------------
+
+    def _pick_product(self, state: ClientState, family: str, ts: datetime):
+
+        catalog = product_catalog.catalog()
+
+        pool = [
+            view
+            for view in catalog.by_family(family)
+            if view.sellable_at(ts) and not view.record.is_synthetic
+        ]
+
+        if not pool:
+            pool = [view for view in catalog.by_family(family) if view.serviced_at(ts)]
+
+        if not pool:
+            return None
+
+        rng = keyed_rng(NS_ADOPTION, state.ordinal, ts.toordinal(), stable_hash(family) % 997)
+
+        weights = []
+
+        for view in pool:
+            weight = 1.0
+            if view.status_at(ts) == product_catalog.STATUS_ACTIVE:
+                weight *= 3.0
+            eligibility = view.version_at(ts).eligibility or {}
+            if eligibility.get("min_assets", 0) > state.assets():
+                weight *= 0.05
+            if eligibility.get("requires_pension") and not state.persona.is_pensioner_at(ts):
+                weight *= 0.02
+            weights.append(weight)
+
+        return pool[int(rng.choice(len(pool), p=weights))]
+
+    def _open_contract(
+        self,
+        state: ClientState,
+        view,
+        ts: datetime,
+        amount: int | None,
+        term: int | None,
+        offer_id: str | None = None,
+        application_id: str | None = None,
+        previous_product_id: str | None = None,
+        migration_reason: str | None = None,
+        emit_events: bool = True,
+        not_before: datetime | None = None,
+    ) -> Contract:
+        """
+        Открывает договор на версии продукта, действующей на дату
+        подписания, и заводит нужные счёт и карту.
+        """
+
+        version = view.version_at(ts)
+
+        index = len(state.contracts) + 1
+
+        contract_id = _contract_id(state.client_id, view.code, index)
+
+        family = view.family
+
+        rate = version.terms.get("rate")
+
+        if rate is None and "rate_by_term" in version.terms and term:
+            rate = version.terms["rate_by_term"].get(term) or version.terms["rate_by_term"].get(str(term))
+
+        contract = Contract(
+            contract_id=contract_id,
+            client_id=state.client_id,
+            product_id=view.record.product_id,
+            product_code=view.code,
+            product_family=family,
+            product_version=version.product_version,
+            tariff_version=version.tariff_version,
+            opened_at=ts,
+            amount_or_limit=amount,
+            term=term,
+            rate=float(rate) if rate is not None else None,
+            offer_id=offer_id,
+            previous_product_id=previous_product_id,
+            application_id=application_id,
+            terms=dict(version.terms),
+        )
+
+        account_kind = {
+            "debit_card": ACCOUNT_CARD,
+            "credit_card": ACCOUNT_CREDIT_CARD,
+            "deposit": ACCOUNT_DEPOSIT,
+            "deposit_certificate": ACCOUNT_DEPOSIT,
+        }.get(family)
+
+        account = None
+
+        if account_kind is not None:
+
+            account = state.ledger.add_account(
+                Account(
+                    account_id=_account_id(state.client_id, account_kind, index),
+                    client_id=state.client_id,
+                    kind=account_kind,
+                    opened_at=ts,
+                    contract_id=contract_id,
+                    product_code=view.code,
+                    credit_limit=int(amount or 0) if family == "credit_card" else 0,
+                )
+            )
+
+            contract.account_id = account.account_id
+
+        card = None
+
+        if family in ("debit_card", "credit_card"):
+
+            card = Card(
+                card_id=_card_id(state.client_id, contract_id, index),
+                account_id=contract.account_id,
+                client_id=state.client_id,
+                contract_id=contract_id,
+                product_code=view.code,
+                issued_at=ts,
+            )
+
+            state.cards[card.card_id] = card
+            contract.card_id = card.card_id
+
+        state.contracts[contract_id] = contract
+
+        if not emit_events:
+            if card is not None:
+                card.status = CARD_ACTIVE
+                card.activated_at = ts
+            return contract
+
+        # Витрина договоров у части продуктов теряет время.
+        # Запись при этом не может оказаться раньше своей
+        # причины: тогда реестр учитывает её следующим днём.
+        quality_rng = keyed_rng(NS_PRODUCT_TIME, state.ordinal, ts.toordinal(), index)
+
+        share = self.settings.defects.date_only_share.get(family, 0.1)
+
+        date_only = quality_rng.random() < share
+
+        registry_ts = ts
+
+        if date_only:
+            registry_ts = ts.replace(hour=0, minute=0, second=0, microsecond=0)
+            if registry_ts <= (not_before or ts) - timedelta(seconds=1):
+                registry_ts = registry_ts + timedelta(days=1)
+            if registry_ts >= HISTORY_END:
+                registry_ts = ts
+                date_only = False
+
+        payload = {
+            "product_id": contract.product_id,
+            "product_code": contract.product_code,
+            "product_version": contract.product_version,
+            "tariff_version": contract.tariff_version,
+            "product_family": family,
+            "contract_id": contract_id,
+            "account_id": contract.account_id,
+            "card_id": contract.card_id,
+            "offer_id": offer_id,
+            "previous_product_id": previous_product_id,
+            "migration_reason": migration_reason,
+            "amount_or_limit": amount,
+            "term": term,
+            "rate": contract.rate,
+            "reason": "application_approved" if application_id else "opened",
+            "timestamp_quality": "date_only" if date_only else "exact",
+        }
+
+        precision = "day" if date_only else "second"
+
+        if account is not None:
+            state.emit(
+                state.factory.make(
+                    "account_opened",
+                    registry_ts,
+                    payload,
+                    initiator=INITIATOR_BANK,
+                    correlation_id=contract_id,
+                    link_type="contract",
+                    effective_at=ts,
+                    precision=precision,
+                )
+            )
+
+        state.emit(
+            state.factory.make(
+                "product_migrated" if migration_reason else "product_opened",
+                registry_ts,
+                payload,
+                initiator=INITIATOR_BANK,
+                correlation_id=application_id or contract_id,
+                link_type="application" if application_id else "contract",
+                effective_at=ts,
+                precision=precision,
+            )
+        )
+
+        if card is not None:
+
+            rng = keyed_rng(NS_CARD, state.ordinal, ts.toordinal(), index)
+
+            low, high = self.settings.products.card_activation_delay_days
+
+            activation = ts + timedelta(days=int(rng.integers(low, high + 1)), hours=int(rng.integers(1, 20)))
+
+            if activation >= HISTORY_END:
+                activation = ts
+
+            card.activated_at = activation
+            card.status = CARD_ACTIVE
+
+            state.emit(
+                state.factory.make(
+                    "card_activated",
+                    activation,
+                    payload,
+                    initiator=INITIATOR_CLIENT,
+                    correlation_id=contract_id,
+                    link_type="contract",
+                )
+            )
+
+        return contract
+
+    # --------------------------------------------------------
+    # ПРЕДЫСТОРИЯ
+    # --------------------------------------------------------
+
+    def _prehistory(self, state: ClientState) -> None:
+        """
+        Договоры, открытые до окна наблюдения. Прошлые проводки
+        не выдумываются: остаток и долг на первое наблюдение
+        уходят в opening_state покрытия.
+        """
+
+        persona = state.persona
+
+        if persona.relationship_start >= HISTORY_START:
+            return
+
+        rng = keyed_rng(NS_LEDGER, state.ordinal, 1)
+
+        # Первая дебетовая карта в день прихода в банк.
+        view = self._pick_product(state, "debit_card", persona.relationship_start)
+
+        if view is not None:
+            self._open_contract(
+                state,
+                view,
+                persona.relationship_start.replace(hour=11, minute=30),
+                amount=None,
+                term=None,
+                emit_events=persona.relationship_start >= REGISTRY_START,
+            )
+
+        span = max(1, (HISTORY_START - persona.relationship_start).days)
+
+        for family, probability in (
+            ("credit_card", 0.10 + 0.45 * persona.trait("credit_appetite")),
+            ("cash_loan", 0.08 + 0.40 * persona.trait("credit_appetite")),
+            ("deposit", 0.05 + 0.35 * persona.trait("savings_propensity")),
+            ("installment", 0.10 + 0.30 * persona.trait("credit_appetite")),
+        ):
+
+            if rng.random() >= min(0.75, probability):
+                continue
+
+            offset = int(rng.integers(0, span))
+
+            ts = persona.relationship_start + timedelta(days=offset, hours=int(rng.integers(9, 19)))
+
+            if ts >= HISTORY_START:
+                continue
+
+            item = self._pick_product(state, family, ts)
+
+            if item is None:
+                continue
+
+            amount, term = self._contract_terms(state, item, ts, rng)
+
+            self._open_contract(
+                state, item, ts, amount, term,
+                emit_events=ts >= REGISTRY_START,
+            )
+
+        # Начальные остатки.
+        opening_cash = _money(persona.true_income * rng.uniform(0.05, 0.45))
+        opening_other = _money(persona.true_income * rng.uniform(0.2, 1.8) * (1.0 - persona.visible_share))
+
+        state.ledger.accounts[state.ledger.cash_id].balance = opening_cash
+        state.ledger.accounts[state.ledger.other_bank_id].balance = opening_other
+
+        card_account = state.primary_card_account(HISTORY_START)
+
+        if card_account is not None:
+            card_account.balance = _money(
+                persona.true_income * persona.visible_share * rng.uniform(0.1, 0.9)
+            )
+
+        for account in state.ledger.accounts.values():
+            if account.kind == ACCOUNT_DEPOSIT:
+                account.balance = _money(persona.true_income * rng.uniform(1.0, 8.0))
+
+        # Остаток на первое наблюдение это opening state, а не
+        # результат наблюдавшихся проводок.
+        for account in state.ledger.accounts.values():
+            account.opening_balance = account.balance
+
+        # Кредиты предыстории: график и остаток долга.
+        for contract in list(state.contracts.values()):
+
+            if contract.product_family not in ("cash_loan", "refinance", "installment"):
+                continue
+
+            if contract.amount_or_limit is None or contract.term is None:
+                continue
+
+            loan = loan_rules.open_loan(
+                contract.contract_id,
+                int(contract.amount_or_limit),
+                float(contract.rate or 0.28),
+                int(contract.term),
+                contract.opened_at,
+                autopay=rng.random() < self.settings.products.autopay_share,
+            )
+
+            # Платежи до окна считаются исполненными.
+            for item in loan.schedule:
+                if item.due_date < HISTORY_START:
+                    loan_rules.apply_payment(loan, item, item.amount, item.due_date)
+
+            if loan.principal_outstanding <= 0:
+                contract.status = CONTRACT_CLOSED
+                contract.closed_at = max(
+                    contract.opened_at, cal.add_months(contract.opened_at, int(contract.term))
+                )
+                continue
+
+            state.loans[contract.contract_id] = loan
+
+        state.opening_state = {
+            "product_events": {
+                "contracts_before_window": len(state.contracts),
+                "open_contracts": len(state.open_contracts(HISTORY_START)),
+            },
+            "transactions": {
+                "card_balance": state.primary_card_account(HISTORY_START).balance
+                if state.primary_card_account(HISTORY_START)
+                else 0,
+                "deposit_balance": state.assets(),
+            },
+            "loans": {
+                "open_loans": len(state.loans),
+                "principal_outstanding": sum(item.principal_outstanding for item in state.loans.values()),
+            },
+        }
+
+    def _outlets_by_id(self, state: ClientState, category: str, ts: datetime) -> tuple:
+        from .world import merchants as catalog
+
+        era = state.habits.era_at(ts)
+
+        return catalog.outlets_of(era.settlement, category)
+
+    def _contract_terms(self, state: ClientState, view, ts: datetime, rng) -> tuple:
+
+        terms = view.version_at(ts).terms
+
+        income = state.persona.true_income
+
+        family = view.family
+
+        if family == "debit_card":
+            return None, None
+
+        if family == "credit_card":
+            low = int(terms.get("limit_min", 20_000))
+            high = int(terms.get("limit_max", 2_000_000))
+            limit = int(min(high, max(low, income * rng.uniform(1.0, 3.5))))
+            return int(round(limit / 10_000) * 10_000), int(terms.get("installment_months", 0)) or None
+
+        if family in ("cash_loan", "refinance"):
+            low = int(terms.get("amount_min", 10_000))
+            high = int(terms.get("amount_max", 9_500_000))
+            amount = int(min(high, max(low, income * rng.uniform(1.5, 8.0))))
+            term = int(rng.choice([6, 12, 18, 24, 36, 48, 60], p=[0.08, 0.20, 0.14, 0.24, 0.20, 0.08, 0.06]))
+            term = max(int(terms.get("term_min", 6)), min(int(terms.get("term_max", 60)), term))
+            return int(round(amount / 1_000) * 1_000), term
+
+        if family == "installment":
+            low = int(terms.get("amount_min", 10_000))
+            high = int(terms.get("amount_max", 1_500_000))
+            amount = int(min(high, max(low, income * rng.uniform(0.2, 1.6))))
+            options = list(terms.get("term_options", (6, 12, 24)))
+            return int(round(amount / 1_000) * 1_000), int(rng.choice(options))
+
+        if family in ("deposit", "deposit_certificate"):
+            minimum = int(terms.get("min_amount", 1_000))
+            free = max(minimum, state.ledger.total_visible_balance() + state.ledger.hidden_funds())
+            amount = int(max(minimum, free * rng.uniform(*self.settings.products.deposit_open_share_of_free_cash)))
+            options = list(terms.get("term_options", (12,)))
+            return int(round(amount / 1_000) * 1_000), int(rng.choice(options))
+
+        if family == "insurance":
+            price = int(terms.get("price_annual", 12_000))
+            return price, int(terms.get("term_months", 12))
+
+        if family == "bonds":
+            return int(terms.get("min_amount_usd", 1_000)) * 500, int(terms.get("term_max_months", 12))
+
+        return None, None
+
+
+# ============================================================
+# ЗАПУСК
+# ============================================================
+
+
+def simulate_community(community_id: int, ordinals: tuple) -> CommunityResult:
+    from .engine import run_community
+
+    return run_community(community_id, ordinals)
+
+
+__all__ = [
+    "Action",
+    "ClientState",
+    "CommunityResult",
+    "CommunitySimulation",
+    "simulate_community",
+]

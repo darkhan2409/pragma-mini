@@ -15,7 +15,7 @@ import pytest
 
 from src.model.data import ClientStore, FixedSplit
 from src.model.history_batching import metadata_from_examples, prepare_history_batch
-from src.model.metrics import STATUS_EXCLUDED, MetricAccumulator
+from src.model.metrics import STATUS_EXCLUDED
 from src.model.mlm_batching import build_targets
 from src.model.targets import (
     HISTORY_EXCLUDES,
@@ -28,7 +28,8 @@ from src.model.trainer import TrainConfig, Trainer
 from src.tokenizer.dataset import collate
 from src.tokenizer.masking import MODES, Masker, MaskingConfig
 
-from tests.test_trainer import env, small_config  # noqa: F401
+from tests.helpers_model import small_config
+
 
 
 def targets_of(env, store, policy: str, mode: str, indices=range(4)):
@@ -73,7 +74,7 @@ def test_history_policy_removes_event_type_and_profile_snapshot_from_targets_but
         for name in excluded
     )
 
-    excluded_ids = {env.vocab.key_entry(name).id for name in excluded}
+    excluded_ids = {env.vocab.field_entry(name).field_id for name in excluded}
 
     for mode in MODES:
 
@@ -82,14 +83,14 @@ def test_history_policy_removes_event_type_and_profile_snapshot_from_targets_but
         assert targets.n > 0, mode
 
         # --- целей по исключённым полям нет ----------------
-        assert not np.isin(targets.key_ids, sorted(excluded_ids)).any(), mode
+        assert not np.isin(targets.field_ids, sorted(excluded_ids)).any(), mode
 
         # --- но значения на месте: это по-прежнему вход ----
-        keys = np.asarray(batch.key_ids, dtype=np.int64)
+        fields = np.asarray(batch.field_ids, dtype=np.int64)
         before = np.asarray(batch.value_ids, dtype=np.int64)
         after = np.asarray(history.tokens.value_ids, dtype=np.int64)
 
-        touched = np.isin(keys, sorted(excluded_ids))
+        touched = np.isin(fields, sorted(excluded_ids))
 
         assert np.array_equal(before[touched], after[touched]), mode
 
@@ -99,7 +100,7 @@ def test_history_policy_removes_event_type_and_profile_snapshot_from_targets_but
         # --- политика all оставляет их целями --------------
         _, _, _, everything = targets_of(env, store, POLICY_ALL, mode)
 
-        assert np.isin(everything.key_ids, sorted(excluded_ids)).any(), mode
+        assert np.isin(everything.field_ids, sorted(excluded_ids)).any(), mode
 
         # Прежняя политика не тронута: маски те же, что были.
         assert everything.digest() != targets.digest(), mode
@@ -116,9 +117,9 @@ def test_history_policy_removes_event_type_and_profile_snapshot_from_targets_but
     assert trainer.excluded == excluded
 
     for name in excluded:
-        key_id = env.vocab.key_entry(name).id
-        if env.table.trainable[key_id]:
-            assert str(key_id) in trainer.head.heads
+        field_id = env.vocab.field_entry(name).field_id
+        if env.table.trainable[field_id]:
+            assert str(field_id) in trainer.head.heads
 
     # --- отчёт называет их исключёнными --------------------
     split = FixedSplit.build(
@@ -157,7 +158,7 @@ def test_history_policy_removes_event_type_and_profile_snapshot_from_targets_but
     with pytest.raises(ValueError):
         Masker(env.vocab, MaskingConfig(exclude_fields=("profile_snapshot",)))
 
-    # --- конфиг прежних запусков не изменился --------------
+    # --- без политики ключа в конфиге нет ------------------
     assert "exclude_fields" not in TrainConfig().masking().as_dict()
     assert TrainConfig(target_policy=POLICY_HISTORY).masking().as_dict()[
         "exclude_fields"

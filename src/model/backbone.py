@@ -7,11 +7,11 @@ import torch.nn as nn
 
 from .batching import BatchError
 from .config import ModelConfig
+from .embeddings import draw_token_weight
 from .encoders import EncoderPair
 from .history_batching import ModelInputs
 from .history_encoder import HistoryEncoder
-from .session_encoder import SessionEncoder
-from .time_encoding import TimeEncoding, sinusoidal_positions
+from .time_features import CALENDAR_FEATURES, FeatureMLP
 
 
 # ============================================================
@@ -33,6 +33,11 @@ from .time_encoding import TimeEncoding, sinusoidal_positions
 # Embeddings событий не кэшируются между вызовами. Одно и то же
 # событие может войти дважды под разными runtime-масками и с
 # разным dropout, и его вектор обязан считаться заново.
+#
+# Ко времени к вектору элемента не прибавляется ничего: элемент
+# несёт координату времени, по которой поворачиваются q и k
+# внутри History Encoder. Календарь события и простой клиента
+# приходят отдельными признаками.
 # ============================================================
 
 
@@ -57,38 +62,22 @@ class BackboneOutput:
     # вход MLM head. None, когда голова не нужна.
     local_hidden: torch.Tensor | None = None
 
-    # Сессии. None в прежней структуре истории.
-    session_pooled: torch.Tensor | None = None
-    session_hidden: torch.Tensor | None = None
-    session_embeddings: torch.Tensor | None = None
-    session_of_event: torch.Tensor | None = None
-    position_in_session: torch.Tensor | None = None
-
-    @property
-    def n_examples(self) -> int:
-        return int(self.client_embedding.shape[0])
-
-    @property
-    def max_length(self) -> int:
-        return int(self.contextualized.shape[1])
-
 
 class Backbone(nn.Module):
 
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, token_weight: torch.Tensor | None = None):
 
         super().__init__()
 
         self.config = config
 
-        self.pair = EncoderPair(config)
+        self.pair = EncoderPair(config, token_weight)
         self.history = HistoryEncoder(config)
-        self.time = TimeEncoding(config)
 
-        # Session Encoder строится ПОСЛЕДНИМ: тогда при одном
-        # seed общие веса обеих структур совпадают, и равенство
-        # выходов на batch без сессий можно проверить.
-        self.session = SessionEncoder(config) if config.uses_sessions else None
+        # Признаки времени строятся ПОСЛЕДНИМИ: тогда при одном
+        # seed веса pair и history от них не зависят.
+        self.calendar = FeatureMLP(CALENDAR_FEATURES, config)
+        self.inactivity = FeatureMLP(1, config)
 
     # --------------------------------------------------------
 
@@ -97,14 +86,13 @@ class Backbone(nn.Module):
         inputs: ModelInputs,
         event_vectors: torch.Tensor,
         profile_vectors: torch.Tensor,
-        session_vectors: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Последовательность истории из готовых векторов.
 
-        Элемент истории это отдельное событие либо сессия. В
-        прежней структуре отдельные события это все события,
-        и ветка та же самая.
+        Ко времени тут не прибавляется ничего: порядок и
+        расстояние несёт поворот внутри внимания, а календарь и
+        простой приходят отдельными признаками.
         """
 
         batch = inputs.n_examples
@@ -119,41 +107,56 @@ class Backbone(nn.Module):
 
         x = torch.zeros(batch, width, self.config.d_model, device=device, dtype=dtype)
 
-        # Профиль на позиции 0, без временного слагаемого.
-        x = x.index_put((rows, torch.zeros_like(rows)), profile_vectors)
+        # Профиль на позиции 0. Он получает простой клиента:
+        # координаты истории относительны, и без этого признака
+        # никто не знал бы, когда история кончилась.
+        lead = profile_vectors + self.inactivity(inputs.temporal.inactivity).to(dtype)
 
-        standalone = inputs.standalone_rows
+        x = x.index_put((rows, torch.zeros_like(rows)), lead)
 
-        if standalone is None:
-
-            if inputs.n_events:
-                x = x.index_put(
-                    (inputs.example_of_event, inputs.slot_of_event),
-                    event_vectors + self.time(inputs.time_hours).to(dtype),
-                )
-
-        elif int(standalone.numel()):
-
+        if inputs.n_events:
             x = x.index_put(
-                (inputs.example_of_event[standalone], inputs.slot_of_event[standalone]),
-                event_vectors[standalone] + self.time(inputs.time_hours).to(dtype),
+                (inputs.example_of_event, inputs.slot_of_event),
+                event_vectors,
             )
-
-        if session_vectors is not None and inputs.sessions is not None:
-
-            sessions = inputs.sessions
-
-            if int(sessions.n_sessions):
-                x = x.index_put(
-                    (sessions.session_example, sessions.session_slot),
-                    session_vectors + self.time(sessions.session_hours).to(dtype),
-                )
-
-        x = x + sinusoidal_positions(width, self.config.d_model, device=device, dtype=dtype)
 
         padding_mask = torch.arange(width, device=device).unsqueeze(0) >= (used + 1).unsqueeze(1)
 
         return x.masked_fill(padding_mask.unsqueeze(-1), 0.0), padding_mask
+
+    # --------------------------------------------------------
+
+    def history_coords(self, inputs: ModelInputs) -> torch.Tensor:
+        """
+        Координата времени каждого слота истории: [B, width].
+
+        Слот 0 это профиль, и координата у него ноль — та же, что
+        у самого свежего элемента: профиль это состояние НА
+        cutoff, и отставать от последнего события ему незачем.
+
+        У padding координата тоже ноль. Его выход всё равно
+        зануляется после финальной нормы, а произвольный угол
+        мешал бы читать промежуточные величины.
+        """
+
+        temporal = inputs.temporal
+
+        if temporal is None:
+            raise BatchError("признаков времени во входе нет")
+
+        device = temporal.event_coords.device
+
+        coords = torch.zeros(
+            inputs.n_examples, inputs.max_length, device=device, dtype=torch.float32
+        )
+
+        if inputs.n_events:
+            coords = coords.index_put(
+                (inputs.example_of_event, inputs.slot_of_event),
+                temporal.event_coords,
+            )
+
+        return coords
 
     # --------------------------------------------------------
 
@@ -162,39 +165,23 @@ class Backbone(nn.Module):
         inputs: ModelInputs,
         event_vectors: torch.Tensor,
         profile_vectors: torch.Tensor,
-        attention_rule: str | None = None,
-        session_out=None,
     ) -> BackboneOutput:
 
-        session_vectors = None if session_out is None else session_out.pooled
+        x, padding_mask = self.assemble(inputs, event_vectors, profile_vectors)
 
-        x, padding_mask = self.assemble(inputs, event_vectors, profile_vectors, session_vectors)
+        coords = self.history_coords(inputs)
 
-        hidden = self.history(x, padding_mask, attention_rule)
-
-        sessions = inputs.sessions
-
-        session_embeddings = None
-
-        if sessions is not None and int(sessions.n_sessions):
-            session_embeddings = hidden[sessions.session_example, sessions.session_slot]
+        hidden = self.history(x, padding_mask, coords)
 
         return BackboneOutput(
             client_embedding=hidden[:, 0],
             contextualized=hidden,
             padding_mask=padding_mask,
-            # Вектор НЕСУЩЕГО элемента: своего события или его
-            # сессии. Один адрес в обеих структурах.
             event_embeddings=hidden[inputs.example_of_event, inputs.slot_of_event],
             event_example=inputs.example_of_event,
             event_slot=inputs.slot_of_event,
             kept_events=inputs.kept_events,
             kept_tokens=inputs.kept_tokens,
-            session_pooled=None if session_out is None else session_out.pooled,
-            session_hidden=None if session_out is None else session_out.hidden,
-            session_embeddings=session_embeddings,
-            session_of_event=None if sessions is None else sessions.session_of_event,
-            position_in_session=None if sessions is None else sessions.position_in_session,
         )
 
     def forward(
@@ -202,7 +189,6 @@ class Backbone(nn.Module):
         inputs: ModelInputs,
         event_microbatch: int | None = 1024,
         gather: tuple[torch.Tensor, torch.Tensor] | None = None,
-        attention_rule: str | None = None,
     ) -> BackboneOutput:
         """
         Один проход.
@@ -210,20 +196,10 @@ class Backbone(nn.Module):
         gather задаёт позиции внутри событий, чьи скрытые
         состояния нужны MLM head. Они берутся из этого же прохода
         Event Encoder: повторный запуск ради них считал бы другое.
-
-        attention_rule ограничивает внимание History Encoder и
-        нужен только диагностике; Event и Profile Encoder он не
-        трогает по построению.
         """
 
-        has_module = self.session is not None
-        has_inputs = inputs.sessions is not None
-
-        if has_module != has_inputs:
-            raise BatchError(
-                "структура модели и структура входа не совпадают: "
-                f"Session Encoder в модели {has_module}, сессии во входе {has_inputs}"
-            )
+        if inputs.temporal is None:
+            raise BatchError("во входе нет признаков времени")
 
         local_hidden = None
 
@@ -234,18 +210,15 @@ class Backbone(nn.Module):
                 inputs.events, event_microbatch, gather
             )
 
+        # h_local календарём не трогается: он снят с Event
+        # Encoder выше, и вход MLM head от календаря не зависит.
+        event_vectors = event_vectors + self.calendar(inputs.temporal.calendar).to(
+            event_vectors.dtype
+        )
+
         profile_vectors = self.pair.encode_profiles(inputs.profiles)
 
-        session_out = None
-
-        # Сессий может не быть и в session-структуре: у клиента
-        # без приложения их нет вовсе.
-        if has_module and int(inputs.sessions.n_sessions):
-            session_out = self.session(event_vectors, inputs.sessions)
-
-        out = self.encode_history(
-            inputs, event_vectors, profile_vectors, attention_rule, session_out
-        )
+        out = self.encode_history(inputs, event_vectors, profile_vectors)
 
         return out if gather is None else replace(out, local_hidden=local_hidden)
 
@@ -258,11 +231,18 @@ class Backbone(nn.Module):
 def build_backbone(config: ModelConfig, seed: int = 42, device=None) -> Backbone:
     """
     Seed задаётся один раз; сборка на CPU, затем перенос.
+
+    Таблица токенов разыгрывается ДО и из своего потока, чтобы
+    размер словаря не сдвигал инициализацию всего остального:
+    иначе сравнение режимов словаря мерило бы ещё и разные
+    стартовые веса.
     """
+
+    token_weight = draw_token_weight(config, seed)
 
     torch.manual_seed(seed)
 
-    backbone = Backbone(config)
+    backbone = Backbone(config, token_weight)
 
     if device is not None:
         backbone = backbone.to(device)

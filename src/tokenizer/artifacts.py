@@ -5,7 +5,6 @@ from pathlib import Path
 from src.preprocessing.artifacts import read_json, sha256_bytes, sha256_file, write_json
 from src.preprocessing.build import events_schema, profile_schema
 from src.preprocessing.buckets import RULE as BUCKET_RULE
-from src.generator.version import REVISION_KEY
 from src.preprocessing.config import SCHEMA_VERSION
 
 from .config import (
@@ -28,7 +27,17 @@ from .encode import (
     tokenized_profile_schema,
 )
 from .masking import MaskingConfig
-from .vocab import KEY_FORMAT, ORDER_RULES, VALUE_RULES, CandidateIndex, FitReport, Vocab
+from .semantics import read_modes, registry_as_dict, registry_digest
+from .vocab import (
+    FIELD_ID_RULE,
+    KEY_FORMAT,
+    NO_FIELD,
+    ORDER_RULES,
+    VALUE_RULES,
+    CandidateIndex,
+    FitReport,
+    Vocab,
+)
 
 
 # ============================================================
@@ -52,20 +61,6 @@ PREPROCESSING_ARTIFACTS: tuple[str, ...] = (
 )
 
 
-def processed_revision(artifacts_dir: Path) -> int:
-    """
-    Ревизия схемы RAW, из которой собран этот processed.
-
-    Читается из split_manifest, куда её кладёт preprocessing.
-    Ключа нет значит ревизия 1: наборы, собранные до её
-    появления, обязаны открываться прежними.
-    """
-
-    manifest = read_json(Path(artifacts_dir) / "split_manifest.json")
-
-    return int(manifest.get("raw", {}).get(REVISION_KEY, 1))
-
-
 def preprocessing_digests(artifacts_dir: Path) -> dict:
     """
     Отпечаток preprocessing, на котором обучен словарь.
@@ -73,13 +68,11 @@ def preprocessing_digests(artifacts_dir: Path) -> dict:
 
     artifacts_dir = Path(artifacts_dir)
 
-    revision = processed_revision(artifacts_dir)
-
     return {
         "schema_version": SCHEMA_VERSION,
         "sha256": {name: sha256_file(artifacts_dir / name) for name in PREPROCESSING_ARTIFACTS},
         "schemas_sha256": {
-            "events": sha256_bytes(str(events_schema(revision)).encode("utf-8")),
+            "events": sha256_bytes(str(events_schema()).encode("utf-8")),
             "profile": sha256_bytes(str(profile_schema()).encode("utf-8")),
         },
     }
@@ -115,6 +108,17 @@ def build_config(
             "size": vocab.size,
         },
         "key_format": KEY_FORMAT,
+        "modes": vocab.modes,
+        "field_id_space": {
+            "n_fields": vocab.n_fields,
+            "no_field": NO_FIELD,
+            "rule": FIELD_ID_RULE,
+        },
+        "semantic_registry": {
+            "sha256": registry_digest(),
+            **registry_as_dict(),
+        },
+        "sharing": vocab.sharing_report(),
         "order_rules": ORDER_RULES,
         "value_rules": {**VALUE_RULES, "bucket_rule": BUCKET_RULE},
         "event_format": {**EVENT_FORMAT, "width_by_type": dict(sorted(EVENT_WIDTH.items()))},
@@ -128,7 +132,8 @@ def build_config(
         "fit": fit.as_dict(),
         "preprocessing": preprocessing_digests(artifacts_dir),
         "vocab": {
-            "n_keys": vocab.n_keys,
+            "n_fields": vocab.n_fields,
+            "n_keys": vocab.n_key_tokens,
             "n_values": vocab.n_values,
             "size": vocab.size,
             "sha256": vocab_digests(vocab_dir),
@@ -222,5 +227,23 @@ class Tokenizer:
 
         if vocab.size != config.get("id_layout", {}).get("size"):
             raise IncompatibleArtifactsError("размер словаря не совпадает с config")
+
+        key_mode, value_mode = read_modes(config)
+
+        if (vocab.key_mode, vocab.value_mode) != (key_mode, value_mode):
+            raise IncompatibleArtifactsError(
+                f"режимы словаря {vocab.key_mode}/{vocab.value_mode} не совпадают с config "
+                f"{key_mode}/{value_mode}"
+            )
+
+        # Правила склейки это часть словаря: их правка обязана
+        # делать прежние artifacts несовместимыми, а не менять
+        # смысл ID молча.
+        stored_registry = config.get("semantic_registry", {}).get("sha256")
+
+        if stored_registry is not None and stored_registry != registry_digest():
+            raise IncompatibleArtifactsError(
+                "реестр семантической склейки изменился после обучения словаря"
+            )
 
         return Tokenizer(vocab, config)

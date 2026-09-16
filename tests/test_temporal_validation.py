@@ -27,26 +27,21 @@ from src.model.trainer import (
     best_value,
 )
 from src.tokenizer.dataset import collate
-from src.tokenizer.masking import (
-    MODE_COMBINED,
-    SCHEME_BATCH,
-    SCHEME_EXAMPLE,
-    Masker,
-    MaskingConfig,
-)
+from src.tokenizer.masking import MODE_COMBINED, Masker, MaskingConfig
 
-from tests.test_trainer import env, small_config  # noqa: F401
+from tests.helpers_model import small_config
 
 
-def val_masking(scheme: str = SCHEME_EXAMPLE) -> MaskingConfig:
-    return MaskingConfig(mode=MODE_COMBINED, seed=99, scheme=scheme)
+
+def val_masking() -> MaskingConfig:
+    return MaskingConfig(mode=MODE_COMBINED, seed=99)
 
 
-def targets_of(env, store, indices, max_events=64, scheme=SCHEME_EXAMPLE, step=0):
+def targets_of(env, store, indices, max_events=64, step=0):
 
     examples = store.examples(indices)
 
-    masker = Masker(env.vocab, val_masking(scheme))
+    masker = Masker(env.vocab, val_masking())
 
     history = prepare_history_batch(
         collate(examples),
@@ -86,7 +81,7 @@ def described(examples, history, targets) -> dict:
             zip(
                 local.tolist(),
                 targets.col[chosen].tolist(),
-                targets.key_ids[chosen].tolist(),
+                targets.field_ids[chosen].tolist(),
                 targets.global_targets[chosen].tolist(),
                 targets.recent[chosen].tolist(),
             )
@@ -144,7 +139,7 @@ def test_recent_targets_mark_only_the_observation_month_and_drive_best_selection
 
     # --- метрика месяца это срез той же оценки -------------
     trainer = Trainer(
-        small_config(mask_scheme=SCHEME_EXAMPLE),
+        small_config(),
         env.tokenizer,
         env.table,
         env.unigram,
@@ -199,7 +194,7 @@ def test_recent_targets_mark_only_the_observation_month_and_drive_best_selection
 def test_streaming_split_reproduces_the_stored_split_at_any_batch_size(env, tok_run):
 
     trainer = Trainer(
-        small_config(mask_scheme=SCHEME_EXAMPLE),
+        small_config(),
         env.tokenizer,
         env.table,
         env.unigram,
@@ -301,17 +296,3 @@ def test_streaming_split_reproduces_the_stored_split_at_any_batch_size(env, tok_
     assert train_store.data.group != store.data.group
     assert not shared_store.shared_events
     assert shared_split.digest == stored.digest
-
-    # --- поток при прежней схеме запрещён ------------------
-    with pytest.raises(ValueError):
-        FixedSplit.build(
-            name="val_client",
-            store=store,
-            vocab=env.vocab,
-            table=env.table,
-            model_config=trainer.model_config,
-            masking=val_masking(SCHEME_BATCH),
-            max_events=64,
-            batch_size=2,
-            stream=True,
-        )

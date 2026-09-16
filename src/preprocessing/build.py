@@ -7,7 +7,6 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from src.generator.config import PROFILE_FIELDS
-from src.generator.version import RAW_SCHEMA_REVISION
 
 from .artifacts import TableWriter, write_table
 from .buckets import BUCKET_DTYPE, BucketSpec, apply_buckets
@@ -44,12 +43,10 @@ from .raw import RawDataset, parse_payloads
 # ============================================================
 
 
-EVENTS_KEYS = ("client_id", "seq", "ts", "event_type")
-
 PROFILE_KEYS = ("client_id", "ts", "snapshot_month")
 
 
-def event_field_specs(event_type: str, revision: int = RAW_SCHEMA_REVISION) -> list[FieldSpec]:
+def event_field_specs(event_type: str) -> list[FieldSpec]:
     """
     Поля payload типа события в порядке контракта.
     """
@@ -57,18 +54,13 @@ def event_field_specs(event_type: str, revision: int = RAW_SCHEMA_REVISION) -> l
     from .config import REGISTRY
 
     return [
-        REGISTRY[(event_type, name)] for name in payload_fields(event_type, revision)
+        REGISTRY[(event_type, name)] for name in payload_fields(event_type)
     ]
 
 
-def events_schema(revision: int = RAW_SCHEMA_REVISION) -> pa.Schema:
+def events_schema() -> pa.Schema:
     """
     Широкая схема событий processed.
-
-    Зависит от ревизии схемы RAW: набор ревизии 1 не знает
-    session_id у операций и баннеров, и добавлять ему пустые
-    колонки нельзя. Иначе уже собранные наборы перестали бы
-    открываться из-за поля, которого у них и не было.
     """
 
     fields = [
@@ -79,7 +71,7 @@ def events_schema(revision: int = RAW_SCHEMA_REVISION) -> pa.Schema:
     ]
 
     for event_type in EVENT_TYPES:
-        for spec in event_field_specs(event_type, revision):
+        for spec in event_field_specs(event_type):
             fields.append((spec.column, spec.arrow_type))
             if spec.is_numeric:
                 fields.append((spec.bucket_column, BUCKET_DTYPE))
@@ -224,7 +216,7 @@ def write_processed(
 
     counts: dict[str, int] = {}
 
-    schema = events_schema(raw.manifest.revision)
+    schema = events_schema()
 
     writers = {
         group: TableWriter(out_dir / "clients" / f"{group}_clients" / "events.parquet", schema)

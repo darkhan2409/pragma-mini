@@ -33,13 +33,13 @@ def hand_made() -> tuple[list[FieldLogits], torch.Tensor]:
     """
 
     narrow = FieldLogits(
-        key_id=10,
+        field_id=10,
         index=torch.tensor([0]),
         logits=torch.zeros(1, 2),
     )
 
     wide = FieldLogits(
-        key_id=20,
+        field_id=20,
         index=torch.tensor([1, 2, 3]),
         logits=torch.zeros(3, 3),
     )
@@ -178,7 +178,7 @@ def test_cross_entropy_is_computed_in_float32():
     field_logits, targets = hand_made()
 
     half = [
-        FieldLogits(item.key_id, item.index, item.logits.to(torch.bfloat16))
+        FieldLogits(item.field_id, item.index, item.logits.to(torch.bfloat16))
         for item in field_logits
     ]
 

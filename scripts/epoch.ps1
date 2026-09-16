@@ -53,8 +53,9 @@ param(
     [ValidateSet('start', 'status', 'logs', 'stop', 'resume', 'resume-interrupted', 'check')]
     [string] $Action = 'status',
 
-    [ValidateSet('epoch', 'last', 'smoke')]
-    [string] $Preset = 'epoch',
+    [ValidateSet('main', 'smoke',
+        'vocab-semkeys', 'vocab-shared', 'vocab-semkeys-shared')]
+    [string] $Preset = 'main',
 
     [int] $Lines = 20,
 
@@ -74,89 +75,61 @@ $Python = Join-Path $Root 'venv\Scripts\python.exe'
 # запускать ОДНО И ТО ЖЕ обучение, иначе продолжение отвергнет
 # проверка совместимости.
 #
-# smoke это не эксперимент, а проверка самого launcher: те же
-# режимы, но крошечный набор и CPU.
+# Пресеты различаются ТОЛЬКО словарём, который читают, и
+# каталогом вывода. Всё остальное - данные, срез обучения,
+# маски, seed, optimizer, расписание, эпохи и валидация -
+# совпадает, иначе сравнение мерило бы не словарь.
+#
+#   main            словарь без тега: namespaced + field_specific
+#   vocab-semkeys   семантически одинаковые поля делят key token
+#   vocab-shared    одинаковые строки и булевы делят value token
+#   vocab-semkeys-shared   и то и другое
+#
+# Маски и локальные цели у всех четырёх одинаковы по построению:
+# masker работает по field_id, а он от режима словаря не
+# зависит. Это проверяется отпечатком targets_field_sha256.
+#
+# Арке с тегом нужен свой словарь:
+#
+#   python -m src.tokenizer.run --name <dataset> --vocab-tag <tag> `
+#       --key-mode <...> --categorical-value-mode <...>
+#
+# smoke это не эксперимент, а проверка самого launcher: тот же
+# путь, но крошечный набор и CPU.
 
-if ($Preset -eq 'epoch') {
+$Dataset = 'clients10k'
 
-    $Name = 'v21_10k'
+$Architecture = @(
+    '--device', 'cuda',
+    '--d-model', '128',
+    '--n-heads', '4',
+    '--dim-feedforward', '512',
+    '--profile-layers', '1',
+    '--event-layers', '3',
+    '--history-layers', '2'
+)
 
-    $TrainArgs = @(
-        '-u', '-m', 'src.model.train', 'run',
-        '--name', $Name,
-        '--device', 'cuda',
-        '--structure', 'session',
-        '--d-model', '128',
-        '--n-heads', '4',
-        '--dim-feedforward', '512',
-        '--profile-layers', '1',
-        '--event-layers', '3',
-        '--session-layers', '1',
-        '--history-layers', '2',
-        '--max-events', 'none',
-        '--train-clients', 'none',
-        '--val-clients', 'none',
-        '--masking-mode', 'combined',
-        '--token-rate', '0.15',
-        '--event-rate', '0.10',
-        '--key-rate', '0.10',
-        '--mask-scheme', 'example',
-        '--target-policy', 'history',
-        '--epochs', '1',
-        '--stream-validation',
-        '--best-metric', 'recent',
-        '--final-splits', 'test_client,test_time',
-        '--batch-size', '2',
-        '--eval-batch-size', '2',
-        '--eval-every', '20000',
-        '--log-every', '200',
-        '--checkpoint-every', '2000'
-    )
-}
-elseif ($Preset -eq 'last') {
+$Objective = @(
+    '--max-events', 'none',
+    '--train-clients', 'none',
+    '--val-clients', 'none',
+    '--masking-mode', 'combined',
+    '--token-rate', '0.15',
+    '--event-rate', '0.10',
+    '--key-rate', '0.10',
+    '--target-policy', 'history',
+    '--epochs', '3',
+    '--stream-validation',
+    '--best-metric', 'recent',
+    '--final-splits', 'test_client,test_time',
+    '--batch-size', '2',
+    '--eval-batch-size', '2',
+    '--eval-every', '4000',
+    '--log-every', '200',
+    '--checkpoint-every', '2000'
+)
 
-    # Арка B сравнения: один пример на клиента, самый поздний
-    # cutoff. Данные, словарь, маски, seed и валидация те же,
-    # что у эпохи, потолок объявлен в 10 эпох заранее -
-    # продолжить прогон с другим бюджетом нельзя.
-
-    $Name = 'v21_10k_last'
-
-    $TrainArgs = @(
-        '-u', '-m', 'src.model.train', 'run',
-        '--name', 'v21_10k',
-        '--out', "data/runs/$Name/run",
-        '--device', 'cuda',
-        '--structure', 'session',
-        '--d-model', '128',
-        '--n-heads', '4',
-        '--dim-feedforward', '512',
-        '--profile-layers', '1',
-        '--event-layers', '3',
-        '--session-layers', '1',
-        '--history-layers', '2',
-        '--max-events', 'none',
-        '--train-clients', 'none',
-        '--val-clients', 'none',
-        '--train-cutoffs', 'last',
-        '--masking-mode', 'combined',
-        '--token-rate', '0.15',
-        '--event-rate', '0.10',
-        '--key-rate', '0.10',
-        '--mask-scheme', 'example',
-        '--target-policy', 'history',
-        '--epochs', '10',
-        '--stream-validation',
-        '--best-metric', 'recent',
-        '--final-splits', 'test_client,test_time',
-        '--batch-size', '2',
-        '--eval-batch-size', '2',
-        '--eval-every', '4000',
-        '--log-every', '200',
-        '--checkpoint-every', '2000'
-    )
-}
-else {
+if ($Preset -eq 'smoke') {
 
     $Name = 'smoke'
 
@@ -169,7 +142,6 @@ else {
         '--val-clients', '2',
         '--max-events', '32',
         '--masking-mode', 'combined',
-        '--mask-scheme', 'example',
         '--target-policy', 'history',
         '--stream-validation',
         '--best-metric', 'recent',
@@ -181,6 +153,29 @@ else {
         '--log-every', '50',
         '--checkpoint-every', '100'
     )
+}
+elseif ($Preset -eq 'main') {
+
+    $Name = $Dataset
+
+    $TrainArgs = @(
+        '-u', '-m', 'src.model.train', 'run',
+        '--name', $Dataset,
+        '--out', "data/runs/$Name/run"
+    ) + $Architecture + $Objective
+}
+else {
+
+    $VocabTag = $Preset -replace '^vocab-', '' -replace '-', '_'
+
+    $Name = "${Dataset}_vocab_$VocabTag"
+
+    $TrainArgs = @(
+        '-u', '-m', 'src.model.train', 'run',
+        '--name', $Dataset,
+        '--vocab-tag', $VocabTag,
+        '--out', "data/runs/$Name/run"
+    ) + $Architecture + $Objective
 }
 
 $RunDir = Join-Path $Root "data\runs\$Name\run"

@@ -26,7 +26,7 @@ from src.model.trainer import (
 )
 from src.tokenizer.config import IncompatibleArtifactsError
 
-from tests.test_trainer import env  # noqa: F401
+
 
 
 STOP_AFTER = 4
@@ -51,7 +51,6 @@ def resume_config(**overrides) -> TrainConfig:
         checkpoint_every=2,
         precision="float32",
         masking_mode="combined",
-        mask_scheme="example",
         stream_validation=True,
         target_policy="history",
         best_metric="recent",
@@ -197,7 +196,6 @@ def test_interrupted_and_resumed_training_matches_uninterrupted(env, tmp_path, m
 def test_failed_save_leaves_the_previous_checkpoint_intact(env, tmp_path, monkeypatch):
 
     from src.model.checkpoint import save_checkpoint
-    from src.model.mlm_head import MLMHead
     from src.model.trainer import Trainer
 
     config = resume_config()
@@ -308,15 +306,6 @@ def test_incompatible_resume_is_refused_before_the_first_step(env, tmp_path):
             resume_config(max_steps=2, eval_every=100, target_policy="all"),
         )
 
-    # --- другая схема масок -------------------------------
-    with pytest.raises(IncompatibleArtifactsError):
-        attempt(
-            tmp_path / "scheme",
-            resume_config(
-                max_steps=2, eval_every=100, mask_scheme="batch", stream_validation=False
-            ),
-        )
-
     # --- другая архитектура -------------------------------
     with pytest.raises(IncompatibleArtifactsError):
         attempt(tmp_path / "model", resume_config(max_steps=2, eval_every=100, d_model=32))
@@ -331,7 +320,7 @@ def test_incompatible_resume_is_refused_before_the_first_step(env, tmp_path):
     assert source.read_bytes() == before
     assert payload_of(source)["counters"]["n_steps"] == steps_done
 
-    for name in ("seed", "policy", "scheme", "model", "artifacts"):
+    for name in ("seed", "policy", "model", "artifacts"):
         rejected = tmp_path / name
         # Каталог мог появиться, но ни одного шага в нём нет.
         assert not (rejected / "last.pt").exists()

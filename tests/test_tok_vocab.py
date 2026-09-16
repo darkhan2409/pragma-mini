@@ -56,27 +56,48 @@ def test_special_ids_are_fixed():
 
 
 def test_id_space_is_continuous(vocab):
-    assert vocab.first_value_id == N_SPECIAL + vocab.n_keys
-    assert vocab.size == N_SPECIAL + vocab.n_keys + vocab.n_values
+    assert vocab.first_value_id == N_SPECIAL + vocab.n_key_tokens
+    assert vocab.size == N_SPECIAL + vocab.n_key_tokens + vocab.n_values
 
-    assert [entry.id for entry in vocab.keys] == list(range(N_SPECIAL, vocab.first_value_id))
+    assert [token.token_id for token in vocab.key_tokens] == list(
+        range(N_SPECIAL, vocab.first_value_id)
+    )
     assert [entry.id for entry in vocab.values] == list(range(vocab.first_value_id, vocab.size))
 
 
+def test_field_ids_are_the_registry_order(vocab):
+    assert [entry.field_id for entry in vocab.fields] == list(range(vocab.n_fields))
+    assert [entry.key for entry in vocab.fields] == [spec.column for spec in feature_specs()]
+
+
+def test_baseline_key_token_is_the_field_shifted(vocab):
+    """
+    В baseline key token это N_SPECIAL + field_id.
+
+    На этом стоит чтение датасетов, записанных до появления
+    колонки field_ids.
+    """
+
+    assert vocab.is_baseline
+
+    for entry in vocab.fields:
+        assert entry.key_token_id == N_SPECIAL + entry.field_id
+
+
 def test_value_ids_of_a_key_are_one_range(vocab):
-    for entry in vocab.keys:
-        ids = [value.id for value in vocab.values if value.key_id == entry.id]
-        assert ids == list(range(entry.value_start, entry.value_end)), entry.key
+    for entry in vocab.fields:
+        ids = [value.id for value in vocab.values if entry.field_id in value.fields]
+        assert sorted(ids) == list(range(entry.value_start, entry.value_end)), entry.key
 
 
 def test_keys_cover_every_feature_field(vocab):
     expected = {spec.column for spec in feature_specs()}
 
-    assert {entry.key for entry in vocab.keys} == expected
+    assert {entry.key for entry in vocab.fields} == expected
 
 
 def test_metadata_is_never_a_key(vocab):
-    names = {entry.key for entry in vocab.keys}
+    names = {entry.key for entry in vocab.fields}
 
     for spec in REGISTRY.values():
         if spec.kind == KIND_METADATA:
@@ -87,27 +108,32 @@ def test_metadata_is_never_a_key(vocab):
 
 
 def test_profile_and_snapshot_are_different_namespaces(vocab):
-    left = vocab.key_entry("profile__declared_income")
-    right = vocab.key_entry("profile_snapshot__declared_income")
+    left = vocab.field_entry("profile__declared_income")
+    right = vocab.field_entry("profile_snapshot__declared_income")
 
     assert left is not None and right is not None
-    assert left.id != right.id
+    assert left.field_id != right.field_id
+    assert left.key_token_id != right.key_token_id
     assert left.predictable is False
     assert right.predictable is True
 
 
 def test_same_string_in_two_fields_gets_two_ids(vocab):
-    online = vocab.key_id("transaction", "is_online")
-    delivered = vocab.key_id("communication", "delivered")
+    online = vocab.field_id("transaction", "is_online")
+    delivered = vocab.field_id("communication", "delivered")
 
-    assert vocab.value_id(online, "true") != vocab.value_id(delivered, "true")
+    assert vocab.value_token(online, "true") != vocab.value_token(delivered, "true")
 
 
 def test_value_belongs_to_its_key(vocab):
     for value in vocab.values:
-        entry = vocab.key_entry_by_id(value.key_id)
-        assert entry is not None
-        assert entry.value_start <= value.id < entry.value_end
+
+        assert value.fields
+
+        for field_id in value.fields:
+            entry = vocab.field_entry_by_id(field_id)
+            assert entry is not None
+            assert value.id in entry.candidates
 
 
 def test_numeric_values_are_the_train_buckets(tok_run, vocab):
@@ -115,7 +141,7 @@ def test_numeric_values_are_the_train_buckets(tok_run, vocab):
 
     for spec in numeric_specs():
 
-        entry = vocab.key_entry(spec.column)
+        entry = vocab.field_entry(spec.column)
 
         declared = edges["fields"][spec.namespace][spec.field]
 
@@ -123,24 +149,24 @@ def test_numeric_values_are_the_train_buckets(tok_run, vocab):
 
         assert entry.n_values == expected, spec.key
 
-        values = [value.value for value in vocab.values if value.key_id == entry.id]
+        values = [vocab.values[token - vocab.first_value_id].value for token in entry.candidates]
 
         assert values == [str(index) for index in range(expected)]
 
 
 def test_categorical_values_are_sorted_by_typed_value(vocab):
-    entry = vocab.key_entry("communication__day_of_week")
+    entry = vocab.field_entry("communication__day_of_week")
 
-    values = [value.value for value in vocab.values if value.key_id == entry.id]
+    values = [value.value for value in vocab.values if entry.field_id in value.fields]
 
     assert values == sorted(values, key=int)
     assert values[0] == "0"
 
 
 def test_boolean_values_are_false_then_true(vocab):
-    entry = vocab.key_entry("transaction__is_online")
+    entry = vocab.field_entry("transaction__is_online")
 
-    values = [value.value for value in vocab.values if value.key_id == entry.id]
+    values = [value.value for value in vocab.values if entry.field_id in value.fields]
 
     assert values == ["false", "true"]
 
@@ -158,9 +184,9 @@ def test_frequency_counts_each_record_once(tok_run, vocab):
 
     stats = json.loads((tok_run["artifacts"] / "field_stats.json").read_text(encoding="utf-8"))
 
-    entry = vocab.key_entry("timeline__event_type")
+    entry = vocab.field_entry("timeline__event_type")
 
-    total = sum(value.count for value in vocab.values if value.key_id == entry.id)
+    total = sum(value.count for value in vocab.values if entry.field_id in value.fields)
 
     assert total == stats["fields"]["timeline"]["event_type"]["n_total"]
 
@@ -173,9 +199,9 @@ def test_frequency_counts_each_record_once(tok_run, vocab):
 def test_profile_counts_use_selected_snapshots(tok_run, vocab):
     stats = json.loads((tok_run["artifacts"] / "field_stats.json").read_text(encoding="utf-8"))
 
-    entry = vocab.key_entry("profile__age")
+    entry = vocab.field_entry("profile__age")
 
-    total = sum(value.count for value in vocab.values if value.key_id == entry.id)
+    total = sum(value.count for value in vocab.values if entry.field_id in value.fields)
 
     assert total == stats["fields"]["profile"]["age"]["n_total"]
 
@@ -188,18 +214,19 @@ def test_profile_counts_use_selected_snapshots(tok_run, vocab):
 def test_field_value_ids_match_vocab(tok_run, vocab):
     stored = json.loads((tok_run["vocab"] / "field_value_ids.json").read_text(encoding="utf-8"))["fields"]
 
-    assert set(stored) == {entry.key for entry in vocab.keys}
+    assert set(stored) == {entry.key for entry in vocab.fields}
 
-    for entry in vocab.keys:
+    for entry in vocab.fields:
 
         ids = stored[entry.key]["value_ids"]
 
-        assert ids == sorted(ids)
-        assert ids == list(range(entry.value_start, entry.value_end))
+        # Порядок это порядок ПОЛЯ, а не возрастание токена: от
+        # него зависит локальный индекс кандидата.
+        assert ids == list(entry.candidates)
 
         for token_id in ids:
             assert token_id >= vocab.first_value_id
-            assert vocab.values[token_id - vocab.first_value_id].key_id == entry.id
+            assert entry.field_id in vocab.values[token_id - vocab.first_value_id].fields
 
 
 def test_candidates_exclude_special_tokens(tok_run):
@@ -212,23 +239,30 @@ def test_candidates_exclude_special_tokens(tok_run):
 def test_local_and_global_ids_round_trip(vocab):
     index = vocab.candidates()
 
-    key_ids = np.array([value.key_id for value in vocab.values], dtype=np.int64)
-    value_ids = np.array([value.id for value in vocab.values], dtype=np.int64)
+    field_ids = np.array(
+        [entry.field_id for entry in vocab.fields for _ in entry.candidates], dtype=np.int64
+    )
+    value_ids = np.array(
+        [token for entry in vocab.fields for token in entry.candidates], dtype=np.int64
+    )
 
-    local = index.to_local(key_ids, value_ids)
+    local = index.to_local(field_ids, value_ids)
 
     assert (local >= 0).all()
-    assert (local < index.size_of(key_ids)).all()
+    assert (local < index.size_of(field_ids)).all()
 
-    assert np.array_equal(index.to_global(key_ids, local), value_ids)
+    assert np.array_equal(index.to_global(field_ids, local), value_ids)
 
 
 def test_local_index_starts_at_zero_for_every_key(vocab):
     index = vocab.candidates()
 
-    for entry in vocab.keys:
+    for entry in vocab.fields:
         if entry.n_values:
-            assert index.to_local(np.array([entry.id]), np.array([entry.value_start]))[0] == 0
+            assert (
+                index.to_local(np.array([entry.field_id]), np.array([entry.candidates[0]]))[0]
+                == 0
+            )
 
 
 # ============================================================
@@ -433,7 +467,7 @@ def test_config_describes_the_contract(tok_run):
     assert config["event_format"]["event_type_position"] == 1
     assert config["event_format"]["lead_position"] == 0
     assert config["profile_format"]["lead"] == "[USR]"
-    assert config["order_rules"]["keys"]
+    assert config["order_rules"]["fields"]
     assert config["value_rules"]["missing"]
     assert set(config["preprocessing"]["sha256"]) == {
         "bucket_edges.json",

@@ -7,7 +7,7 @@ import numpy as np
 
 from .config import MASK_ID
 from .dataset import TokenBatch
-from .vocab import Vocab
+from .vocab import N_FIELDS, Vocab
 
 
 # ============================================================
@@ -51,22 +51,12 @@ COMBINED_RULE = (
 # СХЕМА РОЗЫГРЫША
 # ------------------------------------------------------------
 #
-# batch    один поток случайных чисел на весь batch. Маска
-#          примера зависит от того, с кем он попал в batch и
-#          каким по счёту оказался. Так было с самого начала,
-#          и все прежние checkpoint воспроизводятся только так.
-#
-# example  свой поток на каждый пример, засеянный его
-#          идентичностью (клиент, cutoff). Маска примера одна
-#          и та же при любом составе и размере batch. Это то,
-#          без чего нельзя ни менять eval_batch_size, ни
-#          собирать validation потоком.
+# У каждого примера свой поток случайных чисел, засеянный его
+# идентичностью (клиент, cutoff). Маска примера одна и та же
+# при любом составе и размере batch. Без этого нельзя ни менять
+# eval_batch_size, ни собирать validation потоком.
 # ------------------------------------------------------------
 
-SCHEME_BATCH = "batch"
-SCHEME_EXAMPLE = "example"
-
-SCHEMES: tuple[str, ...] = (SCHEME_BATCH, SCHEME_EXAMPLE)
 
 
 # ------------------------------------------------------------
@@ -107,7 +97,7 @@ def resolve_excluded(names, patterns) -> frozenset[str]:
 
 
 def excluded_field_names(vocab: Vocab, patterns) -> frozenset[str]:
-    return resolve_excluded([entry.key for entry in vocab.keys], patterns)
+    return resolve_excluded([entry.key for entry in vocab.fields], patterns)
 
 
 @dataclass(frozen=True)
@@ -134,11 +124,6 @@ class MaskingConfig:
     # combined: вероятность выбрать пару (пример, ключ) целиком
     key_rate: float = 0.10
 
-    # Как разыгрываются маски: batch это прежняя схема, где
-    # один поток чисел идёт по всему batch; example это поток
-    # на каждый пример, привязанный к его идентичности.
-    scheme: str = SCHEME_BATCH
-
     # Поля, которые не становятся целью, оставаясь входом.
     # Паттерны имён ключей, а не идентификаторы: конфиг едет
     # в checkpoint и восстанавливается там, где словаря нет.
@@ -148,9 +133,6 @@ class MaskingConfig:
 
         if self.mode not in MODES:
             raise ValueError(f"неизвестный режим маскирования {self.mode!r}, ожидался один из {MODES}")
-
-        if self.scheme not in SCHEMES:
-            raise ValueError(f"неизвестная схема маскирования {self.scheme!r}, ожидалась одна из {SCHEMES}")
 
         for name in ("token_rate", "event_rate", "balanced_share", "key_rate"):
             value = getattr(self, name)
@@ -169,16 +151,12 @@ class MaskingConfig:
             "event_rate": self.event_rate,
             "balanced_share": self.balanced_share,
             "key_rate": self.key_rate,
-            # Ключ появляется только когда исключения есть:
-            # словари прежних checkpoint остаются прежними.
+            # Ключ появляется только когда исключения есть.
             **(
                 {"exclude_fields": list(self.exclude_fields)}
                 if self.exclude_fields
                 else {}
             ),
-            # Ключ появляется только у новой схемы: словари
-            # прежних checkpoint остаются прежними.
-            **({"scheme": self.scheme} if self.scheme != SCHEME_BATCH else {}),
             "modes": list(MODES),
             "ignore_index": IGNORE_INDEX,
             "rule": (
@@ -247,44 +225,28 @@ class MaskedBatch:
 # ВИД, ПО КОТОРОМУ ИДЁТ РОЗЫГРЫШ
 # ------------------------------------------------------------
 #
-# Селекторы больше не смотрят в TokenBatch, они смотрят в вид.
-# У схемы batch вид это весь batch, и арифметика с числом
-# розыгрышей та же, что была: результат совпадает побайтово.
-# У схемы example вид это один пример с локальной нумерацией
-# событий, и тот же самый код даёт маску, не зависящую ни от
-# соседей, ни от размера batch.
+# Селекторы смотрят не в TokenBatch, а в вид: один пример с
+# локальной нумерацией событий. Поэтому маска не зависит ни от
+# соседей по batch, ни от его размера.
 # ------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class Selection:
     """
-    Позиции batch, по которым идёт розыгрыш.
+    Позиции одного примера, по которым идёт розыгрыш.
 
     indices  плоские позиции в batch (их и возвращает выбор)
-    keys     key_id этих позиций
-    examples номер примера этих позиций внутри вида
-    events   номер события этих позиций внутри вида
+    keys     field_id этих позиций (идентичность ФИЗИЧЕСКОГО
+             поля, а не key token: маска не имеет права
+             зависеть от режима словаря)
+    events   номер события этих позиций внутри примера
     """
 
     indices: np.ndarray
     keys: np.ndarray
-    examples: np.ndarray
     events: np.ndarray
     n_events: int
-    n_examples: int
-
-    @staticmethod
-    def of_batch(batch: TokenBatch, indices: np.ndarray) -> "Selection":
-        return Selection(
-            indices=indices,
-            keys=np.asarray(batch.key_ids, dtype=np.int64)[indices],
-            examples=np.asarray(batch.example_ids, dtype=np.int64)[indices],
-            events=np.asarray(batch.event_ids, dtype=np.int64)[indices],
-            n_events=int(batch.n_events),
-            n_examples=int(batch.n_examples),
-        )
-
 
 class Masker:
     """
@@ -302,16 +264,18 @@ class Masker:
             vocab, config.exclude_fields
         )
 
-        self.excluded_by_id = np.zeros(vocab.size, dtype=bool)
+        # Таблица по ПОЛЮ, а не по токену: исключение это
+        # свойство поля и одинаково во всех режимах словаря.
+        self.excluded_by_field = np.zeros(N_FIELDS + 1, dtype=bool)
 
         for name in self.excluded_names:
-            entry = vocab.key_entry(name)
+            entry = vocab.field_entry(name)
             if entry is not None:
-                self.excluded_by_id[entry.id] = True
+                self.excluded_by_field[entry.field_id] = True
 
     # --------------------------------------------------------
 
-    def eligible(self, key_ids: np.ndarray, value_ids: np.ndarray) -> np.ndarray:
+    def eligible(self, field_ids: np.ndarray, value_ids: np.ndarray) -> np.ndarray:
         """
         Позиции, которые вообще можно маскировать.
 
@@ -324,17 +288,14 @@ class Masker:
         перестаёт быть целью.
         """
 
-        keys = np.asarray(key_ids, dtype=np.int64)
+        fields = np.asarray(field_ids, dtype=np.int64)
         values = np.asarray(value_ids, dtype=np.int64)
 
         return (
-            self.vocab.predictable_by_id[keys]
+            self.vocab.predictable_by_field[fields]
             & (values >= self.vocab.first_value_id)
-            & ~self.excluded_by_id[keys]
+            & ~self.excluded_by_field[fields]
         )
-
-    def rng(self, step: int) -> np.random.Generator:
-        return np.random.default_rng([self.config.seed, int(step)])
 
     def rng_for(self, step: int, identity) -> np.random.Generator:
         """
@@ -355,21 +316,16 @@ class Masker:
         self, batch: TokenBatch, step: int = 0, identities: np.ndarray | None = None
     ) -> MaskedBatch:
 
-        eligible = self.eligible(batch.key_ids, batch.value_ids)
+        eligible = self.eligible(batch.field_ids, batch.value_ids)
 
-        profile_eligible = self.eligible(batch.profile_key_ids, batch.profile_value_ids)
+        profile_eligible = self.eligible(batch.profile_field_ids, batch.profile_value_ids)
 
         if profile_eligible.any():
             raise AssertionError("профиль не должен содержать маскируемых позиций: это контекст, а не цель")
 
         indices = np.flatnonzero(eligible)
 
-        if self.config.scheme == SCHEME_EXAMPLE:
-            chosen, selection = self._select_per_example(batch, indices, step, identities)
-        else:
-            chosen, selection = self._select_view(
-                Selection.of_batch(batch, indices), self.rng(step)
-            )
+        chosen, selection = self._select_per_example(batch, indices, step, identities)
 
         value_ids = np.array(batch.value_ids, dtype=np.int32, copy=True)
 
@@ -433,7 +389,7 @@ class Masker:
 
         example_of_token = np.asarray(batch.example_ids, dtype=np.int64)[indices]
         event_of_token = np.asarray(batch.event_ids, dtype=np.int64)[indices]
-        key_of_token = np.asarray(batch.key_ids, dtype=np.int64)[indices]
+        key_of_token = np.asarray(batch.field_ids, dtype=np.int64)[indices]
 
         parts: list[np.ndarray] = []
 
@@ -447,10 +403,8 @@ class Masker:
             view = Selection(
                 indices=indices[inside],
                 keys=key_of_token[inside],
-                examples=np.zeros(int(inside.sum()), dtype=np.int64),
                 events=event_of_token[inside] - int(starts[example]),
                 n_events=int(counts[example]),
-                n_examples=1,
             )
 
             chosen, selection = self._select_view(
@@ -468,7 +422,7 @@ class Masker:
             np.sort(np.concatenate(parts)) if parts else np.zeros(0, dtype=np.int64)
         )
 
-        return chosen, {"strategies": strategies, "unique": unique, "scheme": SCHEME_EXAMPLE}
+        return chosen, {"strategies": strategies, "unique": unique}
 
     def _select_view(
         self, view: Selection, rng: np.random.Generator
@@ -504,33 +458,22 @@ class Masker:
 
     def _select_key(self, view: Selection, rng: np.random.Generator) -> np.ndarray:
         """
-        В каждом примере выбирается поле, маскируются все его
-        доступные значения в этом примере.
+        Выбирается поле, маскируются все его доступные значения
+        в этом примере.
         """
 
         keys = view.keys
-        examples = view.examples
 
-        indices = view.indices
+        if keys.size == 0:
+            return np.zeros(0, dtype=np.int64)
 
-        chosen: list[np.ndarray] = []
+        available = np.unique(keys)
 
-        for example in range(view.n_examples):
+        take = min(self.config.keys_per_example, available.size)
 
-            inside = examples == example
+        picked = rng.choice(available, size=take, replace=False)
 
-            if not inside.any():
-                continue
-
-            available = np.unique(keys[inside])
-
-            take = min(self.config.keys_per_example, available.size)
-
-            picked = rng.choice(available, size=take, replace=False)
-
-            chosen.append(indices[inside & np.isin(keys, picked)])
-
-        return np.sort(np.concatenate(chosen)) if chosen else np.zeros(0, dtype=np.int64)
+        return np.sort(view.indices[np.isin(keys, picked)])
 
     def _select_event(self, view: Selection, rng: np.random.Generator) -> np.ndarray:
         """
@@ -604,15 +547,13 @@ class Masker:
         значения, счёл бы позицию недоступной и потерял бы её
         target.
 
-        Событие и пара (пример, ключ) целиком лежат внутри
-        одного примера, поэтому векторный розыгрыш по batch это
-        и есть независимый розыгрыш на пример.
+        Вид это один пример, поэтому и событие, и ключ целиком
+        лежат внутри него.
         """
 
         indices = view.indices
 
         keys = view.keys
-        examples = view.examples
         events = view.events
 
         # 1. Отдельные позиции.
@@ -623,14 +564,12 @@ class Masker:
 
         by_event = indices[picked_events[events]]
 
-        # 3. Ключ целиком, но только внутри своего примера.
-        pairs = np.stack([examples, keys], axis=1)
+        # 3. Ключ целиком.
+        unique_keys, inverse = np.unique(keys, return_inverse=True)
 
-        unique_pairs, inverse = np.unique(pairs, axis=0, return_inverse=True)
+        picked_keys = rng.random(unique_keys.size) < self.config.key_rate
 
-        picked_pairs = rng.random(unique_pairs.shape[0]) < self.config.key_rate
-
-        by_key = indices[picked_pairs[np.asarray(inverse).ravel()]]
+        by_key = indices[picked_keys[np.asarray(inverse).ravel()]]
 
         chosen = np.union1d(np.union1d(by_token, by_event), by_key)
 
@@ -642,7 +581,7 @@ class Masker:
             },
             "unique": int(chosen.size),
             "n_events": int(view.n_events),
-            "n_pairs": int(unique_pairs.shape[0]),
+            "n_keys": int(unique_keys.size),
         }
 
         return chosen.astype(np.int64), selection

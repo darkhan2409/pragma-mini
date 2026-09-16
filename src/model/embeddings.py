@@ -28,18 +28,82 @@ from .config import ModelConfig
 # ============================================================
 
 
+# Соль потока таблицы токенов. Отдельный поток нужен, чтобы
+# размер словаря не двигал инициализацию остальных параметров:
+# Сравнение режимов словаря обязано менять словарь, а не
+# стартовые веса.
+VOCAB_SEED_SALT = 0x5EED_0CAB
+
+
+def draw_token_weight(config: ModelConfig, seed: int) -> torch.Tensor:
+    """
+    Веса таблицы токенов из собственного генератора.
+
+    Глобальный поток не трогается вовсе: Generator у нас свой, и
+    ни одно число из torch.manual_seed(seed) здесь не тратится.
+    Значит Transformer, History Encoder и MLM head стартуют
+    одинаково при любом vocab_size.
+
+    Инициализация та же, что у nn.Embedding: N(0, 1) и нулевая
+    строка padding_idx.
+    """
+
+    generator = torch.Generator().manual_seed(int(seed) ^ VOCAB_SEED_SALT)
+
+    weight = torch.empty(config.vocab_size, config.d_model)
+
+    weight.normal_(mean=0.0, std=1.0, generator=generator)
+
+    with torch.no_grad():
+        weight[config.pad_id].fill_(0.0)
+
+    return weight
+
+
 class SharedEmbeddings(nn.Module):
     """
     Общие таблицы токенов и позиций для обоих энкодеров.
     """
 
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, token_weight: torch.Tensor | None = None):
+        """
+        token_weight приходит готовым, если его разыграли
+        заранее из ОТДЕЛЬНОГО потока.
+
+        Причина в сравнении режимов словаря: nn.Embedding тянет
+        vocab_size * d_model чисел из глобального генератора, и
+        словарь другого размера сдвинул бы инициализацию
+        Transformer, History Encoder и MLM head. Тогда арки
+        различались бы не только словарём.
+
+        skip_init создаёт модуль, ничего не разыгрывая, поэтому
+        глобальный поток не расходуется вовсе.
+        """
 
         super().__init__()
 
         self.config = config
 
-        self.token = nn.Embedding(config.vocab_size, config.d_model, padding_idx=config.pad_id)
+        if token_weight is None:
+            self.token = nn.Embedding(config.vocab_size, config.d_model, padding_idx=config.pad_id)
+        else:
+
+            if tuple(token_weight.shape) != (config.vocab_size, config.d_model):
+                raise BatchError(
+                    f"таблица токенов {tuple(token_weight.shape)}, а конфиг требует "
+                    f"({config.vocab_size}, {config.d_model})"
+                )
+
+            self.token = torch.nn.utils.skip_init(
+                nn.Embedding,
+                config.vocab_size,
+                config.d_model,
+                padding_idx=config.pad_id,
+            )
+
+            with torch.no_grad():
+                self.token.weight.copy_(token_weight)
+
         self.position = nn.Embedding(config.max_position_embeddings, config.d_model)
 
     # --------------------------------------------------------

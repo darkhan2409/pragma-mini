@@ -10,9 +10,14 @@ from src.tokenizer.build import check_order
 from src.tokenizer.dataset import Example, TokenBatch
 
 from .batching import BatchError, PaddedRecords, check_batch, events_from_batch, profiles_from_batch
-from .config import STRUCTURE_EVENT, STRUCTURE_SESSION, ModelConfig
-from .session_batching import HistoryLayout, group_events
-from .time_encoding import age_hours, gap_hours
+from .config import ModelConfig
+from .time_features import (
+    INACTIVITY_NORM_HOURS,
+    age_hours,
+    calendar_features,
+    inactivity_feature,
+    squash_np,
+)
 
 
 # ============================================================
@@ -28,16 +33,14 @@ from .time_encoding import age_hours, gap_hours
 # TokenBatch, поэтому runtime-masker работает на нём без
 # изменений, а mapping к исходному batch сохраняется.
 #
-# Временные признаки считаются по ПОЛНОЙ истории до обрезки:
-# у первого оставшегося события gap настоящий, а не ноль.
+# Возраст считается по ПОЛНОЙ истории до обрезки: cutoff у
+# примера один, и отбрасывание старых событий его не двигает.
 #
 # Вся эта подготовка это NumPy. Тензоры появляются только в
 # to_model_inputs, а forward модели про parquet не знает.
 # ============================================================
 
 
-POLICY_RECENT = "recent"
-POLICY_NONE = "none"
 
 
 # ============================================================
@@ -182,18 +185,12 @@ def validate_history_batch(batch: TokenBatch, meta: HistoryMeta) -> None:
 
 @dataclass(frozen=True)
 class TruncationInfo:
-    policy: str
-    max_events: int | None
     original_history_length: np.ndarray
     used_history_length: np.ndarray
     truncated: np.ndarray
     kept_events: np.ndarray
     kept_tokens: np.ndarray
     slot_of_event: np.ndarray
-
-    @property
-    def any_truncated(self) -> bool:
-        return bool(self.truncated.any())
 
     @property
     def truncated_share(self) -> float:
@@ -219,8 +216,6 @@ def keep_everything(batch: TokenBatch) -> tuple[TokenBatch, TruncationInfo]:
     starts = np.concatenate([[0], np.cumsum(original)[:-1]])
 
     info = TruncationInfo(
-        policy=POLICY_NONE,
-        max_events=None,
         original_history_length=original,
         used_history_length=original,
         truncated=np.zeros(batch.n_examples, dtype=bool),
@@ -289,6 +284,7 @@ def truncate_recent(batch: TokenBatch, max_events: int | None) -> tuple[TokenBat
         key_ids=batch.key_ids[kept_tokens],
         value_ids=batch.value_ids[kept_tokens],
         positions=batch.positions[kept_tokens],
+        field_ids=batch.field_ids[kept_tokens],
         event_ids=np.repeat(np.arange(kept_events.size, dtype=np.int64), new_widths),
         example_ids=np.repeat(new_example_of_event, new_widths),
         event_offsets=offsets,
@@ -300,12 +296,11 @@ def truncate_recent(batch: TokenBatch, max_events: int | None) -> tuple[TokenBat
         profile_value_ids=batch.profile_value_ids,
         profile_positions=batch.profile_positions,
         profile_example_ids=batch.profile_example_ids,
+        profile_field_ids=batch.profile_field_ids,
         n_examples=batch.n_examples,
     )
 
     info = TruncationInfo(
-        policy=POLICY_RECENT,
-        max_events=max_events,
         original_history_length=original,
         used_history_length=used,
         truncated=original > max_events,
@@ -315,38 +310,6 @@ def truncate_recent(batch: TokenBatch, max_events: int | None) -> tuple[TokenBat
     )
 
     return truncated, info
-
-
-def _previous_ts(batch: TokenBatch, info: "TruncationInfo") -> np.ndarray:
-    """
-    Время последнего ОТБРОШЕННОГО обрезкой события примера.
-
-    NaT означает, что до уцелевшего окна ничего не было. Без
-    этого первый элемент истории получил бы gap ноль и выглядел
-    бы началом жизни клиента, чем он не является.
-    """
-
-    n_examples = int(batch.n_examples)
-
-    previous = np.full(n_examples, np.datetime64("NaT", "us"), dtype="datetime64[us]")
-
-    dropped = np.asarray(info.original_history_length, dtype=np.int64) - np.asarray(
-        info.used_history_length, dtype=np.int64
-    )
-
-    if not bool((dropped > 0).any()):
-        return previous
-
-    example_of_event = np.asarray(batch.example_of_event, dtype=np.int64)
-    ts = np.asarray(batch.ts)
-
-    starts = np.zeros(n_examples + 1, dtype=np.int64)
-    np.cumsum(np.bincount(example_of_event, minlength=n_examples), out=starts[1:])
-
-    for index in np.flatnonzero(dropped > 0):
-        previous[index] = ts[starts[index] + dropped[index] - 1]
-
-    return previous
 
 
 # ============================================================
@@ -359,7 +322,6 @@ class HistoryBatch:
     tokens: TokenBatch
     meta: HistoryMeta
     info: TruncationInfo
-    gap_hours: np.ndarray
     age_hours: np.ndarray
     targets: np.ndarray | None = None
     mask: np.ndarray | None = None
@@ -367,10 +329,6 @@ class HistoryBatch:
     # Что именно выбрал masker: режим, доступные позиции, счётчики
     # стратегий до объединения и итоговая доля.
     masking: dict | None = None
-
-    # Раскладка истории по сессиям. None означает прежнюю
-    # структуру: каждое событие занимает свою позицию.
-    layout: HistoryLayout | None = None
 
     @property
     def n_examples(self) -> int:
@@ -387,56 +345,21 @@ def prepare_history_batch(
     max_events: int | None,
     masker=None,
     step: int = 0,
-    *,
-    session_keys: np.ndarray | None = None,
-    structure: str = STRUCTURE_EVENT,
 ) -> HistoryBatch:
     """
-    Проверка, временные признаки, обрезка, раскладка и маски.
+    Проверка, временные признаки, обрезка и маски.
 
-    Порядок важен трижды. gap и age считаются ДО обрезки, чтобы
-    у первого уцелевшего события был настоящий разрыв. Masker
-    применяется ПОСЛЕ обрезки, чтобы не тратить маски на события,
-    которых модель не увидит. Раскладка сессий строится МЕЖДУ
-    ними: она обязана видеть только уцелевшие события и не имеет
-    права зависеть от того, что замаскировано.
+    Порядок важен: masker применяется ПОСЛЕ обрезки, чтобы не
+    тратить маски на события, которых модель не увидит.
     """
 
     validate_history_batch(batch, meta)
 
-    gaps = gap_hours(batch)
     ages = age_hours(batch, meta.cutoffs)
 
     tokens, info = truncate_recent(batch, max_events)
 
     kept = info.kept_events
-
-    layout = None
-
-    if structure == STRUCTURE_SESSION:
-
-        if session_keys is None:
-            raise BatchError(
-                "структура session требует ключей сессий: "
-                "ClientStore должен быть открыт с sessions=True"
-            )
-
-        keys = np.asarray(session_keys, dtype=np.int64)
-
-        if keys.size != batch.n_events:
-            raise BatchError(
-                f"ключей сессий {keys.size}, а событий до обрезки {batch.n_events}"
-            )
-
-        layout = group_events(
-            example_of_event=tokens.example_of_event,
-            ts=tokens.ts,
-            seq=tokens.seq,
-            session_keys=keys[kept],
-            cutoffs=meta.cutoffs,
-            previous_ts=_previous_ts(batch, info),
-            n_examples=tokens.n_examples,
-        )
 
     targets = None
     mask = None
@@ -444,9 +367,9 @@ def prepare_history_batch(
 
     if masker is not None:
 
-        # Идентичность примера это пара (клиент, cutoff): схема
-        # example засевает ею свой поток. Обрезка число примеров
-        # не меняет, поэтому metadata по-прежнему выровнена.
+        # Идентичность примера это пара (клиент, cutoff): ею
+        # засевается поток маски. Обрезка число примеров не
+        # меняет, поэтому metadata остаётся выровненной.
         identities = np.stack(
             [
                 np.asarray(meta.client_ids, dtype=np.int64),
@@ -467,12 +390,10 @@ def prepare_history_batch(
         tokens=tokens,
         meta=meta,
         info=info,
-        gap_hours=gaps[kept],
         age_hours=ages[kept],
         targets=targets,
         mask=mask,
         masking=diagnostics,
-        layout=layout,
     )
 
 
@@ -482,42 +403,36 @@ def prepare_history_batch(
 
 
 @dataclass(frozen=True)
-class SessionInputs:
+class TemporalInputs:
     """
-    Сессии одного batch в тензорах.
+    Признаки времени: координаты поворота и то, чего поворот
+    выразить не может.
 
-    member_rows уже без -1: padding заменён нулём, а правда о
-    нём живёт в member_valid. Индекс -1 в torch не ошибка, он
-    молча берёт последнюю строку, и такую подмену не видно
-    ни в forward, ни в loss.
+    calendar относится к КАЖДОМУ событию, поэтому нумерация
+    строк та же, что у batch событий.
+
+    Координаты это часы до ПОСЛЕДНЕГО элемента истории примера,
+    сжатые squash. У последнего элемента координата ноль, дальше
+    в прошлое она растёт. Внимание видит разность координат, то
+    есть время между парой элементов.
+
+    inactivity хранится готовым к подаче в FeatureMLP, то есть
+    [B, 1], а не [B].
     """
 
-    session_example: torch.Tensor
-    session_slot: torch.Tensor
-    session_hours: torch.Tensor
+    calendar: torch.Tensor                  # [n_events, 6]
+    event_coords: torch.Tensor              # [n_events]
+    inactivity: torch.Tensor                # [B, 1]
 
-    member_rows: torch.Tensor
-    member_valid: torch.Tensor
-    member_gap_minutes: torch.Tensor
+    @property
+    def n_examples(self) -> int:
+        return int(self.inactivity.shape[0])
 
-    session_of_event: torch.Tensor
-    position_in_session: torch.Tensor
-
-    n_sessions: int
-    max_session_length: int
-
-    def to(self, device) -> "SessionInputs":
-        return SessionInputs(
-            session_example=self.session_example.to(device),
-            session_slot=self.session_slot.to(device),
-            session_hours=self.session_hours.to(device),
-            member_rows=self.member_rows.to(device),
-            member_valid=self.member_valid.to(device),
-            member_gap_minutes=self.member_gap_minutes.to(device),
-            session_of_event=self.session_of_event.to(device),
-            position_in_session=self.position_in_session.to(device),
-            n_sessions=self.n_sessions,
-            max_session_length=self.max_session_length,
+    def to(self, device) -> "TemporalInputs":
+        return TemporalInputs(
+            calendar=self.calendar.to(device),
+            event_coords=self.event_coords.to(device),
+            inactivity=self.inactivity.to(device),
         )
 
 
@@ -527,35 +442,24 @@ class ModelInputs:
     Всё, что нужно forward. Targets сюда не попадают: это цель,
     а не признак.
 
-    slot_of_event это слот НЕСУЩЕГО элемента: своего у отдельного
-    события и слота сессии у её члена. Поэтому адрес контекстного
-    вектора события один и тот же в обеих структурах.
-
-    time_hours относится к отдельным элементам истории. В прежней
-    структуре standalone_rows равен None, а отдельные элементы это
-    все события, поэтому массив совпадает с прежним.
+    slot_of_event это позиция события в истории примера; слот 0
+    занят профилем.
     """
 
     events: PaddedRecords
     profiles: PaddedRecords
     example_of_event: torch.Tensor
     slot_of_event: torch.Tensor
-    time_hours: torch.Tensor
     used_history_length: torch.Tensor
     n_examples: int
     kept_events: torch.Tensor
     kept_tokens: torch.Tensor
 
-    standalone_rows: torch.Tensor | None = None
-    sessions: SessionInputs | None = None
+    temporal: TemporalInputs | None = None
 
     @property
     def n_events(self) -> int:
         return int(self.example_of_event.numel())
-
-    @property
-    def n_standalone(self) -> int:
-        return self.n_events if self.standalone_rows is None else int(self.standalone_rows.numel())
 
     @property
     def max_length(self) -> int:
@@ -567,13 +471,11 @@ class ModelInputs:
             profiles=self.profiles.to(device),
             example_of_event=self.example_of_event.to(device),
             slot_of_event=self.slot_of_event.to(device),
-            time_hours=self.time_hours.to(device),
             used_history_length=self.used_history_length.to(device),
             n_examples=self.n_examples,
             kept_events=self.kept_events.to(device),
             kept_tokens=self.kept_tokens.to(device),
-            standalone_rows=None if self.standalone_rows is None else self.standalone_rows.to(device),
-            sessions=None if self.sessions is None else self.sessions.to(device),
+            temporal=None if self.temporal is None else self.temporal.to(device),
         )
 
 
@@ -581,29 +483,55 @@ def _long(values) -> torch.Tensor:
     return torch.from_numpy(np.asarray(values, dtype=np.int64))
 
 
-def _session_inputs(layout: HistoryLayout) -> SessionInputs:
+def _temporal_inputs(history: HistoryBatch) -> TemporalInputs:
+    """
+    Календарь событий, координаты элементов и простой клиента.
 
-    member_rows = np.asarray(layout.member_rows, dtype=np.int64)
+    Координата это возраст события МИНУС возраст последнего
+    события того же примера. Вычитание обязано идти по примеру,
+    а не по batch: у соседа по batch свой cutoff и своя лента.
+    """
 
-    valid = member_rows >= 0
+    tokens = history.tokens
 
-    # Padding заменяется нулём ДО torch: отрицательный индекс
-    # в gather не ошибка, он берёт последнюю строку.
-    safe = np.where(valid, member_rows, 0)
+    n_examples = int(tokens.n_examples)
 
-    return SessionInputs(
-        session_example=_long(layout.session_example),
-        session_slot=_long(layout.session_slot),
-        session_hours=torch.from_numpy(np.asarray(layout.session_hours, dtype=np.float32)),
-        member_rows=_long(safe),
-        member_valid=torch.from_numpy(valid),
-        member_gap_minutes=torch.from_numpy(
-            np.asarray(layout.member_gap_minutes, dtype=np.float32)
-        ),
-        session_of_event=_long(layout.session_of_event),
-        position_in_session=_long(layout.position_in_session),
-        n_sessions=layout.n_sessions,
-        max_session_length=layout.max_session_length,
+    example_of_event = np.asarray(tokens.example_of_event, dtype=np.int64)
+
+    ages = np.asarray(history.age_hours, dtype=np.float64)
+
+    # Возраст самого свежего события примера.
+    last_age = np.full(n_examples, np.inf, dtype=np.float64)
+
+    np.minimum.at(last_age, example_of_event, ages)
+
+    # Пример без единого элемента невозможен по контракту
+    # preprocessing; если он всё же случится, простой берётся
+    # максимальным, а не бесконечным.
+    empty = ~np.isfinite(last_age)
+
+    if empty.any():
+        last_age[empty] = INACTIVITY_NORM_HOURS
+
+    def coords_of(ages: np.ndarray, owner: np.ndarray) -> np.ndarray:
+
+        elapsed = ages - last_age[owner]
+
+        negative = np.flatnonzero(elapsed < 0.0)
+
+        if negative.size:
+            position = int(negative[0])
+            raise BatchError(
+                f"событие {position} примера {int(owner[position])} старше самого свежего "
+                f"на {elapsed[position]:.6f} ч: история повреждена"
+            )
+
+        return squash_np(elapsed).astype(np.float32)
+
+    return TemporalInputs(
+        calendar=torch.from_numpy(calendar_features(tokens.ts)),
+        event_coords=torch.from_numpy(coords_of(ages, example_of_event)),
+        inactivity=torch.from_numpy(inactivity_feature(last_age).reshape(n_examples, 1)),
     )
 
 
@@ -611,51 +539,19 @@ def to_model_inputs(history: HistoryBatch, config: ModelConfig, device=None) -> 
 
     tokens = history.tokens
 
-    layout = history.layout
-
-    if layout is None:
-
-        time_hours = np.stack(
-            [
-                np.asarray(history.gap_hours, dtype=np.float32),
-                np.asarray(history.age_hours, dtype=np.float32),
-            ],
-            axis=1,
-        )
-
-        slot_of_event = np.asarray(history.info.slot_of_event, dtype=np.int64)
-        used = np.asarray(history.info.used_history_length, dtype=np.int64)
-
-        standalone_rows = None
-        sessions = None
-
-    else:
-
-        if layout.n_events != tokens.n_events:
-            raise BatchError(
-                f"раскладка построена на {layout.n_events} событиях, а в batch их {tokens.n_events}"
-            )
-
-        time_hours = np.asarray(layout.standalone_hours, dtype=np.float32)
-
-        slot_of_event = np.asarray(layout.slot_of_event, dtype=np.int64)
-        used = np.asarray(layout.used_history_length, dtype=np.int64)
-
-        standalone_rows = _long(layout.standalone_rows)
-        sessions = _session_inputs(layout)
+    slot_of_event = np.asarray(history.info.slot_of_event, dtype=np.int64)
+    used = np.asarray(history.info.used_history_length, dtype=np.int64)
 
     inputs = ModelInputs(
         events=events_from_batch(tokens, config),
         profiles=profiles_from_batch(tokens, config),
         example_of_event=_long(tokens.example_of_event),
         slot_of_event=torch.from_numpy(slot_of_event),
-        time_hours=torch.from_numpy(time_hours),
         used_history_length=torch.from_numpy(used),
         n_examples=tokens.n_examples,
         kept_events=_long(history.info.kept_events),
         kept_tokens=_long(history.info.kept_tokens),
-        standalone_rows=standalone_rows,
-        sessions=sessions,
+        temporal=_temporal_inputs(history),
     )
 
     return inputs if device is None else inputs.to(device)

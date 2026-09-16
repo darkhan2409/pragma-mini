@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -22,12 +21,11 @@ from src.model.compare import (
     excluded_fields,
     run_comparison,
 )
-from src.model.history_encoder import ATTENTION_RULES, RULE_FULL
 from src.model.metrics import aggregate_fields, bootstrap_combination, bootstrap_contrast
 from src.model.trainer import run_training
 
-from tests.test_combined_masking import combined_config
-from tests.test_trainer import env, small_config  # noqa: F401
+from tests.helpers_model import combined_config, small_config
+
 
 
 # ============================================================
@@ -38,7 +36,7 @@ from tests.test_trainer import env, small_config  # noqa: F401
 def field(name: str, ce: float, targets: int = 10, unigram: float = 2.0) -> dict:
     return {
         "field": name,
-        "key_id": abs(hash(name)) % 1000,
+        "field_id": abs(hash(name)) % 1000,
         "kind": "categorical",
         "n_candidates": 4,
         "status": "ok",
@@ -118,6 +116,20 @@ def test_every_evaluation_mode_has_its_own_settings():
     assert made["key"].event_rate == 0.0
 
     assert {config.seed for config in made.values()} == {7}
+
+
+def test_evaluation_carries_the_excluded_fields_of_the_run():
+    """
+    Политика целей это часть задачи, а не настройка обучения.
+
+    Без переноса exclude_fields сравнение оценивало бы модель
+    на полях, которые она никогда не предсказывала.
+    """
+
+    stored = {"balanced_share": 0.15, "exclude_fields": ["profile_snapshot__*"]}
+
+    for mode in EVAL_MODES:
+        assert evaluation_masking(mode, stored, 7).exclude_fields == ("profile_snapshot__*",)
 
 
 def test_unknown_evaluation_mode_is_refused():
@@ -355,74 +367,10 @@ def test_configs_differ_only_in_masking(comparison):
     assert differences["masking_mode"] == {"old": "field_balanced", "new": "combined"}
 
 
-def test_ablation_is_repeated_for_both_checkpoints(comparison):
-    report = comparison["report"]
-
-    assert set(report["ablations"]) == set(report["ablation_modes"])
-
-    for section in report["ablations"].values():
-
-        for label in ("old", "new"):
-            assert set(section[label]["aggregates"]) == {"val_client", "val_time"}
-            rules = [row["rule"] for row in section[label]["aggregates"]["val_time"]]
-            assert rules == list(ATTENTION_RULES)
-
-        for name, rules in section["contrast"].items():
-            assert RULE_FULL not in rules
-            for rule, entry in rules.items():
-                for scope in ("all_fields", "subset"):
-                    assert entry[scope]["old"]["ci_low"] <= entry[scope]["old"]["ci_high"]
-
-                    # Разность разностей это тоже интервал, а не
-                    # вычитание двух точечных оценок.
-                    difference = entry[scope]["difference"]
-
-                    assert difference["ci_low"] <= difference["estimate"] <= difference["ci_high"]
-
-                    assert difference["estimate"] == pytest.approx(
-                        entry[scope]["new"]["estimate"] - entry[scope]["old"]["estimate"]
-                    )
-
-
-def test_answers_are_explicit(comparison):
-    answers = comparison["report"]["answers"]
-
-    assert answers
-
-    for item in answers.values():
-        assert set(item) == {"history_exchange", "direct_event_to_event", "without_leaky_fields"}
-        for entry in item.values():
-            assert entry["question"]
-            assert entry["answer"]
-            assert entry["difference"]["ci_low"] <= entry["difference"]["ci_high"]
-
-
-def test_growth_verdict_follows_the_difference_not_the_level(comparison):
-    """
-    «Зависимость выросла» решается интервалом разности, а не
-    тем, значима ли потеря у новой модели сама по себе.
-    """
-
-    report = comparison["report"]
-
-    for key, answers in report["answers"].items():
-
-        item = answers["history_exchange"]
-
-        difference = item["difference"]
-
-        if not difference["significant"]:
-            assert "не подтверждено" in item["answer"], key
-        elif difference["estimate"] > 0:
-            assert item["answer"] == "да, выросла", key
-        else:
-            assert item["answer"] == "нет, зависимость снизилась", key
-
-
 def test_artefacts_are_written(comparison):
     out = comparison["out"]
 
-    for name in ("comparison.json", "comparison.md", "masks.json", "ablation_comparison.md"):
+    for name in ("comparison.json", "comparison.md", "masks.json"):
         assert (out / name).exists(), name
 
     text = (out / "comparison.md").read_text(encoding="utf-8")
@@ -437,11 +385,6 @@ def test_artefacts_are_written(comparison):
     for splits in masks["modes"].values():
         for description in splits.values():
             assert description["targets_sha256"]
-
-    ablation = (out / "ablation_comparison.md").read_text(encoding="utf-8")
-
-    assert "self_only" in ablation
-    assert "Ответы" in ablation
 
 
 def test_incomparable_checkpoints_are_refused(env, two_runs, tmp_path):
@@ -470,7 +413,6 @@ def test_same_checkpoint_on_both_sides_shows_no_difference(env, two_runs, tmp_pa
         tmp_path / "self",
         device="cpu",
         modes=("token",),
-        ablation_modes=(),
         n_boot=100,
         quiet=True,
     )
@@ -480,3 +422,95 @@ def test_same_checkpoint_on_both_sides_shows_no_difference(env, two_runs, tmp_pa
         assert not item["all_fields"]["significant"]
 
     assert report["config_differences"] == {}
+
+
+# ============================================================
+# CLI
+# ============================================================
+#
+# run_comparison и describe_checkpoint вызываются тестами
+# напрямую, поэтому разрыв между парсером и сигнатурой
+# оставался невидимым: аргумент, которого функция не принимает,
+# доезжал только до живого запуска. Эти два теста идут через
+# сам CLI.
+# ============================================================
+
+
+def test_compare_cli_passes_only_arguments_the_function_accepts(env, two_runs, tmp_path):
+    """
+    Каждый ключ, который CLI собирается передать, обязан быть в
+    сигнатуре run_comparison.
+    """
+
+    import inspect
+
+    from src.model.train import build_parser
+
+    args = build_parser().parse_args(
+        [
+            "compare",
+            "--name", "dev",
+            "--old", str(two_runs["old"]),
+            "--new", str(two_runs["new"]),
+            "--device", "cpu",
+        ]
+    )
+
+    accepted = set(inspect.signature(run_comparison).parameters)
+
+    for name in ("min_targets", "bootstrap", "old", "new"):
+        assert hasattr(args, name), name
+
+    assert {"min_targets", "n_boot", "device", "modes", "quiet"} <= accepted
+
+    # Ключей, которых функция не принимает, у парсера быть не должно.
+    assert not hasattr(args, "rules")
+
+
+def test_check_cli_reports_fields_that_exist(env, two_runs, capsys):
+    """
+    describe_checkpoint печатает только то, что действительно
+    лежит в checkpoint: поля удалённых режимов не должны
+    воскресать строкой-умолчанием.
+    """
+
+    from src.model.train import describe_checkpoint
+
+    payload = describe_checkpoint(two_runs["old"])
+
+    printed = capsys.readouterr().out
+
+    assert "additive" not in printed
+    assert "структура" not in printed
+
+    # Строка про размеры модели обязана нести настоящие числа.
+    line = next(row for row in printed.splitlines() if row.startswith("d_model"))
+
+    assert "None" not in line
+
+    assert "structure" not in payload["model_config"]
+    assert "temporal" not in payload["model_config"]
+
+
+def test_comparison_accepts_a_run_trained_in_another_mode(env, two_runs, tmp_path):
+    """
+    Сверка набора привязана к режиму старого run.
+
+    Раньше цифра набора field_balanced сверялась с сохранённой
+    у любого старого checkpoint'а, и сравнение прогонов,
+    обученных в combined, падало на этой сверке. Ни один тест
+    этого не ловил: фикстура всегда ставила старым тот run,
+    который обучался в field_balanced.
+    """
+
+    report = run_comparison(
+        env,
+        two_runs["new"],
+        two_runs["old"],
+        tmp_path,
+        device="cpu",
+        n_boot=50,
+        quiet=True,
+    )
+
+    assert report["modes"]

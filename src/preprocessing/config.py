@@ -15,8 +15,7 @@ from src.generator.config import (
     RAW_DIR,
     SOURCES,
 )
-from src.generator.emit import PROFILE_FIELD_TYPES, SCHEMAS, schemas_for
-from src.generator.version import RAW_SCHEMA_REVISION
+from src.generator.emit import PROFILE_FIELD_TYPES, SCHEMAS
 
 
 # ============================================================
@@ -32,7 +31,6 @@ from src.generator.version import RAW_SCHEMA_REVISION
 #   <event_type>      поля payload каждого типа события
 #   profile           полный профиль из 20 полей (контекст)
 #   source_coverage   покрытие, роль coverage, в статистики не идёт
-#   labels            метка, роль label, никогда не читается для признаков
 #
 # Реестр строится из схем генератора, поэтому не может
 # разойтись с RAW: тест проверяет, что покрыта каждая колонка.
@@ -52,7 +50,6 @@ ROLE_FEATURE = "feature"
 ROLE_METADATA = "metadata"
 ROLE_CONTAINER = "container"
 ROLE_COVERAGE = "coverage"
-ROLE_LABEL = "label"
 
 
 @dataclass(frozen=True)
@@ -111,7 +108,7 @@ NUMERIC_FIELDS = frozenset(
 )
 
 # Служебные поля: хранятся, не bucketize, не предсказываются.
-METADATA_FIELDS = frozenset({"client_id", "ts", "seq", "session_id", "snapshot_month"})
+METADATA_FIELDS = frozenset({"client_id", "ts", "seq", "snapshot_month"})
 
 # Содержательные поля событий, которые не являются целью:
 # производные от ts и атрибут качества данных.
@@ -121,7 +118,6 @@ METADATA_NOTES = {
     "client_id": "идентификатор клиента: ключ, не признак",
     "ts": "служебная метка времени: порядок и окна, не признак",
     "seq": "порядковый номер в ленте: tie-break, информации не несёт",
-    "session_id": "идентификатор сессии: хранится, не bucketize, не предсказывается",
     "snapshot_month": "месяц снимка профиля: ключ as-of",
     "payload": "контейнер JSON, разбирается в типизированные колонки",
 }
@@ -168,19 +164,12 @@ SOURCE_BY_EVENT_TYPE: dict[str, str] = {
 EVENT_TYPE_PROFILE = EVENT_TYPE_BY_SOURCE["profile"]
 
 
-def payload_fields(
-    event_type: str, revision: int = RAW_SCHEMA_REVISION
-) -> tuple[str, ...]:
+def payload_fields(event_type: str) -> tuple[str, ...]:
     """
     Поля payload в порядке, в котором их пишет генератор.
 
     Порядок это не украшение: ключи payload обязаны идти в том
-    же порядке, что колонки таблицы, и ревизия схемы меняет
-    оба списка одновременно.
-
-    Умолчание это последняя ревизия: реестр строится по
-    надмножеству полей, чтобы одна сборка preprocessing читала
-    любой RAW. Проверки контракта передают ревизию явно.
+    же порядке, что и колонки таблицы.
     """
 
     if event_type == EVENT_TYPE_PROFILE:
@@ -189,35 +178,30 @@ def payload_fields(
     source = SOURCE_BY_EVENT_TYPE[event_type]
 
     # Первые две колонки таблицы это client_id и ts.
-    return tuple(schemas_for(revision)[source].names[2:])
+    return tuple(SCHEMAS[source].names[2:])
 
 
-def payload_arrow_type(
-    event_type: str, field_name: str, revision: int = RAW_SCHEMA_REVISION
-) -> pa.DataType:
+def payload_arrow_type(event_type: str, field_name: str) -> pa.DataType:
 
     if event_type == EVENT_TYPE_PROFILE:
         return PROFILE_FIELD_TYPES[field_name]
 
-    return schemas_for(revision)[SOURCE_BY_EVENT_TYPE[event_type]].field(field_name).type
+    return SCHEMAS[SOURCE_BY_EVENT_TYPE[event_type]].field(field_name).type
 
 
-def payload_schema(
-    event_type: str, revision: int = RAW_SCHEMA_REVISION
-) -> pa.Schema:
+def payload_schema(event_type: str) -> pa.Schema:
     """
     Схема разбора payload.
 
-    Берётся надмножество полей: pyarrow.json с явной схемой
-    делает отсутствующий ключ null, а лишний ключ ошибкой.
-    Поэтому надмножество читает и старый RAW, и новый, а вот
-    сужение схемы сломалось бы на новом.
+    pyarrow.json с явной схемой делает отсутствующий ключ null,
+    а лишний ключ ошибкой, поэтому схема обязана точно совпадать
+    с тем, что пишет генератор.
     """
 
     return pa.schema(
         [
-            (name, payload_arrow_type(event_type, name, revision))
-            for name in payload_fields(event_type, revision)
+            (name, payload_arrow_type(event_type, name))
+            for name in payload_fields(event_type)
         ]
     )
 
@@ -342,17 +326,6 @@ def build_registry() -> dict[tuple[str, str], FieldSpec]:
             )
         )
 
-    for field_name in SCHEMAS["labels"].names:
-        specs.append(
-            _metadata(
-                "labels",
-                field_name,
-                SCHEMAS["labels"].field(field_name).type,
-                role=ROLE_LABEL,
-                note="downstream-метка: preprocessing её никогда не читает для признаков",
-            )
-        )
-
     registry = {spec.key: spec for spec in specs}
 
     assert len(registry) == len(specs), "дубликат (namespace, field) в реестре"
@@ -380,17 +353,12 @@ def predictable_specs() -> list[FieldSpec]:
 
 
 # Namespaces, чьи записи это события ленты.
-EVENT_NAMESPACES: tuple[str, ...] = tuple(EVENT_TYPES)
-
 # Все namespaces в порядке вывода.
-NAMESPACES: tuple[str, ...] = ("timeline",) + EVENT_NAMESPACES + ("profile", "source_coverage", "labels")
-
 # Таблица RAW, из которой читается namespace (для реестра и проверок).
 NAMESPACE_TABLE: dict[str, str] = {
     "timeline": "timeline",
     "profile": "profile",
     "source_coverage": "source_coverage",
-    "labels": "labels",
     **{event_type: SOURCE_BY_EVENT_TYPE[event_type] for event_type in EVENT_TYPES},
 }
 

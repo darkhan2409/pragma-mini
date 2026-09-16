@@ -19,10 +19,8 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import pytest
 
-from src.generator.config import PROFILE_FIELDS
 from src.preprocessing.artifacts import tree_digests
 from src.preprocessing.build import events_schema, profile_schema
-from src.tokenizer.artifacts import processed_revision
 from src.preprocessing.config import (
     CLIENT_GROUPS,
     DATASET_NAMES,
@@ -87,17 +85,9 @@ def test_processed_schemas_match_declaration(prep_run):
     for dataset in DATASET_NAMES:
         assert table(prep_run, f"{dataset}/examples.parquet").schema.equals(EXAMPLES_SCHEMA)
 
-    # Схема событий зависит от ревизии схемы RAW: фикстура это
-    # V1, то есть ревизия 1, и колонок session_id у операций и
-    # баннеров у неё быть не должно.
-    revision = processed_revision(prep_run["artifacts"])
-
-    assert revision == 1
-
     for group in CLIENT_GROUPS:
         events = table(prep_run, f"clients/{group}_clients/events.parquet")
-        assert events.schema.equals(events_schema(revision))
-        assert "app_operation__session_id" not in events.schema.names
+        assert events.schema.equals(events_schema())
         assert table(prep_run, f"clients/{group}_clients/profile.parquet").schema.equals(profile_schema())
 
 
@@ -134,13 +124,6 @@ def test_events_are_sorted_by_client_and_seq(prep_run):
         order = np.lexsort((seq, client_id))
 
         assert (order == np.arange(len(order))).all(), group
-
-
-def test_processed_holds_no_labels(prep_run):
-    forbidden = {"product_open_90d", "label_start", "label_end"}
-
-    for path in sorted(prep_run["processed"].rglob("*.parquet")):
-        assert not (set(pq.read_schema(path).names) & forbidden), path
 
 
 # ============================================================
@@ -377,7 +360,7 @@ def test_field_stats_cover_every_registry_field(prep_run):
 def test_metadata_entries_say_why_excluded(prep_run):
     stats = artifact(prep_run, "field_stats.json")
 
-    for key in (("app_screen", "session_id"), ("timeline", "seq"), ("labels", "product_open_90d")):
+    for key in (("timeline", "seq"), ("timeline", "client_id")):
         entry = stats["fields"][key[0]][key[1]]
         assert entry["excluded"] is True
         assert entry["note"]
@@ -568,7 +551,7 @@ def perturbed_run(prep_raw_dir, tmp_path_factory):
 
     for name in ("profile", "transactions", "product_events", "communications",
                  "app_screens", "app_operations", "banners", "timeline",
-                 "source_coverage", "labels"):
+                 "source_coverage"):
 
         path = raw_dir / f"{name}.parquet"
 

@@ -15,7 +15,6 @@ from src.preprocessing.config import CLIENT_GROUPS, DATASETS
 from src.preprocessing.splits import (
     assign_groups,
     boundaries,
-    client_group,
     dataset_for,
     month_roles,
     unit_interval,

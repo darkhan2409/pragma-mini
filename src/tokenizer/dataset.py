@@ -11,7 +11,7 @@ import pyarrow.parquet as pq
 
 from src.preprocessing.artifacts import read_json, sha256_file
 
-from .build import iter_client_blocks, tokenized_examples_schema
+from .build import iter_client_blocks
 from .config import (
     CONFIG_FILE,
     DATASET_MANIFEST_FILE,
@@ -30,10 +30,14 @@ from .vocab import Vocab
 # Контракт чтения для будущей модели.
 #
 # Пример это профиль (начинается с [USR]) плюс история событий
-# (каждое начинается с [EVT]), уже в ID. Три массива токенов
+# (каждое начинается с [EVT]), уже в ID. Четыре массива токенов
 # одной длины, смещения по событиям, и рядом ts, seq и
 # event_type: время не превращалось в словарные категории и
 # остаётся доступным для будущего временного кодирования.
+#
+# field_ids едет рядом с key_ids и несёт идентичность
+# ФИЗИЧЕСКОГО поля: по нему живут маски, цели и кандидаты, и он
+# одинаков во всех режимах словаря.
 #
 # collate отдаёт плоский batch со смещениями, без padding:
 # [PAD] зарезервирован, но не используется.
@@ -53,6 +57,7 @@ class Events:
     event_type: np.ndarray
     ts: np.ndarray
     seq: np.ndarray
+    field_ids: np.ndarray
 
     @property
     def n_events(self) -> int:
@@ -64,7 +69,12 @@ class Events:
 
     def event(self, index: int) -> Record:
         lo, hi = int(self.offsets[index]), int(self.offsets[index + 1])
-        return Record(self.key_ids[lo:hi], self.value_ids[lo:hi], self.positions[lo:hi])
+        return Record(
+            self.key_ids[lo:hi],
+            self.value_ids[lo:hi],
+            self.positions[lo:hi],
+            self.field_ids[lo:hi],
+        )
 
 
 @dataclass(frozen=True)
@@ -110,6 +120,25 @@ class TokenBatch:
     profile_example_ids: np.ndarray
 
     n_examples: int
+
+    # field_ids идут последними: так все места, где
+    # TokenBatch собирается по имени, продолжают работать, а
+    # забытый массив ловится проверкой, а не тишиной.
+    field_ids: np.ndarray | None = None
+    profile_field_ids: np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+
+        for name, tokens in (("field_ids", self.field_ids), ("profile_field_ids", self.profile_field_ids)):
+
+            if tokens is None:
+                raise ValueError(f"TokenBatch собран без {name}: идентичность поля обязана ехать с токенами")
+
+        if self.field_ids.size != self.key_ids.size:
+            raise ValueError("field_ids и key_ids должны быть одной длины")
+
+        if self.profile_field_ids.size != self.profile_key_ids.size:
+            raise ValueError("profile_field_ids и profile_key_ids должны быть одной длины")
 
     @property
     def n_tokens(self) -> int:
@@ -160,6 +189,7 @@ def _record_of(table: pa.Table, index: int) -> Record:
         key_ids=np.asarray(row.column("key_ids")[0].as_py(), dtype=np.int32),
         value_ids=np.asarray(row.column("value_ids")[0].as_py(), dtype=np.int32),
         positions=np.asarray(row.column("positions")[0].as_py(), dtype=np.int16),
+        field_ids=np.asarray(row.column("field_ids")[0].as_py(), dtype=np.int16),
     )
 
 
@@ -189,6 +219,7 @@ def _events_of(table: pa.Table, lo: int, hi: int) -> Events:
         event_type=np.asarray(rows.column("event_type").to_pylist(), dtype=object),
         ts=rows.column("ts").to_numpy().astype("datetime64[us]"),
         seq=rows.column("seq").to_numpy().astype(np.int64),
+        field_ids=flat("field_ids", np.int16),
     )
 
 
@@ -200,40 +231,23 @@ class TokenizedDataset:
     def __init__(
         self,
         root: Path,
-        dataset: str | None,
+        dataset: str,
         vocab_dir: Path | None = None,
-        group: str | None = None,
     ):
-        """
-        dataset=None открывает записи группы клиентов без своего
-        каталога примеров. Так читаются наборы, которых в
-        разбиении нет: downstream строит свои строки примеров
-        сам, из cutoff_index, и каталога под них не заводит.
-        """
 
         self.root = Path(root)
         self.dataset = dataset
 
-        if dataset is None:
+        self.examples = pq.read_table(self.root / dataset / "examples.parquet")
 
-            if group is None:
-                raise ValueError("без каталога примеров нужно указать группу клиентов")
+        groups = set(self.examples.column("client_group").to_pylist())
 
-            self.examples = tokenized_examples_schema().empty_table()
-            self.group = group
+        if len(groups) > 1:
+            raise ValueError(
+                f"{dataset}: примеры из разных групп клиентов {sorted(groups)}"
+            )
 
-        else:
-
-            self.examples = pq.read_table(self.root / dataset / "examples.parquet")
-
-            groups = set(self.examples.column("client_group").to_pylist())
-
-            if len(groups) > 1:
-                raise ValueError(
-                    f"{dataset}: примеры из разных групп клиентов {sorted(groups)}"
-                )
-
-            self.group = groups.pop() if groups else "train"
+        self.group = groups.pop() if groups else "train"
 
         self.events_path = self.root / "clients" / f"{self.group}_clients" / "events.parquet"
         self.profile_path = self.root / "clients" / f"{self.group}_clients" / "profile.parquet"
@@ -273,7 +287,9 @@ class TokenizedDataset:
 
         manifest = read_json(manifest_path)
 
-        actual = sha256_file(Path(vocab_dir) / CONFIG_FILE)
+        config_path = Path(vocab_dir) / CONFIG_FILE
+
+        actual = sha256_file(config_path)
 
         if manifest.get("tokenizer_config_sha256") != actual:
             raise IncompatibleArtifactsError(
@@ -396,6 +412,7 @@ def collate(examples: Sequence[Example]) -> TokenBatch:
     key_ids: list[np.ndarray] = []
     value_ids: list[np.ndarray] = []
     positions: list[np.ndarray] = []
+    field_ids: list[np.ndarray] = []
     event_ids: list[np.ndarray] = []
     example_ids: list[np.ndarray] = []
 
@@ -408,6 +425,7 @@ def collate(examples: Sequence[Example]) -> TokenBatch:
     profile_keys: list[np.ndarray] = []
     profile_values: list[np.ndarray] = []
     profile_positions: list[np.ndarray] = []
+    profile_fields: list[np.ndarray] = []
     profile_examples: list[np.ndarray] = []
 
     event_base = 0
@@ -421,6 +439,7 @@ def collate(examples: Sequence[Example]) -> TokenBatch:
         key_ids.append(events.key_ids)
         value_ids.append(events.value_ids)
         positions.append(events.positions)
+        field_ids.append(events.field_ids)
 
         per_event = np.diff(events.offsets)
 
@@ -438,6 +457,7 @@ def collate(examples: Sequence[Example]) -> TokenBatch:
         profile_keys.append(example.profile.key_ids)
         profile_values.append(example.profile.value_ids)
         profile_positions.append(example.profile.positions)
+        profile_fields.append(example.profile.field_ids)
         profile_examples.append(np.full(example.profile.n_tokens, index, dtype=np.int64))
 
     def join(chunks: list[np.ndarray], dtype) -> np.ndarray:
@@ -466,6 +486,8 @@ def collate(examples: Sequence[Example]) -> TokenBatch:
         profile_positions=join(profile_positions, np.int16),
         profile_example_ids=join(profile_examples, np.int64),
         n_examples=len(examples),
+        field_ids=join(field_ids, np.int16),
+        profile_field_ids=join(profile_fields, np.int16),
     )
 
 

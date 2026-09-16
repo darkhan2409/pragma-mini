@@ -9,7 +9,6 @@ import pyarrow.compute as pc
 
 from .buckets import BucketSpec, edges_artifact, fit_edges
 from .config import (
-    EVENT_TYPE_PROFILE,
     EVENT_TYPES,
     FIT_DATASET,
     KIND_METADATA,

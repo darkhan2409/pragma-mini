@@ -12,8 +12,6 @@ import pyarrow.compute as pc
 import pyarrow.json as pj
 import pyarrow.parquet as pq
 
-from src.generator.emit import SCHEMAS
-from src.generator.version import manifest_revision
 
 from .config import payload_schema
 
@@ -39,7 +37,7 @@ REQUIRED_MANIFEST_KEYS = (
     "total_clients",
     "history_start",
     "feature_end",
-    "label_end",
+    "horizon_end",
     "source_availability",
     "event_type_priority",
     "max_tokens_per_event",
@@ -54,17 +52,13 @@ class RawManifest:
     total_clients: int
     history_start: datetime
     feature_end: datetime
-    label_end: datetime
+    horizon_end: datetime
     source_availability: dict[str, datetime]
     event_type_priority: dict[str, int]
     max_tokens_per_event: int
     max_events_per_history: int
     rows: dict[str, int]
     sha256: str
-
-    # Ревизия схемы RAW. Ключа нет значит 1: манифесты первого
-    # выпуска лежат на диске и обязаны читаться как есть.
-    revision: int = 1
 
     def echo(self) -> dict:
         """
@@ -77,7 +71,7 @@ class RawManifest:
             "total_clients": self.total_clients,
             "history_start": self.history_start.isoformat(),
             "feature_end": self.feature_end.isoformat(),
-            "label_end": self.label_end.isoformat(),
+            "horizon_end": self.horizon_end.isoformat(),
             "source_availability": {
                 source: ts.isoformat() for source, ts in sorted(self.source_availability.items())
             },
@@ -85,7 +79,6 @@ class RawManifest:
             "max_tokens_per_event": self.max_tokens_per_event,
             "max_events_per_history": self.max_events_per_history,
             "rows": dict(sorted(self.rows.items())),
-            "raw_schema_revision": self.revision,
             "manifest_sha256": self.sha256,
         }
 
@@ -111,7 +104,7 @@ def read_manifest(raw_dir: Path) -> RawManifest:
         total_clients=int(data["total_clients"]),
         history_start=datetime.fromisoformat(data["history_start"]),
         feature_end=datetime.fromisoformat(data["feature_end"]),
-        label_end=datetime.fromisoformat(data["label_end"]),
+        horizon_end=datetime.fromisoformat(data["horizon_end"]),
         source_availability={
             source: datetime.fromisoformat(value)
             for source, value in data["source_availability"].items()
@@ -121,7 +114,6 @@ def read_manifest(raw_dir: Path) -> RawManifest:
         max_events_per_history=int(data["max_events_per_history"]),
         rows={name: int(value) for name, value in data["rows"].items()},
         sha256=hashlib.sha256(raw_bytes).hexdigest(),
-        revision=manifest_revision(data),
     )
 
 
@@ -228,14 +220,3 @@ def parse_payloads(event_type: str, payload: pa.Array | pa.ChunkedArray) -> pa.T
 
     return parsed.select(schema.names).combine_chunks()
 
-
-def payload_keys(payload_text: str) -> list[str]:
-    """
-    Ключи одного payload в порядке записи (для проверки контракта).
-    """
-
-    return list(json.loads(payload_text).keys())
-
-
-def timeline_schema() -> pa.Schema:
-    return SCHEMAS["timeline"]

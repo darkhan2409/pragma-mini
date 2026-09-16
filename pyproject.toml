@@ -11,6 +11,7 @@ dependencies = [
     "scikit-learn>=1.9,<2.0",
     "scipy",
     "tokenizers>=0.23.1,<0.24",
+    "pyyaml>=6,<7",
 ]
 
 [project.optional-dependencies]
@@ -19,20 +20,31 @@ torch = ["torch==2.13.0"]
 
 [project.scripts]
 mini-pragma-emit = "src.generator.emit:main"
-mini-pragma-calibrate = "src.generator.calibrate:main"
+mini-pragma-report = "src.generator.report.realism:main"
+mini-pragma-show = "src.generator.report.show:main"
 mini-pragma-preprocess = "src.preprocessing.run:main"
 mini-pragma-tokenize = "src.tokenizer.run:main"
-mini-pragma-encoder-smoke = "src.model.smoke:main"
-mini-pragma-history-smoke = "src.model.history_smoke:main"
 mini-pragma-train = "src.model.train:main"
-mini-pragma-downstream = "src.model.downstream:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["src", "src.generator", "src.generator.v2", "src.preprocessing", "src.tokenizer", "src.model"]
+packages = [
+    "src",
+    "src.generator",
+    "src.generator.params",
+    "src.generator.world",
+    "src.generator.life",
+    "src.generator.finance",
+    "src.generator.behaviour",
+    "src.generator.observe",
+    "src.generator.report",
+    "src.preprocessing",
+    "src.tokenizer",
+    "src.model",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

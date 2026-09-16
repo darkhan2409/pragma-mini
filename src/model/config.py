@@ -3,6 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from src.tokenizer.config import EVT_ID, N_SPECIAL, PAD_ID, USR_ID
+from src.tokenizer.semantics import (
+    DEFAULT_KEY_MODE,
+    DEFAULT_VALUE_MODE,
+    check_mode,
+    is_baseline,
+)
 
 
 # ============================================================
@@ -19,7 +25,7 @@ from src.tokenizer.config import EVT_ID, N_SPECIAL, PAD_ID, USR_ID
 # за размер таблицы это ошибка, а не обрезка.
 #
 # Умолчания здесь НЕ меняются при появлении новой архитектуры.
-# Размеры нового запуска задаются явно (см. ARCHITECTURES ниже
+# Размеры нового запуска задаются явно (см. ARCHITECTURE ниже
 # и поля TrainConfig), потому что смена умолчания молча меняла
 # бы архитектуру всех прежних вызовов и делала бы уже лежащие
 # на диске checkpoints незагружаемыми.
@@ -33,20 +39,30 @@ ACTIVATIONS: tuple[str, ...] = ("gelu", "relu")
 # СТРУКТУРА ИСТОРИИ
 # ------------------------------------------------------------
 #
-# event    прежняя лента: [профиль, событие, событие, ...]
-# session  app-события одной сессии сначала сворачиваются
-#          Session Encoder в один вектор
+# История это [профиль, событие, событие, ...]: каждое событие
+# занимает свою позицию.
 # ------------------------------------------------------------
 
-STRUCTURE_EVENT = "event"
-STRUCTURE_SESSION = "session"
 
-STRUCTURES: tuple[str, ...] = (STRUCTURE_EVENT, STRUCTURE_SESSION)
+# ------------------------------------------------------------
+# ВРЕМЯ ИСТОРИИ
+# ------------------------------------------------------------
+#
+# Время живёт во внимании: q и k поворачиваются на угол,
+# пропорциональный squash(часы до последнего элемента истории).
+# Разность углов пары и есть их относительное время, к самому
+# вектору события не прибавляется ничего. Календарь события и
+# простой клиента приходят отдельными признаками.
+#
+# Так сделано не из вкуса: у аддитивного кодирования, которое пробовали до этого,
+# норма временного слагаемого на обученном checkpoint была
+# 26 (сутки) .. 143 (два года) против нормы вектора события 9,
+# то есть содержание события было малой добавкой к направлению
+# «возраст».
+# ------------------------------------------------------------
 
-# Паузы внутри сессии измеряются минутами, а не часами:
-# 8·log1p(t/8) от 0.001 ч это 0.001, на три порядка меньше
-# самих векторов событий, и признак был бы мёртвым.
-SESSION_GAP_UNIT = "minutes"
+# База частот RoPE: та же, что у синусоидального кодирования.
+ROPE_BASE = 10_000.0
 
 
 @dataclass(frozen=True)
@@ -73,11 +89,14 @@ class ModelConfig:
     evt_id: int = EVT_ID
     usr_id: int = USR_ID
 
-    # Структура истории и число слоёв Session Encoder.
-    # Умолчание event: без него каждое существующее место
-    # построения конфига молча переключилось бы на сессии.
-    structure: str = STRUCTURE_EVENT
-    n_session_layers: int = 1
+    rope_base: float = ROPE_BASE
+
+    # Режим словаря. На архитектуру он влияет ровно одним:
+    # размером таблицы токенов. Но он обязан ехать в checkpoint,
+    # потому что модель, обученная на склеенном словаре, в
+    # baseline-словаре означает другое.
+    key_mode: str = DEFAULT_KEY_MODE
+    categorical_value_mode: str = DEFAULT_VALUE_MODE
 
     def __post_init__(self) -> None:
 
@@ -92,12 +111,20 @@ class ModelConfig:
             if value <= 0:
                 raise ValueError(f"{name} должен быть положительным, получено {value}")
 
-        for name in ("n_event_layers", "n_profile_layers", "n_history_layers", "n_session_layers"):
+        for name in ("n_event_layers", "n_profile_layers", "n_history_layers"):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} должен быть не меньше единицы")
 
-        if self.structure not in STRUCTURES:
-            raise ValueError(f"structure должен быть одним из {STRUCTURES}, получено {self.structure!r}")
+        check_mode(self.key_mode, self.categorical_value_mode)
+
+        # RoPE поворачивает ПАРЫ измерений головы.
+        if self.head_dim % 2 != 0:
+            raise ValueError(
+                f"head_dim={self.head_dim} нечётный: RoPE поворачивает пары измерений"
+            )
+
+        if self.rope_base <= 1.0:
+            raise ValueError(f"rope_base должен быть больше единицы, получено {self.rope_base}")
 
         if self.vocab_size <= N_SPECIAL:
             raise ValueError(
@@ -121,17 +148,12 @@ class ModelConfig:
         return self.d_model // self.n_heads
 
     @property
-    def uses_sessions(self) -> bool:
-        return self.structure == STRUCTURE_SESSION
+    def uses_shared_vocab(self) -> bool:
+        return not is_baseline(self.key_mode, self.categorical_value_mode)
 
     def as_dict(self) -> dict:
         """
         Отпечаток архитектуры для checkpoint.
-
-        n_session_layers и session_gap_unit пишутся ТОЛЬКО в
-        режиме сессий. Иначе будущая смена их умолчания сделала
-        бы несовместимыми event-checkpoints, которые про Session
-        Encoder ничего не знают и знать не должны.
         """
 
         data = {
@@ -148,30 +170,23 @@ class ModelConfig:
             "max_position_embeddings": self.max_position_embeddings,
             "layer_norm_eps": self.layer_norm_eps,
             "special_ids": {"pad": self.pad_id, "evt": self.evt_id, "usr": self.usr_id},
-            "structure": self.structure,
+            "rope_base": self.rope_base,
+            "key_mode": self.key_mode,
+            "categorical_value_mode": self.categorical_value_mode,
         }
-
-        if self.uses_sessions:
-            data["n_session_layers"] = self.n_session_layers
-            data["session_gap_unit"] = SESSION_GAP_UNIT
 
         return data
 
 
 # ============================================================
-# АРХИТЕКТУРА НОВОГО ЗАПУСКА
+# АРХИТЕКТУРА ЗАПУСКА
 # ============================================================
 #
-# Явные наборы, а не новые умолчания: старые checkpoints
-# продолжают собираться из своей исходной архитектуры, а новый
-# запуск называет свои размеры сам.
-#
-# Оба набора одинаковы по размерам и отличаются только
-# структурой: сравнение режимов должно идти при равных d_model,
-# ширине FFN и числе слоёв, иначе оно сравнивало бы не то.
+# Явный набор, а не умолчания полей: запуск называет свои
+# размеры сам, и они видны одним куском.
 # ============================================================
 
-SESSION_ARCHITECTURE: dict = {
+ARCHITECTURE: dict = {
     "d_model": 128,
     "n_heads": 4,
     "dim_feedforward": 512,
@@ -179,23 +194,17 @@ SESSION_ARCHITECTURE: dict = {
     "activation": "gelu",
     "n_profile_layers": 1,
     "n_event_layers": 3,
-    "n_session_layers": 1,
     "n_history_layers": 2,
-    "structure": STRUCTURE_SESSION,
-}
-
-EVENT_ARCHITECTURE: dict = {**SESSION_ARCHITECTURE, "structure": STRUCTURE_EVENT}
-
-ARCHITECTURES: dict[str, dict] = {
-    STRUCTURE_EVENT: EVENT_ARCHITECTURE,
-    STRUCTURE_SESSION: SESSION_ARCHITECTURE,
 }
 
 
 def config_from_tokenizer(tokenizer, **overrides) -> ModelConfig:
     """
-    Размер словаря берётся из tokenizer_config, который уже
-    проверен по хэшам при загрузке.
+    Размер словаря и его режим берутся из tokenizer_config,
+    который уже проверен по хэшам при загрузке.
+
+    Режим приходит из словаря, а не из флага: модель не имеет
+    права объявить себя semantic, читая baseline-словарь.
     """
 
     size = tokenizer.config["id_layout"]["size"]
@@ -205,10 +214,22 @@ def config_from_tokenizer(tokenizer, **overrides) -> ModelConfig:
 
     specials = tokenizer.config["special_tokens"]["ids"]
 
+    modes = {
+        "key_mode": tokenizer.vocab.key_mode,
+        "categorical_value_mode": tokenizer.vocab.value_mode,
+    }
+
+    for name, value in modes.items():
+        if name in overrides and overrides[name] is not None and overrides[name] != value:
+            raise ValueError(
+                f"запрошен {name}={overrides[name]!r}, а словарь собран как {value!r}: "
+                "режим берётся из словаря, а не из флага"
+            )
+
     return ModelConfig(
         vocab_size=int(size),
         pad_id=int(specials["[PAD]"]),
         evt_id=int(specials["[EVT]"]),
         usr_id=int(specials["[USR]"]),
-        **overrides,
+        **{**overrides, **modes},
     )

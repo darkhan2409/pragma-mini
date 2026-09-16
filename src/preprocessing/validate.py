@@ -9,7 +9,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from src.generator import config as generator_config
-from src.generator.emit import SCHEMAS, schemas_for
+from src.generator.emit import SCHEMAS
 from src.generator.profile import ALWAYS_PRESENT, FIELD_GROUPS
 
 from .config import (
@@ -21,7 +21,6 @@ from .config import (
     SCHEMA_VERSION,
     SOURCES,
     payload_fields,
-    payload_schema,
 )
 from .raw import RawDataset, parse_payloads
 
@@ -131,7 +130,7 @@ class TableCursor:
 
     def __init__(self, raw: RawDataset, name: str):
         self._name = name
-        self._schema = schemas_for(raw.manifest.revision)[name]
+        self._schema = SCHEMAS[name]
         self._groups: Iterator[pa.Table] = raw.iter_row_groups(name)
         self._buffer: pa.Table | None = None
         self._exhausted = False
@@ -203,11 +202,6 @@ def canonical(table: pa.Table) -> pa.Table:
 
 @dataclass
 class TimelineScan:
-    # Ревизия схемы RAW: от неё зависит ожидаемый список
-    # ключей payload, и сверять его надо с контрактом того
-    # датасета, который читаем, а не последнего известного.
-    revision: int = 1
-
     rows: int = 0
     clients: int = 0
 
@@ -264,7 +258,6 @@ def _source_view(event_type: str, timeline_rows: pa.Table, parsed: pa.Table) -> 
 def scan_timeline(raw: RawDataset) -> TimelineScan:
 
     scan = TimelineScan(
-        revision=raw.manifest.revision,
         key_order_violations={event_type: 0 for event_type in EVENT_TYPES},
         key_order_sampled={event_type: 0 for event_type in EVENT_TYPES},
         parsed_rows={event_type: 0 for event_type in EVENT_TYPES},
@@ -449,7 +442,7 @@ def _sample_key_order(scan: TimelineScan, event_type: str, rows: pa.Table) -> No
     if budget <= 0 or rows.num_rows == 0:
         return
 
-    expected = list(payload_fields(event_type, scan.revision))
+    expected = list(payload_fields(event_type))
 
     for text in rows.column("payload").slice(0, budget).to_pylist():
         scan.key_order_sampled[event_type] += 1
@@ -492,7 +485,7 @@ def _compare_block(scan: TimelineScan, event_type: str, from_timeline: pa.Table,
 
 def check_schemas(raw: RawDataset) -> Check:
 
-    expected = schemas_for(raw.manifest.revision)
+    expected = SCHEMAS
 
     missing = [name for name in expected if not raw.exists(name)]
 
@@ -511,7 +504,6 @@ def check_schemas(raw: RawDataset) -> Check:
     return verdict(
         "schemas_match",
         len(missing) + len(mismatched),
-        revision=raw.manifest.revision,
         tables=len(expected),
         missing=missing,
         mismatched=mismatched,
@@ -750,33 +742,6 @@ def check_timestamp_quality(raw: RawDataset) -> Check:
     )
 
 
-def check_labels(raw: RawDataset) -> Check:
-
-    labels = raw.read("labels")
-
-    client_ids = labels.column("client_id")
-
-    duplicates = len(client_ids) - len(pc.unique(client_ids))
-
-    wrong_count = 0 if len(client_ids) == raw.manifest.total_clients else 1
-
-    start = labels.column("label_start").to_numpy(zero_copy_only=False)
-    end = labels.column("label_end").to_numpy(zero_copy_only=False)
-
-    wrong_start = int((start != np.datetime64(raw.manifest.feature_end, "us")).sum())
-    wrong_end = int((end != np.datetime64(raw.manifest.label_end, "us")).sum())
-
-    return verdict(
-        "labels_shape",
-        duplicates + wrong_count + wrong_start + wrong_end,
-        rows=labels.num_rows,
-        duplicate_clients=duplicates,
-        wrong_client_count=wrong_count,
-        label_start_mismatch=wrong_start,
-        label_end_mismatch=wrong_end,
-    )
-
-
 def check_manifest_vs_generator(raw: RawDataset) -> Check:
     """
     Информационно: RAW мог быть собран другой версией config.
@@ -991,7 +956,6 @@ def validate_raw(raw: RawDataset) -> dict:
     checks.append(_guarded("coverage_rows_complete", lambda: check_coverage_rows(raw)))
     checks.append(_guarded("profile_monthly_grid", lambda: check_profile_grid(raw)))
     checks.append(_guarded("timestamp_quality_consistent", lambda: check_timestamp_quality(raw)))
-    checks.append(_guarded("labels_shape", lambda: check_labels(raw)))
     checks.append(_guarded("manifest_matches_generator_config", lambda: check_manifest_vs_generator(raw)))
 
     summary: dict[str, Any] = {}

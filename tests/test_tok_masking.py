@@ -22,75 +22,15 @@ from src.tokenizer.masking import (
     Masker,
     MaskingConfig,
 )
-from src.tokenizer.vocab import KeyEntry, ValueEntry, Vocab
+from src.tokenizer.vocab import Vocab
 
-from tests.test_tok_encode import toy_vocab
+from tests.helpers_data import fields_of, ident, make_batch, toy_vocab, unbalanced_vocab
+
 
 
 # ============================================================
 # СИНТЕТИЧЕСКИЙ BATCH
 # ============================================================
-
-
-def unbalanced_vocab() -> Vocab:
-    """
-    Два predictable-поля и одно нет: A широкое, B узкое.
-    """
-
-    keys = [
-        KeyEntry(6, "s__a", "s", "a", "categorical", True, "string", 9, 12),
-        KeyEntry(7, "s__b", "s", "b", "categorical", True, "string", 12, 15),
-        KeyEntry(8, "s__quiet", "s", "quiet", "categorical", False, "string", 15, 18),
-    ]
-
-    values = [
-        ValueEntry(9 + offset, 6 + offset // 3, f"s__{name}", f"v{offset % 3}", 1)
-        for offset, name in enumerate(["a"] * 3 + ["b"] * 3 + ["quiet"] * 3)
-    ]
-
-    return Vocab(keys, values)
-
-
-def make_batch(key_ids, value_ids, event_ids=None, example_ids=None, profile=None) -> TokenBatch:
-    """
-    Batch из готовых массивов: маскирование не зависит от того,
-    откуда пришли токены.
-    """
-
-    key_ids = np.asarray(key_ids, dtype=np.int32)
-    value_ids = np.asarray(value_ids, dtype=np.int32)
-
-    size = key_ids.size
-
-    event_ids = np.arange(size, dtype=np.int64) if event_ids is None else np.asarray(event_ids, np.int64)
-    example_ids = np.zeros(size, dtype=np.int64) if example_ids is None else np.asarray(example_ids, np.int64)
-
-    n_events = int(event_ids.max()) + 1 if size else 0
-
-    widths = np.bincount(event_ids, minlength=n_events)
-
-    offsets = np.zeros(n_events + 1, dtype=np.int64)
-    np.cumsum(widths, out=offsets[1:])
-
-    profile = np.zeros(0, dtype=np.int32) if profile is None else np.asarray(profile, np.int32)
-
-    return TokenBatch(
-        key_ids=key_ids,
-        value_ids=value_ids,
-        positions=np.zeros(size, dtype=np.int16),
-        event_ids=event_ids,
-        example_ids=example_ids,
-        event_offsets=offsets,
-        example_of_event=np.zeros(n_events, dtype=np.int64),
-        event_type=np.array(["synthetic"] * n_events, dtype=object),
-        ts=np.zeros(n_events, dtype="datetime64[us]"),
-        seq=np.arange(n_events, dtype=np.int64),
-        profile_key_ids=np.zeros(profile.size, dtype=np.int32),
-        profile_value_ids=profile,
-        profile_positions=np.zeros(profile.size, dtype=np.int16),
-        profile_example_ids=np.zeros(profile.size, dtype=np.int64),
-        n_examples=int(example_ids.max()) + 1 if size else 0,
-    )
 
 
 # ============================================================
@@ -106,7 +46,7 @@ def test_special_and_unknown_values_are_never_eligible():
     keys = np.array([6, 6, 6, 6], dtype=np.int32)
     values = np.array([9, UNK_ID, MISSING_ID, MASK_ID], dtype=np.int32)
 
-    assert list(masker.eligible(keys, values)) == [True, False, False, False]
+    assert list(masker.eligible(fields_of(keys), values)) == [True, False, False, False]
 
 
 def test_non_predictable_key_is_never_eligible():
@@ -115,8 +55,8 @@ def test_non_predictable_key_is_never_eligible():
     masker = Masker(vocab)
 
     # toy__flag объявлен predictable=False.
-    assert not masker.eligible(np.array([8]), np.array([13]))[0]
-    assert masker.eligible(np.array([6]), np.array([9]))[0]
+    assert not masker.eligible(fields_of(np.array([8])), np.array([13]))[0]
+    assert masker.eligible(fields_of(np.array([6])), np.array([9]))[0]
 
 
 def test_profile_positions_are_rejected():
@@ -129,10 +69,16 @@ def test_profile_positions_are_rejected():
 
     batch = make_batch([6], [9], profile=[9])
 
-    batch = TokenBatch(**{**batch.__dict__, "profile_key_ids": np.array([6], dtype=np.int32)})
+    batch = TokenBatch(
+        **{
+            **batch.__dict__,
+            "profile_key_ids": np.array([6], dtype=np.int32),
+            "profile_field_ids": np.array([0], dtype=np.int16),
+        }
+    )
 
     with pytest.raises(AssertionError):
-        Masker(vocab).apply(batch)
+        Masker(vocab).apply(batch, identities=ident(batch))
 
 
 # ============================================================
@@ -156,8 +102,8 @@ def real_vocab(tok_run):
 def test_same_seed_and_step_repeat(real_vocab, real_batch, mode):
     masker = Masker(real_vocab, MaskingConfig(mode=mode, seed=11))
 
-    first = masker.apply(real_batch, step=5)
-    second = masker.apply(real_batch, step=5)
+    first = masker.apply(real_batch, step=5, identities=ident(real_batch))
+    second = masker.apply(real_batch, step=5, identities=ident(real_batch))
 
     assert np.array_equal(first.value_ids, second.value_ids)
     assert np.array_equal(first.targets, second.targets)
@@ -166,10 +112,10 @@ def test_same_seed_and_step_repeat(real_vocab, real_batch, mode):
 
 @pytest.mark.parametrize("mode", MODES)
 def test_other_seed_or_step_differs(real_vocab, real_batch, mode):
-    base = Masker(real_vocab, MaskingConfig(mode=mode, seed=11)).apply(real_batch, step=5)
+    base = Masker(real_vocab, MaskingConfig(mode=mode, seed=11)).apply(real_batch, step=5, identities=ident(real_batch))
 
-    other_step = Masker(real_vocab, MaskingConfig(mode=mode, seed=11)).apply(real_batch, step=6)
-    other_seed = Masker(real_vocab, MaskingConfig(mode=mode, seed=12)).apply(real_batch, step=5)
+    other_step = Masker(real_vocab, MaskingConfig(mode=mode, seed=11)).apply(real_batch, step=6, identities=ident(real_batch))
+    other_seed = Masker(real_vocab, MaskingConfig(mode=mode, seed=12)).apply(real_batch, step=5, identities=ident(real_batch))
 
     assert not np.array_equal(base.mask, other_step.mask)
     assert not np.array_equal(base.mask, other_seed.mask)
@@ -185,7 +131,7 @@ def test_input_arrays_are_not_touched(real_vocab, real_batch, mode):
         "profile_value_ids": real_batch.profile_value_ids.copy(),
     }
 
-    result = Masker(real_vocab, MaskingConfig(mode=mode, seed=3)).apply(real_batch, step=1)
+    result = Masker(real_vocab, MaskingConfig(mode=mode, seed=3)).apply(real_batch, step=1, identities=ident(real_batch))
 
     for name, snapshot in before.items():
         assert np.array_equal(getattr(real_batch, name), snapshot), name
@@ -195,7 +141,7 @@ def test_input_arrays_are_not_touched(real_vocab, real_batch, mode):
 
 @pytest.mark.parametrize("mode", MODES)
 def test_targets_are_correct(real_vocab, real_batch, mode):
-    result = Masker(real_vocab, MaskingConfig(mode=mode, seed=3)).apply(real_batch, step=1)
+    result = Masker(real_vocab, MaskingConfig(mode=mode, seed=3)).apply(real_batch, step=1, identities=ident(real_batch))
 
     assert result.n_masked > 0
 
@@ -213,26 +159,26 @@ def test_targets_are_correct(real_vocab, real_batch, mode):
 def test_only_eligible_positions_are_masked(real_vocab, real_batch, mode):
     masker = Masker(real_vocab, MaskingConfig(mode=mode, seed=3))
 
-    eligible = masker.eligible(real_batch.key_ids, real_batch.value_ids)
+    eligible = masker.eligible(real_batch.field_ids, real_batch.value_ids)
 
-    result = masker.apply(real_batch, step=1)
+    result = masker.apply(real_batch, step=1, identities=ident(real_batch))
 
     assert not (result.mask & ~eligible).any()
 
 
 @pytest.mark.parametrize("mode", MODES)
 def test_derived_and_quality_fields_are_never_masked(real_vocab, real_batch, mode):
-    result = Masker(real_vocab, MaskingConfig(mode=mode, seed=3)).apply(real_batch, step=1)
+    result = Masker(real_vocab, MaskingConfig(mode=mode, seed=3)).apply(real_batch, step=1, identities=ident(real_batch))
 
     forbidden = {
-        real_vocab.key_id("communication", "day_of_week"),
-        real_vocab.key_id("communication", "hour"),
-        real_vocab.key_id("product_event", "timestamp_quality"),
+        real_vocab.field_id("communication", "day_of_week"),
+        real_vocab.field_id("communication", "hour"),
+        real_vocab.field_id("product_event", "timestamp_quality"),
     }
 
-    masked_keys = set(real_batch.key_ids[result.mask].tolist())
+    masked_fields = set(real_batch.field_ids[result.mask].tolist())
 
-    assert not (masked_keys & forbidden)
+    assert not (masked_fields & forbidden)
 
 
 # ============================================================
@@ -241,7 +187,7 @@ def test_derived_and_quality_fields_are_never_masked(real_vocab, real_batch, mod
 
 
 def test_token_mode_hits_about_the_configured_share(real_vocab, real_batch):
-    result = Masker(real_vocab, MaskingConfig(mode=MODE_TOKEN, seed=1, token_rate=0.25)).apply(real_batch)
+    result = Masker(real_vocab, MaskingConfig(mode=MODE_TOKEN, seed=1, token_rate=0.25)).apply(real_batch, identities=ident(real_batch))
 
     share = result.n_masked / result.n_eligible
 
@@ -251,9 +197,9 @@ def test_token_mode_hits_about_the_configured_share(real_vocab, real_batch):
 def test_key_mode_masks_whole_fields_inside_an_example(real_vocab, real_batch):
     masker = Masker(real_vocab, MaskingConfig(mode=MODE_KEY, seed=1, keys_per_example=2))
 
-    eligible = masker.eligible(real_batch.key_ids, real_batch.value_ids)
+    eligible = masker.eligible(real_batch.field_ids, real_batch.value_ids)
 
-    result = masker.apply(real_batch)
+    result = masker.apply(real_batch, identities=ident(real_batch))
 
     for example in range(real_batch.n_examples):
 
@@ -271,9 +217,9 @@ def test_key_mode_masks_whole_fields_inside_an_example(real_vocab, real_batch):
 def test_event_mode_masks_whole_events(real_vocab, real_batch):
     masker = Masker(real_vocab, MaskingConfig(mode=MODE_EVENT, seed=1, event_rate=0.3))
 
-    eligible = masker.eligible(real_batch.key_ids, real_batch.value_ids)
+    eligible = masker.eligible(real_batch.field_ids, real_batch.value_ids)
 
-    result = masker.apply(real_batch)
+    result = masker.apply(real_batch, identities=ident(real_batch))
 
     touched = set(real_batch.event_ids[result.mask].tolist())
 
@@ -315,8 +261,8 @@ def test_field_balanced_does_not_copy_field_frequencies():
     balanced = Masker(vocab, MaskingConfig(mode=MODE_FIELD_BALANCED, seed=5, balanced_share=0.15))
     plain = Masker(vocab, MaskingConfig(mode=MODE_TOKEN, seed=5, token_rate=0.15))
 
-    left = balanced.apply(batch)
-    right = plain.apply(batch)
+    left = balanced.apply(batch, identities=ident(batch))
+    right = plain.apply(batch, identities=ident(batch))
 
     narrow_balanced = int((batch.key_ids[left.mask] == 7).sum())
     narrow_plain = int((batch.key_ids[right.mask] == 7).sum())
@@ -331,7 +277,7 @@ def test_field_balanced_respects_the_budget():
 
     batch = unbalanced_batch()
 
-    result = Masker(vocab, MaskingConfig(mode=MODE_FIELD_BALANCED, seed=5, balanced_share=0.2)).apply(batch)
+    result = Masker(vocab, MaskingConfig(mode=MODE_FIELD_BALANCED, seed=5, balanced_share=0.2)).apply(batch, identities=ident(batch))
 
     assert result.n_masked == round(0.2 * result.n_eligible)
 
@@ -341,7 +287,7 @@ def test_field_balanced_never_picks_a_position_twice():
 
     batch = unbalanced_batch()
 
-    result = Masker(vocab, MaskingConfig(mode=MODE_FIELD_BALANCED, seed=5, balanced_share=0.3)).apply(batch)
+    result = Masker(vocab, MaskingConfig(mode=MODE_FIELD_BALANCED, seed=5, balanced_share=0.3)).apply(batch, identities=ident(batch))
 
     positions = result.masked_positions
 
@@ -354,7 +300,7 @@ def test_field_balanced_exhausts_everything_when_the_budget_is_large():
 
     batch = unbalanced_batch(wide=30, narrow=10)
 
-    result = Masker(vocab, MaskingConfig(mode=MODE_FIELD_BALANCED, seed=5, balanced_share=1.0)).apply(batch)
+    result = Masker(vocab, MaskingConfig(mode=MODE_FIELD_BALANCED, seed=5, balanced_share=1.0)).apply(batch, identities=ident(batch))
 
     assert result.n_masked == result.n_eligible
 

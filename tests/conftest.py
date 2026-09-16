@@ -47,38 +47,6 @@ def raw_tables(raw_dir: Path) -> dict[str, pd.DataFrame]:
 
 
 # ============================================================
-# ГЕНЕРАТОР V2
-# ============================================================
-
-
-@pytest.fixture(scope="session")
-def v2_raw_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """
-    RAW версии v2.1 на тех же 24 клиентах. data/raw не трогается.
-    """
-
-    out = tmp_path_factory.mktemp("raw_v2")
-
-    emit.generate_dataset(
-        total_clients=EMIT_CLIENTS,
-        chunk_clients=EMIT_CHUNK,
-        out_dir=out,
-        workers=1,
-        version="v2.1",
-    )
-
-    return out
-
-
-@pytest.fixture(scope="session")
-def v2_raw_tables(v2_raw_dir: Path) -> dict[str, pd.DataFrame]:
-    return {
-        name: pd.read_parquet(v2_raw_dir / f"{name}.parquet")
-        for name in emit.SCHEMAS
-    }
-
-
-# ============================================================
 # PREPROCESSING
 # ============================================================
 
@@ -162,3 +130,23 @@ def tok_run(prep_run, tmp_path_factory: pytest.TempPathFactory) -> dict:
         "artifacts": prep_run["artifacts"],
         **result,
     }
+
+# ============================================================
+# ОКРУЖЕНИЕ МОДЕЛИ
+# ============================================================
+
+
+@pytest.fixture(scope="module")
+def env(tok_run):
+    # Импорт внутри фикстуры: слой модели ждёт препроцессинга под
+    # новый контракт RAW и при сборе тестов не должен требоваться.
+    from src.model.trainer import load_environment
+
+    return load_environment(tok_run["tokenized"], tok_run["vocab"], tok_run["artifacts"])
+
+
+@pytest.fixture(scope="module")
+def store(env):
+    from src.model.data import ClientStore
+
+    return ClientStore(env.root, "train", env.vocab_dir, max_clients=4)

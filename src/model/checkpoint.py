@@ -9,7 +9,6 @@ import torch
 
 from src.tokenizer.config import IncompatibleArtifactsError
 
-from .config import STRUCTURE_EVENT
 
 
 # ============================================================
@@ -182,87 +181,44 @@ def verify_checkpoint(path: Path) -> dict:
 # ============================================================
 
 
-def _compare(name: str, saved, actual) -> None:
-
-    if saved != actual:
-        raise IncompatibleArtifactsError(
-            f"checkpoint несовместим: {name} отличается от текущего окружения"
-        )
-
-
 # ------------------------------------------------------------
-# СОВМЕСТИМОСТЬ ПРИ ДОБАВЛЕНИИ ПОЛЕЙ
+# СВЕРКА СЛОВАРЕЙ
 # ------------------------------------------------------------
 #
-# Точное равенство словарей ломало бы все прежние checkpoints
-# при одном лишь добавлении ключа. Правило мягче и по-прежнему
-# строгое:
-#
-#   ключ есть у обоих   значения обязаны совпадать
-#   ключ только сейчас  он обязан равняться унаследованному
-#                       значению, иначе окружение другое
-#   ключ только в файле  checkpoint новее кода: отказ
-#
-# Унаследованное значение это то, что подразумевал checkpoint,
-# записанный до появления ключа. Для structure это "event":
-# Session Encoder тогда не существовал. Для sessions это None:
-# sidecar сессий тогда не собирали.
+# Сравнивается весь словарь целиком, ключ в ключ: любое
+# расхождение это другое окружение, и продолжать в нём нельзя.
 # ------------------------------------------------------------
 
-LEGACY_MODEL_CONFIG: dict = {"structure": STRUCTURE_EVENT}
 
-LEGACY_ARTIFACTS: dict = {"sessions": None}
+def _compare_dict(name: str, saved: dict, actual: dict) -> None:
 
+    for key in sorted(set(saved) | set(actual)):
 
-def _compare_with_legacy(name: str, saved: dict, actual: dict, legacy: dict) -> None:
+        if key not in saved:
+            raise IncompatibleArtifactsError(
+                f"checkpoint несовместим: {name}, поля {key} в нём нет; "
+                f"сейчас {actual[key]!r}"
+            )
 
-    # Ключи с известным унаследованным значением проверяются
-    # первыми: иначе отказ назвал бы сопутствующий ключ вместо
-    # настоящей причины (например n_session_layers вместо
-    # структуры, которая его и притащила).
-    order = sorted(set(saved) | set(actual), key=lambda key: (key not in legacy, key))
+        if key not in actual:
+            raise IncompatibleArtifactsError(
+                f"checkpoint несовместим: {name}, в нём есть поле {key}, "
+                f"которого нет в текущем окружении"
+            )
 
-    for key in order:
-
-        if key in saved and key in actual:
-
-            if saved[key] != actual[key]:
-                raise IncompatibleArtifactsError(
-                    f"checkpoint несовместим: {name}, поле {key}: "
-                    f"сохранено {saved[key]!r}, сейчас {actual[key]!r}"
-                )
-
-            continue
-
-        if key in actual:
-
-            if key not in legacy:
-                raise IncompatibleArtifactsError(
-                    f"checkpoint несовместим: {name}, поле {key} появилось позже "
-                    f"checkpoint, и унаследованное значение для него не определено; "
-                    f"сейчас {actual[key]!r}"
-                )
-
-            if actual[key] != legacy[key]:
-                raise IncompatibleArtifactsError(
-                    f"checkpoint несовместим: {name}, поля {key} в нём нет, значит "
-                    f"он собран как {legacy[key]!r}, а сейчас {actual[key]!r}"
-                )
-
-            continue
-
-        raise IncompatibleArtifactsError(
-            f"checkpoint несовместим: {name}, в нём есть поле {key}, "
-            f"которого нет в текущем окружении"
-        )
+        if saved[key] != actual[key]:
+            raise IncompatibleArtifactsError(
+                f"checkpoint несовместим: {name}, поле {key}: "
+                f"сохранено {saved[key]!r}, сейчас {actual[key]!r}"
+            )
 
 
 def compare_model_config(saved: dict, actual: dict) -> None:
-    _compare_with_legacy("конфигурация модели", saved, actual, LEGACY_MODEL_CONFIG)
+    _compare_dict("конфигурация модели", saved, actual)
 
 
 def compare_artifacts(saved: dict, actual: dict) -> None:
-    _compare_with_legacy("отпечатки artifacts", saved, actual, LEGACY_ARTIFACTS)
+    _compare_dict("отпечатки artifacts", saved, actual)
 
 
 # ------------------------------------------------------------
@@ -285,9 +241,7 @@ def compare_train_config(saved: dict, actual: dict) -> None:
     names = (set(saved) | set(actual)) - IGNORED_ON_RESUME
 
     differ = [
-        name
-        for name in sorted(names)
-        if saved.get(name) != actual.get(name)
+        name for name in sorted(names) if saved.get(name) != actual.get(name)
     ]
 
     if differ:
@@ -340,7 +294,7 @@ def check_resume(
     if missing:
         raise IncompatibleArtifactsError(f"в checkpoint нет секций {missing}")
 
-    # Словарь, artifacts preprocessing и sidecar сессий это один
+    # Словарь и artifacts preprocessing это один
     # отпечаток: он покрывает и токенизацию, и ключи сессий.
     compare_artifacts(payload["artifacts"], artifacts)
 

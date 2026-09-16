@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import pytest
@@ -245,13 +244,13 @@ def test_missing_becomes_missing_token(tok_run, vocab):
 
     reject = left.column("app_screen__reject_reason").to_pylist()
 
-    key_id = vocab.key_id("app_screen", "reject_reason")
+    field_id = vocab.field_id("app_screen", "reject_reason")
 
     hits = 0
 
     for value, row in zip(reject, right.to_pylist()):
 
-        position = row["key_ids"].index(key_id)
+        position = row["field_ids"].index(field_id)
 
         if value is None:
             assert row["value_ids"][position] == MISSING_ID
@@ -266,7 +265,7 @@ def test_profile_block_missingness_is_visible(tok_run, vocab):
     profile = pq.read_table(tok_run["processed"] / "clients" / "train_clients" / "profile.parquet")
     tokens = pq.read_table(tok_run["tokenized"] / "clients" / "train_clients" / "profile.parquet")
 
-    key_id = vocab.key_id("profile", "income_type")
+    field_id = vocab.field_id("profile", "income_type")
 
     values = profile.column("income_type").to_pylist()
 
@@ -274,7 +273,7 @@ def test_profile_block_missingness_is_visible(tok_run, vocab):
 
     for value, row in zip(values, tokens.to_pylist()):
 
-        position = row["key_ids"].index(key_id)
+        position = row["field_ids"].index(field_id)
 
         if value is None:
             assert row["value_ids"][position] == MISSING_ID

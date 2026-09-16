@@ -8,18 +8,15 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timedelta
 
 import numpy as np
 import pytest
 import torch
 
-from src.tokenizer.config import EVT_ID, MASK_ID, USR_ID
-from src.tokenizer.dataset import Events, Example, Record, TokenizedDataset, collate
-from src.tokenizer.encode import encode_pairs
+from src.tokenizer.config import MASK_ID
+from src.tokenizer.dataset import TokenizedDataset, collate
 from src.tokenizer.masking import Masker, MaskingConfig
 from src.model.batching import BatchError, check_batch
-from src.model.config import ModelConfig
 from src.model.history_batching import (
     HistoryMeta,
     example_lengths,
@@ -30,83 +27,15 @@ from src.model.history_batching import (
     validate_history_batch,
 )
 
-from tests.test_tok_encode import toy_vocab
+from tests.helpers_data import build_example, synthetic_batch, toy_vocab
 
+from tests.helpers_model import toy_config
 
-BASE = datetime(2025, 1, 1)
-
-COLORS = ("red", "blue")
 
 
 # ============================================================
 # СИНТЕТИЧЕСКАЯ ИСТОРИЯ
 # ============================================================
-
-
-def toy_config(vocab=None) -> ModelConfig:
-    vocab = vocab or toy_vocab()
-    return ModelConfig(vocab_size=vocab.size, max_position_embeddings=16)
-
-
-def build_example(
-    vocab,
-    client_id: int,
-    hours: list[float],
-    cutoff_hours: float,
-    colors: list[str] | None = None,
-) -> Example:
-    """
-    Пример с событиями в заданные часы от базы.
-    """
-
-    colors = colors or [COLORS[index % len(COLORS)] for index in range(len(hours))]
-
-    records = [encode_pairs(vocab, [("toy__color", color)], EVT_ID) for color in colors]
-
-    widths = np.array([len(record.key_ids) for record in records], dtype=np.int64)
-
-    offsets = np.zeros(len(records) + 1, dtype=np.int64)
-    np.cumsum(widths, out=offsets[1:])
-
-    events = Events(
-        key_ids=np.concatenate([record.key_ids for record in records]),
-        value_ids=np.concatenate([record.value_ids for record in records]),
-        positions=np.concatenate([record.positions for record in records]),
-        offsets=offsets,
-        event_type=np.array(["toy"] * len(records), dtype=object),
-        ts=np.array([np.datetime64(BASE + timedelta(hours=h), "us") for h in hours]),
-        seq=np.arange(len(records), dtype=np.int64),
-    )
-
-    # Ключи профиля в реальном словаре никогда не predictable:
-    # берём toy__flag, иначе masker справедливо ругается.
-    profile = encode_pairs(vocab, [("toy__flag", True)], USR_ID)
-
-    return Example(
-        client_id=client_id,
-        cutoff=BASE + timedelta(hours=cutoff_hours),
-        dataset="toy",
-        client_group="train",
-        seq_end=len(records),
-        snapshot_ts=BASE - timedelta(hours=1),
-        profile=profile,
-        events=events,
-    )
-
-
-def synthetic_batch(histories: list[list[float]], cutoff_hours: float, sort: bool = True):
-    """
-    TokenBatch и metadata из списка историй, заданных часами.
-    """
-
-    vocab = toy_vocab()
-
-    examples = [
-        build_example(vocab, index, sorted(hours) if sort else hours, cutoff_hours)
-        for index, hours in enumerate(histories)
-    ]
-
-    return collate(examples), metadata_from_examples(examples)
 
 
 # ============================================================
@@ -311,10 +240,10 @@ def test_example_lengths_counts_every_example():
 # ============================================================
 
 
-def test_gap_of_the_first_kept_event_is_real():
+def test_age_of_the_kept_events_counts_to_cutoff():
     """
-    Временные признаки считаются по полной истории, поэтому у
-    первого оставшегося события gap не ноль.
+    Возраст считается до cutoff примера, а не до начала окна,
+    поэтому обрезка его не смещает.
     """
 
     batch, meta = synthetic_batch([[0, 2, 3, 8]], cutoff_hours=24)
@@ -322,7 +251,6 @@ def test_gap_of_the_first_kept_event_is_real():
     history = prepare_history_batch(batch, meta, max_events=2)
 
     assert history.info.kept_events.tolist() == [2, 3]
-    assert history.gap_hours.tolist() == [1.0, 5.0]
     assert history.age_hours.tolist() == [21.0, 16.0]
 
 
@@ -369,18 +297,16 @@ def test_targets_do_not_reach_the_model():
         "profiles",
         "example_of_event",
         "slot_of_event",
-        "time_hours",
         "used_history_length",
         "n_examples",
         "kept_events",
         "kept_tokens",
-        # Раскладка сессий: в прежней структуре обе пустые.
-        "standalone_rows",
-        "sessions",
+        # Признаки времени.
+        "temporal",
     }
 
-    assert inputs.standalone_rows is None
-    assert inputs.sessions is None
+    assert inputs.temporal is not None
+    assert inputs.temporal.event_coords.numel() == inputs.n_events
 
 
 # ============================================================
@@ -395,8 +321,8 @@ def test_model_inputs_shapes_and_types():
 
     inputs = to_model_inputs(history, toy_config())
 
-    assert inputs.time_hours.shape == (history.tokens.n_events, 2)
-    assert inputs.time_hours.dtype == torch.float32
+    assert inputs.temporal.event_coords.shape == (history.tokens.n_events,)
+    assert inputs.temporal.event_coords.dtype == torch.float32
     assert inputs.example_of_event.dtype == torch.long
     assert inputs.slot_of_event.dtype == torch.long
 
@@ -429,6 +355,5 @@ def test_real_batch_prepares(tok_run):
     history = prepare_history_batch(batch, meta, max_events=50)
 
     assert int(history.info.used_history_length.max()) <= 50
-    assert history.gap_hours.size == history.tokens.n_events
-    assert (history.gap_hours >= 0).all()
+    assert history.age_hours.size == history.tokens.n_events
     assert (history.age_hours > 0).all()

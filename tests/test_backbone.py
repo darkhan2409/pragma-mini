@@ -14,10 +14,10 @@ import pytest
 import torch
 
 from src.tokenizer.artifacts import Tokenizer
-from src.tokenizer.config import EVT_ID, MASK_ID, PAD_ID, USR_ID
+from src.tokenizer.config import MASK_ID, PAD_ID, USR_ID
 from src.tokenizer.dataset import TokenizedDataset, collate
 from src.model.batching import BatchError
-from src.model.config import ModelConfig, config_from_tokenizer
+from src.model.config import config_from_tokenizer
 from src.model.history_batching import (
     metadata_from_examples,
     prepare_history_batch,
@@ -25,11 +25,10 @@ from src.model.history_batching import (
 )
 from src.model.backbone import build_backbone
 from src.model.history_encoder import HistoryEncoder
-from src.model.time_encoding import sinusoidal_positions
 
-from tests.test_history_batching import build_example, synthetic_batch, toy_config
-from tests.test_model_encoders import random_names
-from tests.test_tok_encode import toy_vocab
+from tests.helpers_data import build_example, synthetic_batch, toy_vocab
+from tests.helpers_model import random_names, toy_config
+
 
 
 CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA недоступна")
@@ -129,10 +128,11 @@ def test_client_embedding_is_position_zero(config, backbone):
     torch.testing.assert_close(out.client_embedding, out.contextualized[:, 0])
 
 
-def test_profile_sits_at_position_zero_without_a_time_term(config, backbone):
+def test_profile_sits_at_position_zero(config, backbone):
     """
-    Первая позиция это выход Profile Encoder плюс позиционное
-    кодирование. Временного слагаемого у неё нет.
+    Первая позиция это выход Profile Encoder плюс простой
+    клиента. Выход FeatureMLP инициализирован нулём, поэтому на
+    свежей модели это ровно вектор профиля.
     """
 
     inputs = prepared([[0, 1, 2]], 24, 10, config)
@@ -144,9 +144,7 @@ def test_profile_sits_at_position_zero_without_a_time_term(config, backbone):
 
         x, mask = backbone.assemble(inputs, events, profiles)
 
-    expected = profiles + sinusoidal_positions(x.shape[1], config.d_model)[0]
-
-    torch.testing.assert_close(x[:, 0], expected)
+    torch.testing.assert_close(x[:, 0], profiles)
 
 
 def test_usr_is_not_re_embedded(config, backbone):
@@ -167,7 +165,7 @@ def test_usr_is_not_re_embedded(config, backbone):
         token = backbone.pair.embeddings.token.weight[USR_ID]
 
     assert not torch.allclose(x[0, 0], token)
-    torch.testing.assert_close(x[0, 0] - sinusoidal_positions(x.shape[1], config.d_model)[0], profiles[0])
+    torch.testing.assert_close(x[0, 0], profiles[0])
 
 
 # ============================================================
@@ -175,17 +173,39 @@ def test_usr_is_not_re_embedded(config, backbone):
 # ============================================================
 
 
-def test_age_changes_the_output(config, backbone):
+def test_age_reaches_the_model_through_the_idle_feature(config, backbone):
     """
     Те же интервалы между событиями, но история кончилась
-    сутки назад: клиент обязан выглядеть иначе.
+    сутки назад.
+
+    Координаты внутри истории относительны и у обоих примеров
+    одинаковы: [2, 1, 0] часа до последнего элемента. Возраст
+    несёт отдельный признак простоя, а выход его FeatureMLP
+    инициализирован нулём, поэтому на свежей модели разницы нет
+    по построению. Признак обязан быть разным, и как только у
+    слоя появляется ненулевой вес, разными становятся и выходы.
     """
 
     recent = prepared([[20, 21, 22]], 24, 10, config)
     stale = prepared([[0, 1, 2]], 24, 10, config)
 
-    a = run(backbone, recent)
-    b = run(backbone, stale)
+    assert not torch.allclose(recent.temporal.inactivity, stale.temporal.inactivity)
+
+    torch.testing.assert_close(
+        recent.temporal.event_coords, stale.temporal.event_coords
+    )
+
+    trained = build_backbone(config, seed=1).eval()
+
+    # Веса именно случайные: одинаковые дали бы один и тот же
+    # сдвиг по всем измерениям, а его финальный LayerNorm снимет.
+    with torch.no_grad():
+        trained.inactivity.output.weight.normal_(
+            0.0, 0.5, generator=torch.Generator().manual_seed(7)
+        )
+
+    a = run(trained, recent)
+    b = run(trained, stale)
 
     assert not torch.allclose(a.client_embedding, b.client_embedding)
 
@@ -200,19 +220,28 @@ def test_gap_changes_the_output(config, backbone):
     assert not torch.allclose(a.client_embedding, b.client_embedding)
 
 
-def test_time_projection_is_actually_used(config, backbone):
+def test_calendar_reaches_the_event_vectors(config, backbone):
+    """
+    Календарь события прибавляется к вектору события и не
+    трогает профиль.
+    """
+
     inputs = prepared([[0, 5, 10]], 24, 10, config)
+
+    model = build_backbone(config, seed=1).eval()
+
+    with torch.no_grad():
+        model.calendar.output.weight.fill_(0.05)
 
     with torch.no_grad():
 
-        events = backbone.pair.encode_events(inputs.events)
-        profiles = backbone.pair.encode_profiles(inputs.profiles)
+        events = model.pair.encode_events(inputs.events)
+        profiles = model.pair.encode_profiles(inputs.profiles)
 
-        x, _ = backbone.assemble(inputs, events, profiles)
+        calendared = events + model.calendar(inputs.temporal.calendar).to(events.dtype)
 
-        zeroed = replace(inputs, time_hours=torch.zeros_like(inputs.time_hours))
-
-        y, _ = backbone.assemble(zeroed, events, profiles)
+        x, _ = model.assemble(inputs, calendared, profiles)
+        y, _ = model.assemble(inputs, events, profiles)
 
     assert not torch.allclose(x[:, 1:], y[:, 1:])
     torch.testing.assert_close(x[:, 0], y[:, 0])
@@ -360,12 +389,20 @@ def test_history_differs_from_event_layers(backbone):
 # ============================================================
 
 
-def test_history_layers_carry_a_hook_and_event_layers_do_not(backbone):
+def test_history_layers_are_rotary_and_event_layers_are_plain(backbone):
+    """
+    У History Encoder слои свои: собственный forward поверх SDPA,
+    до которого fast path не доходит по построению. У Event
+    Encoder слои обычные, и там fast path полезен.
+    """
+
+    from src.model.rotary import RotaryHistoryLayer
+
     for layer in backbone.history.layers:
-        assert layer._forward_hooks, "у слоя History Encoder нет хука, fast path не отключён"
+        assert isinstance(layer, RotaryHistoryLayer)
 
     for layer in backbone.pair.event.layers:
-        assert not layer._forward_hooks
+        assert not isinstance(layer, RotaryHistoryLayer)
 
 
 def test_global_fastpath_flag_is_untouched(config, backbone):
@@ -385,14 +422,18 @@ def test_long_history_stays_within_memory(config):
 
     encoder = HistoryEncoder(config).cuda().eval()
 
-    x = torch.randn(4, 3637, config.d_model, device="cuda")
-    mask = torch.zeros(4, 3637, dtype=torch.bool, device="cuda")
+    length = 3637
+
+    x = torch.randn(4, length, config.d_model, device="cuda")
+    mask = torch.zeros(4, length, dtype=torch.bool, device="cuda")
     mask[:, 3000:] = True
+
+    coords = torch.zeros(4, length, device="cuda")
 
     torch.cuda.reset_peak_memory_stats()
 
     with torch.inference_mode():
-        out = encoder(x, mask)
+        out = encoder(x, mask, coords=coords)
 
     peak = torch.cuda.max_memory_allocated() / (1 << 20)
 
@@ -422,7 +463,7 @@ def test_gradients_reach_every_encoder(config):
         "event": backbone.pair.event.layers[0].linear1.weight,
         "profile": backbone.pair.profile.layers[0].linear1.weight,
         "history": backbone.history.layers[0].linear1.weight,
-        "time": backbone.time.linear.weight,
+        "calendar": backbone.calendar.output.weight,
     }
 
     for name, parameter in checked.items():
@@ -488,12 +529,27 @@ def test_microbatch_does_not_change_the_result(config, backbone):
 
 def test_history_rejects_a_wrong_mask(config, backbone):
     with pytest.raises(BatchError, match="не совпадает"):
-        backbone.history(torch.zeros(2, 3, config.d_model), torch.zeros(2, 4, dtype=torch.bool))
+        backbone.history(
+            torch.zeros(2, 3, config.d_model),
+            torch.zeros(2, 4, dtype=torch.bool),
+            coords=torch.zeros(2, 3),
+        )
 
 
 def test_history_rejects_a_fully_padded_example(config, backbone):
     with pytest.raises(BatchError, match="целиком из padding"):
-        backbone.history(torch.zeros(1, 3, config.d_model), torch.ones(1, 3, dtype=torch.bool))
+        backbone.history(
+            torch.zeros(1, 3, config.d_model),
+            torch.ones(1, 3, dtype=torch.bool),
+            coords=torch.zeros(1, 3),
+        )
+
+
+def test_history_rejects_missing_coordinates(config, backbone):
+    with pytest.raises(BatchError, match="координат времени"):
+        backbone.history(
+            torch.zeros(1, 3, config.d_model), torch.zeros(1, 3, dtype=torch.bool)
+        )
 
 
 # ============================================================
@@ -525,9 +581,11 @@ def test_history_encoder_alone_matches_closely(config):
     mask = torch.zeros(3, 200, dtype=torch.bool)
     mask[:, 150:] = True
 
+    coords = torch.rand(3, 200) * 100.0
+
     with torch.no_grad():
-        a = encoder(x, mask)
-        b = encoder.cuda()(x.cuda(), mask.cuda()).cpu()
+        a = encoder(x, mask, coords=coords)
+        b = encoder.cuda()(x.cuda(), mask.cuda(), coords=coords.cuda()).cpu()
 
     torch.testing.assert_close(a, b)
 

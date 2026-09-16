@@ -1,0 +1,159 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+
+# ============================================================
+# КАЛИБРОВОЧНЫЕ ЭТАЛОНЫ
+# ============================================================
+#
+# Метрика без реального эталона хранится со статусом
+# no_reference и пустым значением. Выдуманное точное число
+# здесь запрещено: отчёт обязан честно показать, что эталона
+# нет, а не сравнить генератор сам с собой.
+# ============================================================
+
+
+STATUS_REFERENCE = "reference"
+STATUS_HYPOTHESIS = "hypothesis"
+STATUS_NO_REFERENCE = "no_reference"
+
+STATUSES = (STATUS_REFERENCE, STATUS_HYPOTHESIS, STATUS_NO_REFERENCE)
+
+
+@dataclass(frozen=True)
+class CalibrationTarget:
+    metric: str
+    group: str
+    unit: str
+    status: str
+    value: float | None = None
+    low: float | None = None
+    high: float | None = None
+    source: str | None = None
+    period: str | None = None
+    geography: str | None = None
+    confidence: str = "low"
+    tolerance: float = 0.25
+    note: str = ""
+
+    def as_dict(self) -> dict:
+        return {
+            "metric": self.metric,
+            "group": self.group,
+            "unit": self.unit,
+            "status": self.status,
+            "value": self.value,
+            "low": self.low,
+            "high": self.high,
+            "source": self.source,
+            "period": self.period,
+            "geography": self.geography,
+            "confidence": self.confidence,
+            "tolerance": self.tolerance,
+            "note": self.note,
+        }
+
+
+def _reference(metric, group, unit, value, source, period, geography, confidence, tolerance=0.20, note=""):
+    return CalibrationTarget(metric, group, unit, STATUS_REFERENCE, value=value, source=source,
+                             period=period, geography=geography, confidence=confidence,
+                             tolerance=tolerance, note=note)
+
+
+def _hypothesis(metric, group, unit, low, high, note=""):
+    return CalibrationTarget(metric, group, unit, STATUS_HYPOTHESIS, low=low, high=high,
+                             source="план для генератора.txt, раздел 17.2", period=None,
+                             geography="KZ", confidence="low", note=note)
+
+
+def _absent(metric, group, unit, note=""):
+    return CalibrationTarget(metric, group, unit, STATUS_NO_REFERENCE, note=note)
+
+
+_BANK_REPORT = "Отчет по данным NBO/NBC/NBT pragmatiq, ред. 2026-09-07"
+_BANK_PERIOD = "2024-12-16 .. 2026-08-24"
+
+
+DEFAULT_TARGETS: tuple = (
+    # --- реальные якоря банка ---
+    _reference("communications_per_client_month", "channels", "events", 3.8,
+               _BANK_REPORT, _BANK_PERIOD, "KZ", "high", 0.25),
+    _reference("delivery_rate_call", "channels", "share", 0.062,
+               _BANK_REPORT, _BANK_PERIOD, "KZ", "high", 0.30),
+    _reference("delivery_rate_sms", "channels", "share", 0.813,
+               _BANK_REPORT, _BANK_PERIOD, "KZ", "high", 0.15),
+    _reference("delivery_rate_push", "channels", "share", 0.426,
+               _BANK_REPORT, _BANK_PERIOD, "KZ", "high", 0.30),
+    _reference("app_sessions_per_client_month", "activity", "events", 1.0,
+               _BANK_REPORT, _BANK_PERIOD, "KZ", "medium", 0.60,
+               note="покрытие GA4 в отчёте названо сомнительным"),
+    _reference("banner_ctr", "channels", "share", 0.0235,
+               _BANK_REPORT, _BANK_PERIOD, "KZ", "high", 0.40),
+    _reference("app_domain_share_auth", "activity", "share", 0.849,
+               _BANK_REPORT, _BANK_PERIOD, "KZ", "medium", 0.25),
+    _reference("app_domain_share_cards", "activity", "share", 0.601,
+               _BANK_REPORT, _BANK_PERIOD, "KZ", "medium", 0.25),
+    _reference("app_domain_share_transfers", "activity", "share", 0.509,
+               _BANK_REPORT, _BANK_PERIOD, "KZ", "medium", 0.25),
+    _reference("app_domain_share_loans", "activity", "share", 0.442,
+               _BANK_REPORT, _BANK_PERIOD, "KZ", "medium", 0.25),
+    _reference("app_domain_share_payments", "activity", "share", 0.296,
+               _BANK_REPORT, _BANK_PERIOD, "KZ", "medium", 0.25),
+
+    # --- рабочая гипотеза объёма из плана ---
+    _hypothesis("events_per_client_month_mean", "activity", "events", 65, 85),
+    _hypothesis("events_per_client_month_p10", "activity", "events", 0, 2),
+    _hypothesis("events_per_client_month_p25", "activity", "events", 3, 15),
+    _hypothesis("events_per_client_month_median", "activity", "events", 40, 65),
+    _hypothesis("events_per_client_month_p75", "activity", "events", 80, 130),
+    _hypothesis("events_per_client_month_p90", "activity", "events", 150, 220),
+    _hypothesis("events_per_client_month_p95", "activity", "events", 220, 300),
+    _hypothesis("events_per_client_month_p99", "activity", "events", 400, 600),
+    _hypothesis("zero_month_share", "zero_months", "share", 0.10, 0.15,
+                note="месяцы ВООБЩЕ без записей; полоса из плана, реального эталона нет"),
+    _absent("no_client_action_month_share", "zero_months", "share",
+            note="месяцы, где банк что-то записал, а клиент не делал ничего; "
+                 "показатель другой и полосу zero_month_share к нему применять нельзя"),
+    _hypothesis("segment_share_silent", "zero_months", "share", 0.10, 0.15),
+    _hypothesis("segment_share_sleepy", "activity", "share", 0.15, 0.20),
+    _hypothesis("segment_share_moderate", "activity", "share", 0.25, 0.30),
+    _hypothesis("segment_share_regular", "activity", "share", 0.25, 0.30),
+    _hypothesis("segment_share_high", "activity", "share", 0.08, 0.12),
+    _hypothesis("segment_share_extreme", "activity", "share", 0.01, 0.03),
+
+    # --- метрики без эталона ---
+    _absent("mcc_share_distribution", "mcc", "share", "нужна выгрузка транзакций банка"),
+    _absent("category_share_distribution", "mcc", "share", "нужна выгрузка транзакций банка"),
+    _absent("purchase_amount_quantiles", "amounts", "tenge", "нужна выгрузка транзакций банка"),
+    _absent("balance_quantiles", "amounts", "tenge", "нужны остатки по счетам"),
+    _absent("income_quantiles", "amounts", "tenge", "нужны зачисления зарплаты"),
+    _absent("online_share", "online_offline", "share", "нужен флаг e-commerce в выгрузке"),
+    _absent("hour_of_day_profile", "time", "share", "нужны часы операций"),
+    _absent("day_of_week_profile", "time", "share", "нужны даты операций"),
+    _absent("city_share_distribution", "cities", "share", "нужен город точки"),
+    _absent("product_penetration", "products", "share", "нужен реестр договоров"),
+    _absent("application_conversion", "products", "share", "нужна воронка заявок"),
+    _absent("dpd30_share", "dpd", "share", "нужна витрина просрочек"),
+    _absent("dpd90_share", "dpd", "share", "нужна витрина просрочек"),
+    _absent("pause_length_distribution", "pauses", "days", "нужна помесячная активность клиентов"),
+    _absent("return_after_pause_share", "pauses", "share", "нужна помесячная активность клиентов"),
+    _absent("source_delay_distribution", "defects", "minutes", "нужны record_time хранилища"),
+    _absent("duplicate_share", "defects", "share", "нужны технические дубли хранилища"),
+    _absent("correction_share", "defects", "share", "нужны версии записей хранилища"),
+)
+
+
+@dataclass(frozen=True)
+class CalibrationParams:
+
+    targets: tuple = DEFAULT_TARGETS
+
+    def by_group(self) -> dict:
+        grouped: dict = {}
+        for target in self.targets:
+            grouped.setdefault(target.group, []).append(target)
+        return grouped
+
+    def as_list(self) -> list:
+        return [target.as_dict() for target in self.targets]

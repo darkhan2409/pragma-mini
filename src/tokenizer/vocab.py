@@ -36,6 +36,17 @@ from .config import (
     VALUE_VOCAB_FILE,
     IncompatibleArtifactsError,
 )
+from .semantics import (
+    DEFAULT_KEY_MODE,
+    DEFAULT_VALUE_MODE,
+    check_mode,
+    is_baseline,
+    registry_digest,
+    semantic_key_name,
+    shares_values,
+    validate_registry,
+    value_class,
+)
 
 
 # ============================================================
@@ -48,35 +59,63 @@ from .config import (
 # записи в нескольких cutoff-примерах не увеличивает её частоту:
 # fit-набор это префикс ленты клиента, а не объединение историй.
 #
-# Порядок ID не зависит от частот: ключи идут в порядке реестра
-# preprocessing, значения внутри ключа по возрастанию самого
-# значения. Значит value-ID одного ключа образуют непрерывный
-# диапазон [value_start, value_end), а local = global - start.
+# ДВА ПРОСТРАНСТВА, КОТОРЫЕ НЕЛЬЗЯ ПУТАТЬ
+#
+#   field_id   идентичность физического поля. Индекс в реестре
+#              preprocessing, 0..n_fields-1, ОДИН И ТОТ ЖЕ во
+#              всех режимах. По нему живут кандидаты, маски,
+#              predictable, корзины, unigram и все отчёты.
+#
+#   token_id   идентификатор токена в словаре ЭТОГО режима.
+#              Только embedding lookup. В semantic-режиме два
+#              поля могут нести один key token, в shared —
+#              одинаковое значение из разных полей один value
+#              token.
+#
+# Раскладка token_id:
+#
+#   [0, 6)                      special
+#   [6, 6 + n_key_tokens)       key tokens
+#   [6 + n_key_tokens, size)    value tokens
+#
+# Порядок не зависит от частот: поля идут в порядке реестра,
+# значения внутри поля по возрастанию самого значения, а новый
+# token выдаётся на первое появление класса склейки.
+#
+# Локальный индекс кандидата это позиция в ТИПИЗИРОВАННОМ
+# порядке значений своего поля. У numeric он равен номеру
+# корзины — на этом держится совпадение с unigram_baselines.
+# Поэтому в field_value_ids кандидаты лежат в порядке поля, а
+# не по возрастанию token_id: в shared-режиме это разные вещи.
 # ============================================================
 
 
 KEY_FORMAT = "{namespace}__{field}"
 
 ORDER_RULES = {
-    "ids": "сначала special, затем ключи, затем значения",
-    "keys": "порядок реестра preprocessing: timeline.event_type, поля событий по EVENT_TYPES, затем profile",
+    "ids": "сначала special, затем key tokens, затем value tokens",
+    "fields": "порядок реестра preprocessing: timeline.event_type, поля событий по EVENT_TYPES, затем profile",
+    "key_tokens": "по первому появлению: физический ключ либо имя семантической группы",
     "values": {
         "numeric": "корзины 0..actual_bucket_count-1 из bucket_edges.json по возрастанию",
         "boolean": "false, затем true (среди встреченных на train)",
         "categorical": "по возрастанию типизированного значения: целые численно, строки по кодпоинтам",
     },
+    "value_tokens": "token выдаётся на первое появление класса склейки при обходе полей в порядке реестра",
+    "local_index": "позиция в типизированном порядке значений своего поля, не позиция token_id",
     "frequency": "count хранится рядом со значением, но на порядок ID не влияет",
     "repeated_keys": "повторяющиеся ключи внутри события сохраняют исходный порядок значений (стабильная сортировка)",
     "unknown_key": "пара с ключом вне реестра ставится после известных полей, в порядке ввода",
 }
 
 VALUE_RULES = {
-    "missing": "null значение -> [MISSING] в value_ids; key_id при этом настоящий ключ поля",
+    "missing": "null значение -> [MISSING] в value_ids; field_id и key token при этом настоящие",
     "unknown": "непустое значение вне frozen vocab -> [UNK]; словарь не расширяется",
     "numeric": "numeric берётся уже bucketized из preprocessing: значение это номер корзины",
     "no_bpe": "остальные значения кодируются целиком, без BPE",
-    "metadata": "metadata (client_id, ts, seq, session_id, snapshot_month, payload) в словарь не входит",
+    "metadata": "metadata (client_id, ts, seq, snapshot_month, payload) в словарь не входит",
     "special_position": "[EVT], [USR] и неизвестный ключ несут один и тот же special ID в key_ids и в value_ids",
+    "membership": "принадлежность значения полю живёт в field_value_ids, а не в записи токена: один token может принадлежать нескольким полям",
 }
 
 
@@ -92,80 +131,202 @@ ARROW_TYPES: dict[str, pa.DataType] = {
 
 
 # ============================================================
+# ПРОСТРАНСТВО ПОЛЕЙ
+# ============================================================
+#
+# Оно не зависит ни от режима, ни от данных: это реестр
+# preprocessing. Специальная позиция ([EVT], [USR], неизвестный
+# ключ) поля не имеет и несёт сентинел NO_FIELD.
+#
+# Сентинел это n_fields, а не -1: массивы по полю имеют длину
+# n_fields + 1 с ложью в последней строке, и отрицательный
+# индекс никуда не уезжает.
+# ============================================================
+
+
+def key_specs() -> list[FieldSpec]:
+    """
+    Поля словаря: все содержательные поля реестра, metadata нет.
+    """
+
+    return list(feature_specs())
+
+
+N_FIELDS: int = len(key_specs())
+
+NO_FIELD: int = N_FIELDS
+
+FIELD_ID_RULE = (
+    "field_id это индекс поля в реестре preprocessing, одинаковый во всех режимах; "
+    f"NO_FIELD = {NO_FIELD} у специальных позиций"
+)
+
+
+# ============================================================
 # ЗАПИСИ СЛОВАРЯ
+# ============================================================
+#
+# Три вида записей, и путать их нельзя:
+#
+#   FieldEntry  одна на ФИЗИЧЕСКОЕ ПОЛЕ (их всегда n_fields)
+#   KeyToken    одна на key token (их 57 или 47)
+#   ValueEntry  одна на value token
+#
+# Принадлежность значения полю это отношение «многие ко многим»,
+# поэтому у ValueEntry нет field_id. Порядок кандидатов внутри
+# поля живёт в FieldEntry.candidates и в field_value_ids.json:
+# множество порядка не несёт, а локальный индекс от него зависит.
 # ============================================================
 
 
 @dataclass(frozen=True)
-class KeyEntry:
-    id: int
+class FieldEntry:
+    field_id: int
     key: str
     namespace: str
     field: str
     kind: str
     predictable: bool
     arrow_type: str
-    value_start: int
-    value_end: int
+    key_token_id: int
+    candidates: tuple[int, ...]
 
     @property
     def n_values(self) -> int:
-        return self.value_end - self.value_start
+        return len(self.candidates)
+
+    @property
+    def is_contiguous(self) -> bool:
+        """
+        Кандидаты поля идут подряд по token_id.
+
+        В baseline это верно всегда, в shared — только у полей,
+        ни одного значения которых не забрал кто-то раньше.
+        Numeric обязан быть непрерывным: на этом стоит
+        арифметическое кодирование корзин.
+        """
+
+        if not self.candidates:
+            return True
+
+        start = self.candidates[0]
+
+        return tuple(range(start, start + len(self.candidates))) == self.candidates
+
+    @property
+    def value_start(self) -> int:
+        return self.candidates[0] if (self.candidates and self.is_contiguous) else -1
+
+    @property
+    def value_end(self) -> int:
+        start = self.value_start
+        return -1 if start < 0 else start + len(self.candidates)
 
     def to_json(self) -> dict:
         return {
-            "id": self.id,
+            "id": self.key_token_id,
+            "field_id": self.field_id,
             "key": self.key,
+            "key_token_id": self.key_token_id,
             "namespace": self.namespace,
             "field": self.field,
             "kind": self.kind,
             "predictable": self.predictable,
             "arrow_type": self.arrow_type,
+            "n_values": self.n_values,
+            "contiguous": self.is_contiguous,
             "value_start": self.value_start,
             "value_end": self.value_end,
-            "n_values": self.n_values,
+            "candidates": list(self.candidates),
         }
 
     @staticmethod
-    def from_json(data: dict) -> "KeyEntry":
-        return KeyEntry(
-            id=int(data["id"]),
+    def from_json(data: dict) -> "FieldEntry":
+        return FieldEntry(
+            field_id=int(data["field_id"]),
             key=data["key"],
             namespace=data["namespace"],
             field=data["field"],
             kind=data["kind"],
             predictable=bool(data["predictable"]),
             arrow_type=data["arrow_type"],
-            value_start=int(data["value_start"]),
-            value_end=int(data["value_end"]),
+            key_token_id=int(data["key_token_id"]),
+            candidates=tuple(int(value) for value in data["candidates"]),
+        )
+
+
+@dataclass(frozen=True)
+class KeyToken:
+    token_id: int
+    name: str
+    fields: tuple[int, ...]
+
+    @property
+    def shared(self) -> bool:
+        return len(self.fields) > 1
+
+    def to_json(self) -> dict:
+        return {
+            "token_id": self.token_id,
+            "name": self.name,
+            "shared": self.shared,
+            "fields": list(self.fields),
+        }
+
+    @staticmethod
+    def from_json(data: dict) -> "KeyToken":
+        return KeyToken(
+            token_id=int(data["token_id"]),
+            name=data["name"],
+            fields=tuple(int(value) for value in data["fields"]),
         )
 
 
 @dataclass(frozen=True)
 class ValueEntry:
-    id: int
-    key_id: int
-    key: str
-    value: str
-    count: int
+    """
+    Одна запись на value token.
 
-    def to_json(self) -> dict:
-        return {
+    field_id здесь НЕТ намеренно: общий токен принадлежит
+    нескольким полям. fields это производная принадлежность для
+    отчётов; авторитет по составу и порядку кандидатов —
+    field_value_ids / CandidateIndex.
+    """
+
+    id: int
+    value: str
+    arrow_type: str
+    shared: bool
+    count: int
+    fields: tuple[int, ...]
+
+    def to_json(self, owner: dict[int, str] | None = None) -> dict:
+
+        data = {
             "id": self.id,
-            "key_id": self.key_id,
-            "key": self.key,
             "value": self.value,
+            "arrow_type": self.arrow_type,
+            "shared": self.shared,
             "count": self.count,
+            "fields": list(self.fields),
         }
+
+        # У токена ровно одного владельца имя поля пишется
+        # рядом: так читается и baseline-словарь, и отчёт.
+        if owner is not None and len(self.fields) == 1:
+            data["key"] = owner[self.fields[0]]
+
+        return data
 
     @staticmethod
     def from_json(data: dict) -> "ValueEntry":
         return ValueEntry(
             id=int(data["id"]),
-            key_id=int(data["key_id"]),
-            key=data["key"],
             value=data["value"],
+            arrow_type=data["arrow_type"],
+            shared=bool(data["shared"]),
             count=int(data["count"]),
+            fields=tuple(int(value) for value in data["fields"]),
         )
 
 
@@ -193,73 +354,194 @@ def parse_value(kind: str, arrow_type: str, text: str) -> Any:
 
 class Vocab:
     """
-    Frozen словарь: special-токены, ключи полей и значения в
-    едином пространстве ID.
+    Frozen словарь одного режима: special-токены, key tokens и
+    value tokens в едином пространстве ID, плюс пространство
+    полей, которое от режима не зависит.
     """
 
-    def __init__(self, keys: Iterable[KeyEntry], values: Iterable[ValueEntry]):
+    def __init__(
+        self,
+        fields: Iterable[FieldEntry],
+        key_tokens: Iterable[KeyToken],
+        values: Iterable[ValueEntry],
+        key_mode: str = DEFAULT_KEY_MODE,
+        value_mode: str = DEFAULT_VALUE_MODE,
+    ):
 
-        self.specials: dict[str, int] = dict(SPECIAL_IDS)
+        check_mode(key_mode, value_mode)
 
-        self.keys: tuple[KeyEntry, ...] = tuple(keys)
+        self.key_mode = key_mode
+        self.value_mode = value_mode
+
+
+        self.fields: tuple[FieldEntry, ...] = tuple(fields)
+        self.key_tokens: tuple[KeyToken, ...] = tuple(key_tokens)
         self.values: tuple[ValueEntry, ...] = tuple(values)
 
-        self._by_key_name: dict[str, KeyEntry] = {entry.key: entry for entry in self.keys}
-        self._by_key_id: dict[int, KeyEntry] = {entry.id: entry for entry in self.keys}
+        self._by_key_name: dict[str, FieldEntry] = {entry.key: entry for entry in self.fields}
+        self._by_field_id: dict[int, FieldEntry] = {entry.field_id: entry for entry in self.fields}
+        self._by_key_token: dict[int, KeyToken] = {token.token_id: token for token in self.key_tokens}
 
-        self._value_id: dict[tuple[int, str], int] = {
-            (entry.key_id, entry.value): entry.id for entry in self.values
-        }
+        self._value_token: dict[tuple[int, str], int] = {}
+
+        for entry in self.fields:
+            for token, value in zip(entry.candidates, self._value_strings(entry)):
+                self._value_token[(entry.field_id, value)] = token
 
         self._check_layout()
 
         self._typed_cache: dict[int, pa.Array] = {}
 
+        self._build_tables()
+
+    # --------------------------------------------------------
+
+    def _value_strings(self, entry: FieldEntry) -> list[str]:
+        """
+        Строки значений поля в порядке кандидатов.
+        """
+
+        first = self.first_value_id
+
+        return [self.values[token - first].value for token in entry.candidates]
+
+    def _build_tables(self) -> None:
+        """
+        Плотные таблицы для горячих путей.
+
+        local_lookup это [n_fields + 1, size] int32, -1 значит
+        «значение не кандидат этого поля». Ради него всё и
+        затевалось: «домены полей не смешиваются» становится
+        данными, а не рассуждением, и проверка стоит одно
+        индексирование.
+
+        Граница применимости: на реальных HCB с сотнями полей и
+        десятками тысяч значений таблицу придётся сделать
+        разреженной. При 57 полях и 738 токенах это 171 КБ.
+        """
+
         size = self.size
+        rows = N_FIELDS + 1
 
-        self.predictable_by_id = np.zeros(size, dtype=bool)
-        self.value_start_by_id = np.full(size, -1, dtype=np.int64)
-        self.n_candidates_by_id = np.zeros(size, dtype=np.int64)
+        self.predictable_by_field = np.zeros(rows, dtype=bool)
+        self.n_candidates_by_field = np.zeros(rows, dtype=np.int64)
+        self.key_token_by_field = np.zeros(rows, dtype=np.int64)
 
-        for entry in self.keys:
-            self.predictable_by_id[entry.id] = entry.predictable
-            self.value_start_by_id[entry.id] = entry.value_start
-            self.n_candidates_by_id[entry.id] = entry.n_values
+        # Специальная позиция поля не имеет: key token у неё
+        # свой собственный special ID, он приходит в потоке.
+        self.key_token_by_field[NO_FIELD] = SPECIAL_IDS["[UNK]"]
+
+        self.local_lookup = np.full((rows, size), -1, dtype=np.int32)
+
+        offsets = np.zeros(rows + 1, dtype=np.int64)
+        flat: list[int] = []
+
+        for entry in self.fields:
+
+            field_id = entry.field_id
+
+            self.predictable_by_field[field_id] = entry.predictable
+            self.n_candidates_by_field[field_id] = entry.n_values
+            self.key_token_by_field[field_id] = entry.key_token_id
+
+            for local, token in enumerate(entry.candidates):
+                self.local_lookup[field_id, token] = local
+
+            flat.extend(entry.candidates)
+            offsets[field_id + 1] = len(flat)
+
+        offsets[NO_FIELD + 1] = len(flat)
+
+        self.candidate_offsets = offsets
+        self.candidates_flat = np.asarray(flat, dtype=np.int64)
 
     # --------------------------------------------------------
 
     def _check_layout(self) -> None:
         """
-        ID непрерывны и сгруппированы: special, ключи, значения.
+        ID непрерывны и сгруппированы, кандидаты покрывают все
+        value token ровно один раз.
         """
 
-        for index, entry in enumerate(self.keys):
-            if entry.id != N_SPECIAL + index:
+        # Полнота реестра здесь НЕ проверяется: build_vocab
+        # строит поля по key_specs() и иначе не умеет, а тесты
+        # законно собирают крошечные словари из трёх полей.
+        # Сверку с реестром делает FieldTable.load по
+        # field_value_ids.json.
+        if len(self.fields) > N_FIELDS:
+            raise IncompatibleArtifactsError(
+                f"полей в словаре {len(self.fields)}, а в реестре preprocessing их {N_FIELDS}"
+            )
+
+        for index, entry in enumerate(self.fields):
+            if entry.field_id != index:
                 raise IncompatibleArtifactsError(
-                    f"ключ {entry.key} имеет ID {entry.id}, ожидался {N_SPECIAL + index}"
+                    f"поле {entry.key} имеет field_id {entry.field_id}, ожидался {index}"
                 )
 
-        expected = self.first_value_id
-
-        for entry in self.keys:
-            if entry.value_start != expected or entry.value_end < entry.value_start:
+        for index, token in enumerate(self.key_tokens):
+            if token.token_id != N_SPECIAL + index:
                 raise IncompatibleArtifactsError(
-                    f"диапазон значений ключа {entry.key} разрывен: {entry.value_start}..{entry.value_end}"
+                    f"key token {token.name} имеет ID {token.token_id}, ожидался {N_SPECIAL + index}"
                 )
-            expected = entry.value_end
 
-        if expected != self.size:
-            raise IncompatibleArtifactsError("диапазоны значений не покрывают словарь целиком")
+        first = self.first_value_id
+
+        for entry in self.fields:
+
+            token = self._by_key_token.get(entry.key_token_id)
+
+            if token is None:
+                raise IncompatibleArtifactsError(
+                    f"поле {entry.key} ссылается на key token {entry.key_token_id}, которого нет"
+                )
+
+            if entry.field_id not in token.fields:
+                raise IncompatibleArtifactsError(
+                    f"key token {token.name} не числит среди своих полей {entry.key}"
+                )
+
+            if len(set(entry.candidates)) != len(entry.candidates):
+                raise IncompatibleArtifactsError(
+                    f"поле {entry.key} дважды называет один и тот же value token"
+                )
+
+            for candidate in entry.candidates:
+                if not (first <= candidate < self.size):
+                    raise IncompatibleArtifactsError(
+                        f"кандидат {candidate} поля {entry.key} вне диапазона значений "
+                        f"[{first}, {self.size})"
+                    )
+
+            # Корзины кодируются арифметикой, поэтому numeric
+            # обязан остаться непрерывным в любом режиме.
+            if entry.kind == KIND_NUMERIC and not entry.is_contiguous:
+                raise IncompatibleArtifactsError(
+                    f"numeric-поле {entry.key} получило разрывный набор корзин: "
+                    "корзины не делятся между полями ни в одном режиме"
+                )
 
         for index, entry in enumerate(self.values):
-            if entry.id != self.first_value_id + index:
+            if entry.id != first + index:
                 raise IncompatibleArtifactsError(f"значение {entry.value} имеет разрывный ID {entry.id}")
+
+        covered = {token for entry in self.fields for token in entry.candidates}
+
+        if len(covered) != self.n_values:
+            missing = sorted(set(range(first, self.size)) - covered)
+            raise IncompatibleArtifactsError(
+                f"value token без владельца: {missing[:8]}; кандидаты полей обязаны покрывать словарь"
+            )
 
     # --------------------------------------------------------
 
     @property
-    def n_keys(self) -> int:
-        return len(self.keys)
+    def n_fields(self) -> int:
+        return len(self.fields)
+
+    @property
+    def n_key_tokens(self) -> int:
+        return len(self.key_tokens)
 
     @property
     def n_values(self) -> int:
@@ -267,39 +549,61 @@ class Vocab:
 
     @property
     def first_value_id(self) -> int:
-        return N_SPECIAL + self.n_keys
+        return N_SPECIAL + self.n_key_tokens
 
     @property
     def size(self) -> int:
-        return N_SPECIAL + self.n_keys + self.n_values
+        return N_SPECIAL + self.n_key_tokens + self.n_values
+
+    @property
+    def is_baseline(self) -> bool:
+        return is_baseline(self.key_mode, self.value_mode)
+
+    @property
+    def modes(self) -> dict[str, str]:
+        return {"key_mode": self.key_mode, "categorical_value_mode": self.value_mode}
 
     # --------------------------------------------------------
 
-    def key_entry(self, key: str) -> KeyEntry | None:
+    def field_entry(self, key: str) -> FieldEntry | None:
         return self._by_key_name.get(key)
 
-    def key_entry_by_id(self, key_id: int) -> KeyEntry | None:
-        return self._by_key_id.get(key_id)
+    def field_entry_by_id(self, field_id: int) -> FieldEntry | None:
+        return self._by_field_id.get(int(field_id))
 
-    def key_id(self, namespace: str, field: str) -> int | None:
+    def field_id(self, namespace: str, field: str) -> int | None:
         entry = self._by_key_name.get(KEY_FORMAT.format(namespace=namespace, field=field))
-        return None if entry is None else entry.id
+        return None if entry is None else entry.field_id
 
-    def value_id(self, key_id: int, value: str) -> int | None:
-        return self._value_id.get((key_id, value))
+    def key_token_id(self, namespace: str, field: str) -> int | None:
+        entry = self._by_key_name.get(KEY_FORMAT.format(namespace=namespace, field=field))
+        return None if entry is None else entry.key_token_id
+
+    def value_token(self, field_id: int, value: str) -> int | None:
+        """
+        Токен значения ВНУТРИ поля.
+
+        Ключ поиска это поле, а не key token: в semantic-режиме
+        два поля делят key token, но множества значений у них
+        по-прежнему свои.
+        """
+
+        return self._value_token.get((int(field_id), value))
 
     def decode(self, token_id: int) -> str:
         """
         Человекочитаемое имя токена: для отчётов и golden-векторов.
         """
 
+        token_id = int(token_id)
+
         if 0 <= token_id < N_SPECIAL:
             return SPECIAL_TOKENS[token_id]
 
-        entry = self._by_key_id.get(token_id)
+        token = self._by_key_token.get(token_id)
 
-        if entry is not None:
-            return entry.key
+        if token is not None:
+            return token.name
 
         index = token_id - self.first_value_id
 
@@ -308,32 +612,33 @@ class Vocab:
 
         raise KeyError(f"ID {token_id} вне словаря")
 
-    def typed_values(self, key_id: int) -> pa.Array:
+    def typed_values(self, field_id: int) -> pa.Array:
         """
-        Значения ключа в типе исходного поля: для pc.index_in.
+        Значения поля в типе исходного поля, в порядке
+        кандидатов: для pc.index_in.
+
         Для numeric не используется: там колонка __bucket.
         """
 
-        cached = self._typed_cache.get(key_id)
+        field_id = int(field_id)
+
+        cached = self._typed_cache.get(field_id)
 
         if cached is not None:
             return cached
 
-        entry = self._by_key_id[key_id]
+        entry = self._by_field_id[field_id]
 
         arrow_type = ARROW_TYPES.get(entry.arrow_type, pa.string())
 
-        low = entry.value_start - self.first_value_id
-        high = entry.value_end - self.first_value_id
-
         parsed = [
-            parse_value(entry.kind, entry.arrow_type, value.value)
-            for value in self.values[low:high]
+            parse_value(entry.kind, entry.arrow_type, value)
+            for value in self._value_strings(entry)
         ]
 
         array = pa.array(parsed, type=arrow_type)
 
-        self._typed_cache[key_id] = array
+        self._typed_cache[field_id] = array
 
         return array
 
@@ -342,29 +647,70 @@ class Vocab:
     def field_value_ids(self) -> dict:
         return {
             "rule": (
-                "поле -> отсортированные допустимые value ID; numeric это все корзины train-artifact, "
-                "остальные поля это значения, встреченные на train; special токены в кандидаты не входят"
+                "поле -> допустимые value token в ПОРЯДКЕ ПОЛЯ (типизированном), а не по возрастанию токена: "
+                "локальный индекс кандидата это позиция в этом списке, у numeric он равен номеру корзины. "
+                "numeric это все корзины train-artifact, остальные поля это значения, встреченные на train; "
+                "special токены в кандидаты не входят"
             ),
+            "field_id_rule": FIELD_ID_RULE,
+            "modes": self.modes,
             "fields": {
                 entry.key: {
-                    "key_id": entry.id,
+                    "field_id": entry.field_id,
+                    "key_token_id": entry.key_token_id,
                     "kind": entry.kind,
                     "predictable": entry.predictable,
                     "n_candidates": entry.n_values,
-                    "value_ids": list(range(entry.value_start, entry.value_end)),
+                    "value_ids": list(entry.candidates),
                 }
-                for entry in self.keys
+                for entry in self.fields
             },
         }
 
     def candidates(self) -> "CandidateIndex":
         return CandidateIndex(self)
 
+    def sharing_report(self) -> dict:
+        """
+        Что именно склеилось: для artifacts и для отчёта.
+        """
+
+        key_groups = [
+            {"token_id": token.token_id, "name": token.name, "keys": [self.fields[f].key for f in token.fields]}
+            for token in self.key_tokens
+            if token.shared
+        ]
+
+        value_groups = [
+            {
+                "token_id": entry.id,
+                "value": entry.value,
+                "arrow_type": entry.arrow_type,
+                "keys": [self.fields[f].key for f in entry.fields],
+            }
+            for entry in self.values
+            if len(entry.fields) > 1
+        ]
+
+        return {
+            "modes": self.modes,
+            "n_fields": self.n_fields,
+            "n_key_tokens": self.n_key_tokens,
+            "n_value_tokens": self.n_values,
+            "size": self.size,
+            "n_merged_key_tokens": len(key_groups),
+            "n_merged_value_tokens": len(value_groups),
+            "merged_keys": key_groups,
+            "merged_values": value_groups,
+        }
+
     # --------------------------------------------------------
 
     def save(self, directory: Path) -> None:
 
         directory = Path(directory)
+
+        owner = {entry.field_id: entry.key for entry in self.fields}
 
         write_json(
             directory / SPECIAL_TOKENS_FILE,
@@ -384,8 +730,12 @@ class Vocab:
                 "schema_version": SCHEMA_VERSION,
                 "key_format": KEY_FORMAT,
                 "first_key_id": N_SPECIAL,
-                "n_keys": self.n_keys,
-                "keys": [entry.to_json() for entry in self.keys],
+                "modes": self.modes,
+                "field_id_rule": FIELD_ID_RULE,
+                "n_fields": self.n_fields,
+                "n_keys": self.n_key_tokens,
+                "keys": [entry.to_json() for entry in self.fields],
+                "key_tokens": [token.to_json() for token in self.key_tokens],
             },
         )
 
@@ -395,7 +745,8 @@ class Vocab:
                 "schema_version": SCHEMA_VERSION,
                 "first_value_id": self.first_value_id,
                 "n_values": self.n_values,
-                "values": [entry.to_json() for entry in self.values],
+                "modes": self.modes,
+                "values": [entry.to_json(owner) for entry in self.values],
             },
         )
 
@@ -414,30 +765,52 @@ class Vocab:
         keys = read_json(directory / KEY_VOCAB_FILE)
         values = read_json(directory / VALUE_VOCAB_FILE)
 
+        modes = keys["modes"]
+
         return Vocab(
-            keys=[KeyEntry.from_json(item) for item in keys["keys"]],
+            fields=[FieldEntry.from_json(item) for item in keys["keys"]],
+            key_tokens=[KeyToken.from_json(item) for item in keys["key_tokens"]],
             values=[ValueEntry.from_json(item) for item in values["values"]],
+            key_mode=modes["key_mode"],
+            value_mode=modes["categorical_value_mode"],
         )
 
 
 class CandidateIndex:
     """
-    Перевод между глобальным value ID и локальным индексом
-    кандидата внутри поля.
+    Перевод между value token и локальным индексом кандидата
+    внутри ПОЛЯ.
+
+    Локальный индекс это позиция в типизированном порядке поля.
+    Вычитанием смещения он больше не выражается: в shared-режиме
+    кандидаты поля не обязаны идти подряд.
     """
 
     def __init__(self, vocab: Vocab):
-        self.value_start = vocab.value_start_by_id
-        self.n_candidates = vocab.n_candidates_by_id
+        self.local_lookup = vocab.local_lookup
+        self.n_candidates = vocab.n_candidates_by_field
+        self.offsets = vocab.candidate_offsets
+        self.flat = vocab.candidates_flat
 
-    def to_local(self, key_ids, value_ids) -> np.ndarray:
-        return np.asarray(value_ids, dtype=np.int64) - self.value_start[np.asarray(key_ids, dtype=np.int64)]
+    def to_local(self, field_ids, value_ids) -> np.ndarray:
+        """
+        -1 означает «значение не кандидат этого поля». Решение о
+        том, ошибка это или нет, принимает вызывающий.
+        """
 
-    def to_global(self, key_ids, local) -> np.ndarray:
-        return np.asarray(local, dtype=np.int64) + self.value_start[np.asarray(key_ids, dtype=np.int64)]
+        fields = np.asarray(field_ids, dtype=np.int64)
+        values = np.asarray(value_ids, dtype=np.int64)
 
-    def size_of(self, key_ids) -> np.ndarray:
-        return self.n_candidates[np.asarray(key_ids, dtype=np.int64)]
+        return self.local_lookup[fields, values].astype(np.int64)
+
+    def to_global(self, field_ids, local) -> np.ndarray:
+        fields = np.asarray(field_ids, dtype=np.int64)
+        index = np.asarray(local, dtype=np.int64)
+
+        return self.flat[self.offsets[fields] + index]
+
+    def size_of(self, field_ids) -> np.ndarray:
+        return self.n_candidates[np.asarray(field_ids, dtype=np.int64)]
 
 
 # ============================================================
@@ -460,14 +833,6 @@ def profile_column(spec: FieldSpec) -> str:
     return f"{spec.field}__bucket" if spec.is_numeric else spec.field
 
 
-def key_specs() -> list[FieldSpec]:
-    """
-    Ключи словаря: все содержательные поля реестра, metadata нет.
-    """
-
-    return list(feature_specs())
-
-
 def event_key_specs() -> list[FieldSpec]:
     return [spec for spec in key_specs() if spec.namespace != "profile"]
 
@@ -478,6 +843,14 @@ def profile_key_specs() -> list[FieldSpec]:
     specs = [spec for spec in key_specs() if spec.namespace == "profile"]
 
     return sorted(specs, key=lambda spec: order[spec.field])
+
+
+def field_ids_by_key() -> dict[str, int]:
+    """
+    Физическое имя поля -> field_id. Не зависит от режима.
+    """
+
+    return {spec.column: index for index, spec in enumerate(key_specs())}
 
 
 # ============================================================
@@ -643,7 +1016,11 @@ def count_profile(processed_dir: Path, scope: FitScope) -> tuple[dict[tuple[str,
 
 def _ordered_values(spec: FieldSpec, counter: Counter, bucket_count: int | None) -> list[tuple[str, int]]:
     """
-    Значения ключа в порядке назначения ID.
+    Значения поля в типизированном порядке.
+
+    Это и есть порядок локальных индексов: у numeric он совпадает
+    с номером корзины, у остального — с возрастанием значения.
+    Выдача token_id идёт поверх него и порядок не меняет.
     """
 
     if spec.kind == KIND_NUMERIC:
@@ -667,51 +1044,156 @@ def _ordered_values(spec: FieldSpec, counter: Counter, bucket_count: int | None)
 def build_vocab(
     counters: dict[tuple[str, str], Counter],
     bucket_counts: dict[tuple[str, str], int | None],
+    key_mode: str = DEFAULT_KEY_MODE,
+    value_mode: str = DEFAULT_VALUE_MODE,
 ) -> Vocab:
+    """
+    Словарь режима из счётчиков train.
 
-    keys: list[KeyEntry] = []
-    values: list[ValueEntry] = []
+    Счётчики одни и те же для всех четырёх режимов: они считаются
+    по ПОЛЯМ, а склейка касается только выдачи token_id. Поэтому
+    один проход по данным даёт сразу четыре словаря.
+    """
+
+    check_mode(key_mode, value_mode)
 
     specs = key_specs()
 
-    next_value_id = N_SPECIAL + len(specs)
+    validate_registry(spec.column for spec in specs)
 
-    for index, spec in enumerate(specs):
+    # ---- key tokens -------------------------------------------------
 
-        key_id = N_SPECIAL + index
+    token_of_name: dict[str, int] = {}
+    members: list[list[int]] = []
+    names: list[str] = []
 
-        key_name = KEY_FORMAT.format(namespace=spec.namespace, field=spec.field)
+    key_token_of_field: list[int] = []
+
+    for field_id, spec in enumerate(specs):
+
+        name = semantic_key_name(spec.column, key_mode)
+
+        token = token_of_name.get(name)
+
+        if token is None:
+            token = N_SPECIAL + len(names)
+            token_of_name[name] = token
+            names.append(name)
+            members.append([])
+
+        members[token - N_SPECIAL].append(field_id)
+        key_token_of_field.append(token)
+
+    key_tokens = [
+        KeyToken(token_id=N_SPECIAL + index, name=names[index], fields=tuple(members[index]))
+        for index in range(len(names))
+    ]
+
+    # ---- value tokens -----------------------------------------------
+
+    first_value_id = N_SPECIAL + len(key_tokens)
+
+    token_of_class: dict[tuple, int] = {}
+
+    value_strings: list[str] = []
+    value_types: list[str] = []
+    value_shared: list[bool] = []
+    value_counts: list[int] = []
+    value_fields: list[list[int]] = []
+
+    fields: list[FieldEntry] = []
+
+    next_token = first_value_id
+
+    for field_id, spec in enumerate(specs):
+
+        arrow_type = str(spec.arrow_type)
 
         ordered = _ordered_values(spec, counters.get(spec.key, Counter()), bucket_counts.get(spec.key))
 
-        start = next_value_id
+        candidates: list[int] = []
 
         for value, count in ordered:
-            values.append(
-                ValueEntry(id=next_value_id, key_id=key_id, key=key_name, value=value, count=count)
-            )
-            next_value_id += 1
 
-        keys.append(
-            KeyEntry(
-                id=key_id,
-                key=key_name,
+            group = value_class(field_id, spec.kind, arrow_type, value, value_mode)
+
+            token = token_of_class.get(group)
+
+            if token is None:
+
+                token = next_token
+                next_token += 1
+
+                token_of_class[group] = token
+
+                value_strings.append(value)
+                value_types.append(arrow_type)
+                value_shared.append(shares_values(spec.kind, arrow_type, value_mode))
+                value_counts.append(0)
+                value_fields.append([])
+
+            index = token - first_value_id
+
+            value_counts[index] += count
+            value_fields[index].append(field_id)
+
+            candidates.append(token)
+
+        fields.append(
+            FieldEntry(
+                field_id=field_id,
+                key=spec.column,
                 namespace=spec.namespace,
                 field=spec.field,
                 kind=spec.kind,
                 predictable=spec.predictable,
-                arrow_type=str(spec.arrow_type),
-                value_start=start,
-                value_end=next_value_id,
+                arrow_type=arrow_type,
+                key_token_id=key_token_of_field[field_id],
+                candidates=tuple(candidates),
             )
         )
 
-    return Vocab(keys=keys, values=values)
+    values = [
+        ValueEntry(
+            id=first_value_id + index,
+            value=value_strings[index],
+            arrow_type=value_types[index],
+            shared=value_shared[index],
+            count=value_counts[index],
+            fields=tuple(value_fields[index]),
+        )
+        for index in range(len(value_strings))
+    ]
+
+    return Vocab(
+        fields=fields,
+        key_tokens=key_tokens,
+        values=values,
+        key_mode=key_mode,
+        value_mode=value_mode,
+    )
 
 
-def fit_vocab(processed_dir: Path, artifacts_dir: Path) -> tuple[Vocab, FitReport]:
+@dataclass(frozen=True)
+class FitCounters:
     """
-    Полный fit словаря: только train, каждая запись один раз.
+    Результат единственного прохода по train.
+
+    Счётчики не зависят от режима, поэтому четыре словаря
+    строятся из одного и того же объекта.
+    """
+
+    counters: dict[tuple[str, str], Counter]
+    bucket_counts: dict[tuple[str, str], int | None]
+    report: FitReport
+
+    def build(self, key_mode: str = DEFAULT_KEY_MODE, value_mode: str = DEFAULT_VALUE_MODE) -> Vocab:
+        return build_vocab(self.counters, self.bucket_counts, key_mode, value_mode)
+
+
+def fit_counters(processed_dir: Path, artifacts_dir: Path) -> FitCounters:
+    """
+    Один проход по train: частоты значений по ПОЛЯМ.
     """
 
     processed_dir = Path(processed_dir)
@@ -761,8 +1243,6 @@ def fit_vocab(processed_dir: Path, artifacts_dir: Path) -> tuple[Vocab, FitRepor
 
         bucket_counts[spec.key] = None if bucket.status == STATUS_NO_FIT_DATA else bucket.actual_bucket_count
 
-    vocab = build_vocab(counters, bucket_counts)
-
     cutoff_max = scope.max_cutoff
 
     report = FitReport(
@@ -772,4 +1252,51 @@ def fit_vocab(processed_dir: Path, artifacts_dir: Path) -> tuple[Vocab, FitRepor
         cutoff_max=cutoff_max.isoformat() if isinstance(cutoff_max, datetime) else None,
     )
 
-    return vocab, report
+    return FitCounters(counters=counters, bucket_counts=bucket_counts, report=report)
+
+
+def fit_vocab(
+    processed_dir: Path,
+    artifacts_dir: Path,
+    key_mode: str = DEFAULT_KEY_MODE,
+    value_mode: str = DEFAULT_VALUE_MODE,
+) -> tuple[Vocab, FitReport]:
+    """
+    Полный fit словаря: только train, каждая запись один раз.
+    """
+
+    counters = fit_counters(processed_dir, artifacts_dir)
+
+    return counters.build(key_mode, value_mode), counters.report
+
+
+__all__ = [
+    "ARROW_TYPES",
+    "CandidateIndex",
+    "FIELD_ID_RULE",
+    "FieldEntry",
+    "FitCounters",
+    "FitReport",
+    "KEY_FORMAT",
+    "KeyToken",
+    "NO_FIELD",
+    "N_FIELDS",
+    "ORDER_RULES",
+    "VALUE_RULES",
+    "ValueEntry",
+    "Vocab",
+    "build_vocab",
+    "count_events",
+    "count_profile",
+    "event_key_specs",
+    "events_column",
+    "field_ids_by_key",
+    "fit_counters",
+    "fit_vocab",
+    "key_specs",
+    "load_fit_scope",
+    "parse_value",
+    "profile_column",
+    "profile_key_specs",
+    "registry_digest",
+]

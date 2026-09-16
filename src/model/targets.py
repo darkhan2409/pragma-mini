@@ -77,7 +77,7 @@ def excluded_fields(table, policy: str = POLICY_HISTORY) -> frozenset[str]:
     учился на всех полях.
     """
 
-    names = [table.name(key_id) for key_id in table.trainable_key_ids]
+    names = [table.name(key_id) for key_id in table.trainable_field_ids]
 
     return resolve_excluded(names, exclude_patterns(policy)) if policy != POLICY_ALL else frozenset()
 

@@ -16,57 +16,15 @@ import pytest
 import torch
 
 from src.tokenizer.dataset import TokenizedDataset
-from src.model.data import ClientStore, EpochSampler, FixedSplit
-from src.model.trainer import (
-    TrainConfig,
-    Trainer,
-    TrainingAborted,
-    build_validation,
-    load_environment,
-    resolve_precision,
-    run_training,
-    tiny_overfit,
-)
+from src.model.data import ClientStore, EpochSampler
+from src.model.trainer import TrainConfig, Trainer, TrainingAborted, build_validation, resolve_precision, run_training, tiny_overfit
+
+from tests.helpers_model import small_config, trainer_for
 
 
 # ============================================================
 # ОКРУЖЕНИЕ
 # ============================================================
-
-
-@pytest.fixture(scope="module")
-def env(tok_run):
-    return load_environment(tok_run["tokenized"], tok_run["vocab"], tok_run["artifacts"])
-
-
-def small_config(**overrides) -> TrainConfig:
-    """
-    Конфигурация, на которой тест идёт секунды, а не минуты.
-    """
-
-    base = TrainConfig(
-        max_train_clients=4,
-        max_val_clients=2,
-        batch_size=2,
-        eval_batch_size=2,
-        max_events_per_history=24,
-        max_steps=3,
-        warmup_steps=1,
-        eval_every=2,
-        log_every=1,
-        precision="float32",
-    )
-
-    return replace(base, **overrides) if overrides else base
-
-
-@pytest.fixture(scope="module")
-def store(env):
-    return ClientStore(env.root, "train", env.vocab_dir, max_clients=4)
-
-
-def trainer_for(env, config=None) -> Trainer:
-    return Trainer(config or small_config(), env.tokenizer, env.table, env.unigram, "cpu")
 
 
 # ============================================================
@@ -359,8 +317,8 @@ def test_evaluation_reports_every_split(env, splits):
         assert report["n_targets"] > 0
         assert report["field_balanced_ce"] > 0
         assert report["n_fields_with_targets"] > 1
-        assert len(report["fields"]) == len(env.table.trainable_key_ids) + len(
-            env.table.degenerate_key_ids
+        assert len(report["fields"]) == len(env.table.trainable_field_ids) + len(
+            env.table.degenerate_field_ids
         )
 
 
@@ -464,8 +422,8 @@ def test_nan_stops_the_run_with_diagnostics(env, tmp_path):
 
     original = Trainer.compute
 
-    def broken(self, inputs, targets, attention_rule=None):
-        result, field_logits, local = original(self, inputs, targets, attention_rule)
+    def broken(self, inputs, targets):
+        result, field_logits, local = original(self, inputs, targets)
         if result.field_balanced is not None and self.n_batches > 0:
             for item in field_logits:
                 item.logits.data.fill_(float("nan"))
@@ -523,3 +481,32 @@ def test_tiny_overfit_learns_a_fixed_batch(env, tmp_path):
 def test_tiny_overfit_refuses_a_silly_budget(env, tmp_path):
     with pytest.raises(ValueError, match="100"):
         tiny_overfit(env, small_config(), tmp_path, steps=10, device="cpu", quiet=True)
+
+
+# ============================================================
+# ПРОГРЕСС
+# ============================================================
+
+
+def test_step_budget_reports_its_own_progress(env, tmp_path, capsys):
+    """
+    В режиме --max-steps знаменатель это бюджет шагов.
+
+    Раньше строка печатала знаменатель эпохи и вечные 0.0%:
+    у шагового обучения не было ни процента, ни ETA, и ни один
+    тест этого не ловил, потому что все зовут quiet=True.
+    """
+
+    config = small_config(max_steps=3, log_every=1, eval_every=100)
+
+    run_training(env, config, tmp_path, device="cpu", quiet=False)
+
+    lines = [row for row in capsys.readouterr().out.splitlines() if row.startswith("  step")]
+
+    assert lines
+
+    for line in lines:
+        assert f"/{config.max_steps}" in line, line
+
+    # Последний шаг это сто процентов бюджета, а не ноль.
+    assert "100.0%" in lines[-1], lines[-1]

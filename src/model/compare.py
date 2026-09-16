@@ -9,11 +9,9 @@ from src.preprocessing.artifacts import write_json, write_text
 from src.tokenizer.config import IncompatibleArtifactsError
 from src.tokenizer.masking import MaskingConfig
 
-from .ablation import evaluate_rules, rule_tables
 from .checkpoint import load_checkpoint
-from .data import ClientStore, FixedSplit
-from .history_encoder import ATTENTION_RULES, RULE_EVENTS_VIA_PROFILE, RULE_FULL, RULE_SELF_ONLY
-from .metrics import bootstrap_combination, bootstrap_contrast
+from .data import FixedSplit
+from .metrics import bootstrap_contrast
 from .targets import excluded_fields as _excluded_fields
 from .trainer import Environment, TrainConfig, Trainer, VALIDATION_SPLITS, store_for
 
@@ -40,9 +38,6 @@ from .trainer import Environment, TrainConfig, Trainer, VALIDATION_SPLITS, store
 
 
 EVAL_MODES: tuple[str, ...] = ("field_balanced", "token", "event", "key")
-
-# Режимы, на которых повторяется диагностика внимания.
-ABLATION_MODES: tuple[str, ...] = ("token", "event", "key")
 
 # Настройки, при расхождении которых наборы масок или цели
 # перестали бы совпадать, и сравнение потеряло бы смысл.
@@ -71,24 +66,40 @@ def evaluation_masking(mode: str, stored: dict, val_seed: int) -> MaskingConfig:
     tokenizer маскирует ровно keys_per_example ключей на пример,
     а здесь нужен независимый розыгрыш каждого ключа с
     вероятностью 10 %.
+
+    Исключённые поля переносятся из старого run во все режимы:
+    политика целей это часть задачи, и оценивать модель на
+    полях, которые она никогда не предсказывала, нечестно.
     """
+
+    exclude = tuple(stored.get("exclude_fields") or ())
 
     if mode == "field_balanced":
         return MaskingConfig(
             mode="field_balanced",
             seed=val_seed,
             balanced_share=float(stored.get("balanced_share", 0.15)),
+            exclude_fields=exclude,
         )
 
     if mode == "token":
-        return MaskingConfig(mode="token", seed=val_seed, token_rate=0.15)
+        return MaskingConfig(
+            mode="token", seed=val_seed, token_rate=0.15, exclude_fields=exclude
+        )
 
     if mode == "event":
-        return MaskingConfig(mode="event", seed=val_seed, event_rate=0.10)
+        return MaskingConfig(
+            mode="event", seed=val_seed, event_rate=0.10, exclude_fields=exclude
+        )
 
     if mode == "key":
         return MaskingConfig(
-            mode="combined", seed=val_seed, token_rate=0.0, event_rate=0.0, key_rate=0.10
+            mode="combined",
+            seed=val_seed,
+            token_rate=0.0,
+            event_rate=0.0,
+            key_rate=0.10,
+            exclude_fields=exclude,
         )
 
     raise ValueError(f"неизвестный режим оценки {mode!r}, ожидался один из {EVAL_MODES}")
@@ -159,15 +170,25 @@ def run_comparison(
     out_dir: Path,
     device: str = "cpu",
     modes: tuple[str, ...] = EVAL_MODES,
-    ablation_modes: tuple[str, ...] = ABLATION_MODES,
-    rules: tuple[str, ...] = ATTENTION_RULES,
     min_targets: int = MIN_TARGETS,
     n_boot: int = 2000,
     quiet: bool = False,
+    new_env: "Environment | None" = None,
 ) -> dict:
     """
-    Два checkpoint'а, четыре набора масок, повтор диагностики внимания.
+    Два checkpoint'а на четырёх наборах масок.
+
+    new_env задаётся, когда модели живут в РАЗНЫХ словарях: тогда
+    один набор splits на обе не годится, потому что token id у
+    них разные. Строятся два набора, по одному на свой словарь, а
+    равенство задачи доказывается совпадением targets_field_sha256
+    — отпечатка позиций, полей и локальных целей, который от
+    словаря не зависит.
     """
+
+    same_vocab = new_env is None or new_env is env
+
+    new_env = env if new_env is None else new_env
 
     old, new, out_dir = Path(old), Path(new), Path(out_dir)
 
@@ -187,7 +208,7 @@ def run_comparison(
         )
 
     old_trainer = build_trainer(env, old_config, old, device)
-    new_trainer = build_trainer(env, new_config, new, device)
+    new_trainer = build_trainer(new_env, new_config, new, device)
 
     if old_trainer.precision != new_trainer.precision:
         raise IncompatibleArtifactsError(
@@ -202,46 +223,77 @@ def run_comparison(
 
     started = time.perf_counter()
 
-    stores = {
-        name: store_for(env, old_config, name)
-        for name in VALIDATION_SPLITS
-    }
+    def build_masks(source, trainer) -> tuple[dict[str, dict[str, FixedSplit]], dict]:
 
-    masks: dict[str, dict[str, FixedSplit]] = {}
+        stores = {name: store_for(source, old_config, name) for name in VALIDATION_SPLITS}
 
-    for mode in modes:
+        built: dict[str, dict[str, FixedSplit]] = {}
 
-        masking = evaluation_masking(mode, old_payload.get("masking_config") or {}, old_config.val_seed)
+        for mode in modes:
 
-        masks[mode] = {
-            name: FixedSplit.build(
-                name=name,
-                store=store,
-                vocab=env.vocab,
-                table=env.table,
-                model_config=old_trainer.model_config,
-                masking=masking,
-                max_events=old_config.max_events_per_history,
-                batch_size=old_config.eval_batch_size,
+            masking = evaluation_masking(
+                mode, old_payload.get("masking_config") or {}, old_config.val_seed
             )
-            for name, store in stores.items()
-        }
+
+            built[mode] = {
+                name: FixedSplit.build(
+                    name=name,
+                    store=store,
+                    vocab=source.vocab,
+                    table=source.table,
+                    model_config=trainer.model_config,
+                    masking=masking,
+                    max_events=old_config.max_events_per_history,
+                    batch_size=old_config.eval_batch_size,
+                )
+                for name, store in stores.items()
+            }
+
+        return built, stores
+
+    masks, stores = build_masks(env, old_trainer)
+
+    new_masks = masks if same_vocab else build_masks(new_env, new_trainer)[0]
+
+    # Разные словари дают разные token id даже у одной и той же
+    # задачи, поэтому сравнивается инвариантный отпечаток, а не
+    # вокабулярный. Несовпадение значит, что маски или цели
+    # действительно разошлись.
+    if not same_vocab:
+
+        for mode in modes:
+            for name in VALIDATION_SPLITS:
+
+                left = masks[mode][name].field_digest
+                right = new_masks[mode][name].field_digest
+
+                if left != right:
+                    raise IncompatibleArtifactsError(
+                        f"наборы несравнимы: в режиме {mode} у {name} разные задачи "
+                        f"({left[:16]}… против {right[:16]}…)"
+                    )
 
     build_seconds = time.perf_counter() - started
 
     # Набор field_balanced обязан быть тем же, на котором
-    # оценивался старый run.
+    # оценивался старый run, но сверять его есть с чем только
+    # когда тот в этом режиме и обучался: run в combined
+    # сохранил цифру своего набора, а не этого. Остальные
+    # режимы оценки идут по ставкам спецификации, а не по
+    # ставкам run, и сравнивать их цифры не с чем.
     reference = old_payload.get("splits") or {}
 
-    for name, split in masks.get("field_balanced", {}).items():
+    if (old_payload.get("masking_config") or {}).get("mode") == "field_balanced":
 
-        saved = (reference.get(name) or {}).get("targets_sha256")
+        for name, split in masks.get("field_balanced", {}).items():
 
-        if saved is not None and saved != split.digest:
-            raise IncompatibleArtifactsError(
-                f"набор field_balanced для {name} не совпал с сохранённым в старом checkpoint: "
-                f"{split.digest} против {saved}"
-            )
+            saved = (reference.get(name) or {}).get("targets_sha256")
+
+            if saved is not None and saved != split.digest:
+                raise IncompatibleArtifactsError(
+                    f"набор field_balanced для {name} не совпал с сохранённым в старом "
+                    f"checkpoint: {split.digest} против {saved}"
+                )
 
     # --------------------------------------------------------
     # ОЦЕНКА
@@ -259,9 +311,12 @@ def run_comparison(
         reports: dict[str, dict] = {}
         contrasts: dict[str, dict] = {}
 
-        for label, trainer in (("old", old_trainer), ("new", new_trainer)):
+        for label, trainer, own in (
+            ("old", old_trainer, masks[mode]),
+            ("new", new_trainer, new_masks[mode]),
+        ):
 
-            evaluated = trainer.evaluate(splits, exclude=exclude, keep_units=True)
+            evaluated = trainer.evaluate(own, exclude=exclude, keep_units=True)
 
             evaluated.pop("_seconds")
 
@@ -310,50 +365,6 @@ def run_comparison(
                     f"Δ {item['estimate']:+.4f} [{item['ci_low']:+.4f}, {item['ci_high']:+.4f}]"
                 )
 
-    # --------------------------------------------------------
-    # ДИАГНОСТИКА ВНИМАНИЯ
-    # --------------------------------------------------------
-
-    ablations: dict[str, dict] = {}
-
-    for mode in ablation_modes:
-
-        if not quiet:
-            print(f"  диагностика внимания, режим {mode}")
-
-        splits = masks[mode]
-
-        per_checkpoint: dict[str, dict] = {}
-
-        for label, trainer in (("old", old_trainer), ("new", new_trainer)):
-
-            results = evaluate_rules(
-                trainer,
-                splits,
-                list(rules),
-                exclude=exclude,
-                keep_units=True,
-                quiet=quiet,
-                label=f"{label} ",
-            )
-
-            aggregates, fields, silent = rule_tables(results, list(rules), splits)
-
-            per_checkpoint[label] = {
-                "aggregates": aggregates,
-                "fields": fields,
-                "fields_without_targets": silent,
-                "accumulators": {rule: results[rule]["accumulators"] for rule in rules},
-            }
-
-        ablations[mode] = {
-            "old": {key: value for key, value in per_checkpoint["old"].items() if key != "accumulators"},
-            "new": {key: value for key, value in per_checkpoint["new"].items() if key != "accumulators"},
-            "contrast": _ablation_contrasts(per_checkpoint, list(rules), splits, exclude, n_boot, old_config.val_seed),
-        }
-
-    # --------------------------------------------------------
-
     report = {
         "mode": "comparison",
         "device": str(old_trainer.device),
@@ -376,13 +387,9 @@ def run_comparison(
         "min_targets": min_targets,
         "n_boot": n_boot,
         "modes": list(modes),
-        "ablation_modes": list(ablation_modes),
-        "rules": list(rules),
         "data": {name: store.summary() for name, store in stores.items()},
         "build_seconds": build_seconds,
         "comparisons": comparisons,
-        "ablations": ablations,
-        "answers": _answers(ablations, comparisons),
         "note": (
             "CE разных режимов маскирования между собой не сравнивается: скрыть одно значение "
             "и скрыть событие целиком это разные задачи. Сравниваются два checkpoint'а внутри "
@@ -393,13 +400,10 @@ def run_comparison(
     write_json(out_dir / "comparison.json", report)
     write_json(out_dir / "masks.json", _masks_manifest(masks, report))
     write_text(out_dir / "comparison.md", render_comparison(report))
-    write_text(out_dir / "ablation_comparison.md", render_ablation_comparison(report))
 
     if not quiet:
         print()
         print(render_comparison(report))
-        print()
-        print(render_ablation_comparison(report))
 
     return report
 
@@ -414,7 +418,7 @@ def _field_pairs(old: dict, new: dict, min_targets: int) -> list[dict]:
     Поле за полем: старый checkpoint против нового.
     """
 
-    right = {item["key_id"]: item for item in new["fields"]}
+    right = {item["field_id"]: item for item in new["fields"]}
 
     rows: list[dict] = []
 
@@ -423,12 +427,12 @@ def _field_pairs(old: dict, new: dict, min_targets: int) -> list[dict]:
         if item["n_targets"] == 0:
             continue
 
-        other = right[item["key_id"]]
+        other = right[item["field_id"]]
 
         rows.append(
             {
                 "field": item["field"],
-                "key_id": item["key_id"],
+                "key_id": item["field_id"],
                 "n_targets": item["n_targets"],
                 "n_candidates": item["n_candidates"],
                 "ce_unigram": item["ce_unigram"],
@@ -451,144 +455,6 @@ def _field_pairs(old: dict, new: dict, min_targets: int) -> list[dict]:
     rows.sort(key=lambda row: row["delta"]["ce_model"] if row["delta"]["ce_model"] is not None else 0.0)
 
     return rows
-
-
-def _ablation_contrasts(per_checkpoint, rules, splits, exclude, n_boot, seed) -> dict:
-    """
-    Насколько сильнее новая модель теряет от запрета внимания.
-
-    Сравнивается не CE, а ПОТЕРЯ от запрета: у моделей разные
-    базовые уровни, и разность потерь это то, что отвечает на
-    вопрос о роли истории.
-    """
-
-    out: dict[str, dict] = {}
-
-    for name in splits:
-
-        out[name] = {}
-
-        for rule in rules:
-
-            if rule == RULE_FULL:
-                continue
-
-            entry: dict[str, dict] = {}
-
-            for scope, subset in (("all_fields", frozenset()), ("subset", exclude)):
-
-                deltas = {}
-                samples = {}
-
-                for label in ("old", "new"):
-
-                    accumulators = per_checkpoint[label]["accumulators"]
-
-                    samples[label] = {
-                        "full": accumulators[RULE_FULL][name].unit_losses(subset),
-                        "rule": accumulators[rule][name].unit_losses(subset),
-                    }
-
-                    deltas[label] = bootstrap_contrast(
-                        samples[label]["full"], samples[label]["rule"], n_boot=n_boot, seed=seed
-                    )
-
-                entry[scope] = {
-                    "old": deltas["old"],
-                    "new": deltas["new"],
-                    # Разность разностей на общей выборке
-                    # примеров: два независимых интервала
-                    # ответа на вопрос «стало ли сильнее» не дают.
-                    "difference": bootstrap_combination(
-                        [
-                            (-1.0, samples["new"]["full"]),
-                            (1.0, samples["new"]["rule"]),
-                            (1.0, samples["old"]["full"]),
-                            (-1.0, samples["old"]["rule"]),
-                        ],
-                        n_boot=n_boot,
-                        seed=seed,
-                    ),
-                }
-
-            out[name][rule] = entry
-
-    return out
-
-
-def _grew(item: dict) -> str:
-    """
-    Вердикт о ПРИРОСТЕ зависимости, а не о самой зависимости.
-
-    Значимая потеря от запрета у новой модели ещё не значит,
-    что зависимость выросла: у старой она могла быть такой же
-    или больше. Отвечает только интервал разности разностей.
-    """
-
-    difference = item["difference"]
-
-    if not difference["significant"]:
-        return "не подтверждено: интервал разности накрывает ноль"
-
-    return "да, выросла" if difference["estimate"] > 0 else "нет, зависимость снизилась"
-
-
-def _present(item: dict) -> str:
-    """
-    Есть ли вклад у новой модели вообще.
-    """
-
-    if not item["new"]["significant"]:
-        return "нет: потеря от запрета неотличима от нуля"
-
-    return "да" if item["new"]["estimate"] > 0 else "нет, запрет улучшает результат"
-
-
-def _answers(ablations: dict, comparisons: dict) -> dict:
-    """
-    Три вопроса спецификации с числами вместо впечатлений.
-    """
-
-    out: dict[str, dict] = {}
-
-    for mode, section in ablations.items():
-
-        for name, rules in section["contrast"].items():
-
-            if RULE_SELF_ONLY not in rules or RULE_EVENTS_VIA_PROFILE not in rules:
-                continue
-
-            self_only = rules[RULE_SELF_ONLY]
-            via_profile = rules[RULE_EVENTS_VIA_PROFILE]
-
-            out[f"{mode}/{name}"] = {
-                "history_exchange": {
-                    "question": "выросла ли зависимость от обмена между позициями истории",
-                    "old_delta": self_only["all_fields"]["old"]["estimate"],
-                    "new_delta": self_only["all_fields"]["new"]["estimate"],
-                    "difference": self_only["all_fields"]["difference"],
-                    "answer": _grew(self_only["all_fields"]),
-                },
-                "direct_event_to_event": {
-                    "question": "появился ли вклад прямого event-to-event attention",
-                    "old_delta": via_profile["all_fields"]["old"]["estimate"],
-                    "new_delta": via_profile["all_fields"]["new"]["estimate"],
-                    "difference": via_profile["all_fields"]["difference"],
-                    "answer": (
-                        f"вклад у новой модели: {_present(via_profile['all_fields'])}; "
-                        f"прирост: {_grew(via_profile['all_fields'])}"
-                    ),
-                },
-                "without_leaky_fields": {
-                    "question": "сохраняется ли картина без event_type и profile_snapshot",
-                    "old_delta": self_only["subset"]["old"]["estimate"],
-                    "new_delta": self_only["subset"]["new"]["estimate"],
-                    "difference": self_only["subset"]["difference"],
-                    "answer": _grew(self_only["subset"]),
-                },
-            }
-
-    return out
 
 
 def _masks_manifest(masks: dict, report: dict) -> dict:
@@ -637,7 +503,7 @@ def render_comparison(report: dict) -> str:
 
     lines: list[str] = []
 
-    lines.append("# Combined masking против field_balanced")
+    lines.append("# Сравнение двух арок")
     lines.append("")
     lines.append(
         f"Устройство {report['device']}, precision {report['precision']}. "
@@ -751,82 +617,3 @@ def render_comparison(report: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_ablation_comparison(report: dict) -> str:
-
-    lines: list[str] = []
-
-    lines.append("# Роль истории: диагностика внимания у обоих checkpoint'ов")
-    lines.append("")
-    lines.append(
-        "Сравнивается не CE, а потеря от запрета внимания. У моделей разные базовые уровни, "
-        "и именно разность потерь отвечает на вопрос о роли истории."
-    )
-    lines.append("")
-
-    others = [rule for rule in report["rules"] if rule != RULE_FULL]
-
-    for mode in report["ablation_modes"]:
-
-        section = report["ablations"][mode]
-
-        lines.append(f"## Маски `{mode}`")
-        lines.append("")
-
-        for name in section["contrast"]:
-
-            lines.append(f"### {name}")
-            lines.append("")
-            lines.append("| запрет | ΔCE старый | ΔCE новый | разность разностей |")
-            lines.append("|---|---|---|---|")
-
-            for rule in others:
-
-                item = section["contrast"][name][rule]["all_fields"]
-
-                lines.append(
-                    f"| `{rule}` | {_interval(item['old'], 4)} | {_interval(item['new'], 4)} | "
-                    f"{_interval(item['difference'], 4)} |"
-                )
-
-            lines.append("")
-            lines.append("Без `timeline__event_type` и `profile_snapshot__*`:")
-            lines.append("")
-            lines.append("| запрет | ΔCE старый | ΔCE новый | разность разностей |")
-            lines.append("|---|---|---|---|")
-
-            for rule in others:
-
-                item = section["contrast"][name][rule]["subset"]
-
-                lines.append(
-                    f"| `{rule}` | {_interval(item['old'], 4)} | {_interval(item['new'], 4)} | "
-                    f"{_interval(item['difference'], 4)} |"
-                )
-
-            lines.append("")
-
-    # --------------------------------------------------------
-
-    lines.append("## Ответы")
-    lines.append("")
-
-    for key, answers in report["answers"].items():
-
-        lines.append(f"### {key}")
-        lines.append("")
-
-        for item in answers.values():
-            lines.append(
-                f"- {item['question']}: **{item['answer']}**. "
-                f"Потеря от запрета: старый {_signed(item['old_delta'])}, "
-                f"новый {_signed(item['new_delta'])}, разность {_interval(item['difference'])}."
-            )
-
-        lines.append("")
-
-    lines.append(
-        "Вывод о качестве client embedding по этим числам не делается: они меряют только "
-        "восстановление замаскированных значений."
-    )
-
-    return "\n".join(lines) + "\n"

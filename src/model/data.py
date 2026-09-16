@@ -13,14 +13,13 @@ from src.tokenizer.artifacts import preprocessing_digests, vocab_digests
 from src.tokenizer.build import client_runs, iter_client_blocks
 from src.tokenizer.config import CONFIG_FILE, DATASET_MANIFEST_FILE
 from src.tokenizer.dataset import Events, Example, TokenizedDataset, _events_of, collate
-from src.tokenizer.masking import SCHEME_EXAMPLE, Masker, MaskingConfig
+from src.tokenizer.masking import Masker, MaskingConfig
 from src.tokenizer.vocab import Vocab
 
-from .config import STRUCTURE_EVENT, STRUCTURE_SESSION, ModelConfig
+from .config import ModelConfig
 from .history_batching import metadata_from_examples, prepare_history_batch, to_model_inputs
 from .mlm_batching import MaskedTargets, build_targets
 from .mlm_head import FieldTable
-from .sessions import load_session_keys, sidecar_digest
 
 
 # ============================================================
@@ -71,12 +70,6 @@ def select_clients(
     return unique if max_clients is None else unique[: int(max_clients)]
 
 
-CUTOFFS_ALL = "all"
-CUTOFFS_LAST = "last"
-
-CUTOFF_POLICIES = (CUTOFFS_ALL, CUTOFFS_LAST)
-
-
 def last_row_per_client(rows: list[dict]) -> list[int]:
     """
     По одному примеру на клиента: самый поздний cutoff.
@@ -108,47 +101,6 @@ def rows_for_clients(examples: pa.Table, client_ids) -> np.ndarray:
     return rows[np.lexsort((cutoff[rows], client_id[rows]))]
 
 
-@dataclass(frozen=True)
-class SessionExample(Example):
-    """
-    Пример с ключами сессий его событий.
-
-    Ключи едут вместе с примером, а не отдельным аргументом:
-    иначе их пришлось бы протаскивать через каждый вызов
-    store.examples(...) -> prepare(...). collate и
-    metadata_from_examples подкласса не замечают.
-    """
-
-    session_keys: np.ndarray | None = None
-
-
-def session_keys_from_examples(examples) -> np.ndarray | None:
-    """
-    Ключи сессий batch в том же порядке, в каком collate
-    склеивает события.
-    """
-
-    keyed = [isinstance(item, SessionExample) and item.session_keys is not None for item in examples]
-
-    if not any(keyed):
-        return None
-
-    if not all(keyed):
-        raise ValueError(
-            "в batch смешаны примеры с ключами сессий и без них: "
-            "структура истории должна быть одна на весь batch"
-        )
-
-    for item in examples:
-        if item.session_keys.size != item.events.n_events:
-            raise ValueError(
-                f"клиент {item.client_id}: ключей {item.session_keys.size}, "
-                f"а событий {item.events.n_events}"
-            )
-
-    return np.concatenate([np.asarray(item.session_keys, dtype=np.int64) for item in examples])
-
-
 def _prefix(events: Events, seq_end: int) -> Events:
     """
     История примера это первые seq_end событий клиента.
@@ -167,6 +119,7 @@ def _prefix(events: Events, seq_end: int) -> Events:
         event_type=events.event_type[:seq_end],
         ts=events.ts[:seq_end],
         seq=events.seq[:seq_end],
+        field_ids=events.field_ids[:stop],
     )
 
 
@@ -187,9 +140,8 @@ class ClientStore:
         vocab_dir: Path,
         max_clients: int | None = None,
         clients: Iterable[int] | None = None,
-        sessions: bool = False,
         shared: "ClientStore | None" = None,
-        cutoffs: str = CUTOFFS_ALL,
+        last_cutoff_only: bool = False,
     ):
 
         self.dataset = dataset
@@ -205,12 +157,9 @@ class ClientStore:
 
         self.rows = self.data.examples.take(pa.array(self.row_index)).to_pylist()
 
-        self.cutoffs = cutoffs
+        self.last_cutoff_only = bool(last_cutoff_only)
 
-        if cutoffs not in CUTOFF_POLICIES:
-            raise ValueError(f"cutoffs должен быть одним из {CUTOFF_POLICIES}, получено {cutoffs!r}")
-
-        if cutoffs == CUTOFFS_LAST:
+        if self.last_cutoff_only:
             keep = last_row_per_client(self.rows)
             self.row_index = self.row_index[keep]
             self.rows = [self.rows[index] for index in keep]
@@ -225,23 +174,13 @@ class ClientStore:
             shared is not None
             and shared.data.group == self.data.group
             and set(self.client_ids) <= set(shared.events)
-            and (not sessions or shared.session_keys is not None)
         )
 
         if self.shared_events:
             self.events = {client: shared.events[client] for client in self.client_ids}
-            self.session_keys = (
-                {client: shared.session_keys[client] for client in self.client_ids}
-                if sessions
-                else None
-            )
             return
 
         self.events = self._load_events(set(self.client_ids))
-
-        self.session_keys = (
-            self._load_session_keys(set(self.client_ids)) if sessions else None
-        )
 
     # --------------------------------------------------------
 
@@ -277,94 +216,6 @@ class ClientStore:
 
     # --------------------------------------------------------
 
-    def _load_session_keys(self, wanted: set[int]) -> dict[int, np.ndarray]:
-        """
-        Ключи сессий с поэлементной сверкой по seq.
-
-        Сравнения длин мало: у клиента с тем же числом событий,
-        но другой лентой, длина совпала бы, а история была бы
-        чужой.
-        """
-
-        group = self.data.group
-
-        keys = load_session_keys(Path(self.data.root), str(group), wanted)
-
-        for client_id, events in self.events.items():
-
-            values = keys[client_id]
-
-            if values.size != events.n_events:
-                raise ValueError(
-                    f"клиент {client_id}: ключей сессий {values.size}, "
-                    f"а событий {events.n_events}"
-                )
-
-            if not np.array_equal(events.seq, np.arange(events.n_events, dtype=np.int64)):
-                raise ValueError(
-                    f"клиент {client_id}: seq токенизированных событий не плотный от нуля"
-                )
-
-        return keys
-
-    # --------------------------------------------------------
-
-    @staticmethod
-    def from_rows(
-        root: Path,
-        group: str,
-        vocab_dir: Path,
-        rows: list[dict],
-        sessions: bool = False,
-    ) -> "ClientStore":
-        """
-        Хранилище на готовых строках примеров.
-
-        Нужно там, где примеров нет в разбиении: downstream
-        строит по одному примеру на клиента на своём cutoff, и
-        каталога под них не заводит. Строки обязаны нести те же
-        поля, что и examples.parquet: client_id, cutoff,
-        dataset, client_group, seq_end, snapshot_ts.
-        """
-
-        store = ClientStore.__new__(ClientStore)
-
-        store.dataset = f"{group}:rows"
-
-        store.data = TokenizedDataset(root, None, vocab_dir=vocab_dir, group=group)
-
-        store.rows = [dict(row) for row in rows]
-
-        if not store.rows:
-            raise ValueError(f"{group}: пустой список строк примеров")
-
-        store.client_ids = sorted({int(row["client_id"]) for row in store.rows})
-
-        # Порядок тот же, что у обычного набора: (client_id, cutoff).
-        order = sorted(
-            range(len(store.rows)),
-            key=lambda index: (
-                int(store.rows[index]["client_id"]),
-                store.rows[index]["cutoff"],
-            ),
-        )
-
-        store.rows = [store.rows[index] for index in order]
-
-        store.row_index = np.arange(len(store.rows), dtype=np.int64)
-
-        store.shared_events = False
-
-        store.events = store._load_events(set(store.client_ids))
-
-        store.session_keys = (
-            store._load_session_keys(set(store.client_ids)) if sessions else None
-        )
-
-        return store
-
-    # --------------------------------------------------------
-
     def __len__(self) -> int:
         return len(self.rows)
 
@@ -391,11 +242,7 @@ class ClientStore:
             events=_prefix(self.events[client_id], seq_end),
         )
 
-        if self.session_keys is None:
-            return Example(**common)
-
-        # Ключи режутся тем же префиксом, что и события.
-        return SessionExample(**common, session_keys=self.session_keys[client_id][:seq_end])
+        return Example(**common)
 
     def examples(self, indices) -> list[Example]:
         return [self.example(int(index)) for index in indices]
@@ -489,22 +336,14 @@ class EpochSampler:
 
 
 # ============================================================
-# ФИКСИРОВАННАЯ VALIDATION
-# ============================================================
-
-
-# ============================================================
 # ПОТОЧНЫЙ ИСТОЧНИК
 # ============================================================
 #
 # Хранить подготовленные batch'и всего набора это гигабайты на
 # полных историях. Пересобирать их на каждую оценку дешевле по
-# памяти, но воспроизводимо только при схеме example: там маска
-# примера не зависит ни от соседей, ни от номера batch, и
-# второй проход даёт ровно те же цели.
-#
-# При схеме batch поток запрещён: маска зависела бы от порядка,
-# а digest перестал бы что-либо гарантировать.
+# памяти, и воспроизводимо: маска примера засеяна его
+# идентичностью, не зависит ни от соседей, ни от номера batch,
+# и второй проход даёт ровно те же цели.
 # ============================================================
 
 
@@ -516,7 +355,6 @@ class StreamSource:
     table: FieldTable
     max_events: int | None
     batch_size: int
-    structure: str
     chunks: tuple[range, ...]
 
     def batches(self):
@@ -526,7 +364,7 @@ class StreamSource:
 
         for chunk in self.chunks:
             yield prepared_batch(
-                self.store, chunk, self.masker, self.table, self.max_events, self.structure
+                self.store, chunk, self.masker, self.table, self.max_events
             )
 
 
@@ -536,7 +374,6 @@ def prepared_batch(
     masker: Masker,
     table: FieldTable,
     max_events: int | None,
-    structure: str,
     step: int = 0,
 ) -> tuple[object, MaskedTargets]:
     """
@@ -545,22 +382,12 @@ def prepared_batch(
 
     examples = store.examples(chunk)
 
-    keys = session_keys_from_examples(examples)
-
-    if structure == STRUCTURE_SESSION and keys is None:
-        raise ValueError(
-            "структура session требует ключей сессий: "
-            "ClientStore должен быть открыт с sessions=True"
-        )
-
     history = prepare_history_batch(
         collate(examples),
         metadata_from_examples(examples),
         max_events,
         masker=masker,
         step=step,
-        session_keys=keys if structure == STRUCTURE_SESSION else None,
-        structure=structure,
     )
 
     return history, build_targets(history, table)
@@ -578,7 +405,6 @@ class FixedSplit:
 
     # Клиент каждого примера в порядке нумерации набора: единица
     # пересэмплирования это клиент, а не месячный срез.
-    client_of_example: np.ndarray
 
     # Хранится подготовленный, но ещё не выровненный batch:
     # padded int64 на полных историях весит около гигабайта,
@@ -601,6 +427,7 @@ class FixedSplit:
 
     settings: dict
     digest: str
+    field_digest: str
 
     @property
     def n_examples(self) -> int:
@@ -653,6 +480,7 @@ class FixedSplit:
             "selected_by": dict(self.selected_by),
             "settings": dict(self.settings),
             "targets_sha256": self.digest,
+            "targets_field_sha256": self.field_digest,
         }
 
     @staticmethod
@@ -665,19 +493,12 @@ class FixedSplit:
         masking: MaskingConfig,
         max_events: int | None,
         batch_size: int,
-        structure: str = STRUCTURE_EVENT,
         stream: bool = False,
     ) -> "FixedSplit":
         """
         Собирает batch'и один раз: маски, обрезка и раскладка
         больше не меняются.
         """
-
-        if stream and masking.scheme != SCHEME_EXAMPLE:
-            raise ValueError(
-                "поток требует схемы масок example: при схеме batch маска "
-                "зависит от номера batch, и второй проход дал бы другие цели"
-            )
 
         masker = Masker(vocab, masking)
 
@@ -690,6 +511,7 @@ class FixedSplit:
         truncated: list[np.ndarray] = []
 
         digest = hashlib.sha256()
+        field_digest = hashlib.sha256()
 
         n_targets = n_eligible = n_degenerate = n_masked = 0
 
@@ -701,18 +523,13 @@ class FixedSplit:
 
             chunks.append(chunk)
 
-            # Схема example не смотрит на номер batch, поэтому
-            # шаг фиксируется нулём: иначе поток пришлось бы
-            # заново нумеровать теми же индексами, и это была бы
-            # воспроизводимость по договорённости, а не по сути.
+            # Маска засевается парой (client_id, cutoff) и на
+            # номер batch не смотрит, поэтому шаг фиксируется
+            # нулём: иначе поток пришлось бы заново нумеровать
+            # теми же индексами, и это была бы воспроизводимость
+            # по договорённости, а не по сути.
             history, targets = prepared_batch(
-                store,
-                chunk,
-                masker,
-                table,
-                max_events,
-                structure,
-                step=0 if masking.scheme == SCHEME_EXAMPLE else index,
+                store, chunk, masker, table, max_events, step=0
             )
 
             if not stream:
@@ -738,13 +555,16 @@ class FixedSplit:
             digest.update(str(index).encode("utf-8"))
             digest.update(targets.digest().encode("utf-8"))
 
+            # Отпечаток ЗАДАЧИ: позиции, поля и локальные цели.
+            # Он не зависит от словаря, поэтому им сравниваются
+            # арки с разными token id.
+            field_digest.update(str(index).encode("utf-8"))
+            field_digest.update(targets.field_digest().encode("utf-8"))
+
         return FixedSplit(
             name=name,
             clients=tuple(store.client_ids),
             row_index=np.asarray(store.row_index, dtype=np.int64),
-            client_of_example=np.array(
-                [int(row["client_id"]) for row in store.rows], dtype=np.int64
-            ),
             prepared=None if stream else tuple(prepared),
             source=(
                 StreamSource(
@@ -753,7 +573,6 @@ class FixedSplit:
                     table=table,
                     max_events=max_events,
                     batch_size=int(batch_size),
-                    structure=structure,
                     chunks=tuple(chunks),
                 )
                 if stream
@@ -771,10 +590,10 @@ class FixedSplit:
                 "max_events_per_history": None if max_events is None else int(max_events),
                 "batch_size": int(batch_size),
                 "masking": masking.as_dict(),
-                "structure": structure,
                 "stream": bool(stream),
             },
             digest=digest.hexdigest(),
+            field_digest=field_digest.hexdigest(),
         )
 
 
@@ -790,11 +609,6 @@ def artifact_hashes(root: Path, vocab_dir: Path, artifacts_dir: Path) -> dict:
     unigram_baselines.json не входит в отпечаток tokenizer,
     поэтому его хэш фиксируется здесь: обучение сравнивается с
     ним, и подмена baseline меняла бы смысл NCE.
-
-    Sidecar сессий тоже: он задаёт СТРУКТУРУ истории, и его
-    подмена изменила бы модель, не тронув ни один токен.
-    Отсутствие sidecar это законное состояние прежней
-    структуры, поэтому None, а не ошибка.
     """
 
     return {
@@ -803,5 +617,4 @@ def artifact_hashes(root: Path, vocab_dir: Path, artifacts_dir: Path) -> dict:
         "preprocessing": preprocessing_digests(artifacts_dir),
         "unigram_baselines": sha256_file(Path(artifacts_dir) / UNIGRAM_FILE),
         "tokenized_manifest": sha256_file(Path(root) / DATASET_MANIFEST_FILE),
-        "sessions": sidecar_digest(root),
     }

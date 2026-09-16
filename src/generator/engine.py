@@ -1,0 +1,1182 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta
+
+from . import params as params_module
+from .behaviour import adoption as adoption_module
+from .behaviour import communications as comm_module
+from .behaviour import fraud as fraud_behaviour
+from .behaviour import habits as habits_module
+from .behaviour import merchants as merchant_choice
+from .behaviour import needs as needs_module
+from .behaviour import outcomes as outcome_module
+from .behaviour import sessions as session_module
+from .behaviour import support as support_module
+from .config import (
+    HISTORY_END,
+    HISTORY_START,
+    INITIATOR_BANK,
+    INITIATOR_CLIENT,
+    INITIATOR_EXTERNAL,
+    INITIATOR_SYSTEM,
+)
+from .finance import cards as card_rules
+from .finance import deposits as deposit_rules
+from .finance import loans as loan_rules
+from .finance.entities import (
+    ACCOUNT_CARD,
+    ACCOUNT_CREDIT_CARD,
+    ACCOUNT_DEPOSIT,
+    CARD_ACTIVE,
+    CARD_BLOCKED,
+    CONTRACT_CLOSED,
+    Application,
+    Card,
+    Offer,
+)
+from .finance.ledger import COUNTERPART_BANK, COUNTERPART_GOVERNMENT
+from .life import calendar as cal
+from .life import household as household_module
+from .life import lifecycle as lifecycle_module
+from .life import stress as stress_module
+from .life.traits import event_shift
+from .observe import coverage as coverage_module
+from .observe import defects as defect_module
+from .rng import (
+    COMPONENT_CONTENT,
+    COMPONENT_OUTCOME,
+    NS_ADOPTION,
+    NS_CARD,
+    NS_DEPOSIT,
+    NS_FRAUD,
+    NS_LEDGER,
+    NS_LOAN,
+    NS_PROFILE,
+    NS_SUPPORT,
+    NS_TRANSFER,
+    event_rng,
+    keyed_rng,
+    stable_hash,
+)
+from .simulate import (
+    Action,
+    ClientState,
+    CommunityResult,
+    CommunitySimulation,
+    _application_id,
+    _money,
+    _transfer_id,
+)
+from .world import products as product_catalog
+from .world.dictionaries import (
+    CATEGORY_BY_NAME,
+    DECLINE_REASONS,
+    ERROR_CODES,
+    MCC_CASH,
+    MCC_SALARY,
+    MCC_TRANSFER,
+    PROFILE_TRACKED_FIELDS,
+)
+
+
+# ============================================================
+# ДВИЖОК ДНЯ
+# ============================================================
+#
+# Все клиенты сообщества живут в одной очереди: действия дня
+# собираются вместе и исполняются по времени. Внутрибанковский
+# перевод поэтому доходит до получателя сразу и влияет на его
+# последующие решения.
+#
+# Деньги двигаются только через ledger: у каждой успешной
+# операции есть проводка, у каждой проводки две стороны, и
+# balance_after продолжает предыдущий balance_after.
+# ============================================================
+
+
+def run_community(community_id: int, ordinals: tuple) -> CommunityResult:
+
+    sim = CommunitySimulation(community_id, ordinals)
+
+    for state in sim.clients.values():
+        sim._prehistory(state)
+        state.state = lifecycle_module.initial_state(state.persona, HISTORY_START)
+
+    day = HISTORY_START
+
+    while day < HISTORY_END:
+
+        actions: list[Action] = []
+
+        for ordinal in sorted(sim.clients):
+            actions.extend(_plan_day(sim, sim.clients[ordinal], day))
+
+        actions.sort(key=lambda item: (item.ts, item.ordinal, item.order))
+
+        for action in actions:
+            _execute(sim, action)
+
+        if (day + timedelta(days=1)).month != day.month:
+            for ordinal in sorted(sim.clients):
+                _month_end(sim, sim.clients[ordinal], day)
+
+        day += timedelta(days=1)
+
+    return _finish(sim)
+
+
+# ============================================================
+# ПЛАН ДНЯ
+# ============================================================
+
+
+def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> list:
+
+    persona = state.persona
+
+    if day < persona.relationship_start.replace(hour=0, minute=0, second=0, microsecond=0):
+        return []
+
+    actions: list[Action] = []
+    order = 0
+
+    def add(ts: datetime, kind: str, payload: dict) -> None:
+        nonlocal order
+        order += 1
+        if HISTORY_START <= ts < HISTORY_END:
+            actions.append(Action(ts=ts, ordinal=state.ordinal, order=order, kind=kind, payload=payload))
+
+    silenced = lifecycle_module.silenced_streams(state.pauses, day)
+
+    stress = stress_module.level_at(state.stress_episodes, day)
+
+    month = cal.month_start(day)
+
+    debt = loan_rules.debt_service(tuple(state.loans.values()), day)
+
+    budget = household_module.budget_for_month(
+        persona, month, state.income_streams, state.stress_episodes, debt
+    )
+
+    factor = household_module.spending_factor(budget, persona)
+
+    # Деньги месяца не бесконечны: потратив их раньше срока,
+    # клиент покупает реже и дешевле, а не упирается в отказы.
+    factor *= household_module.budget_pressure(budget, state.month_purchases, day)
+    factor *= household_module.funds_pressure(state.ledger.payment_capacity(day), budget)
+
+    # --- регистрация клиента внутри окна ---
+
+    if persona.registered_in_window and day.date() == persona.relationship_start.date():
+        add(persona.relationship_start, "registration", {})
+
+    # --- доход ---
+
+    for payout in state.payouts:
+        if payout.ts.date() == day.date():
+            add(payout.ts, "income", {"payout": payout})
+
+    # --- счета ---
+
+    for index, bill in enumerate(state.habits.bills):
+
+        if bill.valid_from > day or (bill.valid_to and bill.valid_to <= day):
+            continue
+
+        if cal.day_in_month(day, bill.day_of_month).date() != day.date():
+            continue
+
+        if "bills" in silenced:
+            # Счёт никуда не делся, но оплачен мимо этого банка.
+            state.note(day, "hidden_purchase", "bill_outside_bank", {"kind": bill.kind})
+            continue
+
+        add(
+            day.replace(hour=int(9 + index % 10), minute=int((index * 7) % 60)),
+            "bill",
+            {"bill": bill, "index": index},
+        )
+
+    # --- подписки ---
+
+    for index, subscription in enumerate(state.habits.subscriptions):
+
+        if not habits_module.subscription_active(subscription, day):
+            continue
+
+        if "bills" in silenced or "purchases" in silenced:
+            continue
+
+        if cal.day_in_month(day, subscription.day_of_month).date() != day.date():
+            continue
+
+        add(
+            day.replace(hour=int(2 + index % 5), minute=int((index * 13) % 60)),
+            "subscription",
+            {"subscription": subscription, "index": index},
+        )
+
+    # --- покупки ---
+
+    for index, intent in enumerate(
+        needs_module.daily_intents(persona, state.habits, day, state.state, factor, silenced)
+    ):
+        add(intent.ts, "purchase", {"intent": intent, "index": index, "budget": budget})
+
+    # --- наличные ---
+
+    if needs_module.cash_need(persona, day, silenced):
+        rng = keyed_rng(NS_LEDGER, state.ordinal, day.toordinal(), 7)
+        ts = day.replace(hour=int(rng.integers(9, 21)), minute=int(rng.integers(0, 60)))
+        add(ts, "cash_withdrawal", {"budget": budget})
+
+    # --- внесение наличных ---
+
+    if "cash" not in silenced and state.ledger.balance(state.ledger.cash_id) > persona.true_income * 0.4:
+        rng = keyed_rng(NS_LEDGER, state.ordinal, day.toordinal(), 13)
+        if rng.random() < 0.05:
+            add(day.replace(hour=int(rng.integers(10, 20)), minute=int(rng.integers(0, 60))),
+                "cash_deposit", {})
+
+    # --- переводы ---
+
+    if "transfers" not in silenced:
+
+        active = [
+            item
+            for item in sim.graph.active(state.ordinal, day)
+            if item.relation_type != "employer"
+        ]
+
+        planned = sum(item.typical_frequency for item in active)
+
+        budget_per_month = (
+            params_module.active().activity.transfers_per_month[persona.activity_mode]
+            * params_module.active().activity.state_factor.get(state.state, 1.0)
+            * persona.visible_share
+            * 1.4
+        )
+
+        scale = (budget_per_month / planned) if planned > 0 else 0.0
+
+        for index, relation in enumerate(active):
+
+            rate = relation.typical_frequency * scale / 30.0
+
+            if relation.relation_type == "landlord":
+                if cal.day_in_month(day, min(28, persona.salary_day + 2)).date() != day.date():
+                    continue
+                rate = 1.0
+
+            rng = event_rng(NS_TRANSFER, state.ordinal, day.toordinal(), index, COMPONENT_CONTENT)
+
+            if rng.random() >= rate:
+                continue
+
+            ts = day.replace(hour=int(rng.integers(9, 22)), minute=int(rng.integers(0, 60)))
+
+            add(ts, "transfer", {"relation": relation, "index": index})
+
+    # --- сессии приложения ---
+
+    app_adopted = state.app_adopted_at is not None and day >= state.app_adopted_at
+
+    context = session_module.SessionContext(
+        due_bills=tuple(
+            bill.kind
+            for bill in state.habits.bills
+            if bill.valid_from <= day and cal.day_in_month(day, bill.day_of_month) >= day - timedelta(days=6)
+            and cal.day_in_month(day, bill.day_of_month) <= day
+        ),
+        card_blocked=any(card.is_blocked_at(day) for card in state.cards.values()),
+        recent_offer_family=state.offers[-1].product_family if state.offers else None,
+        has_loan=bool(state.loans),
+        has_deposit=state.assets() > 0,
+        has_card=any(card.usable_at(day) for card in state.cards.values()),
+        accounts=len(state.ledger.visible_accounts(day)),
+        dpd=state.worst_dpd(),
+        salary_just_arrived=any(
+            payout.ts.date() == (day - timedelta(days=1)).date() for payout in state.payouts
+        ),
+        recent_failure=state.recent_failure_at is not None
+        and (day - state.recent_failure_at).days <= 3,
+        fraud_alert=state.fraud_alert_at is not None and (day - state.fraud_alert_at).days <= 3,
+    )
+
+    for index, session in enumerate(
+        session_module.plan_sessions(persona, day, state.state, silenced, app_adopted, context)
+    ):
+        add(session.started_at, "session", {"session": session, "index": index})
+
+    # --- коммуникации ---
+
+    if state.consent_at is not None and day >= state.consent_at:
+
+        candidates = adoption_module.candidates(
+            persona,
+            day,
+            state.held_codes(day),
+            state.held_counts(day),
+            state.assets(),
+            app_adopted,
+            bool(state.loans),
+            len(state.open_contracts(day)),
+            stress,
+        )
+
+        families = frozenset(item.view.family for item in candidates)
+
+        contacts = comm_module.contacts_for_day(
+            persona=persona,
+            day=day,
+            consented=True,
+            app_adopted=app_adopted,
+            fatigue=state.comm_fatigue,
+            state_factor=params_module.active().activity.state_factor.get(state.state, 1.0),
+            owned_families=state.owned_families(day),
+            candidate_families=families,
+            dpd=state.worst_dpd(),
+            in_pause=lifecycle_module.pause_at(state.pauses, day) is not None,
+            stress=stress,
+            pending_notice=state.pending_notice,
+            fraud_alert=state.fraud_alert_at is not None and (day - state.fraud_alert_at).days <= 5,
+        )
+
+        for index, contact in enumerate(contacts):
+            add(contact.ts, "communication", {"contact": contact, "index": index, "candidates": candidates})
+
+    # --- кредитное обслуживание ---
+
+    for contract_id, loan in list(state.loans.items()):
+
+        if loan.closed:
+            continue
+
+        item = loan_rules.due_today(loan, day)
+
+        if item is not None:
+            add(day.replace(hour=0, minute=0, second=0), "installment_due",
+                {"contract_id": contract_id, "installment": item})
+
+        add(day.replace(hour=23, minute=30), "loan_check", {"contract_id": contract_id})
+
+    # --- органический интерес к продукту ---
+
+    if day >= persona.relationship_start and "purchases" not in silenced:
+        add(day.replace(hour=20, minute=15), "adoption", {"stress": stress, "app": app_adopted})
+
+    # --- мошеннические эпизоды ---
+
+    for index, episode in enumerate(state.fraud_episodes):
+
+        # Шаги, которые делает сам клиент, в паузе не случаются:
+        # молчащий клиент не покупает за границей и не переводит
+        # деньги «службе безопасности». Чужие руки паузой не
+        # ограничены.
+        if episode.kind == "false_positive" and "purchases" in silenced:
+            continue
+
+        if episode.kind == "social_engineering" and "transfers" in silenced:
+            continue
+
+        for position, step in enumerate(episode.steps):
+            if step.ts.date() == day.date():
+                add(step.ts, "fraud_step", {"episode": episode, "step": step,
+                                            "index": index, "position": position})
+
+    # --- истёкшая блокировка карты ---
+
+    for card in state.cards.values():
+        if (
+            card.status == CARD_BLOCKED
+            and card.blocked_until is not None
+            and card.blocked_until.date() == day.date()
+        ):
+            add(card.blocked_until, "card_block_expired", {"card_id": card.card_id})
+
+    # --- обращение в поддержку ---
+
+    cause = None
+
+    if state.recent_failure_at is not None and (day - state.recent_failure_at).days <= 2:
+        cause = "failed_operation"
+    elif state.worst_dpd() >= 30:
+        cause = "delinquency"
+    elif any(item.is_blocked_at(day) for item in state.cards.values()):
+        cause = "card_blocked"
+
+    if cause is not None:
+        add(day.replace(hour=13, minute=20), "support_check", {"cause": cause, "stress": stress})
+
+    # --- просроченные счета к оплате ---
+
+    if state.open_bills:
+        add(day.replace(hour=21, minute=5), "bill_sweep", {})
+
+    # --- банк узнал об изменении профиля ---
+
+    for index, event in enumerate(state.life_events):
+        if event.known_to_bank_at is not None and event.known_to_bank_at.date() == day.date():
+            add(event.known_to_bank_at, "profile_change", {"event": event, "index": index})
+
+    return actions
+
+
+# ============================================================
+# ИСПОЛНЕНИЕ
+# ============================================================
+
+
+def _execute(sim: CommunitySimulation, action: Action) -> None:
+
+    state = sim.clients[action.ordinal]
+
+    handler = _HANDLERS.get(action.kind)
+
+    if handler is not None:
+        handler(sim, state, action.ts, action.payload)
+
+
+def _touch_client(state: ClientState, ts: datetime) -> None:
+    """
+    Клиентское действие: оно и определяет паузы и возвращения.
+    """
+
+    previous = state.last_client_event
+
+    if previous is not None and (ts - previous).days >= 45:
+        state.returned_flag = True
+        state.note(ts, "pause_end", "return", {"silence_days": (ts - previous).days})
+
+    state.last_client_event = ts
+
+
+# --- деньги ---------------------------------------------------
+
+
+def _emit_money(
+    state: ClientState,
+    ts: datetime,
+    event_type: str,
+    account_id: str | None,
+    amount: int,
+    direction: str,
+    counterpart_account: str,
+    payload: dict,
+    initiator: str,
+    correlation_id: str | None = None,
+    link_type: str | None = None,
+    status: str = "approved",
+):
+    """
+    Одна денежная операция: проводка и событие с balance_after.
+    Отклонённая операция проводки не создаёт.
+    """
+
+    account = state.ledger.get(account_id) if account_id else None
+
+    body = dict(payload)
+    body["amount"] = int(amount)
+    body["direction"] = direction
+    body["status"] = status
+    body["account_id"] = account_id
+
+    event = state.factory.make(
+        event_type,
+        ts,
+        body,
+        initiator=initiator,
+        correlation_id=correlation_id,
+        link_type=link_type,
+    )
+
+    if status == "approved" and account is not None:
+
+        if direction == "debit":
+            state.ledger.post(ts, event.event_id, account_id, counterpart_account, int(amount))
+        else:
+            state.ledger.post(ts, event.event_id, counterpart_account, account_id, int(amount))
+
+        event.payload["balance_after"] = account.balance
+
+    return state.emit(event)
+
+
+def _decline(state: ClientState, ts: datetime, event_type: str, account_id: str | None,
+             amount: int, direction: str, payload: dict, reason: str, initiator: str,
+             correlation_id: str | None = None):
+
+    body = dict(payload)
+    body["decline_reason"] = reason
+
+    return _emit_money(
+        state, ts, event_type, account_id, amount, direction,
+        "external:none", body, initiator, correlation_id, status="declined",
+    )
+
+
+# --- обработчики ----------------------------------------------
+
+
+def _on_registration(sim, state: ClientState, ts: datetime, payload: dict) -> None:
+
+    view = sim._pick_product(state, "debit_card", ts)
+
+    if view is None:
+        return
+
+    sim._open_contract(state, view, ts.replace(hour=12), None, None)
+
+    _touch_client(state, ts)
+
+    state.note(ts, "state_transition", lifecycle_module.STATE_ONBOARDING, {"cause": "registration"})
+
+
+def _on_income(sim, state: ClientState, ts: datetime, payload: dict) -> None:
+
+    payout = payload["payout"]
+
+    amount = int(payout.amount)
+
+    if amount <= 0:
+        return
+
+    counterpart = f"employer:{payout.payer}"
+
+    if payout.landing == "cash":
+        state.ledger.post(ts, "hidden", counterpart, state.ledger.cash_id, amount)
+        state.note(ts, "income_event", "cash", {"amount": amount, "kind": payout.kind})
+        return
+
+    if payout.landing == "other_bank":
+        state.ledger.post(ts, "hidden", counterpart, state.ledger.other_bank_id, amount)
+        state.note(ts, "income_event", "other_bank", {"amount": amount, "kind": payout.kind})
+        return
+
+    account = state.primary_card_account(ts)
+
+    if account is None:
+        state.ledger.post(ts, "hidden", counterpart, state.ledger.cash_id, amount)
+        return
+
+    event_type = {
+        "pension": "pension_credit",
+        "salary": "salary_credit",
+    }.get(payout.kind, "other_income_credit")
+
+    _emit_money(
+        state, ts, event_type, account.account_id, amount, "credit", counterpart,
+        {
+            "channel": "system",
+            "mcc": MCC_SALARY,
+            "counterparty": payout.payer if payout.kind != "salary" else "Employer",
+            "reason": payout.outcome,
+            "merchant_country": "KZ",
+        },
+        INITIATOR_EXTERNAL,
+    )
+
+    state.note(ts, "income_event", payout.outcome, {"amount": amount, "kind": payout.kind})
+
+
+def _on_bill(sim, state: ClientState, ts: datetime, payload: dict) -> None:
+
+    bill = payload["bill"]
+
+    rng = event_rng(NS_LEDGER, state.ordinal, ts.toordinal(), payload["index"], COMPONENT_CONTENT)
+
+    amount = habits_module.bill_amount(bill, ts, state.persona.region, rng)
+
+    silenced = lifecycle_module.silenced_streams(state.pauses, ts)
+
+    if "purchases" in silenced and not bill.autopay:
+        return
+
+    account = None
+
+    for candidate in state.ledger.payment_sources(ts, amount):
+        account = candidate
+        break
+
+    choice = merchant_choice.choose_outlet(
+        state.persona, state.habits, bill.category, ts, rng, online_hint=True
+    )
+
+    merchant = choice.outlet if choice else None
+
+    body = {
+        "channel": "app" if not bill.autopay else "system",
+        "merchant_id": merchant.merchant_id if merchant else None,
+        "outlet_id": merchant.outlet_id if merchant else None,
+        "merchant_name": merchant.merchant_name if merchant else None,
+        "mcc": merchant.mcc if merchant else None,
+        "merchant_city": merchant.settlement if merchant else None,
+        "merchant_country": "KZ",
+        "is_online": True,
+        "is_subscription": False,
+        "reason": f"bill_{bill.kind}",
+    }
+
+    if not bill.autopay:
+        # Счёт остаётся к оплате: клиент заплатит его в приложении
+        # либо, не успев, мимо банка у срока.
+        state.open_bills.append(
+            {
+                "kind": bill.kind,
+                "category": bill.category,
+                "amount": amount,
+                "due": ts,
+                "deadline": ts + timedelta(days=10),
+                "body": body,
+            }
+        )
+        return
+
+    if account is None:
+
+        # Автоплатёж чаще всего просто не за что списывать, и
+        # счёт закрывается мимо банка. Наблюдаемая неудачная
+        # попытка списания случается реже.
+        fail_rng = keyed_rng(NS_LEDGER, state.ordinal, ts.toordinal(), 71)
+
+        if fail_rng.random() < params_module.active().activity.autopay_attempt_share:
+            _decline(state, ts, "bill_payment", None, amount, "debit", body,
+                     "insufficient_funds", INITIATOR_SYSTEM)
+
+        state.note(ts, "hidden_purchase", "bill_unpaid_in_bank", {"amount": amount, "kind": bill.kind})
+        return
+
+    card = state.usable_card(account.account_id, ts)
+
+    body["card_id"] = card.card_id if card else None
+
+    _emit_money(
+        state, ts, "bill_payment", account.account_id, amount, "debit",
+        f"merchant:{merchant.outlet_id}" if merchant else COUNTERPART_GOVERNMENT,
+        body, INITIATOR_SYSTEM,
+    )
+
+
+def _on_subscription(sim, state: ClientState, ts: datetime, payload: dict) -> None:
+
+    subscription = payload["subscription"]
+
+    amount = habits_module.subscription_amount(subscription, ts)
+
+    account = None
+
+    for candidate in state.ledger.payment_sources(ts, amount):
+        account = candidate
+        break
+
+    outlet = None
+
+    for item in sim._outlets_by_id(state, "subscription", ts):
+        if item.outlet_id == subscription.outlet_id:
+            outlet = item
+            break
+
+    body = {
+        "channel": "ecom",
+        "merchant_id": outlet.merchant_id if outlet else None,
+        "outlet_id": subscription.outlet_id,
+        "merchant_name": outlet.merchant_name if outlet else None,
+        "mcc": outlet.mcc if outlet else "5815",
+        "merchant_city": outlet.settlement if outlet else None,
+        "merchant_country": "KZ",
+        "is_online": True,
+        "is_subscription": True,
+        "reason": "subscription",
+    }
+
+    if account is None:
+
+        fail_rng = keyed_rng(NS_LEDGER, state.ordinal, ts.toordinal(), 72)
+
+        if fail_rng.random() < params_module.active().activity.autopay_attempt_share:
+            _decline(state, ts, "purchase", None, amount, "debit", body,
+                     "insufficient_funds", INITIATOR_SYSTEM)
+            return
+
+        state.note(ts, "hidden_purchase", "subscription_outside_bank", {"amount": amount})
+        return
+
+    body["card_id"] = state.usable_card(account.account_id, ts).card_id if state.usable_card(account.account_id, ts) else None
+
+    event = _emit_money(
+        state, ts, "purchase", account.account_id, amount, "debit",
+        f"merchant:{subscription.outlet_id}", body, INITIATOR_SYSTEM,
+    )
+
+    state.purchases.append(event)
+    state.month_purchases += amount
+
+
+def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
+
+    intent = payload["intent"]
+    budget = payload["budget"]
+
+    persona = state.persona
+
+    rng = event_rng(NS_LEDGER, state.ordinal, ts.toordinal(), payload["index"] + 50, COMPONENT_CONTENT)
+
+    factor = household_module.spending_factor(budget, persona)
+
+    travel = None
+    foreign = None
+
+    vacation = None
+
+    for event in state.life_events:
+        if event.kind != "vacation":
+            continue
+        if event.ts <= ts < event.ts + timedelta(days=int(event.payload.get("days", 0))):
+            vacation = event
+            break
+
+    if vacation is not None and vacation.payload.get("abroad"):
+        foreign = str(
+            rng.weighted(params_module.active().geography.foreign_countries)
+        )
+
+    choice = merchant_choice.choose_outlet(
+        persona, state.habits, intent.category, ts, rng,
+        travel_settlement=travel, foreign_country=foreign,
+    )
+
+    if choice is None:
+        return
+
+    amount = merchant_choice.purchase_amount(
+        persona, intent.category, choice.outlet, ts, factor, rng
+    )
+
+    sources = state.ledger.payment_sources(ts, amount)
+
+    body = {
+        "channel": choice.channel,
+        "merchant_id": choice.outlet.merchant_id,
+        "outlet_id": choice.outlet.outlet_id,
+        "merchant_name": choice.outlet.merchant_name,
+        "mcc": choice.outlet.mcc,
+        "merchant_city": choice.outlet.settlement or None,
+        "merchant_country": choice.outlet.country,
+        "is_online": choice.outlet.is_online,
+        "is_subscription": False,
+        "reason": "routine" if intent.from_routine else "purchase",
+    }
+
+    if not sources:
+
+        # Денег на счёте нет. Чаще всего банк этого даже не
+        # видит: клиент платит наличными, деньгами в другом
+        # банке или откладывает покупку. Наблюдаемый отказ
+        # редок, и после пары отказов за день клиент перестаёт
+        # пробовать.
+        settings = params_module.active().activity
+
+        hidden = state.ledger.hidden_sources(amount)
+
+        if hidden and rng.random() < settings.hidden_purchase_share:
+            state.ledger.post(ts, "hidden", hidden[0].account_id, f"merchant:{choice.outlet.outlet_id}", amount)
+            state.note(ts, "hidden_purchase", intent.category, {"amount": amount})
+            return
+
+        if rng.random() < settings.decline_attempt_share and state.may_decline(ts):
+            _decline(state, ts, "purchase", None, amount, "debit", body,
+                     "insufficient_funds", INITIATOR_CLIENT)
+            _touch_client(state, ts)
+            return
+
+        state.note(ts, "hidden_purchase", intent.category,
+                   {"amount": amount, "reason": "postponed"})
+        return
+
+    account = sources[0]
+
+    card = state.usable_card(account.account_id, ts)
+
+    if not choice.outlet.is_online and card is None:
+
+        blocked = any(
+            item.account_id == account.account_id and item.is_blocked_at(ts)
+            for item in state.cards.values()
+        )
+
+        if blocked:
+            body["card_id"] = next(
+                (item.card_id for item in state.cards.values() if item.account_id == account.account_id),
+                None,
+            )
+            _decline(state, ts, "purchase", account.account_id, amount, "debit", body,
+                     "card_blocked", INITIATOR_CLIENT)
+            _touch_client(state, ts)
+            return
+
+    body["card_id"] = card.card_id if card else None
+
+    event = _emit_money(
+        state, ts, "purchase", account.account_id, amount, "debit",
+        f"merchant:{choice.outlet.outlet_id}", body, INITIATOR_CLIENT,
+    )
+
+    state.purchases.append(event)
+    state.month_purchases += amount
+
+    _touch_client(state, ts)
+
+    # --- кешбэк по тарифу версии договора ---
+
+    contract = state.contracts.get(account.contract_id) if account.contract_id else None
+
+    if contract is not None and contract.terms:
+
+        months = max(0, cal.month_index(ts) - cal.month_index(contract.opened_at))
+
+        value = card_rules.cashback_amount(
+            contract.terms, intent.category, amount, account.balance, state.assets(), months
+        )
+
+        cap = card_rules.cashback_cap(contract.terms)
+
+        if cap:
+            value = max(0, min(value, cap - state.monthly_cashback))
+
+        if value > 0:
+            # Кешбэк начисляется не за каждую покупку, а один раз
+            # в месяц: у периодического начисления нет отдельного
+            # события-причины.
+            state.monthly_cashback += value
+            key = (contract.contract_id, account.account_id)
+            state.pending_cashback[key] = state.pending_cashback.get(key, 0) + value
+
+
+def _on_cash(sim, state: ClientState, ts: datetime, payload: dict) -> None:
+
+    budget = payload["budget"]
+
+    rng = keyed_rng(NS_LEDGER, state.ordinal, ts.toordinal(), 11)
+
+    low, high = params_module.active().activity.cash_withdrawal_share_of_income
+
+    amount = _money(max(2_000, budget.income * rng.uniform(low, high)))
+
+    amount = int(round(amount / 1_000) * 1_000)
+
+    # В банкомате снимают то, что есть, а не задуманную сумму.
+    capacity = state.ledger.payment_capacity(ts)
+
+    if amount > capacity > 0:
+        trimmed = int(capacity / 1_000) * 1_000
+        if trimmed >= 2_000:
+            amount = trimmed
+
+    sources = state.ledger.payment_sources(ts, amount)
+
+    body = {
+        "channel": "atm",
+        "mcc": MCC_CASH,
+        "merchant_country": "KZ",
+        "is_online": False,
+        "reason": "cash_need",
+    }
+
+    if not sources:
+
+        settings = params_module.active().activity
+
+        if rng.random() < settings.decline_attempt_share and state.may_decline(ts):
+            _decline(state, ts, "cash_withdrawal", None, amount, "debit", body,
+                     "insufficient_funds", INITIATOR_CLIENT)
+            return
+
+        state.note(ts, "hidden_purchase", "cash_need", {"amount": amount, "reason": "postponed"})
+        return
+
+    account = sources[0]
+
+    card = state.usable_card(account.account_id, ts)
+
+    body["card_id"] = card.card_id if card else None
+
+    _emit_money(
+        state, ts, "cash_withdrawal", account.account_id, amount, "debit",
+        state.ledger.cash_id, body, INITIATOR_CLIENT,
+    )
+
+    _touch_client(state, ts)
+
+    contract = state.contracts.get(account.contract_id) if account.contract_id else None
+
+    if contract is not None:
+
+        fee = card_rules.withdrawal_fee(
+            contract.terms, amount, state.monthly_atm, state.monthly_atm_count
+        )
+
+        state.monthly_atm += amount
+        state.monthly_atm_count += 1
+
+        if fee > 0 and state.ledger.can_debit(account.account_id, fee):
+            _emit_money(
+                state, ts + timedelta(seconds=5), "fee_charge", account.account_id, fee, "debit",
+                COUNTERPART_BANK,
+                {
+                    "channel": "system",
+                    "contract_id": contract.contract_id,
+                    "reason": "atm_withdrawal_fee",
+                    "accrual_period": ts.strftime("%Y-%m"),
+                    "merchant_country": "KZ",
+                },
+                INITIATOR_SYSTEM,
+            )
+
+
+def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
+
+    relation = payload["relation"]
+
+    settings = params_module.active().relationships
+
+    rng = event_rng(NS_TRANSFER, state.ordinal, ts.toordinal(), payload["index"] + 200, COMPONENT_OUTCOME)
+
+    amount = int(rng.integers(max(1_000, relation.typical_amount_low),
+                              max(2_000, relation.typical_amount_high)))
+
+    amount = int(round(amount / 100) * 100)
+
+    counterpart = relation.counterpart
+
+    internal = counterpart.client_ordinal is not None and counterpart.client_ordinal in sim.clients
+
+    # Человек переводит то, что у него есть: привычная сумма
+    # уменьшается до возможной, а не упирается в отказ. Отказом
+    # заканчивается только попытка при пустом счёте.
+    capacity = state.ledger.payment_capacity(ts)
+
+    if amount > capacity > 0:
+        trimmed = int(round(capacity * rng.uniform(0.35, 0.95) / 100) * 100)
+        if trimmed >= 500:
+            amount = trimmed
+
+    sources = state.ledger.payment_sources(ts, amount)
+
+    if not sources:
+
+        outcome = rng.weighted(settings.transfer_shortfall)
+
+        if outcome == "topup_from_other_bank":
+
+            hidden = state.ledger.accounts[state.ledger.other_bank_id]
+
+            if hidden.balance >= amount:
+
+                account = state.primary_card_account(ts)
+
+                if account is not None:
+                    _emit_money(
+                        state, ts - timedelta(minutes=3), "transfer_in", account.account_id,
+                        amount, "credit", state.ledger.other_bank_id,
+                        {
+                            "channel": "app",
+                            "counterparty": "Own account",
+                            "reason": "topup_before_transfer",
+                            "mcc": MCC_TRANSFER,
+                            "merchant_country": "KZ",
+                        },
+                        INITIATOR_CLIENT,
+                    )
+                    sources = state.ledger.payment_sources(ts, amount)
+
+        if not sources and outcome == "reduce_amount":
+            reduced = int(amount * rng.uniform(*settings.reduce_amount_factor))
+            reduced = max(500, int(round(reduced / 100) * 100))
+            sources = state.ledger.payment_sources(ts, reduced)
+            if sources:
+                amount = reduced
+
+        if not sources:
+
+            if outcome in ("client_cancels", "topup_from_other_bank", "reduce_amount"):
+                # Попытка не удалась и до банка не дошла.
+                state.note(ts, "transfer_intent", "cancelled", {"amount": amount})
+                return
+
+            if not state.may_decline(ts):
+                state.note(ts, "transfer_intent", "abandoned", {"amount": amount})
+                return
+
+            _decline(
+                state, ts, "p2p_out" if internal else "transfer_out", None, amount, "debit",
+                {
+                    "channel": "app",
+                    "counterparty": counterpart.masked_name,
+                    "mcc": MCC_TRANSFER,
+                    "merchant_country": "KZ",
+                    "reason": "transfer",
+                },
+                "insufficient_funds",
+                INITIATOR_CLIENT,
+            )
+            _touch_client(state, ts)
+            return
+
+    account = sources[0]
+
+    transfer_id = _transfer_id(state.client_id, ts, payload["index"])
+
+    body = {
+        "channel": "app",
+        "counterparty": counterpart.masked_name,
+        "mcc": MCC_TRANSFER,
+        "merchant_country": "KZ",
+        "reason": "transfer",
+        "card_id": state.usable_card(account.account_id, ts).card_id
+        if state.usable_card(account.account_id, ts)
+        else None,
+    }
+
+    if internal:
+
+        other = sim.clients[counterpart.client_ordinal]
+
+        target = other.primary_card_account(ts)
+
+        if target is None:
+            internal = False
+
+    if internal:
+
+        _emit_money(
+            state, ts, "p2p_out", account.account_id, amount, "debit",
+            target.account_id, body, INITIATOR_CLIENT,
+            correlation_id=transfer_id, link_type="transfer",
+        )
+
+        # Деньги доходят немедленно и влияют на решения получателя.
+        _emit_money(
+            other, ts + timedelta(seconds=1), "p2p_in", target.account_id, amount, "credit",
+            account.account_id,
+            {
+                "channel": "system",
+                "counterparty": graph_counterpart_name(state),
+                "mcc": MCC_TRANSFER,
+                "merchant_country": "KZ",
+                "reason": "transfer",
+            },
+            INITIATOR_EXTERNAL,
+            correlation_id=transfer_id,
+            link_type="transfer",
+        )
+
+    else:
+
+        destination = (
+            state.ledger.other_bank_id
+            if relation.relation_type == "own_account_other_bank"
+            else f"external:{counterpart.counterpart_id}"
+        )
+
+        _emit_money(
+            state, ts, "transfer_out", account.account_id, amount, "debit",
+            destination, body, INITIATOR_CLIENT,
+            correlation_id=transfer_id, link_type="transfer",
+        )
+
+    _touch_client(state, ts)
+
+    contract = state.contracts.get(account.contract_id) if account.contract_id else None
+
+    if contract is not None:
+
+        fee = card_rules.transfer_fee(contract.terms, amount, state.monthly_transfer)
+
+        state.monthly_transfer += amount
+
+        if fee > 0 and state.ledger.can_debit(account.account_id, fee):
+            _emit_money(
+                state, ts + timedelta(seconds=4), "fee_charge", account.account_id, fee, "debit",
+                COUNTERPART_BANK,
+                {
+                    "channel": "system",
+                    "contract_id": contract.contract_id,
+                    "reason": "transfer_fee",
+                    "accrual_period": ts.strftime("%Y-%m"),
+                    "merchant_country": "KZ",
+                },
+                INITIATOR_SYSTEM,
+            )
+
+
+def graph_counterpart_name(state: ClientState) -> str:
+    from .world.relationships import masked_name
+
+    return masked_name(state.client_id)
+
+
+_HANDLERS: dict = {}
+
+
+def _on_cash_deposit(sim, state: ClientState, ts: datetime, payload: dict) -> None:
+    """
+    Наличные возвращаются на счёт: скрытый мир и наблюдаемый
+    связаны проводкой, а не появлением денег из ниоткуда.
+    """
+
+    rng = keyed_rng(NS_LEDGER, state.ordinal, ts.toordinal(), 17)
+
+    cash = state.ledger.accounts[state.ledger.cash_id]
+
+    amount = int(round(cash.balance * rng.uniform(0.35, 0.9) / 1_000) * 1_000)
+
+    if amount < 1_000:
+        return
+
+    account = state.primary_card_account(ts)
+
+    if account is None:
+        return
+
+    card = state.usable_card(account.account_id, ts)
+
+    _emit_money(
+        state, ts, "cash_deposit", account.account_id, amount, "credit",
+        state.ledger.cash_id,
+        {
+            "channel": "atm",
+            "card_id": card.card_id if card else None,
+            "mcc": MCC_CASH,
+            "merchant_country": "KZ",
+            "is_online": False,
+            "reason": "cash_deposit",
+        },
+        INITIATOR_CLIENT,
+    )
+
+    _touch_client(state, ts)
+
+
+_HANDLERS.update(
+    {
+        "cash_deposit": _on_cash_deposit,
+        "registration": _on_registration,
+        "income": _on_income,
+        "bill": _on_bill,
+        "subscription": _on_subscription,
+        "purchase": _on_purchase,
+        "cash_withdrawal": _on_cash,
+        "transfer": _on_transfer,
+    }
+)
+
+
+# Обработчики остальных доменов регистрируются в своих модулях.
+from .engine_app import unblock_card  # noqa: E402,F401
+from .engine_credit import close_loan, repay_loan  # noqa: E402,F401
+from .engine_products import _emit_case  # noqa: E402,F401
+from .engine_month import finish as _finish, month_end as _month_end  # noqa: E402
+
+
+__all__ = ["run_community"]

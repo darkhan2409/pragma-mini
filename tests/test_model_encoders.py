@@ -9,7 +9,6 @@ Event и Profile Encoder: pooling, padding, общие таблицы,
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
 import torch
 
@@ -21,7 +20,10 @@ from src.model.batching import BatchError, events_from_batch, pad_records, profi
 from src.model.config import ModelConfig, config_from_tokenizer
 from src.model.encoders import build_encoders, encode_events, encode_profiles
 
-from tests.test_tok_encode import toy_vocab
+from tests.helpers_data import toy_vocab
+
+from tests.helpers_model import random_names
+
 
 
 CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA недоступна")
@@ -315,19 +317,6 @@ def test_id_beyond_the_vocabulary_is_rejected_by_embeddings(toy_config, toy_pair
 
     with pytest.raises(BatchError, match="вне словаря"):
         toy_pair.embeddings(keys, values, positions, mask)
-
-
-def random_names(parameters: dict) -> list[str]:
-    """
-    Имена тензоров со случайной инициализацией.
-
-    Биасы внимания и веса LayerNorm задаются константами, они
-    совпадают у любых двух блоков по построению, а не потому,
-    что блок скопирован. Сравнивать имеет смысл только то, что
-    действительно разыгрывается.
-    """
-
-    return [name for name, tensor in parameters.items() if tensor.detach().unique().numel() > 2]
 
 
 # ============================================================

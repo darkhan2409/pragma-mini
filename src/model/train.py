@@ -13,17 +13,9 @@ from src.tokenizer.config import artifacts_dir as default_artifacts_dir
 from src.tokenizer.config import tokenized_dir as default_tokenized_dir
 from src.tokenizer.config import vocab_dir as default_vocab_dir
 
-from .ablation import run_ablation
 from .compare import run_comparison
-from .diagnostics import run_cluster_bootstrap
-from .full_history import ABLATION_SPLITS, CLIENT_UNIVERSE, run_full_history
-from .history_coverage import WINDOWS, run_history_coverage
-from .history_encoder import ATTENTION_RULES
-from .config import STRUCTURES
-from src.tokenizer.masking import SCHEMES
 
 from .checkpoint import verify_checkpoint
-from .data import CUTOFF_POLICIES
 from .targets import TARGET_POLICIES
 from .trainer import (
     ARCHITECTURE_FIELDS,
@@ -47,11 +39,11 @@ from .trainer import (
 #   overfit     может ли модель вообще запомнить два примера
 #   benchmark   сколько стоит шаг именно в этой конфигурации
 #   run         один короткий эксперимент с фиксированным бюджетом
-#   ablate      диагностика внимания на готовом checkpoint
+#   compare     две обученные арки на одних примерах и масках
 #
 # Каждый режим строит СВОЮ модель: сравнивать скорость на
 # частично обученных весах или продолжать run после overfit
-# значит мерить и обучать разные вещи. Исключение это ablate:
+# значит мерить и обучать разные вещи. Исключение это compare:
 # он берёт и веса, и конфигурацию из checkpoint, потому что
 # обязан воспроизвести обучение, а не задать его заново.
 #
@@ -60,15 +52,7 @@ from .trainer import (
 # ============================================================
 
 
-MODES: tuple[str, ...] = (
-    "check",
-    "overfit", "benchmark", "run", "ablate", "compare", "diagnose", "full-history",
-)
-
-ABLATION_DIR = "ablation"
 COMPARISON_DIR = "comparison"
-DIAGNOSTICS_DIR = "diagnostics"
-FULL_HISTORY_TAG = "full_history"
 
 
 def run_dir(name: str, mode: str, tag: str | None = None) -> Path:
@@ -202,10 +186,16 @@ def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--accumulation-steps", type=int, default=None)
     parser.add_argument("--target-policy", choices=TARGET_POLICIES, default=None)
-    # Какие срезы клиента идут в обучение. last это один
-    # пример на клиента, самый поздний cutoff.
-    parser.add_argument("--train-cutoffs", choices=CUTOFF_POLICIES, default=None)
-    parser.add_argument("--mask-scheme", choices=SCHEMES, default=None)
+    parser.add_argument(
+        "--vocab-tag",
+        default=None,
+        help="комплект словаря: data/artifacts/<name>/tokenizer__<tag> и data/tokenized/<name>__<tag>",
+    )
+    parser.add_argument(
+        "--new-vocab-tag",
+        default=None,
+        help="только для compare: комплект словаря ВТОРОЙ арки, если он другой",
+    )
     parser.add_argument(
         "--stream-validation",
         action="store_const",
@@ -231,14 +221,12 @@ def add_common(parser: argparse.ArgumentParser) -> None:
 
     # Архитектура запуска. Ничего не передали значит прежняя
     # модель: умолчания ModelConfig не менялись.
-    parser.add_argument("--structure", choices=STRUCTURES, default=None)
     parser.add_argument("--d-model", type=int, default=None, dest="d_model")
     parser.add_argument("--n-heads", type=int, default=None, dest="n_heads")
     parser.add_argument("--dim-feedforward", type=int, default=None, dest="dim_feedforward")
     parser.add_argument("--event-layers", type=int, default=None, dest="n_event_layers")
     parser.add_argument("--profile-layers", type=int, default=None, dest="n_profile_layers")
     parser.add_argument("--history-layers", type=int, default=None, dest="n_history_layers")
-    parser.add_argument("--session-layers", type=int, default=None, dest="n_session_layers")
 
 
 OVERRIDES: tuple[str, ...] = (
@@ -265,8 +253,7 @@ OVERRIDES: tuple[str, ...] = (
     "epochs",
     "accumulation_steps",
     "target_policy",
-    "train_cutoffs",
-    "mask_scheme",
+    "vocab_tag",
     "stream_validation",
     "best_metric",
     "checkpoint_every",
@@ -297,9 +284,16 @@ def config_from_args(args) -> TrainConfig:
 
 
 def paths_from_args(args) -> tuple[Path, Path, Path]:
+    """
+    Тег словаря выбирает КОМПЛЕКТ: свой каталог artifacts и свой
+    токенизированный датасет. Без тега пути прежние.
+    """
+
+    tag = getattr(args, "vocab_tag", None)
+
     return (
-        args.root or default_tokenized_dir(args.name),
-        args.vocab or default_vocab_dir(args.name),
+        args.root or default_tokenized_dir(args.name, tag),
+        args.vocab or default_vocab_dir(args.name, tag),
         args.artifacts or default_artifacts_dir(args.name),
     )
 
@@ -343,18 +337,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="продолжить ЭТОТ ЖЕ прогон с checkpoint (last.pt или interrupted.pt)",
     )
 
-    ablate = sub.add_parser(
-        "ablate", help="диагностика внимания History Encoder на готовом checkpoint"
-    )
-    add_common(ablate)
-    ablate.add_argument(
-        "--checkpoint",
-        type=Path,
-        default=None,
-        help="по умолчанию best.pt последнего run, иначе last.pt",
-    )
-    ablate.add_argument("--rules", default=",".join(ATTENTION_RULES))
-
     compare = sub.add_parser(
         "compare", help="сравнение двух checkpoint'ов на фиксированных наборах масок"
     )
@@ -363,63 +345,8 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--new", type=Path, default=None, help="по умолчанию run с тегом")
     compare.add_argument("--min-targets", type=int, default=30)
     compare.add_argument("--bootstrap", type=int, default=2000)
-    compare.add_argument("--rules", default=",".join(ATTENTION_RULES))
-
-    diagnose = sub.add_parser(
-        "diagnose", help="кластерный bootstrap и календарная глубина истории, без обучения"
-    )
-    add_common(diagnose)
-    diagnose.add_argument("--old", type=Path, default=None)
-    diagnose.add_argument("--new", type=Path, default=None)
-    diagnose.add_argument("--bootstrap", type=int, default=2000)
-    diagnose.add_argument("--min-targets", type=int, default=30)
-    diagnose.add_argument("--rules", default=",".join(ATTENTION_RULES))
-    diagnose.add_argument(
-        "--windows", default=",".join("full" if w is None else str(w) for w in WINDOWS)
-    )
-    diagnose.add_argument("--train-coverage-clients", type=int, default=512)
-    diagnose.add_argument("--skip-bootstrap", action="store_true")
-    diagnose.add_argument("--skip-coverage", action="store_true")
-    diagnose.add_argument("--skip-links", action="store_true")
-
-    full = sub.add_parser(
-        "full-history", help="полные истории без обрезки, одна эпоха на выбранном наборе клиентов"
-    )
-    add_common(full)
-    full.add_argument("--clients", type=int, default=CLIENT_UNIVERSE)
-    full.add_argument(
-        "--baseline",
-        action="append",
-        default=None,
-        help="имя=путь; по умолчанию прежние combined и field_balanced checkpoint'ы",
-    )
-    full.add_argument("--ablation-splits", default=",".join(ABLATION_SPLITS))
-    full.add_argument("--bootstrap", type=int, default=2000)
-    full.add_argument("--skip-benchmark", action="store_true")
 
     return parser
-
-
-def default_baselines(name: str) -> dict[str, Path]:
-    """
-    Прежние checkpoint'ы: combined отличается от нового только
-    контекстом и объёмом, field_balanced это исходный эксперимент.
-    """
-
-    candidates = {
-        "combined_128": run_dir(name, "run", "combined") / "best.pt",
-        "field_balanced_128": run_dir(name, "run") / "best.pt",
-    }
-
-    return {label: path for label, path in candidates.items() if path.exists()}
-
-
-def parse_windows(text: str) -> tuple[int | None, ...]:
-    return tuple(
-        None if value.strip() == "full" else int(value)
-        for value in text.split(",")
-        if value.strip()
-    )
 
 
 def default_checkpoint(name: str, tag: str | None = None) -> Path:
@@ -462,18 +389,23 @@ def describe_checkpoint(path: Path) -> dict:
     print()
     print(f"шагов оптимизатора      {counters.get('n_steps')}")
     print(f"batch'ей                {counters.get('n_batches')}, пропущено {counters.get('n_skipped')}")
-    print(f"micro-batch эпохи       {micro_done} из {micro_budget}"
-          + (f" ({share * 100:.1f} %)" if share else ""))
+    # Бюджет эпох есть только у обучения по эпохам: у шагового
+    # знаменателя нет, и печатать "из None" нечестно.
+    print(
+        f"micro-batch             {micro_done} из {micro_budget} "
+        f"({share * 100:.1f} %)"
+        if micro_budget
+        else f"micro-batch             {micro_done}, бюджет в шагах"
+    )
     print(f"sampler                 эпоха {(payload.get('sampler') or {}).get('epoch')}, "
           f"позиция {(payload.get('sampler') or {}).get('position')}")
     print(f"оценки на шагах         {progress.get('evaluated_steps')}")
     print(f"лучший                  {progress.get('best')}")
     print(f"финальные наборы        {'сделаны' if progress.get('final') else 'нет'}")
     print()
-    print(f"структура               {model_config.get('structure')}, d_model {model_config.get('d_model')}")
+    print(f"d_model                 {model_config.get('d_model')}, "
+          f"слоёв {model_config.get('n_event_layers')}/{model_config.get('n_history_layers')}")
     print(f"политика целей          {train_config.get('target_policy')}")
-    print(f"срезы обучения          {train_config.get('train_cutoffs')}")
-    print(f"схема масок             {train_config.get('mask_scheme')}")
     print(f"seed / val_seed         {train_config.get('seed')} / {train_config.get('val_seed')}")
     print(f"эпох / batch            {train_config.get('epochs')} / {train_config.get('batch_size')}")
     print(f"обрезка истории         {train_config.get('max_events_per_history')}")
@@ -504,25 +436,18 @@ def main() -> None:
 
     config = config_from_args(args)
 
-    folder = {
-        "ablate": ABLATION_DIR,
-        "compare": COMPARISON_DIR,
-        "diagnose": DIAGNOSTICS_DIR,
-    }.get(args.mode, args.mode)
+    folder = COMPARISON_DIR if args.mode == "compare" else args.mode
 
-    if args.mode == "full-history":
-        out = prepare_dir(args.out or RUNS_DIR / args.name / FULL_HISTORY_TAG, args.force)
-    else:
-        out = prepare_dir(
-            args.out or run_dir(args.name, folder, args.tag),
-            args.force,
-            keep=getattr(args, "resume", None) is not None,
-        )
+    out = prepare_dir(
+        args.out or run_dir(args.name, folder, args.tag),
+        args.force,
+        keep=getattr(args, "resume", None) is not None,
+    )
 
     env = load_environment(root, vocab, artifacts, epsilon=config.epsilon)
 
-    print(f"словарь {env.vocab.size}, обучаемых полей {len(env.table.trainable_key_ids)}, "
-          f"вырожденных {len(env.table.degenerate_key_ids)}")
+    print(f"словарь {env.vocab.size}, обучаемых полей {len(env.table.trainable_field_ids)}, "
+          f"вырожденных {len(env.table.degenerate_field_ids)}")
 
     if env.unigram.missing:
         print(f"без unigram-baseline: {env.unigram.missing}")
@@ -555,95 +480,6 @@ def main() -> None:
         benchmark(env, config, out, warmup=args.warmup, measured=args.measured, device=args.device)
         return
 
-    if args.mode == "full-history":
-
-        settings = replace(
-            config,
-            client_universe=args.clients,
-            max_train_clients=None,
-            max_val_clients=None,
-            max_events_per_history=None,
-            epochs=1,
-            masking_mode=args.masking_mode or "combined",
-            token_rate=args.token_rate if args.token_rate is not None else 0.15,
-            event_rate=args.event_rate if args.event_rate is not None else 0.10,
-            key_rate=args.key_rate if args.key_rate is not None else 0.10,
-            eval_batch_size=args.eval_batch_size or 2,
-            log_every=args.log_every or 200,
-            eval_every=args.eval_every or 2000,
-        )
-
-        baselines = (
-            {item.split("=", 1)[0]: Path(item.split("=", 1)[1]) for item in args.baseline}
-            if args.baseline
-            else default_baselines(args.name)
-        )
-
-        print(f"клиентов: {settings.client_universe}, лимит истории: "
-              f"{settings.max_events_per_history}, эпох: {settings.epochs}")
-        print("baseline'ы: " + (", ".join(f"{k} -> {v}" for k, v in baselines.items()) or "нет"))
-        print()
-
-        run_full_history(
-            env,
-            out,
-            settings,
-            baselines,
-            device=args.device,
-            ablation_splits=tuple(
-                value.strip() for value in args.ablation_splits.split(",") if value.strip()
-            ),
-            n_boot=args.bootstrap,
-            skip_benchmark=args.skip_benchmark,
-        )
-
-        return
-
-    if args.mode == "diagnose":
-
-        if not args.skip_bootstrap:
-
-            old = args.old or default_checkpoint(args.name)
-            new = args.new or default_checkpoint(args.name, args.tag)
-
-            print(f"старый checkpoint: {old}")
-            print(f"новый checkpoint:  {new}")
-            print("обучения нет: веса заморожены, маски и цели те же")
-            print()
-
-            run_cluster_bootstrap(
-                env,
-                old,
-                new,
-                out,
-                device=args.device,
-                rules=tuple(value.strip() for value in args.rules.split(",") if value.strip()),
-                n_boot=args.bootstrap,
-                min_targets=args.min_targets,
-            )
-
-        if not args.skip_coverage:
-
-            from src.tokenizer.config import processed_dir as default_processed_dir
-
-            print()
-            print("календарная глубина recent-окон")
-            print()
-
-            run_history_coverage(
-                default_processed_dir(args.name),
-                out,
-                splits={
-                    "train": args.train_coverage_clients,
-                    "val_client": config.max_val_clients,
-                    "val_time": config.max_val_clients,
-                },
-                windows=parse_windows(args.windows),
-                with_links=not args.skip_links,
-            )
-
-        return
-
     if args.mode == "compare":
 
         old = args.old or default_checkpoint(args.name)
@@ -657,33 +493,29 @@ def main() -> None:
         print("конфигурация и маски берутся из checkpoint'ов, флаги обучения игнорируются")
         print()
 
+        # Арки с разными словарями живут в разных token-простран-
+        # ствах: каждой нужен свой комплект artifacts, а равенство
+        # задачи доказывается инвариантным отпечатком целей.
+        new_env = None
+
+        if args.new_vocab_tag is not None:
+
+            new_env = load_environment(
+                default_tokenized_dir(args.name, args.new_vocab_tag),
+                default_vocab_dir(args.name, args.new_vocab_tag),
+                default_artifacts_dir(args.name),
+                epsilon=config.epsilon,
+            )
+
         run_comparison(
             env,
             old,
             new,
             out,
             device=args.device,
-            rules=tuple(value.strip() for value in args.rules.split(",") if value.strip()),
             min_targets=args.min_targets,
             n_boot=args.bootstrap,
-        )
-
-        return
-
-    if args.mode == "ablate":
-
-        checkpoint = args.checkpoint or default_checkpoint(args.name, args.tag)
-
-        print(f"checkpoint: {checkpoint}")
-        print("конфигурация и маски validation берутся из него, флаги обучения игнорируются")
-        print()
-
-        run_ablation(
-            env,
-            checkpoint,
-            out,
-            device=args.device,
-            rules=tuple(value.strip() for value in args.rules.split(",") if value.strip()),
+            new_env=new_env,
         )
 
         return

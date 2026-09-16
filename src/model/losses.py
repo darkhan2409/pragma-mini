@@ -92,13 +92,13 @@ def mlm_loss(field_logits: list[FieldLogits], local_targets: torch.Tensor) -> Lo
 
         if int(targets.max()) >= item.n_candidates or int(targets.min()) < 0:
             raise TargetError(
-                f"цель вне {item.n_candidates} кандидатов поля {item.key_id}: "
+                f"цель вне {item.n_candidates} кандидатов поля {item.field_id}: "
                 f"диапазон {int(targets.min())}..{int(targets.max())}"
             )
 
         value = F.cross_entropy(item.logits.float(), targets)
 
-        per_field[item.key_id] = (value, int(targets.numel()))
+        per_field[item.field_id] = (value, int(targets.numel()))
 
         losses.append(value)
         weights.append(int(targets.numel()))

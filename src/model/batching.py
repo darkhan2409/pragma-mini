@@ -103,6 +103,7 @@ def check_batch(batch: TokenBatch) -> None:
         "key_ids": batch.key_ids.size,
         "value_ids": batch.value_ids.size,
         "positions": batch.positions.size,
+        "field_ids": batch.field_ids.size,
         "event_ids": batch.event_ids.size,
         "example_ids": batch.example_ids.size,
     }
@@ -120,6 +121,7 @@ def check_batch(batch: TokenBatch) -> None:
         "profile_key_ids": batch.profile_key_ids.size,
         "profile_value_ids": batch.profile_value_ids.size,
         "profile_positions": batch.profile_positions.size,
+        "profile_field_ids": batch.profile_field_ids.size,
         "profile_example_ids": batch.profile_example_ids.size,
     }
 
@@ -141,6 +143,7 @@ def split_events(batch: TokenBatch) -> list[Record]:
             key_ids=batch.key_ids[lo:hi],
             value_ids=batch.value_ids[lo:hi],
             positions=batch.positions[lo:hi],
+            field_ids=batch.field_ids[lo:hi],
         )
         for lo, hi in zip(offsets[:-1], offsets[1:])
     ]
@@ -173,6 +176,7 @@ def split_profiles(batch: TokenBatch) -> list[Record]:
             key_ids=batch.profile_key_ids[lo:hi],
             value_ids=batch.profile_value_ids[lo:hi],
             positions=batch.profile_positions[lo:hi],
+            field_ids=batch.profile_field_ids[lo:hi],
         )
         for lo, hi in zip(starts, ends)
     ]

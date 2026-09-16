@@ -16,10 +16,11 @@ import torch
 
 from src.tokenizer.config import IncompatibleArtifactsError
 from src.model.checkpoint import CHECKPOINT_VERSION, load_checkpoint, save_checkpoint
-from src.model.data import ClientStore, EpochSampler
+from src.model.data import EpochSampler
 from src.model.trainer import Trainer, build_validation, run_training
 
-from tests.test_trainer import env, small_config, store, trainer_for  # noqa: F401
+from tests.helpers_model import small_config, trainer_for
+
 
 
 # ============================================================

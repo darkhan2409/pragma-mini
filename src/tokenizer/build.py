@@ -150,16 +150,20 @@ def check_order(client_id: np.ndarray, ts: np.ndarray, seq: np.ndarray) -> None:
 
 def flat_arrays(table: pa.Table) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Плоские key_ids, value_ids и длины строк.
+    Плоские field_ids, value_ids и длины строк.
+
+    Отчёт по неизвестным и пропущенным ведётся по ПОЛЮ: в
+    semantic-режиме один key token принадлежит нескольким полям,
+    и разбивка по токену смешала бы их в одну строку.
     """
 
-    keys = table.column("key_ids").combine_chunks()
+    fields = table.column("field_ids").combine_chunks()
     values = table.column("value_ids").combine_chunks()
 
     widths = table.column("n_tokens").to_numpy().astype(np.int64)
 
     return (
-        keys.flatten().to_numpy(zero_copy_only=False).astype(np.int64),
+        fields.flatten().to_numpy(zero_copy_only=False).astype(np.int64),
         values.flatten().to_numpy(zero_copy_only=False).astype(np.int64),
         widths,
     )
@@ -199,7 +203,7 @@ class TokenStats:
         if table.num_rows == 0:
             return
 
-        flat_keys, flat_values, widths = flat_arrays(table)
+        flat_fields, flat_values, widths = flat_arrays(table)
 
         self.n_records += table.num_rows
         self.n_tokens += int(widths.sum())
@@ -214,8 +218,8 @@ class TokenStats:
             setattr(self, total, getattr(self, total) + int(hit.sum()))
 
             if hit.any():
-                for key_id, count in Counter(flat_keys[hit].tolist()).items():
-                    entry = self.vocab.key_entry_by_id(int(key_id))
+                for field_id, count in Counter(flat_fields[hit].tolist()).items():
+                    entry = self.vocab.field_entry_by_id(int(field_id))
                     by_key[entry.key if entry else "[UNK]"] += int(count)
 
         if type_column is not None:

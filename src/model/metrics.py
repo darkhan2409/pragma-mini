@@ -75,9 +75,9 @@ class UnigramTable:
 
         fields = artifact.get("fields", {})
 
-        for key_id in table.trainable_key_ids:
+        for field_id in table.trainable_field_ids:
 
-            entry = vocab.key_entry_by_id(key_id)
+            entry = vocab.field_entry_by_id(field_id)
 
             item = fields.get(entry.namespace, {}).get(entry.field)
 
@@ -85,7 +85,7 @@ class UnigramTable:
                 self.missing.append(entry.key)
                 continue
 
-            size = table.size_of(key_id)
+            size = table.size_of(field_id)
 
             weights = np.zeros(size, dtype=np.float64)
 
@@ -93,7 +93,7 @@ class UnigramTable:
 
             for value, share in item["distribution"]:
 
-                local = self._local(item.get("encoding"), value, key_id, size, vocab, table)
+                local = self._local(item.get("encoding"), value, field_id, size, vocab, table)
 
                 if local is None:
                     unmatched.append(str(value))
@@ -115,15 +115,20 @@ class UnigramTable:
             weights = np.clip(weights, self.epsilon, None)
             weights = weights / weights.sum()
 
-            self.log_probs[key_id] = np.log(weights)
-            self.mode[key_id] = int(np.argmax(weights))
+            self.log_probs[field_id] = np.log(weights)
+            self.mode[field_id] = int(np.argmax(weights))
 
     # --------------------------------------------------------
 
     @staticmethod
-    def _local(encoding, value, key_id: int, size: int, vocab: Vocab, table: FieldTable) -> int | None:
+    def _local(encoding, value, field_id: int, size: int, vocab: Vocab, table: FieldTable) -> int | None:
         """
         Значение artifact в локальный индекс кандидата.
+
+        Поиск идёт по ПОЛЮ: в shared-режиме один value token
+        принадлежит нескольким полям, и локальный индекс у них
+        разный. Вычитание смещения здесь тоже не работает —
+        кандидаты поля не обязаны идти подряд.
         """
 
         if encoding == "bucket":
@@ -132,12 +137,12 @@ class UnigramTable:
 
             return index if 0 <= index < size else None
 
-        found = vocab.value_id(key_id, str(value))
+        found = vocab.value_token(field_id, str(value))
 
         if found is None:
             return None
 
-        local = int(found) - int(table.value_start[key_id])
+        local = int(table.candidates.to_local([field_id], [found])[0])
 
         return local if 0 <= local < size else None
 
@@ -305,7 +310,7 @@ class MetricAccumulator:
 
             logits = item.logits.detach().float().to("cpu")
 
-            cell = self.state.setdefault(item.key_id, _FieldState())
+            cell = self.state.setdefault(item.field_id, _FieldState())
 
             log_probs = torch.log_softmax(logits, dim=-1)
 
@@ -322,7 +327,7 @@ class MetricAccumulator:
                 if units is None:
                     raise ValueError("keep_units требует номеров примеров для каждой позиции")
 
-                self._note_units(item.key_id, units[item.index], nll)
+                self._note_units(item.field_id, units[item.index], nll)
 
             width = min(self.top_k, item.n_candidates)
 
@@ -335,12 +340,12 @@ class MetricAccumulator:
             cell.true.append(true)
             cell.pred.append(prediction.numpy().astype(np.int64))
 
-            if self.unigram.has(item.key_id):
+            if self.unigram.has(item.field_id):
 
-                log_p = self.unigram.log_probs[item.key_id]
+                log_p = self.unigram.log_probs[item.field_id]
 
                 cell.nll_unigram += float(-log_p[true].sum())
-                cell.unigram_correct += int((true == self.unigram.mode[item.key_id]).sum())
+                cell.unigram_correct += int((true == self.unigram.mode[item.field_id]).sum())
 
     # --------------------------------------------------------
 
@@ -376,7 +381,8 @@ class MetricAccumulator:
 
         base = {
             "field": self.table.name(key_id),
-            "key_id": int(key_id),
+            "field_id": int(key_id),
+            "key_token_id": self.table.key_token_of(key_id),
             "kind": self.table.kind(key_id),
             "n_candidates": size,
         }
@@ -442,10 +448,10 @@ class MetricAccumulator:
     def finalize(self, exclude: frozenset[str] = frozenset()) -> dict:
 
         fields = [
-            self._field_report(key_id, exclude) for key_id in self.table.trainable_key_ids
+            self._field_report(key_id, exclude) for key_id in self.table.trainable_field_ids
         ]
         fields += [
-            self._field_report(key_id, exclude) for key_id in self.table.degenerate_key_ids
+            self._field_report(key_id, exclude) for key_id in self.table.degenerate_field_ids
         ]
 
         excluded_names = sorted(
@@ -458,7 +464,7 @@ class MetricAccumulator:
             "epsilon": self.epsilon,
             "n_masked_positions": self.n_masked,
             "n_degenerate_skipped": self.n_degenerate,
-            "n_fields_trainable": len(self.table.trainable_key_ids),
+            "n_fields_trainable": len(self.table.trainable_field_ids),
             **aggregate_fields(fields),
             "subset": aggregate_fields(fields, exclude) if exclude else None,
             "fields": fields,
@@ -495,7 +501,7 @@ class MetricAccumulator:
 
         keys = [
             key_id
-            for key_id in self.table.trainable_key_ids
+            for key_id in self.table.trainable_field_ids
             if key_id in self.state and self.table.name(key_id) not in exclude
         ]
 
@@ -571,42 +577,6 @@ def cluster_draws(n_units: int, n_boot: int = 2000, seed: int = 20240608) -> np.
     return rng.multinomial(
         n_units, np.full(n_units, 1.0 / n_units), size=int(n_boot)
     ).astype(np.float64)
-
-
-def group_sample(
-    sample: tuple[np.ndarray, np.ndarray, np.ndarray], clusters: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Складывает строки одной единицы кластеризации.
-
-    Field-balanced CE суммирует NLL и counts по полю, а потом
-    усредняет по полям. Сумма столбца не зависит от того,
-    сгруппированы строки или нет, поэтому «взять клиента с
-    кратностью k вместе со всеми его примерами» это то же, что
-    «взять строку клиента с весом k». Формула сохраняется, а не
-    подменяется средним по клиентским CE.
-    """
-
-    owners, total, counts = sample
-
-    clusters = np.asarray(clusters, dtype=np.int64)
-
-    if clusters.shape[0] != owners.shape[0]:
-        raise ValueError(
-            f"кластеров {clusters.shape[0]}, а строк {owners.shape[0]}"
-        )
-
-    keys, index = np.unique(clusters, return_inverse=True)
-
-    index = np.asarray(index).ravel()
-
-    grouped_total = np.zeros((keys.size, total.shape[1]), dtype=np.float64)
-    grouped_counts = np.zeros((keys.size, counts.shape[1]), dtype=np.float64)
-
-    np.add.at(grouped_total, index, total)
-    np.add.at(grouped_counts, index, counts)
-
-    return keys, grouped_total, grouped_counts
 
 
 def bootstrap_combination(

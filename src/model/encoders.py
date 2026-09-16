@@ -7,7 +7,7 @@ from src.tokenizer.dataset import TokenBatch
 
 from .batching import PaddedRecords, events_from_batch, profiles_from_batch
 from .config import ModelConfig
-from .embeddings import SharedEmbeddings
+from .embeddings import SharedEmbeddings, draw_token_weight
 from .event_encoder import EventEncoder
 from .profile_encoder import ProfileEncoder
 
@@ -32,13 +32,13 @@ from .profile_encoder import ProfileEncoder
 
 class EncoderPair(nn.Module):
 
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, token_weight: torch.Tensor | None = None):
 
         super().__init__()
 
         self.config = config
 
-        self.embeddings = SharedEmbeddings(config)
+        self.embeddings = SharedEmbeddings(config, token_weight)
 
         self.event = EventEncoder(config, self.embeddings)
         self.profile = ProfileEncoder(config, self.embeddings)
@@ -58,6 +58,11 @@ class EncoderPair(nn.Module):
 
     def n_parameters(self) -> int:
         return sum(parameter.numel() for parameter in self.parameters())
+
+
+# ============================================================
+# ПОВЕРХ TokenBatch
+# ============================================================
 
 
 def build_encoders(config: ModelConfig, seed: int = 42, device=None) -> EncoderPair:

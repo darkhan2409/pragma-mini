@@ -16,7 +16,7 @@ import torch
 from src.preprocessing.artifacts import write_json, write_text
 from src.tokenizer.dataset import collate
 from src.preprocessing.config import DATASET_NAMES
-from src.tokenizer.masking import SCHEME_BATCH, SCHEME_EXAMPLE, MaskingConfig, Masker
+from src.tokenizer.masking import MaskingConfig, Masker
 
 from .backbone import build_backbone
 from .checkpoint import (
@@ -26,20 +26,17 @@ from .checkpoint import (
     save_checkpoint,
     verify_checkpoint,
 )
-from .config import ACTIVATIONS, STRUCTURE_SESSION, STRUCTURES, config_from_tokenizer
-from .batching import BatchError
+from .config import ACTIVATIONS, config_from_tokenizer
 from .data import (
-    CUTOFF_POLICIES,
-    CUTOFFS_ALL,
     ClientStore,
     EpochSampler,
     FixedSplit,
-    session_keys_from_examples,
+    last_row_per_client,
 )
 from .history_batching import metadata_from_examples, prepare_history_batch, to_model_inputs
 from .losses import mlm_loss
 from .metrics import MetricAccumulator, UnigramTable, render_metrics
-from .mlm_batching import build_targets, representations, within_session
+from .mlm_batching import build_targets, representations
 from .mlm_head import FieldLogits, FieldTable, MLMHead
 from .targets import DEFAULT_POLICY, POLICY_NOTES, TARGET_POLICIES, exclude_patterns
 
@@ -123,9 +120,11 @@ ARCHITECTURE_FIELDS: tuple[str, ...] = (
     "n_event_layers",
     "n_profile_layers",
     "n_history_layers",
-    "n_session_layers",
-    "structure",
 )
+
+# Поля архитектуры, чьё значение это имя режима, а не размер:
+# проверка «положительное число» к ним не относится.
+NAMED_ARCHITECTURE_FIELDS: frozenset[str] = frozenset({"activation"})
 
 
 BEST_SCOPE_FULL = "full"
@@ -160,7 +159,6 @@ class TrainConfig:
     # None означает отсутствие лимита истории.
     max_events_per_history: int | None = 128
     event_microbatch: int = 1024
-    num_workers: int = 0
 
     masking_mode: str = "field_balanced"
 
@@ -171,7 +169,6 @@ class TrainConfig:
 
     # Как разыгрываются маски: batch это прежняя схема,
     # example привязывает маску к паре (клиент, cutoff).
-    mask_scheme: str = SCHEME_BATCH
 
     # По какой метрике выбирается best.pt: full это прежний
     # выбор по всей истории, recent по целям месяца наблюдения.
@@ -200,7 +197,6 @@ class TrainConfig:
 
     # Белый список на весь набор: клиенты с ID меньше значения.
     # Распределение по сплитам берётся из существующего разбиения.
-    client_universe: int | None = None
 
     # Бюджет в эпохах вместо max_steps.
     epochs: int | None = None
@@ -211,7 +207,12 @@ class TrainConfig:
     # Какие срезы клиента идут в ОБУЧЕНИЕ: все помесячные или
     # только последний. Валидация не меняется никогда — иначе
     # две схемы мерились бы разными линейками.
-    train_cutoffs: str = CUTOFFS_ALL
+
+    # Тег словаря: какой набор artifacts и какой токенизированный
+    # датасет читает прогон. В checkpoint он едет ради диагностики
+    # и продолжения; несовпадение самого словаря ловится строже —
+    # по режимам и размеру в конфигурации модели.
+    vocab_tag: str | None = None
 
     top_k: int = 5
     epsilon: float = 1e-8
@@ -236,8 +237,6 @@ class TrainConfig:
     n_event_layers: int | None = None
     n_profile_layers: int | None = None
     n_history_layers: int | None = None
-    n_session_layers: int | None = None
-    structure: str | None = None
 
     def __post_init__(self) -> None:
 
@@ -248,7 +247,7 @@ class TrainConfig:
                 raise ValueError(f"{name} должен быть положительным, получено {getattr(self, name)}")
 
         # None это осмысленное значение: лимита нет.
-        for name in ("max_events_per_history", "client_universe", "epochs",
+        for name in ("max_events_per_history", "epochs",
                      "max_train_clients", "max_val_clients"):
             value = getattr(self, name)
             if value is not None and value < 1:
@@ -257,35 +256,16 @@ class TrainConfig:
         if self.lr <= 0:
             raise ValueError("lr должен быть положительным")
 
-        if self.train_cutoffs not in CUTOFF_POLICIES:
-            raise ValueError(
-                f"train_cutoffs должен быть одним из {CUTOFF_POLICIES}, "
-                f"получено {self.train_cutoffs!r}"
-            )
-
         if self.precision not in PRECISIONS:
             raise ValueError(f"precision должен быть одним из {PRECISIONS}, получено {self.precision!r}")
 
-        if self.num_workers != 0:
-            raise ValueError("num_workers > 0 в V1 не поддерживается: данные уже в памяти")
-
         for name in ARCHITECTURE_FIELDS:
             value = getattr(self, name)
-            if name not in ("structure", "activation") and value is not None and value < 1:
+            if name not in NAMED_ARCHITECTURE_FIELDS and value is not None and value < 1:
                 raise ValueError(f"{name} должен быть положительным или None, получено {value}")
-
-        if self.structure is not None and self.structure not in STRUCTURES:
-            raise ValueError(f"structure должен быть одним из {STRUCTURES}, получено {self.structure!r}")
 
         if self.activation is not None and self.activation not in ACTIVATIONS:
             raise ValueError(f"activation должен быть одним из {ACTIVATIONS}, получено {self.activation!r}")
-
-        if self.stream_validation and self.mask_scheme != SCHEME_EXAMPLE:
-            raise ValueError(
-                "потоковая validation требует mask_scheme=example: при схеме "
-                "batch маска зависит от номера batch, и пересборка дала бы "
-                "другие цели"
-            )
 
         if self.best_metric not in BEST_SCOPES:
             raise ValueError(
@@ -323,10 +303,6 @@ class TrainConfig:
             if getattr(self, name) is not None
         }
 
-    @property
-    def uses_sessions(self) -> bool:
-        return self.structure == STRUCTURE_SESSION
-
     def masking(self, seed: int | None = None) -> MaskingConfig:
         return MaskingConfig(
             mode=self.masking_mode,
@@ -337,7 +313,6 @@ class TrainConfig:
             balanced_share=self.balanced_share,
             key_rate=self.key_rate,
             exclude_fields=exclude_patterns(self.target_policy),
-            scheme=self.mask_scheme,
         )
 
     @staticmethod
@@ -375,14 +350,11 @@ class TrainConfig:
             "batch_size": self.batch_size,
             "eval_batch_size": self.eval_batch_size,
             "accumulation_steps": self.accumulation_steps,
-            "client_universe": self.client_universe,
             "epochs": self.epochs,
             "max_events_per_history": self.max_events_per_history,
             "event_microbatch": self.event_microbatch,
-            "num_workers": self.num_workers,
             "masking_mode": self.masking_mode,
             "target_policy": self.target_policy,
-            "mask_scheme": self.mask_scheme,
             "best_metric": self.best_metric,
             "stream_validation": self.stream_validation,
             "checkpoint_every": self.checkpoint_every,
@@ -395,7 +367,7 @@ class TrainConfig:
             "max_consecutive_skips": self.max_consecutive_skips,
             "max_train_clients": self.max_train_clients,
             "max_val_clients": self.max_val_clients,
-            "train_cutoffs": self.train_cutoffs,
+            "vocab_tag": self.vocab_tag,
             "top_k": self.top_k,
             "epsilon": self.epsilon,
             "dropout": self.dropout,
@@ -502,7 +474,7 @@ def recent_logits(field_logits, targets, device) -> list:
 
         sliced.append(
             FieldLogits(
-                key_id=item.key_id,
+                field_id=item.field_id,
                 index=item.index[chosen],
                 logits=item.logits[chosen],
             )
@@ -601,34 +573,24 @@ class Trainer:
 
     # --------------------------------------------------------
 
-    def prepare(self, examples, mask_step: int, masker: Masker | None = None):
+    def prepare(self, examples, mask_step: int):
         """
         Пример → обрезка → раскладка → маски → цели → тензоры входа.
         """
-
-        keys = session_keys_from_examples(examples)
-
-        if self.config.uses_sessions and keys is None:
-            raise BatchError(
-                "структура session требует ключей сессий: "
-                "ClientStore должен быть открыт с sessions=True"
-            )
 
         history = prepare_history_batch(
             collate(examples),
             metadata_from_examples(examples),
             self.config.max_events_per_history,
-            masker=self.masker if masker is None else masker,
+            masker=self.masker,
             step=mask_step,
-            session_keys=keys if self.config.uses_sessions else None,
-            structure=self.model_config.structure,
         )
 
         targets = build_targets(history, self.table)
 
         return to_model_inputs(history, self.model_config), targets, history
 
-    def compute(self, inputs, targets, attention_rule: str | None = None):
+    def compute(self, inputs, targets):
         """
         Один forward: локальные состояния, событие и клиент из него же.
         """
@@ -643,14 +605,11 @@ class Trainer:
                 moved,
                 self.config.event_microbatch,
                 gather=(tensors["event_row"], tensors["col"]),
-                attention_rule=attention_rule,
             )
 
             h_local, h_event, h_usr = representations(out, tensors)
 
-            within = within_session(out, tensors)
-
-            field_logits = self.head(h_local, h_event, h_usr, tensors["key_ids"], within)
+            field_logits = self.head(h_local, h_event, h_usr, tensors["field_ids"])
 
         return mlm_loss(field_logits, tensors["local_targets"]), field_logits, tensors["local_targets"]
 
@@ -771,7 +730,7 @@ class Trainer:
             weighted.append(float(result.token_weighted.detach()))
 
             n_targets += result.n_targets
-            fields.update(item.key_id for item in field_logits)
+            fields.update(item.field_id for item in field_logits)
 
         if not balanced:
             return self._skip("все микро-batch'и группы остались без целей", time.perf_counter() - started)
@@ -847,7 +806,6 @@ class Trainer:
     def evaluate(
         self,
         splits: dict[str, FixedSplit],
-        attention_rule: str | None = None,
         exclude: frozenset[str] = frozenset(),
         keep_units: bool = False,
     ) -> dict:
@@ -901,7 +859,7 @@ class Trainer:
 
                         if targets.n:
 
-                            _, field_logits, local = self.compute(inputs, targets, attention_rule)
+                            _, field_logits, local = self.compute(inputs, targets)
 
                             units = None
 
@@ -1197,17 +1155,6 @@ def load_environment(root: Path, vocab_dir: Path, artifacts_dir: Path, epsilon: 
 VALIDATION_SPLITS: tuple[str, ...] = ("val_client", "val_time")
 
 
-def client_whitelist(config: TrainConfig) -> range | None:
-    """
-    Клиенты набора: ID меньше client_universe.
-
-    Возвращает None, когда вселенная не задана, и тогда работают
-    прежние ограничения на число клиентов в сплите.
-    """
-
-    return None if config.client_universe is None else range(int(config.client_universe))
-
-
 def store_for(
     env: Environment,
     config: TrainConfig,
@@ -1225,13 +1172,11 @@ def store_for(
         split,
         env.vocab_dir,
         max_clients=limit,
-        clients=client_whitelist(config),
-        sessions=config.uses_sessions,
         shared=shared,
-        # Отбор среза касается только обучения: val_time и
-        # test_time и так по одному примеру на клиента, а
-        # val_client должен остаться прежней линейкой.
-        cutoffs=config.train_cutoffs if split == "train" else CUTOFFS_ALL,
+        # Обучение берёт по одному срезу на клиента, оценка все.
+        # val_time и test_time и так по одному примеру, а
+        # val_client должен остаться полной линейкой.
+        last_cutoff_only=split == "train",
     )
 
 
@@ -1269,7 +1214,6 @@ def build_validation(
             masking=masking,
             max_events=config.max_events_per_history,
             batch_size=config.eval_batch_size,
-            structure=model_config.structure,
             stream=config.stream_validation,
         )
 
@@ -1281,19 +1225,6 @@ def build_validation(
 # ============================================================
 # TINY OVERFIT
 # ============================================================
-
-
-def _last_row_per_client(store: ClientStore, limit: int) -> list[int]:
-    """
-    По одному примеру на клиента, самый поздний cutoff.
-    """
-
-    picked: dict[int, int] = {}
-
-    for index, row in enumerate(store.rows):
-        picked[int(row["client_id"])] = index
-
-    return [picked[client_id] for client_id in sorted(picked)][:limit]
 
 
 def tiny_overfit(
@@ -1339,10 +1270,9 @@ def tiny_overfit(
         "train",
         env.vocab_dir,
         max_clients=n_examples,
-        clients=client_whitelist(settings),
     )
 
-    indices = _last_row_per_client(store, n_examples)
+    indices = last_row_per_client(store.rows)[:n_examples]
 
     examples = store.examples(indices)
 
@@ -1353,8 +1283,8 @@ def tiny_overfit(
     # --------------------------------------------------------
 
     distinct = {
-        int(key): int(np.unique(targets.local_targets[targets.key_ids == key]).size)
-        for key in np.unique(targets.key_ids)
+        int(key): int(np.unique(targets.local_targets[targets.field_ids == key]).size)
+        for key in np.unique(targets.field_ids)
     }
 
     varied = sum(1 for count in distinct.values() if count >= 2)
@@ -1946,6 +1876,23 @@ def run_training(
     # бы, оставив часть примеров непройденной.
     micro_budget = micro_per_epoch * config.epochs if config.epochs else None
 
+    def progress(step: int, done: int) -> tuple[int, float | None]:
+        """
+        Знаменатель и доля пройденного.
+
+        В режиме эпох это batch'и, в режиме бюджета шагов это
+        сами шаги: иначе у шагового обучения нет ни процента,
+        ни ETA.
+        """
+
+        if micro_budget:
+            return steps_per_epoch, done / micro_budget
+
+        if config.max_steps:
+            return config.max_steps, step / config.max_steps
+
+        return steps_per_epoch, None
+
     # --------------------------------------------------------
     # ПРОДОЛЖЕНИЕ
     # --------------------------------------------------------
@@ -2159,7 +2106,7 @@ def run_training(
 
         elapsed = time.time() - started_at
 
-        share = micro_done / micro_budget if micro_budget else None
+        _, share = progress(step, micro_done)
 
         write_status(out_dir, {
             "pid": os.getpid(),
@@ -2192,9 +2139,7 @@ def run_training(
                 "batch_size": config.batch_size,
                 "eval_every": config.eval_every,
                 "checkpoint_every": config.checkpoint_every,
-                "structure": trainer.model_config.structure,
                 "target_policy": config.target_policy,
-                "mask_scheme": config.mask_scheme,
             },
             **(extra or {}),
         })
@@ -2300,7 +2245,7 @@ def run_training(
 
                 elapsed = time.time() - started_at
 
-                share = micro_done / micro_budget if micro_budget else None
+                budget, share = progress(record["step"], micro_done)
 
                 record.update({
                     "micro_done": micro_done,
@@ -2325,7 +2270,7 @@ def run_training(
 
                 if not quiet:
                     print(
-                        f"  step {record['step']:>6}/{steps_per_epoch}"
+                        f"  step {record['step']:>6}/{budget}"
                         f" {(share or 0) * 100:5.1f}%  loss {record['field_balanced']:.4f}  "
                         f"lr {record['learning_rate']:.2e}  |g| {record['grad_norm']:.2f}  "
                         f"{record['seconds_per_step']:.3f} с/шаг  "

@@ -30,8 +30,9 @@ from src.model.mlm_batching import build_targets
 from src.model.mlm_head import FieldTable
 from src.model.trainer import TrainConfig, Trainer
 
-from tests.test_tok_masking import make_batch, unbalanced_vocab
-from tests.test_trainer import env, small_config  # noqa: F401
+from tests.helpers_data import ident, make_batch, unbalanced_vocab
+from tests.helpers_model import combined_config, small_config
+
 
 
 # ============================================================
@@ -87,7 +88,7 @@ def rates(**overrides) -> MaskingConfig:
 
 def apply(config: MaskingConfig, batch=None, step: int = 0):
     batch = grid_batch() if batch is None else batch
-    return Masker(unbalanced_vocab(), config).apply(batch, step), batch
+    return Masker(unbalanced_vocab(), config).apply(batch, step, identities=ident(batch)), batch
 
 
 # ============================================================
@@ -112,7 +113,7 @@ def test_all_rates_zero_masks_nothing():
 def test_each_strategy_alone_can_take_everything(strategy):
     result, batch = apply(rates(**{strategy: 1.0}))
 
-    eligible = Masker(unbalanced_vocab()).eligible(batch.key_ids, batch.value_ids)
+    eligible = Masker(unbalanced_vocab()).eligible(batch.field_ids, batch.value_ids)
 
     assert result.n_masked == int(eligible.sum())
     assert np.array_equal(result.mask, eligible)
@@ -123,7 +124,7 @@ def test_each_strategy_alone_can_take_everything(strategy):
 def test_event_masking_takes_whole_events():
     result, batch = apply(rates(event_rate=0.5), step=3)
 
-    eligible = Masker(unbalanced_vocab()).eligible(batch.key_ids, batch.value_ids)
+    eligible = Masker(unbalanced_vocab()).eligible(batch.field_ids, batch.value_ids)
 
     events = np.asarray(batch.event_ids)
 
@@ -143,7 +144,7 @@ def test_event_masking_takes_whole_events():
 def test_key_masking_takes_whole_keys_inside_one_example():
     result, batch = apply(rates(key_rate=0.5), step=11)
 
-    eligible = Masker(unbalanced_vocab()).eligible(batch.key_ids, batch.value_ids)
+    eligible = Masker(unbalanced_vocab()).eligible(batch.field_ids, batch.value_ids)
 
     keys = np.asarray(batch.key_ids, dtype=np.int64)
     owners = np.asarray(batch.example_ids, dtype=np.int64)
@@ -170,7 +171,7 @@ def test_key_masking_is_per_example_not_per_batch():
 
     batch = grid_batch(n_examples=6, n_events=2)
 
-    eligible = Masker(vocab).eligible(batch.key_ids, batch.value_ids)
+    eligible = Masker(vocab).eligible(batch.field_ids, batch.value_ids)
 
     keys = np.asarray(batch.key_ids, dtype=np.int64)
     owners = np.asarray(batch.example_ids, dtype=np.int64)
@@ -179,7 +180,7 @@ def test_key_masking_is_per_example_not_per_batch():
 
     for step in range(20):
 
-        result = Masker(vocab, rates(key_rate=0.5)).apply(batch, step)
+        result = Masker(vocab, rates(key_rate=0.5)).apply(batch, step, identities=ident(batch))
 
         for key in np.unique(keys[eligible]):
 
@@ -203,7 +204,7 @@ def test_token_masking_can_split_an_event():
 
     batch = grid_batch(n_examples=4, n_events=4)
 
-    eligible = Masker(vocab).eligible(batch.key_ids, batch.value_ids)
+    eligible = Masker(vocab).eligible(batch.field_ids, batch.value_ids)
 
     events = np.asarray(batch.event_ids)
 
@@ -211,7 +212,7 @@ def test_token_masking_can_split_an_event():
 
     for step in range(10):
 
-        result = Masker(vocab, rates(token_rate=0.5)).apply(batch, step)
+        result = Masker(vocab, rates(token_rate=0.5)).apply(batch, step, identities=ident(batch))
 
         for event in np.unique(events[eligible]):
             inside = eligible & (events == event)
@@ -229,7 +230,7 @@ def test_token_masking_can_split_an_event():
 def test_union_counts_intersections_once():
     result, batch = apply(rates(token_rate=1.0, event_rate=1.0, key_rate=1.0))
 
-    eligible = Masker(unbalanced_vocab()).eligible(batch.key_ids, batch.value_ids)
+    eligible = Masker(unbalanced_vocab()).eligible(batch.field_ids, batch.value_ids)
 
     total = int(eligible.sum())
 
@@ -276,9 +277,9 @@ def test_observed_share_matches_the_expectation(tok_run):
 
     masker = Masker(vocab, config)
 
-    assert int(masker.eligible(batch.key_ids, batch.value_ids).sum()) > 3000
+    assert int(masker.eligible(batch.field_ids, batch.value_ids).sum()) > 3000
 
-    shares = [masker.apply(batch, step).masked_fraction for step in range(20)]
+    shares = [masker.apply(batch, step, identities=ident(batch)).masked_fraction for step in range(20)]
 
     assert float(np.mean(shares)) == pytest.approx(config.expected_share, abs=0.04)
 
@@ -387,17 +388,6 @@ def test_empty_mask_gives_no_targets(tok_run):
 # ============================================================
 # ИНТЕГРАЦИЯ
 # ============================================================
-
-
-def combined_config(**overrides) -> TrainConfig:
-    return replace(
-        small_config(),
-        masking_mode=MODE_COMBINED,
-        token_rate=0.15,
-        event_rate=0.10,
-        key_rate=0.10,
-        **overrides,
-    )
 
 
 def test_config_round_trips_the_key_rate():

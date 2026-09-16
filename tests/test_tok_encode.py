@@ -25,37 +25,14 @@ from src.tokenizer.encode import (
     event_pairs,
     profile_pairs,
 )
-from src.tokenizer.vocab import KeyEntry, ValueEntry, Vocab, fit_vocab
+from src.tokenizer.vocab import Vocab, fit_vocab
+
+from tests.helpers_data import toy_vocab
 
 
 # ============================================================
 # РУЧНОЙ МИНИ-СЛОВАРЬ
 # ============================================================
-
-
-def toy_vocab() -> Vocab:
-    """
-    Три ключа, шесть значений. Константы заданы здесь, а не
-    прочитаны из файлов: тест обязан ломаться от изменения
-    правил, а не от изменения данных.
-    """
-
-    keys = [
-        KeyEntry(6, "toy__color", "toy", "color", "categorical", True, "string", 9, 11),
-        KeyEntry(7, "toy__size", "toy", "size", "numeric", True, "int64", 11, 13),
-        KeyEntry(8, "toy__flag", "toy", "flag", "boolean", False, "bool", 13, 15),
-    ]
-
-    values = [
-        ValueEntry(9, 6, "toy__color", "blue", 5),
-        ValueEntry(10, 6, "toy__color", "red", 3),
-        ValueEntry(11, 7, "toy__size", "0", 4),
-        ValueEntry(12, 7, "toy__size", "1", 4),
-        ValueEntry(13, 8, "toy__flag", "false", 2),
-        ValueEntry(14, 8, "toy__flag", "true", 6),
-    ]
-
-    return Vocab(keys, values)
 
 
 @pytest.fixture()
@@ -163,30 +140,30 @@ def test_numeric_value_is_a_bucket(toy):
 
 
 def test_boolean_values_are_separate_ids(toy):
-    assert toy.value_id(8, "true") != toy.value_id(8, "false")
+    assert toy.value_token(2, "true") != toy.value_token(2, "false")
 
 
 def test_same_string_in_two_fields_would_be_two_ids(toy):
-    assert toy.value_id(6, "blue") != toy.value_id(7, "0")
+    assert toy.value_token(0, "blue") != toy.value_token(1, "0")
 
 
 # ============================================================
 # GOLDEN НА РЕАЛЬНЫХ ДАННЫХ
 # ============================================================
 #
-# Литералы сняты вручную один раз и привязаны к:
+# Литералы привязаны к:
 #   PREP_CLIENTS = 100, PREP_CHUNK = 25 (tests/conftest.py),
-#   Settings() по умолчанию, замороженный генератор.
+#   Settings() по умолчанию, правила генератора и его seed.
 # Изменение любого из них требует ОСОЗНАННОГО ручного
 # обновления литералов; автоматически они не перегенерируются.
 
 GOLDEN_REF = {
     "client_id": 0,
     "cutoff": "2024-09-01T00:00:00",
-    "seq_end": 116,
+    "seq_end": 104,
     "snapshot_ts": "2024-08-31T23:59:59",
-    "n_events": 116,
-    "n_tokens": 1065,
+    "n_events": 104,
+    "n_tokens": 957,
 }
 
 GOLDEN_PROFILE = [
@@ -209,7 +186,7 @@ GOLDEN_PROFILE = [
     (16, "profile__holds_credit_card", "true"),
     (17, "profile__holds_debit_card", "true"),
     (18, "profile__holds_deposit", "false"),
-    (19, "profile__credit_limit", "14"),
+    (19, "profile__credit_limit", "12"),
     (20, "profile__credit_utilization", "6"),
 ]
 
@@ -226,7 +203,7 @@ GOLDEN_EVENT_0_TOKENS = [
 ]
 
 GOLDEN_EVENT_0_KEY_IDS = [3, 6, 16, 17, 18, 19, 20]
-GOLDEN_EVENT_0_VALUE_IDS = [3, 67, 149, 5, 5, 174, 189]
+GOLDEN_EVENT_0_VALUE_IDS = [3, 67, 150, 5, 5, 176, 191]
 
 GOLDEN_EVENT_1 = {"seq": 1, "ts": "2024-04-08T00:00:00", "event_type": "product_event"}
 
@@ -234,7 +211,7 @@ GOLDEN_EVENT_1_TOKENS = [
     (0, "[EVT]", "[EVT]"),
     (1, "timeline__event_type", "product_event"),
     (2, "product_event__product_type", "cash_loan"),
-    (3, "product_event__amount_or_limit", "13"),
+    (3, "product_event__amount_or_limit", "12"),
     (4, "product_event__term", "3"),
     (5, "product_event__product_subtype", "standard"),
     (6, "product_event__timestamp_quality", "date_only"),
