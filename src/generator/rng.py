@@ -139,6 +139,7 @@ NS_SESSION_DEPTH = 48
 NS_CARD_EXPIRY = 49
 NS_CONSENT = 50
 NS_CLOSURE = 51
+NS_CARD_BLOCK = 52
 
 
 # ============================================================

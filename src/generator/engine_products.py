@@ -14,7 +14,7 @@ from .config import (
     INITIATOR_EXTERNAL,
     INITIATOR_SYSTEM,
 )
-from .engine import _HANDLERS, _emit_money, _touch_client
+from .engine import _HANDLERS, _decline, _emit_money, _touch_client
 from .engine_app import unblock_card
 from .engine_credit import emit_product_closed
 from .finance import cards as card_rules
@@ -30,7 +30,9 @@ from .finance.ledger import COUNTERPART_BANK
 from .life import calendar as cal
 from .rng import (
     COMPONENT_CONTENT,
+    COMPONENT_OUTCOME,
     NS_ADOPTION,
+    NS_CARD_BLOCK,
     NS_FRAUD,
     NS_FRAUD_MATERIAL,
     NS_PROFILE,
@@ -708,7 +710,7 @@ def _fraud_purchase(state: ClientState, account, card, ts, amount, episode, step
 
     settings = params_module.active().fraud
 
-    if card is None or not state.ledger.payment_sources(ts, amount):
+    if card is None:
         return None, "card"
 
     pick_rng = event_rng(
@@ -748,6 +750,21 @@ def _fraud_purchase(state: ClientState, account, card, ts, amount, episode, step
         "reason": "purchase",
     }
 
+    initiator = INITIATOR_CLIENT if episode.kind == "false_positive" else INITIATOR_EXTERNAL
+
+    # Денег на счёте не хватило. Это ОТКАЗ, а не отсутствие
+    # попытки: банк видит неудачную авторизацию и реагирует на
+    # неё так же. Раньше эпизод на этом месте исчезал целиком —
+    # ни срабатывания антифрода, ни обращения клиента.
+    if not state.ledger.payment_sources(ts, amount):
+        return (
+            _decline(
+                state, ts, "purchase", account.account_id, amount, "debit",
+                body, "insufficient_funds", initiator,
+            ),
+            "card",
+        )
+
     event = _emit_money(
         state,
         ts,
@@ -757,7 +774,7 @@ def _fraud_purchase(state: ClientState, account, card, ts, amount, episode, step
         "debit",
         f"merchant:{outlet.outlet_id}",
         body,
-        INITIATOR_CLIENT if episode.kind == "false_positive" else INITIATOR_EXTERNAL,
+        initiator,
     )
 
     return event, "card"
@@ -770,15 +787,34 @@ def _fraud_transfer(state: ClientState, account, ts, amount, episode, step, rng)
     с нового устройства.
     """
 
-    if not state.ledger.payment_sources(ts, amount):
-        return None, "account"
-
     subject = "session" if episode.kind == "account_takeover" else "account"
 
     if episode.kind == "account_takeover" and step.kind == "strike":
         _emit_takeover_login(state, ts - timedelta(minutes=4))
 
     counterpart = f"cp_fraud_{stable_hash(state.client_id, ts.toordinal()) % 10 ** 8:08d}"
+
+    body = {
+        "channel": "app",
+        "counterparty": f"P. {counterpart[-4:]}",
+        "mcc": MCC_TRANSFER,
+        "merchant_country": "KZ",
+        "reason": "transfer",
+    }
+
+    # Социальную инженерию переводит сам клиент, захват доступа
+    # делают чужие руки.
+    initiator = INITIATOR_CLIENT if episode.kind == "social_engineering" else INITIATOR_EXTERNAL
+
+    # Денег не хватило — это отказ, а не отсутствие попытки.
+    if not state.ledger.payment_sources(ts, amount):
+        return (
+            _decline(
+                state, ts, "transfer_out", account.account_id, amount, "debit",
+                body, "insufficient_funds", initiator,
+            ),
+            subject,
+        )
 
     event = _emit_money(
         state,
@@ -788,16 +824,8 @@ def _fraud_transfer(state: ClientState, account, ts, amount, episode, step, rng)
         amount,
         "debit",
         f"external:{counterpart}",
-        {
-            "channel": "app",
-            "counterparty": f"P. {counterpart[-4:]}",
-            "mcc": MCC_TRANSFER,
-            "merchant_country": "KZ",
-            "reason": "transfer",
-        },
-        # Социальную инженерию переводит сам клиент, захват
-        # доступа делают чужие руки.
-        INITIATOR_CLIENT if episode.kind == "social_engineering" else INITIATOR_EXTERNAL,
+        body,
+        initiator,
     )
 
     return event, subject
@@ -938,43 +966,73 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
         )
     )
 
-    if decision != "block":
-        return
+    # Карта скомпрометирована, если операцию делали чужие руки
+    # и клиент её своей не признал. Такую карту размораживать
+    # нельзя: её место занимает перевыпущенная.
+    compromised = episode.kind != "false_positive" and episode.client_response != "confirmed_by_client"
 
     # Блокировать нечего, если карта не при чём: подозрительный
     # перевод банк останавливает без карты.
-    if card is None:
-        return
-
-    card_rules.block(card, decision_ts, "fraud_suspicion")
-
-    contract = state.contracts.get(card.contract_id)
-
-    state.emit(
-        state.factory.make(
-            "card_blocked",
-            decision_ts + timedelta(seconds=10),
-            {
-                "product_id": contract.product_id if contract else None,
-                "product_code": card.product_code,
-                "product_version": contract.product_version if contract else 1,
-                "tariff_version": contract.tariff_version if contract else 1,
-                "product_family": contract.product_family if contract else "debit_card",
-                "contract_id": card.contract_id,
-                "account_id": card.account_id,
-                "card_id": card.card_id,
-                "reason": "fraud_suspicion",
-                "timestamp_quality": "exact",
-            },
-            initiator=INITIATOR_SYSTEM,
-            correlation_id=alert.event_id,
-            link_type="fraud_episode",
-        )
+    #
+    # Второй удар того же эпизода приходит раньше, чем банк
+    # успевает решить по первому, и карта к моменту решения уже
+    # заблокирована. Блокировать её снова банк не станет: одна
+    # карта — одна блокировка, и перевыпуск тоже один.
+    blocked = (
+        decision == "block"
+        and card is not None
+        and not card.is_blocked_at(decision_ts)
     )
 
-    # --- реакция клиента ---
+    if blocked:
 
-    if episode.opens_case:
+        card_rules.block(card, decision_ts, "fraud_suspicion", permanent=compromised)
+
+        contract = state.contracts.get(card.contract_id)
+
+        state.emit(
+            state.factory.make(
+                "card_blocked",
+                decision_ts + timedelta(seconds=10),
+                {
+                    "product_id": contract.product_id if contract else None,
+                    "product_code": card.product_code,
+                    "product_version": contract.product_version if contract else 1,
+                    "tariff_version": contract.tariff_version if contract else 1,
+                    "product_family": contract.product_family if contract else "debit_card",
+                    "contract_id": card.contract_id,
+                    "account_id": card.account_id,
+                    "card_id": card.card_id,
+                    "reason": "compromise" if compromised else "fraud_suspicion",
+                    "timestamp_quality": "exact",
+                },
+                initiator=INITIATOR_SYSTEM,
+                correlation_id=alert.event_id,
+                link_type="fraud_episode",
+            )
+        )
+
+    # --- реакция клиента ---
+    #
+    # Обращение и оспаривание следуют из того, что клиент увидел
+    # у себя чужую операцию. Решение банка тут ни при чём: карту
+    # он мог и не заблокировать, а деньги всё равно ушли.
+    #
+    # Ложное срабатывание это своя же покупка: жаловаться не на
+    # что, пока банк не заблокировал карту.
+    #
+    # Эпизод из нескольких ударов даёт одно обращение и один
+    # возврат, а не по одному на каждый удар.
+
+    episode_key = (episode.kind, episode.start)
+
+    if (
+        episode.opens_case
+        and episode_key not in state.fraud_disputes
+        and (episode.kind != "false_positive" or blocked)
+    ):
+
+        state.fraud_disputes.add(episode_key)
 
         case = support_module.open_case(
             state.persona, "fraud_alert" if episode.kind != "false_positive" else "card_blocked",
@@ -987,7 +1045,15 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
         # Возврат по оспариванию бывает только там, где спорят
         # с торговой точкой. Перевод, сделанный руками клиента
         # под давлением, так не возвращают.
-        if episode.chargeback and episode.kind in settings.chargeback_kinds:
+        #
+        # И возвращают только то, что действительно списали:
+        # у отклонённой операции денег не забирали, возвращать
+        # нечего.
+        if (
+            episode.chargeback
+            and episode.kind in settings.chargeback_kinds
+            and event.payload.get("status") == "approved"
+        ):
 
             back_ts = case.resolved_at + timedelta(days=int(rng.integers(*settings.chargeback_delay_days)))
 
@@ -1013,19 +1079,30 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
                     link_type="chargeback",
                 )
 
-    if episode.reissue:
+    # --- судьба заблокированной карты ---
 
-        reissue_ts = decision_ts + timedelta(days=int(rng.integers(*settings.reissue_delay_days)))
+    if not blocked:
+        return
 
-        if reissue_ts < HISTORY_END:
-            _reissue_card(state, card, reissue_ts)
+    # Скомпрометированную карту не размораживают ни при каких
+    # условиях. Обычно банк выдаёт новую, а прежняя остаётся
+    # закрытой; если клиент новой не захотел, карта так и
+    # остаётся заблокированной навсегда.
+    if compromised:
 
-    elif episode.client_response == "confirmed_by_client" or episode.kind == "false_positive":
+        if episode.reissue:
 
-        unblock_ts = decision_ts + timedelta(hours=int(rng.integers(*settings.unblock_delay_hours)))
+            reissue_ts = decision_ts + timedelta(days=int(rng.integers(*settings.reissue_delay_days)))
 
-        if unblock_ts < HISTORY_END:
-            unblock_card(state, unblock_ts, card, INITIATOR_CLIENT, "confirmed_by_client")
+            if reissue_ts < HISTORY_END:
+                _reissue_card(state, card, reissue_ts)
+
+        return
+
+    unblock_ts = decision_ts + timedelta(hours=int(rng.integers(*settings.unblock_delay_hours)))
+
+    if unblock_ts < HISTORY_END:
+        unblock_card(state, unblock_ts, card, INITIATOR_CLIENT, "confirmed_by_client")
 
 
 def _reissue_card(state: ClientState, card, ts: datetime, reason: str = "fraud_reissue") -> None:
@@ -1250,8 +1327,16 @@ def _on_support_check(sim, state: ClientState, ts: datetime, payload: dict) -> N
     _touch_client(state, ts)
 
     if case.resolution == "card_unblocked":
+        # Поддержка снимает временную заморозку. Утраченную или
+        # скомпрометированную карту не размораживает никто: у
+        # такой блокировки нет срока, и она не заканчивается.
         card = next(
-            (item for item in state.cards.values() if item.is_blocked_at(case.resolved_at)), None
+            (
+                item
+                for item in state.cards.values()
+                if item.releasable()
+            ),
+            None,
         )
         if card is not None and case.resolved_at < HISTORY_END:
             unblock_card(state, case.resolved_at, card, INITIATOR_BANK, "support_resolution")
@@ -1316,7 +1401,81 @@ def _migrate_products(sim, state: ClientState, ts: datetime, rng) -> None:
 
 _HANDLERS["support_check"] = _on_support_check
 _HANDLERS["adoption"] = _on_adoption
+def _on_card_block_request(sim, state: ClientState, ts: datetime, payload: dict) -> None:
+    """
+    Клиент блокирует карту сам.
+
+    Временная заморозка и утрата это разные истории. Заморозку
+    клиент ставит на всякий случай и снимает сам; утраченную или
+    скомпрометированную карту не размораживают никогда, её место
+    занимает перевыпущенная.
+    """
+
+    card = state.cards.get(payload["card_id"])
+
+    if card is None or not card.usable_at(ts):
+        return
+
+    settings = params_module.active().products
+
+    lost = bool(payload["lost"])
+
+    reason = "lost_or_stolen" if lost else "client_freeze"
+
+    rng = event_rng(NS_CARD_BLOCK, state.ordinal, ts.toordinal(), 0, COMPONENT_OUTCOME)
+
+    days = None if lost else int(rng.integers(*settings.card_freeze_days))
+
+    card_rules.block(card, ts, reason, days=days, permanent=lost)
+
+    contract = state.contracts.get(card.contract_id)
+
+    blocked = state.emit(
+        state.factory.make(
+            "card_blocked",
+            ts,
+            {
+                "product_id": contract.product_id if contract else None,
+                "product_code": card.product_code,
+                "product_version": contract.product_version if contract else 1,
+                "tariff_version": contract.tariff_version if contract else 1,
+                "product_family": contract.product_family if contract else "debit_card",
+                "contract_id": card.contract_id,
+                "account_id": card.account_id,
+                "card_id": card.card_id,
+                "reason": reason,
+                "timestamp_quality": "exact",
+            },
+            initiator=INITIATOR_CLIENT,
+            correlation_id=card.contract_id,
+            link_type="contract",
+        )
+    )
+
+    if lost:
+
+        reissue_ts = ts + timedelta(days=int(rng.integers(*settings.card_lost_reissue_delay_days)))
+
+        if reissue_ts < HISTORY_END:
+            _reissue_card(state, card, reissue_ts, reason="lost_or_stolen")
+
+        return
+
+    # Заморозку клиент чаще снимает сам, не дожидаясь срока.
+    # Остальные ждут, и её снимет истёкший срок блокировки.
+    if rng.random() >= settings.card_freeze_self_unblock_share:
+        return
+
+    unblock_ts = ts + timedelta(
+        hours=int(rng.integers(2, max(3, 24 * max(1, days or 1))))
+    )
+
+    if unblock_ts < HISTORY_END and card.blocked_until is not None and unblock_ts < card.blocked_until:
+        unblock_card(state, unblock_ts, card, INITIATOR_CLIENT, "client_request")
+
+
 _HANDLERS["fraud_step"] = _on_fraud_step
+_HANDLERS["card_block_request"] = _on_card_block_request
 _HANDLERS["profile_change"] = _on_profile_change
 
 

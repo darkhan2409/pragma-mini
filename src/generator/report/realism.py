@@ -9,7 +9,15 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
-from ..config import HISTORY_END, HISTORY_START, INITIATOR_CLIENT, INITIATOR_SYSTEM, RAW_DIR
+from ..config import (
+    HISTORY_END,
+    HISTORY_START,
+    INITIATOR_CLIENT,
+    INITIATOR_EXTERNAL,
+    INITIATOR_SYSTEM,
+    RAW_DIR,
+    SOURCES,
+)
 from ..finance import invariants as invariants_module
 from ..observe import leak_audit
 
@@ -101,75 +109,324 @@ def _load(raw_dir: Path) -> dict:
 
 
 # ============================================================
+# ОКНО НАБЛЮДЕНИЯ
+# ============================================================
+#
+# source_coverage надо читать по смыслу, а не по именам колонок:
+#
+#   first_available_at  когда источник появился в БАНКЕ;
+#                       к конкретному клиенту отношения не имеет
+#   first_seen          max(доступность источника, начало клиента
+#                       в этом источнике) — вот здесь клиент учтён
+#   last_available_at   заполняется только при закрытии отношений;
+#                       None означает «конец не задан», а не
+#                       «наблюдения нет»
+#   source_outage       сбои были, но КАЛЕНДАРЯ сбойных месяцев в
+#                       строке нет: дни живут внутри генератора и
+#                       наружу не выдаются
+#   client_not_onboarded у источников приложения означает «нет
+#                       установленного приложения», а вовсе не
+#                       «нет отношений с банком»
+#
+# Отсюда три правила. Окно начинается с фактического начала
+# отношений, а не с начала истории. Месяцы до регистрации и после
+# закрытия в сетку не входят. Недостаток покрытия это НЕИЗВЕСТНО,
+# а не ноль: такой месяц не превращается в пустой и не склеивает
+# через себя паузу.
+# ============================================================
+
+
+# Источники, где вообще может появиться действие клиента.
+# Каналы приложения входят: экран и операция в приложении это
+# действия клиента, и без них молчание не доказано.
+CLIENT_ACTION_SOURCES = (
+    "transactions",
+    "product_events",
+    "applications",
+    "loans",
+    "support",
+    "app_screens",
+    "app_operations",
+)
+
+# Источники, определяющие начало отношений. Приложение и
+# коммуникации сюда не входят: их отсутствие говорит о канале,
+# а не о клиенте.
+RELATIONSHIP_SOURCES = (
+    "profile",
+    "applications",
+    "product_events",
+    "loans",
+    "transactions",
+    "support",
+    "antifraud",
+)
+
+# Причины, по которым источника у клиента нет ПО-НАСТОЯЩЕМУ:
+# приложение не установлено, согласия не давал. Это свойство
+# клиента, а не пробел наблюдения.
+NOT_APPLICABLE_REASONS = ("client_not_onboarded", "no_consent")
+
+
+def _known_from(rows: dict, required: tuple) -> str | None:
+    """
+    Месяц, начиная с которого известны ВСЕ нужные источники.
+
+    None означает, что хотя бы один нужный источник не наблюдался
+    никогда, и судить по нему нельзя вовсе.
+
+    Покрытие здесь монотонно: источник начинается со своего
+    first_seen и идёт до конца окна, а закрытие отношений окно и
+    завершает. Поэтому достаточно самого позднего начала.
+    """
+
+    latest = ""
+
+    for source in required:
+
+        row = rows.get(source)
+
+        if row is None:
+            continue
+
+        if row["first_seen"] is None:
+            # Источника у клиента нет по-настоящему — это не
+            # пробел наблюдения.
+            if row["coverage_reason"] in NOT_APPLICABLE_REASONS:
+                continue
+            return None
+
+        month = _month(row["first_seen"])
+
+        if month > latest:
+            latest = month
+
+    return latest
+
+
+def _next_month_start(month: str) -> datetime:
+
+    year, number = int(month[:4]), int(month[5:])
+
+    return datetime(year + 1, 1, 1) if number == 12 else datetime(year, number + 1, 1)
+
+
+def _windows(data: dict) -> dict:
+    """
+    Окно наблюдения на каждого клиента и статус каждого месяца.
+
+    Одно определение окна на весь отчёт: активность и раздел
+    исчезновений обязаны смотреть на одну и ту же сетку.
+    """
+
+    by_client: dict[str, dict] = defaultdict(dict)
+
+    for row in data["coverage"]:
+        by_client[row["client_id"]][row["source"]] = row
+
+    windows: dict[str, dict] = {}
+
+    for client in data["truth_clients"]:
+
+        client_id = client["client_id"]
+
+        rows = by_client.get(client_id, {})
+
+        # --- начало отношений ---
+
+        starts = [
+            rows[source]["first_seen"]
+            for source in RELATIONSHIP_SOURCES
+            if rows.get(source) and rows[source]["first_seen"] is not None
+        ]
+
+        if not starts:
+            starts = [
+                row["first_seen"] for row in rows.values() if row["first_seen"] is not None
+            ]
+
+        if not starts:
+            windows[client_id] = {"start": None, "end": None, "months": [], "closed_at": None}
+            continue
+
+        start = max(HISTORY_START, min(starts))
+
+        # --- конец: закрытие отношений либо открытый конец ---
+
+        closings = [
+            row["last_available_at"]
+            for row in rows.values()
+            if row["coverage_reason"] == "relationship_closed" and row["last_available_at"] is not None
+        ]
+
+        closed_at = min(closings) if closings else None
+
+        end = min(HISTORY_END, closed_at) if closed_at is not None else HISTORY_END
+
+        if end <= start:
+            windows[client_id] = {"start": start, "end": end, "months": [], "closed_at": closed_at}
+            continue
+
+        known_action = _known_from(rows, CLIENT_ACTION_SOURCES)
+        known_any = _known_from(rows, tuple(SOURCES))
+
+        names = _months_between(start, end)
+
+        months = []
+
+        for index, name in enumerate(names):
+
+            partial = (index == 0 and start.day != 1) or (
+                index == len(names) - 1 and end < _next_month_start(name)
+            )
+
+            months.append(
+                {
+                    "month": name,
+                    "partial": bool(partial),
+                    "known_action": known_action is not None and name >= known_action,
+                    "known_any": known_any is not None and name >= known_any,
+                }
+            )
+
+        windows[client_id] = {
+            "start": start,
+            "end": end,
+            "months": months,
+            "closed_at": closed_at,
+        }
+
+    return windows
+
+
+# ============================================================
 # РАЗДЕЛЫ
 # ============================================================
 
 
 def _activity(data: dict) -> dict:
     """
-    События на клиент-месяц с обязательными нулевыми месяцами.
+    События на клиент-месяц по классам инициатора.
+
+    Три РАЗНЫХ показателя месяца, и путать их нельзя:
+
+      нет никаких записей          ни клиент, ни банк, ни система
+                                   за месяц не записали ничего
+      записи есть, клиент молчит   банк начислял проценты, слал
+                                   выписки, клиент не делал ничего
+      есть действия клиента        клиент что-то сделал сам
+
+    Их доли дают ровно 100 %, а общий показатель «месяцев без
+    действий клиента» равен сумме первых двух.
+
+    Месяц, где нужных источников не хватает, не ноль, а
+    НЕИЗВЕСТНО: он идёт своей строкой и в знаменатель не входит.
     """
 
-    events = data["events"]
-
-    first_seen: dict[str, datetime] = {}
-
-    for row in data["coverage"]:
-        if row["source"] != "transactions" or row["first_seen"] is None:
-            continue
-        first_seen[row["client_id"]] = max(HISTORY_START, row["first_seen"])
+    windows = data["windows"]
 
     per_client_month: dict[tuple, Counter] = defaultdict(Counter)
 
-    for row in events:
+    for row in data["events"]:
+
         key = (row["client_id"], _month(row["event_time"]))
+
         per_client_month[key]["all"] += 1
-        if row["change_initiator"] == INITIATOR_CLIENT:
+
+        initiator = row["change_initiator"]
+
+        if initiator == INITIATOR_CLIENT:
             per_client_month[key]["client"] += 1
-        elif row["change_initiator"] == INITIATOR_SYSTEM:
+        elif initiator == INITIATOR_SYSTEM:
             per_client_month[key]["system"] += 1
+        elif initiator == INITIATOR_EXTERNAL:
+            # Зарплата от работодателя, перевод от родни и чужая
+            # рука мошенника — это не банк.
+            per_client_month[key]["external"] += 1
         else:
             per_client_month[key]["bank"] += 1
 
     totals: list[int] = []
     client_only: list[int] = []
-    bank_only: list[int] = []
-    system_only: list[int] = []
+    bank_system: list[int] = []
+    external_only: list[int] = []
 
     zero_months = 0
-    silent_client_months = 0
+    bank_only_months = 0
+    client_months = 0
+
     grid = 0
+    classified = 0
+    partial_months = 0
+    unknown_months = 0
 
-    clients = {row["client_id"] for row in data["truth_clients"]}
+    # Активность клиента это условная ГРУППИРОВКА ОТЧЁТА, а не
+    # свойство клиента: активным считаем того, кто действовал не
+    # менее чем в половине своих месяцев. Раздел исчезновений
+    # этой группировкой не пользуется.
+    active_months: list[int] = []
+    inactive_months: list[int] = []
 
-    for client_id in sorted(clients):
+    active_clients = 0
+    inactive_clients = 0
 
-        start = first_seen.get(client_id)
+    for client_id in sorted(windows):
 
-        if start is None:
+        months = windows[client_id]["months"]
+
+        counted: list[tuple] = []
+
+        for item in months:
+
+            if item["partial"]:
+                partial_months += 1
+                continue
+
+            counts = per_client_month.get((client_id, item["month"]), Counter())
+
+            counted.append((item, counts))
+
+        if not counted:
             continue
 
-        for month in _months_between(start, HISTORY_END):
+        acted = sum(1 for _, counts in counted if counts["client"] > 0)
+
+        is_active = acted * 2 >= len(counted)
+
+        if is_active:
+            active_clients += 1
+        else:
+            inactive_clients += 1
+
+        for item, counts in counted:
 
             grid += 1
 
-            counts = per_client_month.get((client_id, month), Counter())
-
             totals.append(counts["all"])
             client_only.append(counts["client"])
-            bank_only.append(counts["bank"])
-            system_only.append(counts["system"])
+            bank_system.append(counts["bank"] + counts["system"])
+            external_only.append(counts["external"])
 
-            # Два РАЗНЫХ показателя, и путать их нельзя.
-            # «Пустой месяц» это месяц вообще без записей,
-            # включая начисления и рассылки банка. «Месяц без
-            # действий клиента» это месяц, где банк что-то
-            # записал, а клиент не сделал ничего.
-            if counts["all"] == 0:
+            (active_months if is_active else inactive_months).append(counts["all"])
+
+            # Три вида месяца требуют, чтобы были известны ВСЕ
+            # источники: иначе «нет никаких записей» отличить от
+            # «часть записей не наблюдалась» невозможно, а доли
+            # перестанут делить одно целое. Объёмные показатели
+            # выше такой строгости не требуют и считаются по
+            # всему окну.
+            if not item["known_any"]:
+                unknown_months += 1
+                continue
+
+            classified += 1
+
+            if counts["client"] > 0:
+                client_months += 1
+            elif counts["all"] == 0:
                 zero_months += 1
-
-            if counts["client"] == 0:
-                silent_client_months += 1
+            else:
+                bank_only_months += 1
 
     segments = Counter()
 
@@ -187,21 +444,261 @@ def _activity(data: dict) -> dict:
         else:
             segments["extreme_250_plus"] += 1
 
+    silent = zero_months + bank_only_months
+
     return {
+        # Сетка объёма: все полные месяцы окна. По ней считаются
+        # распределения и частоты вроде сессий на клиент-месяц.
         "client_months": grid,
-        "zero_month_share": round(zero_months / grid, 4) if grid else None,
-        "no_client_action_month_share": (
-            round(silent_client_months / grid, 4) if grid else None
+        # Сетка классификации: месяцы, где известны все источники.
+        # Только на ней можно утверждать «записей не было вовсе».
+        "classified_months": classified,
+        "partial_months": partial_months,
+        "unknown_months": unknown_months,
+        "coverage_note": (
+            "покрытие проверено по доступности источников; "
+            "отдельные дни сбоев в source_coverage не восстановимы и не учтены"
         ),
+        # Определение НЕ менялось: это все месяцы без действий
+        # клиента, включая полностью пустые.
+        "no_client_action_month_share": round(silent / classified, 4) if classified else None,
+        "zero_month_share": round(zero_months / classified, 4) if classified else None,
+        "bank_only_month_share": round(bank_only_months / classified, 4) if classified else None,
+        "client_action_month_share": round(client_months / classified, 4) if classified else None,
+        "month_kinds_sum": (
+            round((zero_months + bank_only_months + client_months) / classified, 4)
+            if classified
+            else None
+        ),
+        "active_clients": active_clients,
+        "inactive_clients": inactive_clients,
+        "active_definition": "действия клиента не менее чем в половине его полных месяцев",
         "all_events": _quantiles(totals),
         "client_events": _quantiles(client_only),
-        "bank_events": _quantiles(bank_only),
-        "system_events": _quantiles(system_only),
+        "bank_system_events": _quantiles(bank_system),
+        "external_events": _quantiles(external_only),
+        "active_client_months": _quantiles(active_months) if active_months else {},
+        "inactive_client_months": _quantiles(inactive_months) if inactive_months else {},
         "segments": {name: round(count / grid, 4) for name, count in segments.items()} if grid else {},
         "events_by_type": dict(Counter(row["event_type"] for row in data["events"]).most_common()),
         "events_by_source": dict(Counter(row["source"] for row in data["events"]).most_common()),
         "events_by_initiator": dict(Counter(row["change_initiator"] for row in data["events"])),
     }
+
+
+def _absence(data: dict) -> dict:
+    """
+    Исчезновение и возвращение клиента по НАБЛЮДАЕМЫМ действиям.
+
+    Пауза это серия подряд идущих месяцев окна без действий
+    клиента. Три отрезка молчания различаются и не смешиваются:
+
+      стартовое молчание   месяцы от начала окна до первого
+                           действия. Клиент ещё не начал, это не
+                           исчезновение, и ни в один знаменатель
+                           оно не входит
+      пауза                молчание ранее активного клиента
+      неизвестный месяц    нужных источников не хватает, судить
+                           нельзя
+
+    У паузы четыре исхода. Три установленных — вернулся, молчит
+    на конец наблюдения, отношения закрыты — образуют знаменатель
+    доли возвращения. Четвёртый, «наблюдение прервано», в него не
+    входит: про такую паузу неизвестно ничего, и отнести её к
+    любому из трёх значило бы выдумать факт.
+
+    Молчание на конце окна НЕ равно уходу из банка: будущее
+    клиента за границей датасета неизвестно. Подтверждённое
+    закрытие отношений считается отдельно и только по факту.
+    """
+
+    windows = data["windows"]
+
+    acted: dict[tuple, bool] = {}
+    used_product: dict[tuple, bool] = {}
+
+    product_use = (
+        "product_opened",
+        "application_submitted",
+        "installment_paid",
+        "deposit_topup",
+        "purchase",
+    )
+
+    for row in data["events"]:
+
+        if row["change_initiator"] != INITIATOR_CLIENT:
+            continue
+
+        key = (row["client_id"], _month(row["event_time"]))
+
+        acted[key] = True
+
+        if row["event_type"] in product_use:
+            used_product[key] = True
+
+    # --- подтверждённое закрытие отношений ---
+    #
+    # Закрыты ПО ФАКТУ на конец наблюдения: состояние клиента
+    # закрытое либо покрытие источников кончилось закрытием.
+    # Клиент, который когда-то закрывался, а потом вернулся,
+    # отношений не прекратил, и в это число не входит — для него
+    # есть отдельная строка.
+
+    closed: set[str] = {
+        row["client_id"]
+        for row in data["truth_clients"]
+        if row["final_state"] == "closed_relationship"
+    }
+
+    for client_id, window in windows.items():
+        if window["closed_at"] is not None:
+            closed.add(client_id)
+
+    closed_ever: set[str] = set(closed)
+
+    for row in data["truth_events"]:
+        if row["kind"] == "state_transition" and row["key"] == "closed_relationship":
+            closed_ever.add(row["client_id"])
+
+    buckets = ("1-2", "3-5", "6-11", "12+")
+
+    episodes = {name: Counter() for name in buckets}
+    clients_with = {name: set() for name in buckets}
+
+    outcomes = Counter()
+
+    leading_silence = []
+    never_acted = 0
+    returned_to_products: set[str] = set()
+    clients_counted = 0
+
+    for client_id in sorted(windows):
+
+        months = windows[client_id]["months"]
+
+        if not months:
+            continue
+
+        clients_counted += 1
+
+        # Зафиксированное действие сильнее пробела в покрытии:
+        # месяц с действием активен при любом покрытии. Обратное
+        # неверно — молчание при нехватке источников это
+        # неизвестность, а не бездействие.
+        acted_in = [bool(acted.get((client_id, item["month"]))) for item in months]
+
+        if not any(acted_in):
+            never_acted += 1
+            leading_silence.append(len(months))
+            continue
+
+        first = acted_in.index(True)
+
+        if first:
+            leading_silence.append(first)
+
+        run = 0
+        broken = False
+
+        for index in range(first + 1, len(months) + 1):
+
+            if index == len(months):
+
+                if run:
+                    if broken:
+                        outcome = "observation_broken"
+                    elif client_id in closed:
+                        outcome = "closed"
+                    else:
+                        outcome = "ongoing"
+                    _record(episodes, clients_with, client_id, run, outcome)
+                    outcomes[outcome] += 1
+
+                break
+
+            if acted_in[index]:
+
+                if run:
+                    outcome = "observation_broken" if broken else "returned"
+                    _record(episodes, clients_with, client_id, run, outcome)
+                    outcomes[outcome] += 1
+
+                    if not broken and any(
+                        used_product.get((client_id, months[position]["month"]))
+                        for position in range(index, len(months))
+                    ):
+                        returned_to_products.add(client_id)
+
+                run = 0
+                broken = False
+                continue
+
+            # Молчание: либо настоящее, либо неизвестность.
+            # Неизвестный месяц паузу не склеивает, а помечает её
+            # неопределимой.
+            if not months[index]["known_action"]:
+                broken = True
+
+            run += 1
+
+    established = outcomes["returned"] + outcomes["ongoing"] + outcomes["closed"]
+
+    return {
+        "clients": clients_counted,
+        "leading_silence_months": _quantiles(leading_silence) if leading_silence else {},
+        "clients_never_acted": never_acted,
+        "buckets": {
+            name: {
+                "episodes": sum(episodes[name].values()),
+                "clients": len(clients_with[name]),
+                "client_share": (
+                    round(len(clients_with[name]) / clients_counted, 4) if clients_counted else None
+                ),
+                "returned": episodes[name]["returned"],
+                "ongoing": episodes[name]["ongoing"],
+                "closed": episodes[name]["closed"],
+                "observation_broken": episodes[name]["observation_broken"],
+            }
+            for name in buckets
+        },
+        "outcomes": dict(outcomes),
+        # Наблюдаемый результат НА ДАТУ КОНЦА ДАТАСЕТА, а не
+        # вероятность возвращения: сроки наблюдения у клиентов
+        # разные, и продолжающаяся пауза ещё может кончиться
+        # возвратом.
+        "returned_by_window_end_share": (
+            round(outcomes["returned"] / established, 4) if established else None
+        ),
+        "pause_ongoing_at_window_end_share": (
+            round(outcomes["ongoing"] / established, 4) if established else None
+        ),
+        "confirmed_closure_clients": len(closed & set(windows)),
+        "confirmed_closure_share": (
+            round(len(closed & set(windows)) / clients_counted, 4) if clients_counted else None
+        ),
+        # Закрывались, но вернулись: отношения не прекращены.
+        "closed_once_but_returned": len((closed_ever - closed) & set(windows)),
+        "returned_and_used_products": len(returned_to_products),
+        # Диагностика самого генератора. Порог там ДРУГОЙ: запись
+        # ставится после перерыва не менее 45 дней между
+        # действиями клиента, а раздел выше считает полные
+        # календарные месяцы. Совпадать счётчики не обязаны, и
+        # расхождение ошибкой не является.
+        "generator_pause_notes": {
+            "pause_start": sum(1 for row in data["truth_events"] if row["kind"] == "pause_start"),
+            "pause_end": sum(1 for row in data["truth_events"] if row["kind"] == "pause_end"),
+            "threshold_days": 45,
+        },
+    }
+
+
+def _record(episodes: dict, clients_with: dict, client_id: str, length: int, outcome: str) -> None:
+
+    name = "1-2" if length <= 2 else "3-5" if length <= 5 else "6-11" if length <= 11 else "12+"
+
+    episodes[name][outcome] += 1
+    clients_with[name].add(client_id)
 
 
 def _long_tails(data: dict) -> dict:
@@ -302,7 +799,7 @@ def _lifecycle(data: dict) -> dict:
 
     transitions = Counter()
     pauses = []
-    returns = 0
+    planned_returns = 0
 
     for row in data["truth_events"]:
 
@@ -314,8 +811,11 @@ def _lifecycle(data: dict) -> dict:
             start = row["ts"]
             end = datetime.fromisoformat(value["actual_end"])
             pauses.append((end - start).days)
+            # Это ПЛАН, а не факт: намерение вернуться, записанное
+            # при планировании паузы. Наблюдаемые возвращения
+            # считает раздел «Исчезновение и возвращение».
             if value.get("return_trigger") not in (None, "none"):
-                returns += 1
+                planned_returns += 1
 
     states = Counter(row["final_state"] for row in data["truth_clients"])
 
@@ -325,7 +825,7 @@ def _lifecycle(data: dict) -> dict:
         "pauses": {
             "count": len(pauses),
             "length_days": _quantiles(pauses) if pauses else {},
-            "with_return": returns,
+            "with_planned_return": planned_returns,
         },
     }
 
@@ -952,6 +1452,10 @@ def _calibration(data: dict, report: dict) -> dict:
         "loan_amount_to_income_median": report["credit"]["loan_amount_to_income"].get("p50"),
         "inbound_transfers_per_client_month": report["credit"]["inbound_transfers_per_client_month"],
         "zero_month_share": report["activity"]["zero_month_share"],
+        "no_client_action_month_share": report["activity"]["no_client_action_month_share"],
+        "returned_by_window_end_share": report["absence"]["returned_by_window_end_share"],
+        "pause_ongoing_at_window_end_share": report["absence"]["pause_ongoing_at_window_end_share"],
+        "confirmed_closure_share": report["absence"]["confirmed_closure_share"],
         "segment_share_silent": report["activity"]["segments"].get("silent_0_2"),
         "segment_share_sleepy": report["activity"]["segments"].get("sleepy_3_15"),
         "segment_share_moderate": report["activity"]["segments"].get("moderate_16_60"),
@@ -980,19 +1484,30 @@ def _calibration(data: dict, report: dict) -> dict:
             continue
 
         if value is None:
-            rows.append({"metric": metric, "status": "not_measured", "target": target})
+            rows.append(
+                {
+                    "metric": metric,
+                    "status": "not_measured",
+                    "kind": target["status"],
+                    "source": target["source"],
+                }
+            )
             continue
 
         if target.get("value") is not None:
             reference = target["value"]
             tolerance = target.get("tolerance", 0.25)
-            inside = abs(value - reference) <= abs(reference) * tolerance
+            span = abs(reference) * tolerance
+            inside = abs(value - reference) <= span
             rows.append(
                 {
                     "metric": metric,
                     "measured": round(value, 4),
                     "reference": reference,
                     "tolerance": tolerance,
+                    # Границы допуска печатаются готовыми, чтобы
+                    # «в допуске» можно было проверить глазами.
+                    "allowed": [round(reference - span, 4), round(reference + span, 4)],
                     "inside": inside,
                     "source": target["source"],
                     "confidence": target["confidence"],
@@ -1013,10 +1528,28 @@ def _calibration(data: dict, report: dict) -> dict:
                 }
             )
 
+    # Эталон и гипотеза — РАЗНЫЕ вещи, и складывать их в один
+    # счётчик нельзя. Эталон это число из отчёта банка, и выход
+    # за допуск означает ошибку генератора. Гипотеза это полоса
+    # из плана, ничем не подтверждённая: расхождение с ней
+    # ошибкой не является и подгонки не требует.
+    references = [row for row in rows if row.get("kind") == "reference"]
+    hypotheses = [row for row in rows if row.get("kind") == "hypothesis"]
+
     return {
         "checks": rows,
-        "inside": sum(1 for row in rows if row.get("inside")),
-        "outside": sum(1 for row in rows if row.get("inside") is False),
+        "references": {
+            "total": len(references),
+            "inside": sum(1 for row in references if row.get("inside")),
+            "outside": sum(1 for row in references if row.get("inside") is False),
+            "not_measured": sum(1 for row in references if row.get("status") == "not_measured"),
+        },
+        "hypotheses": {
+            "total": len(hypotheses),
+            "inside": sum(1 for row in hypotheses if row.get("inside")),
+            "outside": sum(1 for row in hypotheses if row.get("inside") is False),
+            "not_measured": sum(1 for row in hypotheses if row.get("status") == "not_measured"),
+        },
         "metrics_without_reference": sorted(without_reference),
     }
 
@@ -1223,7 +1756,10 @@ def build_report(raw_dir: Path, stories: int = 6) -> dict:
         }
     }
 
+    data["windows"] = _windows(data)
+
     report["activity"] = _activity(data)
+    report["absence"] = _absence(data)
     report["long_tails"] = _long_tails(data)
     report["repeatability"] = _repeatability(data)
     report["lifecycle"] = _lifecycle(data)
@@ -1284,38 +1820,70 @@ def render_markdown(report: dict) -> str:
     out.append("## Активность на клиент-месяц")
     out.append("")
     out.append(
-        f"Сетка клиент × месяц включает пустые месяцы: {activity['client_months']} строк."
+        f"Сетка клиент × месяц включает пустые месяцы: {activity['client_months']} полных "
+        f"месяцев окна. Неполных месяцев на краях {activity['partial_months']}, они в "
+        "распределения не входят: делить на половину месяца как на целый нельзя."
     )
     out.append("")
-    out.append("| показатель | доля |")
+    out.append(f"Ограничение: {activity['coverage_note']}.")
+    out.append("")
+    out.append("### Три вида месяца")
+    out.append("")
+    out.append(
+        f"Знаменатель здесь строже: {activity['classified_months']} месяцев, где известны "
+        "ВСЕ источники. Иначе «записей не было вовсе» не отличить от «часть записей не "
+        f"наблюдалась». Ещё {activity['unknown_months']} месяцев остались НЕИЗВЕСТНЫМИ — "
+        "это не ноль, и в знаменатель они не входят."
+    )
+    out.append("")
+    out.append("| вид месяца | доля |")
     out.append("|---|---|")
+    out.append(f"| нет никаких записей | {activity['zero_month_share']} |")
+    out.append(f"| записи есть, действий клиента нет | {activity['bank_only_month_share']} |")
+    out.append(f"| есть действия клиента | {activity['client_action_month_share']} |")
+    out.append(f"| **сумма трёх долей** | **{activity['month_kinds_sum']}** |")
+    out.append("")
     out.append(
-        f"| месяцев вообще без записей | {activity['zero_month_share']} |"
-    )
-    out.append(
-        "| месяцев без действий клиента (записи банка есть) | "
-        f"{activity['no_client_action_month_share']} |"
+        "Виды не пересекаются и делят одно целое. Первый говорит, что о клиенте "
+        "не написал никто, включая начисления и рассылки. Второй говорит, что банк "
+        "работал, а клиент молчал."
     )
     out.append("")
     out.append(
-        "Это разные величины. Первая говорит, что о клиенте не написал "
-        "никто, включая начисления и рассылки. Вторая говорит, что клиент "
-        "сам ничего не делал, а банк продолжал работать."
+        "Общий показатель месяцев БЕЗ ДЕЙСТВИЙ КЛИЕНТА равен сумме первых двух: "
+        f"{activity['no_client_action_month_share']} = {activity['zero_month_share']} + "
+        f"{activity['bank_only_month_share']}."
     )
+    out.append("")
+    out.append("### События на клиент-месяц")
     out.append("")
     out.append(
         _table(
             [
-                [name] + [stats.get(key) for key in ("p10", "p25", "p50", "mean", "p75", "p90", "p95", "p99", "max")]
+                [name] + [stats.get(key) for key in ("mean", "p50", "p90", "p95", "p99", "max")]
                 for name, stats in (
                     ("все события", activity["all_events"]),
-                    ("клиентские", activity["client_events"]),
-                    ("банковские", activity["bank_events"]),
-                    ("системные", activity["system_events"]),
+                    ("действия клиента", activity["client_events"]),
+                    ("банк и система", activity["bank_system_events"]),
+                    ("внешние", activity["external_events"]),
+                    ("активные клиенты", activity["active_client_months"]),
+                    ("неактивные клиенты", activity["inactive_client_months"]),
                 )
             ],
-            ["класс", "P10", "P25", "медиана", "среднее", "P75", "P90", "P95", "P99", "максимум"],
+            ["класс", "среднее", "P50", "P90", "P95", "P99", "максимум"],
         )
+    )
+    out.append("")
+    out.append(
+        f"Активных клиентов {activity['active_clients']}, неактивных "
+        f"{activity['inactive_clients']}. Активный это {activity['active_definition']}. "
+        "Это условная группировка отчёта, а не свойство клиента: раздел исчезновений "
+        "ею не пользуется и смотрит фактические действия по месяцам."
+    )
+    out.append("")
+    out.append(
+        "«Внешние» это не банк: зарплата от работодателя, перевод от родни, чужая "
+        "рука мошенника. Раньше они молча складывались с банковскими."
     )
 
     out.append("")
@@ -1360,8 +1928,95 @@ def render_markdown(report: dict) -> str:
     out.append(_table([[name, count] for name, count in life["final_states"].items()],
                       ["состояние на конец окна", "клиентов"]))
     out.append("")
-    out.append(f"Пауз: {life['pauses']['count']}, из них с возвращением {life['pauses']['with_return']}. "
-               f"Длина паузы: медиана {life['pauses']['length_days'].get('p50')} дней.")
+    out.append(
+        f"Запланированных пауз: {life['pauses']['count']}, из них с намерением вернуться "
+        f"{life['pauses']['with_planned_return']}. Длина паузы: медиана "
+        f"{life['pauses']['length_days'].get('p50')} дней. Это ПЛАН генератора, "
+        "а не наблюдаемое поведение; факт считает раздел ниже."
+    )
+
+    absence = report["absence"]
+
+    out.append("")
+    out.append("## Исчезновение и возвращение")
+    out.append("")
+    out.append(
+        f"Считается по наблюдаемым действиям клиента, по {absence['clients']} клиентам. "
+        "Пауза это серия подряд идущих месяцев окна без действий клиента."
+    )
+    out.append("")
+    out.append(
+        "Стартовое молчание до первого действия исчезновением не считается: клиент ещё "
+        f"не начал. Медиана такого молчания {absence['leading_silence_months'].get('p50')} "
+        f"месяцев, клиентов без единого действия за всё окно {absence['clients_never_acted']}."
+    )
+    out.append("")
+    out.append(
+        _table(
+            [
+                [
+                    name,
+                    item["episodes"],
+                    item["clients"],
+                    item["client_share"],
+                    item["returned"],
+                    item["ongoing"],
+                    item["closed"],
+                    item["observation_broken"],
+                ]
+                for name, item in absence["buckets"].items()
+            ],
+            [
+                "длина паузы, мес",
+                "эпизодов",
+                "клиентов",
+                "доля клиентов",
+                "вернулся",
+                "длится на конец",
+                "закрытие",
+                "наблюдение прервано",
+            ],
+        )
+    )
+    out.append("")
+    out.append(
+        "Исход «наблюдение прервано» означает, что пауза упёрлась в месяц с недостаточным "
+        "покрытием. Про такую паузу неизвестно ничего: клиент мог вернуться в невидимый "
+        "месяц, мог закрыть отношения, мог продолжать молчать. В знаменатель доли "
+        "возвращения она не входит, и склеивать через неизвестный месяц две паузы нельзя."
+    )
+    out.append("")
+    out.append(
+        "**Доля пауз, завершившихся возвращением К КОНЦУ НАБЛЮДЕНИЯ: "
+        f"{absence['returned_by_window_end_share']}.** Это наблюдаемый результат на дату "
+        "конца датасета, а не вероятность возвращения: сроки наблюдения у клиентов разные, "
+        "а продолжающаяся пауза ещё может закончиться возвратом. Ещё "
+        f"{absence['pause_ongoing_at_window_end_share']} пауз на эту дату продолжаются."
+    )
+    out.append("")
+    out.append(
+        f"Подтверждённо прекратили отношения с банком {absence['confirmed_closure_clients']} "
+        f"клиентов ({absence['confirmed_closure_share']}). Считается только по факту: "
+        "состояние closed_relationship на конец окна или закрытие в покрытии источников. "
+        "Молчание на конце окна сюда не попадает никогда. Ещё "
+        f"{absence['closed_once_but_returned']} клиентов когда-то закрывали отношения, но "
+        "вернулись: отношений они не прекратили, и в это число не входят."
+    )
+    out.append("")
+    out.append(
+        f"После возвращения снова пользовались продуктами {absence['returned_and_used_products']} "
+        "клиентов: открыли договор, подали заявку, заплатили взнос, пополнили вклад "
+        "или расплатились картой."
+    )
+    out.append("")
+    notes = absence["generator_pause_notes"]
+    out.append(
+        f"Диагностика генератора: записей pause_start {notes['pause_start']}, "
+        f"pause_end {notes['pause_end']}. Порог там ДРУГОЙ — перерыв не менее "
+        f"{notes['threshold_days']} дней между действиями клиента, тогда как раздел выше "
+        "считает полные календарные месяцы. Совпадать эти числа не обязаны, и расхождение "
+        "ошибкой не является."
+    )
 
     income = report["income"]
 
@@ -1603,8 +2258,27 @@ def render_markdown(report: dict) -> str:
 
     calibration = report["calibration"]
 
+    references = [row for row in calibration["checks"] if row.get("kind") == "reference"]
+    hypotheses = [row for row in calibration["checks"] if row.get("kind") == "hypothesis"]
+
     out.append("")
-    out.append("## Сравнение с калибровочными эталонами")
+    out.append("## Сверка с внешними ориентирами")
+    out.append("")
+    out.append(
+        "Ориентиры бывают двух РАЗНЫХ видов, и складывать их в один счётчик нельзя. "
+        "Эталон это число из отчёта банка: выход за допуск означает ошибку генератора. "
+        "Гипотеза это полоса из плана, ничем не подтверждённая: расхождение с ней "
+        "ошибкой не является и подгонки не требует."
+    )
+
+    counts = calibration["references"]
+
+    out.append("")
+    out.append("### Реальные эталоны банка")
+    out.append("")
+    out.append(
+        f"Всего {counts['total']}, в допуске {counts['inside']}, вне допуска {counts['outside']}."
+    )
     out.append("")
     out.append(
         _table(
@@ -1612,13 +2286,43 @@ def render_markdown(report: dict) -> str:
                 [
                     row["metric"],
                     row.get("measured"),
-                    row.get("reference") if "reference" in row else row.get("band"),
+                    row.get("reference"),
+                    f"±{int(round(row['tolerance'] * 100))}%" if row.get("tolerance") else None,
+                    f"{row['allowed'][0]} … {row['allowed'][1]}" if row.get("allowed") else None,
                     "да" if row.get("inside") else "нет",
-                    row.get("kind"),
+                    row.get("confidence"),
                 ]
-                for row in calibration["checks"]
+                for row in references
             ],
-            ["метрика", "измерено", "эталон", "в допуске", "тип"],
+            ["метрика", "измерено", "эталон", "допуск", "интервал допуска", "в допуске", "уверенность"],
+        )
+    )
+
+    counts = calibration["hypotheses"]
+
+    out.append("")
+    out.append("### Гипотезы (НЕ подтверждены данными банка)")
+    out.append("")
+    out.append(
+        f"Всего {counts['total']}, внутри полосы {counts['inside']}, вне полосы "
+        f"{counts['outside']}. Это ориентиры из «плана для генератора», раздел 17.2. "
+        "Реального эталона у них нет, поэтому выход за полосу сам по себе ошибкой "
+        "не является и подгонять под него генератор не следует."
+    )
+    out.append("")
+    out.append(
+        _table(
+            [
+                [
+                    row["metric"],
+                    row.get("measured"),
+                    f"{row['band'][0]} … {row['band'][1]}" if row.get("band") else None,
+                    "да" if row.get("inside") else "нет",
+                    row.get("source"),
+                ]
+                for row in hypotheses
+            ],
+            ["метрика", "измерено", "полоса гипотезы", "внутри полосы", "откуда полоса"],
         )
     )
 
@@ -1726,9 +2430,26 @@ def main() -> None:
     print(f"на клиент-месяц: среднее {activity['all_events']['mean']}, "
           f"медиана {activity['all_events']['p50']}, "
           f"месяцев без записей {activity['zero_month_share']}, "
-          f"без действий клиента {activity['no_client_action_month_share']}")
+          f"без действий клиента {activity['no_client_action_month_share']} "
+          f"(из них с записями банка {activity['bank_only_month_share']})")
     print(f"нарушений инвариантов: {report['finance']['violations']}")
-    print(f"эталонов в допуске: {report['calibration']['inside']}, вне: {report['calibration']['outside']}")
+
+    # Эталон и гипотеза считаются РАЗДЕЛЬНО. Один счётчик на обе
+    # группы читался как противоречие: реальные эталоны все в
+    # допуске, а общее число говорило обратное.
+    references = report["calibration"]["references"]
+    hypotheses = report["calibration"]["hypotheses"]
+
+    print(f"эталонов банка: {references['total']}, в допуске {references['inside']}, "
+          f"вне {references['outside']}")
+    print(f"гипотез плана: {hypotheses['total']}, внутри полосы {hypotheses['inside']}, "
+          f"вне {hypotheses['outside']} — расхождение с гипотезой ошибкой не является")
+
+    absence = report["absence"]
+
+    print(f"паузы: вернулись к концу наблюдения {absence['returned_by_window_end_share']}, "
+          f"ещё длятся {absence['pause_ongoing_at_window_end_share']}, "
+          f"подтверждённых закрытий {absence['confirmed_closure_clients']}")
     print(f"отчёт: {out}")
 
 

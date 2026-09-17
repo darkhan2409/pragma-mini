@@ -203,6 +203,17 @@ class ProductParams:
     # Карты.
     card_activation_delay_days: tuple = (0, 9)
     card_block_max_days: int = 21
+
+    # Клиент и сам блокирует карту: странное списание в
+    # выписке, поездка, карта не нашлась в кармане. Чаще
+    # это временная заморозка, которую он же и снимает;
+    # реже карта потеряна или скомпрометирована, и тогда
+    # размораживать нечего, нужен перевыпуск.
+    card_block_client_share_per_year: float = 0.06
+    card_block_lost_share: float = 0.30
+    card_freeze_days: tuple = (2, 14)
+    card_freeze_self_unblock_share: float = 0.75
+    card_lost_reissue_delay_days: tuple = (1, 9)
     card_expiry_years: int = 4
 
     # Карта рассрочки: минимальный платёж по наличному долгу

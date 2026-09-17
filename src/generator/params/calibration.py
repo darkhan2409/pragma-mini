@@ -62,9 +62,18 @@ def _reference(metric, group, unit, value, source, period, geography, confidence
 
 
 def _hypothesis(metric, group, unit, low, high, note=""):
+    """
+    Полоса-ориентир из плана. Это НЕ эталон: данными банка она не
+    подтверждена, выход за неё ошибкой генератора не является и
+    подгонки не требует.
+    """
+
+    mark = "гипотеза из плана, данными банка не подтверждена"
+
     return CalibrationTarget(metric, group, unit, STATUS_HYPOTHESIS, low=low, high=high,
                              source="план для генератора.txt, раздел 17.2", period=None,
-                             geography="KZ", confidence="low", note=note)
+                             geography="KZ", confidence="low",
+                             note=f"{note}; {mark}" if note else mark)
 
 
 def _absent(metric, group, unit, note=""):
@@ -164,6 +173,15 @@ DEFAULT_TARGETS: tuple = (
     _absent("dpd90_share", "dpd", "share", "нужна витрина просрочек"),
     _absent("pause_length_distribution", "pauses", "days", "нужна помесячная активность клиентов"),
     _absent("return_after_pause_share", "pauses", "share", "нужна помесячная активность клиентов"),
+    _absent("returned_by_window_end_share", "pauses", "share",
+            "доля пауз, закончившихся возвращением К КОНЦУ НАБЛЮДЕНИЯ; "
+            "это наблюдаемый результат на дату конца датасета, а не вероятность возвращения"),
+    _absent("pause_ongoing_at_window_end_share", "pauses", "share",
+            "доля пауз, которые на дату конца датасета ещё длятся; "
+            "уходом из банка это не является, будущее клиента неизвестно"),
+    _absent("confirmed_closure_share", "pauses", "share",
+            "доля клиентов с ПОДТВЕРЖДЁННЫМ закрытием отношений; "
+            "молчание на конце окна сюда не входит"),
     _absent("source_delay_distribution", "defects", "minutes", "нужны record_time хранилища"),
     _absent("duplicate_share", "defects", "share", "нужны технические дубли хранилища"),
     _absent("correction_share", "defects", "share", "нужны версии записей хранилища"),

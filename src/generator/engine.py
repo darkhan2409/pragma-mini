@@ -31,12 +31,14 @@ from .rng import (
     COMPONENT_CONTENT,
     COMPONENT_OUTCOME,
     COMPONENT_TIME,
+    NS_CARD_BLOCK,
     NS_LEDGER,
     NS_PURCHASE_SOURCE,
     NS_QR,
     NS_INBOUND,
     NS_SUPPORT_CAUSE,
     NS_TRANSFER,
+    day_rng,
     event_rng,
     keyed_rng,
 )
@@ -501,6 +503,40 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
                 add(step.ts, "fraud_step", {"episode": episode, "step": step,
                                             "index": index, "position": position})
 
+    # --- клиент блокирует свою карту ---
+    #
+    # Странное списание в выписке, поездка, карта не нашлась в
+    # кармане. Чаще это временная заморозка, которую клиент сам
+    # же и снимает; реже карта потеряна или скомпрометирована, и
+    # тогда размораживать нечего, нужен перевыпуск.
+
+    if day >= persona.relationship_start and "purchases" not in silenced:
+
+        usable = [
+            card
+            for card in state.cards.values()
+            if card.usable_at(day) and card.closed_at is None
+        ]
+
+        if usable:
+
+            pick = day_rng(NS_CARD_BLOCK, state.ordinal, day.toordinal())
+
+            products = params_module.active().products
+
+            if pick.random() < products.card_block_client_share_per_year / 365.25:
+
+                card = usable[int(pick.integers(0, len(usable)))]
+
+                add(
+                    day.replace(hour=int(pick.integers(8, 22)), minute=int(pick.integers(0, 60))),
+                    "card_block_request",
+                    {
+                        "card_id": card.card_id,
+                        "lost": bool(pick.random() < products.card_block_lost_share),
+                    },
+                )
+
     # --- истёкшая блокировка карты ---
 
     for card in state.cards.values():
@@ -521,7 +557,16 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
     if state.recent_failure_at is not None and (day - state.recent_failure_at).days <= 2:
         causes.append("failed_operation")
 
-    if any(item.is_blocked_at(day) for item in state.cards.values()):
+    # Повод обратиться даёт СВЕЖАЯ блокировка. Раньше условие
+    # смотрело «заблокирована сейчас», и навсегда заблокированная
+    # карта делала бы эту тему поводом до конца истории.
+    if any(
+        item.blocked_at is not None
+        and item.closed_at is None
+        and 0 <= (day - item.blocked_at).days <= 7
+        and item.is_blocked_at(day)
+        for item in state.cards.values()
+    ):
         causes.append("card_blocked")
 
     if live_dpd >= 30:

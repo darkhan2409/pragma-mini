@@ -300,6 +300,56 @@ SCENARIOS: tuple[Scenario, ...] = (
         expect=("installment_due", "fee_charge"),
     ),
     Scenario(
+        name="fraud_chargeback",
+        description="клиент оспаривает чужую операцию, хотя карту банк не блокировал",
+        overrides={
+            "fraud": {
+                "base_rate_per_year": 4.0,
+                "kind_weights": {"card_compromise": 1.0, "unusual_purchase": 0.0,
+                                 "suspicious_transfer": 0.0, "social_engineering": 0.0,
+                                 "account_takeover": 0.0, "false_positive": 0.0},
+                "detection_probability": {"card_compromise": 1.0, "unusual_purchase": 1.0,
+                                          "suspicious_transfer": 1.0, "social_engineering": 1.0,
+                                          "account_takeover": 1.0, "false_positive": 1.0},
+                # Банк только наблюдает: блокировки нет ни одной.
+                "decision_weights": {"monitor": 1.0, "confirm_request": 0.0, "block": 0.0},
+                "block_decision_boost_high_band": 1.0,
+                "client_disputes_share": 1.0,
+                "dispute_opens_case_share": 1.0,
+                "chargeback_share_of_disputes": 1.0,
+            },
+            # Клиентская блокировка тут только мешала бы: пресет
+            # проверяет, что спор идёт БЕЗ участия блокировки.
+            "products": {"card_block_client_share_per_year": 0.0},
+        },
+        expect=("chargeback",),
+    ),
+    Scenario(
+        name="card_freeze",
+        description="клиент временно замораживает свою карту и сам её размораживает",
+        overrides={
+            "fraud": {"base_rate_per_year": 0.0},
+            "products": {
+                "card_block_client_share_per_year": 40.0,
+                "card_block_lost_share": 0.0,
+                "card_freeze_self_unblock_share": 1.0,
+            },
+        },
+        expect=("card_blocked", "card_unblocked"),
+    ),
+    Scenario(
+        name="card_lost",
+        description="утраченную карту не размораживают: её место занимает перевыпущенная",
+        overrides={
+            "fraud": {"base_rate_per_year": 0.0},
+            "products": {
+                "card_block_client_share_per_year": 40.0,
+                "card_block_lost_share": 1.0,
+            },
+        },
+        expect=("card_blocked", "card_reissued"),
+    ),
+    Scenario(
         name="inbound_money",
         description="деньги приходят извне, а не только уходят",
         overrides={

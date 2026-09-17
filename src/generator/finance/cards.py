@@ -19,11 +19,22 @@ from .entities import CARD_ACTIVE, CARD_BLOCKED, CARD_CLOSED, Card, CardCreditSt
 # ============================================================
 
 
-def block(card: Card, ts: datetime, reason: str, days: int | None = None) -> None:
+def block(card: Card, ts: datetime, reason: str, days: int | None = None,
+          permanent: bool = False) -> None:
+    """
+    Временная заморозка имеет срок и снимается. Утраченная или
+    скомпрометированная карта блокируется НАВСЕГДА: срока у неё
+    нет, таймер её не разморозит, обслуживание возвращает только
+    перевыпуск.
+    """
 
     settings = params_module.active().products
 
-    until = ts + timedelta(days=days if days is not None else settings.card_block_max_days)
+    until = (
+        None
+        if permanent
+        else ts + timedelta(days=days if days is not None else settings.card_block_max_days)
+    )
 
     card.status = CARD_BLOCKED
     card.blocked_at = ts

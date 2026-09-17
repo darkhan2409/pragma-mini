@@ -115,6 +115,7 @@ class ClientState:
     open_bills: list = field(default_factory=list)
     cases: list = field(default_factory=list)
     support_last_by_cause: dict = field(default_factory=dict)
+    fraud_disputes: set = field(default_factory=set)
     closed_at: datetime | None = None
 
     # --------------------------------------------------------

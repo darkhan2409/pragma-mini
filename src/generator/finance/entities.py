@@ -103,6 +103,24 @@ class Card:
                 return True
         return False
 
+    def releasable(self) -> bool:
+        """
+        Блокировку можно снять, только если у неё есть срок.
+        Утраченная и скомпрометированная карта заблокирована
+        навсегда: её не размораживают ни таймер, ни поддержка,
+        ни сам клиент, а обслуживание возвращает перевыпуск.
+
+        Ответ зависит от ТЕКУЩЕГО состояния карты, а не от
+        момента времени. Снятие по истечении срока приходится
+        ровно на конец интервала блокировки, и проверка «ts
+        внутри интервала» молча теряла бы именно его.
+        """
+
+        if self.status != CARD_BLOCKED:
+            return False
+
+        return self.blocked_until is not None
+
     def usable_at(self, ts: datetime) -> bool:
         if self.activated_at is None or ts < self.activated_at:
             return False

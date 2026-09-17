@@ -798,8 +798,16 @@ def _update_state(state: ClientState, day: datetime) -> None:
         state.note(day, "state_transition", new_state, {"from": state.state, "cause": cause})
         state.state = new_state
 
-    if new_state == lifecycle_module.STATE_CLOSED and state.closed_at is None:
-        state.closed_at = day
+    # Дата закрытия отношений живёт РОВНО пока клиент закрыт.
+    # Клиент, который вернулся и снова покупает, отношений не
+    # прекращал, и покрытие источников обязано это показывать:
+    # иначе таблица покрытия говорит «источник кончился», а в
+    # ленте после этой даты лежат сотни его операций.
+    if new_state == lifecycle_module.STATE_CLOSED:
+        if state.closed_at is None:
+            state.closed_at = day
+    elif state.closed_at is not None:
+        state.closed_at = None
 
 
 def _update_profile(state: ClientState, day: datetime) -> None:

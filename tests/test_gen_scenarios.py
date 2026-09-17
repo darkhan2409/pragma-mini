@@ -765,3 +765,103 @@ def test_card_purchases_become_a_debt(baseline):
     ]
 
     assert interest, "начислений по договору не оказалось"
+
+
+def test_dispute_does_not_require_a_block(baseline):
+    """
+    Оспорить чужую операцию клиент может и тогда, когда банк
+    карту не заблокировал: деньги ушли, спор идёт с точкой.
+
+    Раньше возврат был вложен в ветку блокировки и не случался
+    ни разу за всю историю.
+    """
+
+    data = _run("fraud_chargeback", clients=32)
+
+    assert data["types"]["card_blocked"] == 0, "в этом пресете банк не блокирует"
+    assert data["types"]["chargeback"] > 0
+
+    ids = {row["event_id"]: row for row in data["events"]}
+
+    for row in data["events"]:
+
+        if row["event_type"] != "chargeback":
+            continue
+
+        cause = ids[row["payload"]["cause_event_id"]]
+
+        # Возвращают только то, что действительно списали, и
+        # ровно столько, сколько списали.
+        assert cause["payload"]["status"] == "approved"
+        assert row["payload"]["amount"] == cause["payload"]["amount"]
+
+    # Одна операция не возвращается дважды.
+    returned = Counter(row["payload"]["cause_event_id"]
+                       for row in data["events"] if row["event_type"] == "chargeback")
+
+    assert max(returned.values()) == 1
+
+
+def test_client_freeze_is_temporary(baseline):
+    """
+    Временную заморозку клиент ставит сам и сам же снимает.
+    """
+
+    data = _run("card_freeze", clients=32)
+
+    blocked = [row for row in data["events"] if row["event_type"] == "card_blocked"]
+
+    assert blocked
+
+    assert all(row["payload"]["reason"] == "client_freeze" for row in blocked)
+    assert all(row["change_initiator"] == "client" for row in blocked)
+
+    assert data["types"]["card_unblocked"] > 0
+
+    for rows in data["by_client"].values():
+
+        first = next((row for row in rows if row["event_type"] == "card_blocked"), None)
+        back = next((row for row in rows if row["event_type"] == "card_unblocked"), None)
+
+        if first and back:
+            assert back["event_time"] >= first["event_time"]
+            return
+
+    pytest.fail("замороженной и размороженной карты не нашлось")
+
+
+def test_lost_card_is_never_released(baseline):
+    """
+    Потерянную карту не размораживает ни таймер, ни поддержка.
+    Обслуживание возвращает только перевыпуск, а прежняя карта
+    остаётся заблокированной навсегда.
+    """
+
+    data = _run("card_lost", clients=32)
+
+    blocked = [row for row in data["events"] if row["event_type"] == "card_blocked"]
+
+    assert blocked
+
+    assert all(row["payload"]["reason"] == "lost_or_stolen" for row in blocked)
+
+    lost_cards = {row["payload"]["card_id"] for row in blocked}
+
+    released = {
+        row["payload"]["card_id"]
+        for row in data["events"]
+        if row["event_type"] == "card_unblocked"
+    }
+
+    assert not (lost_cards & released), "утраченную карту вернули в строй"
+
+    # Перевыпущенная карта это НОВАЯ карта, а не прежняя. Сама
+    # она потом тоже может потеряться, поэтому сравнивать надо с
+    # заменённой картой, а не со всем списком утраченных.
+    reissues = [row for row in data["events"] if row["event_type"] == "card_reissued"]
+
+    assert reissues
+
+    for row in reissues:
+        assert row["payload"]["card_id"] != row["correlation_id"]
+        assert row["payload"]["reason"] == "lost_or_stolen"

@@ -117,7 +117,7 @@ def _on_session(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
         if operation == "card_unblock":
             target_card = next(
-                (item for item in state.cards.values() if item.is_blocked_at(step.ts)), None
+                (item for item in state.cards.values() if item.releasable()), None
             )
             if target_card is None:
                 feasible = False
@@ -403,6 +403,12 @@ def _own_transfer(
 def unblock_card(state: ClientState, ts: datetime, card, initiator: str, reason: str) -> None:
 
     from .finance import cards as card_rules
+
+    # Постоянную блокировку не снимает никто. Проверка стоит
+    # здесь, а не только у вызывающих: путей разблокировки
+    # четыре, и пропустить один слишком легко.
+    if not card.releasable():
+        return
 
     card_rules.unblock(card, ts)
 
