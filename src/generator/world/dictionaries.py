@@ -313,15 +313,19 @@ APP_DOMAINS = tuple(DOMAIN_OPERATIONS)
 
 DOMAIN_ADOPTION = {
     "auth": 0.849,
-    "cards": 0.601,
-    "transfers": 0.509,
-    "loans": 0.442,
-    "payments": 0.296,
+    "cards": 0.77,
+    "transfers": 0.87,
+    "loans": 0.72,
+    "payments": 0.27,
     "deposits": 0.185,
     "market": 0.140,
     "profile": 0.62,
     "support": 0.120,
     "invest": 0.035,
+    # Раздел страхования существовал в экранах и семействах,
+    # но принять его было нельзя: клиент попадал туда мимо
+    # правил.
+    "insurance": 0.155,
 }
 
 DOMAIN_FAMILY = {

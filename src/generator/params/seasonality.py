@@ -129,6 +129,14 @@ class SeasonalityParams:
     )
 
     # Зарплатный эффект: первые дни после выплаты тратят больше.
+    # Общий уровень месяца поверх категорийной сезонности.
+    month_factor: dict = field(
+        default_factory=lambda: {
+            1: 0.88, 2: 0.92, 3: 1.06, 4: 0.98, 5: 1.02, 6: 1.00,
+            7: 1.02, 8: 1.06, 9: 1.04, 10: 0.98, 11: 0.98, 12: 1.22,
+        }
+    )
+
     payday_window_days: int = 4
     payday_boost: float = 1.45
     pre_payday_days: int = 5

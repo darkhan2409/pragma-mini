@@ -57,6 +57,12 @@ def daily_purchase_rate(
     rate *= settings.role_factor.get(persona.hcb_role, 1.0)
     rate *= persona.visible_share * 1.3
 
+    # Импульсивный клиент ходит по магазинам чаще, а не только
+    # тратит больше за раз.
+    impulsivity = persona.trait("spending_impulsivity", ts)
+
+    rate *= 0.75 + params_module.active().traits.impulsivity_rate_factor * impulsivity
+
     if ts.weekday() >= 5:
         rate *= settings.weekend_factor_purchases
 

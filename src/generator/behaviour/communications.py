@@ -83,6 +83,26 @@ def daily_rate(persona: Persona, ts: datetime, consented: bool, fatigue: int,
     return float(rate)
 
 
+def _collection_template(dpd: int, days_to_due: int | None) -> str:
+    """
+    Какой текст уместен при этом состоянии долга.
+    """
+
+    if dpd >= 60:
+        return "PR_RESTRUCTURE"
+
+    if dpd >= 30:
+        return "PR_OVERDUE_HARD"
+
+    if dpd > 0:
+        return "PR_OVERDUE_SOFT"
+
+    if days_to_due is not None and days_to_due <= 0:
+        return "PR_DUE_TODAY"
+
+    return "PR_DUE_SOON"
+
+
 def _campaign_weights(
     persona: Persona,
     ts: datetime,
@@ -93,6 +113,7 @@ def _campaign_weights(
     stress: float,
     pending_notice: bool,
     fraud_alert: bool,
+    days_to_due: int | None = None,
 ) -> dict:
 
     weights: dict[str, float] = {}
@@ -120,7 +141,16 @@ def _campaign_weights(
                 weight *= 0.4 + 1.8 * persona.trait("savings_propensity", ts)
 
         elif campaign.purpose == "collection":
-            weight = 0.0 if dpd <= 0 else 3.0 + 0.08 * min(90, dpd)
+            # Напоминание о платеже приходит ДО срока. Раньше
+            # вес был нулевым, пока клиент не просрочил, и
+            # «платёж скоро» уходило уже после дефолта.
+            reminder = params_module.active().activity.due_reminder_days
+            if dpd > 0:
+                weight = 3.0 + 0.08 * min(90, dpd)
+            elif days_to_due is not None and 0 <= days_to_due <= reminder:
+                weight = 2.4
+            else:
+                weight = 0.0
 
         elif campaign.purpose == "winback":
             weight = 2.2 if in_pause else 0.0
@@ -213,6 +243,7 @@ def contacts_for_day(
     stress: float,
     pending_notice: bool,
     fraud_alert: bool,
+    days_to_due: int | None = None,
 ) -> tuple:
     """
     Отправки банка за день.
@@ -232,7 +263,7 @@ def contacts_for_day(
 
     weights = _campaign_weights(
         persona, day, owned_families, candidate_families, dpd, in_pause,
-        stress, pending_notice, fraud_alert,
+        stress, pending_notice, fraud_alert, days_to_due,
     )
 
     if not weights:
@@ -251,8 +282,14 @@ def contacts_for_day(
 
         channel = _channel(persona, campaign, day, app_adopted, rng)
 
-        template = str(rng.choice(list(campaign.templates),
-                                  p=[1.0 / ((position + 1) ** 1.4) for position in range(len(campaign.templates))]))
+        if campaign.purpose == "collection":
+            # Текст напоминания следует состоянию долга, а не
+            # позиции в списке. Иначе «платёж скоро» уходит на
+            # девяностом дне просрочки.
+            template = _collection_template(dpd, days_to_due)
+        else:
+            template = str(rng.choice(list(campaign.templates),
+                                      p=[1.0 / ((position + 1) ** 1.4) for position in range(len(campaign.templates))]))
 
         hour = int(time_rng.choice(list(SEND_HOURS), p=list(SEND_WEIGHTS)))
 

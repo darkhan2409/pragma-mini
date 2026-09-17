@@ -167,7 +167,9 @@ def choose_outlet(
 
     if favourites and not wants_online and rng.random() < habits.loyalty:
 
-        by_id = {item.outlet_id: item for item in pool}
+        # Только те точки, что прошли фильтр онлайна: иначе
+        # интернет-магазин возвращался бы с каналом pos.
+        by_id = {item.outlet_id: item for item in candidates}
 
         weights = [item.weight for item in favourites]
 
@@ -184,19 +186,38 @@ def choose_outlet(
 
     weights = []
 
+    favourite_ids = {item.outlet_id for item in favourites}
+
+    bonus = settings.traits.favourite_outlet_bonus
+
+    closed_weight = settings.merchants.closed_outlet_weight
+
     for item in candidates:
 
         weight = max(1e-6, item.popularity)
 
         if not wants_online:
+
             if item.district != target_district:
                 weight *= math.exp(-decay)
+
+            # Закрытая точка не обслуживает. Раньше она лишь
+            # теряла вес и всё равно иногда выигрывала: каждая
+            # восьмая покупка приходилась на нерабочий час.
             if not _open_now(item, ts):
-                weight *= 0.02
+                weight *= closed_weight
+
+        # Привычка тянет к любимой точке и там, где выбор идёт
+        # по общему правилу.
+        if item.outlet_id in favourite_ids:
+            weight *= 1.0 + bonus * habits.loyalty
 
         weight *= _price_fit(item, persona, ts)
 
         weights.append(weight)
+
+    if sum(weights) <= 0.0:
+        return None
 
     outlet = candidates[int(rng.choice(len(candidates), p=weights))]
 

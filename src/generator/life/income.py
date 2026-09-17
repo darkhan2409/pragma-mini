@@ -39,6 +39,8 @@ class IncomeStream:
     base_amount: int
     valid_from: datetime
     valid_to: datetime | None
+    # Объявленные жизненные события, меняющие сумму потока.
+    shifts: tuple = ()
 
     def active_at(self, ts: datetime) -> bool:
         if ts < self.valid_from:
@@ -133,6 +135,15 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
     # оборвалась бы задним числом.
     primary_position = 0
 
+    # Изменение дохода это изменение ДЕНЕГ, а не только записи
+    # в анкете. Раньше событие меняло заявленный доход, а поток
+    # выплат жил по своим розыгрышам.
+    income_shifts = tuple(
+        (event.ts, float(event.payload.get("factor") or 1.0))
+        for event in events
+        if event.kind in ("income_up", "income_down")
+    )
+
     for event in events:
 
         if event.kind not in ("job_loss", "job_change"):
@@ -217,13 +228,23 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
 
         primary_position = len(streams) - 1
 
+    # Изменение дохода касается каждого потока клиента.
+    if income_shifts:
+        streams = [replace(item, shifts=income_shifts) for item in streams]
+
     return tuple(streams)
 
 
-def _amount_at(stream: IncomeStream, ts: datetime, rng_seed: int, settings) -> int:
+def _amount_at(
+    stream: IncomeStream,
+    ts: datetime,
+    rng_seed: int,
+    settings,
+    income_shifts: tuple = (),
+) -> int:
     """
-    Сумма потока на дату: индексация плюс редкие повышения
-    и снижения.
+    Сумма потока на дату: индексация, редкие повышения и
+    снижения, а также объявленные жизненные события.
     """
 
     # Индексация считается от начала окна: доход до наблюдения
@@ -237,6 +258,11 @@ def _amount_at(stream: IncomeStream, ts: datetime, rng_seed: int, settings) -> i
     indexation = rng.uniform(*settings.annual_indexation)
 
     amount = stream.base_amount * ((1.0 + indexation) ** (months / 12.0))
+
+    # Повышение и понижение дохода из жизненного события.
+    for moment, factor in income_shifts:
+        if moment <= ts and moment >= stream.valid_from:
+            amount *= factor
 
     years = months // 12
 
@@ -301,7 +327,7 @@ def payouts(persona: Persona, streams: tuple, stress_episodes: tuple) -> tuple:
                 low, high = settings.irregular_events_per_month
                 count = rng.poisson(rng.uniform(low, high))
 
-                base = _amount_at(stream, month, persona.client_ordinal, settings)
+                base = _amount_at(stream, month, persona.client_ordinal, settings, stream.shifts)
 
                 for index in range(count):
 
@@ -354,7 +380,7 @@ def payouts(persona: Persona, streams: tuple, stress_episodes: tuple) -> tuple:
 
         while month < stop:
 
-            base = _amount_at(stream, month, persona.client_ordinal, settings)
+            base = _amount_at(stream, month, persona.client_ordinal, settings, stream.shifts)
 
             per_payday = base // len(paydays)
 

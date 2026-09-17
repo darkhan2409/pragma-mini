@@ -91,6 +91,13 @@ class ActivityParams:
     max_declines_per_day: int = 2
     autopay_attempt_share: float = 0.30
 
+    # За сколько дней до платежа банк начинает напоминать.
+    due_reminder_days: int = 5
+
+    # Обращение по одному и тому же поводу не повторяется
+    # каждый день.
+    support_cooldown_days: int = 14
+
     weekend_factor_purchases: float = 1.10
     weekend_factor_sessions: float = 0.92
 
@@ -117,9 +124,9 @@ class ActivityParams:
     )
 
     # Ночной сегмент: кто вообще покупает ночью.
-    night_segment_share: float = 0.08
+    night_segment_share: float = 0.045
     night_hours: tuple = (0, 1, 2, 3, 4, 5)
-    night_boost: float = 6.0
+    night_boost: float = 1.8
 
     # Мягкие ограничители.
     max_sessions_per_day: int = 9

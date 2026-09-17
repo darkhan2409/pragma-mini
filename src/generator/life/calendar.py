@@ -189,6 +189,14 @@ def category_factor(category: str, ts: datetime, region: str | None = None) -> f
     return float(factor)
 
 
+def month_factor(ts: datetime) -> float:
+    """
+    Общий уровень трат месяца: декабрь дороже февраля.
+    """
+
+    return float(params_module.active().seasonality.month_factor.get(ts.month, 1.0))
+
+
 def payday_factor(ts: datetime, last_payday: datetime | None, next_payday: datetime | None) -> float:
     """
     Первые дни после зарплаты тратят больше, перед ней меньше.
@@ -274,6 +282,7 @@ def day_in_month(ts: datetime, day: int) -> datetime:
 
 
 __all__ = [
+    "month_factor",
     "DayContext",
     "add_months",
     "category_factor",

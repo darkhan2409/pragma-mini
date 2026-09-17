@@ -113,7 +113,17 @@ def _favourites_for(
         rng = keyed_rng(NS_HABITS, persona.client_ordinal, salt, stable_hash(category) % (2 ** 20))
 
         low, high = settings.favourite_outlets_per_category
-        count = min(len(pool), rng.integers(low, high + 1))
+
+        # Лояльный клиент держится одной точки, нелояльный
+        # разбрасывается по нескольким. Без этого лояльность
+        # никак не проявлялась в доле повторных покупок.
+        loyalty = persona.trait("merchant_loyalty")
+
+        span = max(0, high - low)
+
+        count = high - int(round(span * loyalty))
+
+        count = min(len(pool), max(low, count))
 
         weights = [item.popularity for item in pool]
 

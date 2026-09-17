@@ -148,5 +148,9 @@ class IncomeParams:
 
     # Зарплатный день.
     salary_day_range: tuple = (1, 29)
+
+    # Государственная пенсия приходит в начале месяца, а не в
+    # любой день, как зарплата.
+    pension_day_range: tuple = (3, 11)
     second_payday_offset: int = 15
     payout_hour_range: tuple = (6, 13)

@@ -40,6 +40,7 @@ from .rng import (
     NS_CARD,
     NS_DEPOSIT,
     NS_FRAUD,
+    NS_FRAUD_MATERIAL,
     NS_PROFILE,
     NS_SUPPORT,
     event_rng,
@@ -48,7 +49,7 @@ from .rng import (
 )
 from .simulate import ClientState, _application_id, _money
 from .world import products as product_catalog
-from .world.dictionaries import FUNNEL_SCREENS, MCC_CASH
+from .world.dictionaries import FUNNEL_SCREENS, MCC_CASH, MCC_TRANSFER
 
 
 # ============================================================
@@ -680,6 +681,148 @@ def _apply_new_versions(state: ClientState, ts: datetime) -> None:
 # ============================================================
 
 
+def _fraud_purchase(state: ClientState, account, card, ts, amount, episode, step, rng):
+    """
+    Мошенническая покупка выглядит как обычная: реальная точка,
+    её MCC и её имя. Постоянная метка вроде UNKNOWN MERCHANT
+    была бы готовым признаком для модели.
+    """
+
+    from .behaviour import merchants as merchant_choice
+
+    settings = params_module.active().fraud
+
+    if card is None or not state.ledger.payment_sources(ts, amount):
+        return None, "card"
+
+    pick_rng = event_rng(
+        NS_FRAUD_MATERIAL, state.ordinal, ts.toordinal(), int(step.kind == "strike"), COMPONENT_CONTENT
+    )
+
+    category = str(pick_rng.weighted(settings.material_categories))
+
+    country = _foreign_country(state, pick_rng) if step.foreign else None
+
+    choice = merchant_choice.choose_outlet(
+        state.persona,
+        state.habits,
+        category,
+        ts,
+        pick_rng,
+        online_hint=step.online,
+        foreign_country=country,
+    )
+
+    if choice is None:
+        return None, "card"
+
+    outlet = choice.outlet
+
+    body = {
+        "channel": choice.channel,
+        "card_id": card.card_id,
+        "merchant_id": outlet.merchant_id,
+        "outlet_id": outlet.outlet_id,
+        "merchant_name": outlet.merchant_name,
+        "mcc": outlet.mcc,
+        "merchant_city": outlet.settlement or None,
+        "merchant_country": outlet.country,
+        "is_online": outlet.is_online,
+        "is_subscription": False,
+        "reason": "purchase",
+    }
+
+    event = _emit_money(
+        state,
+        ts,
+        "purchase",
+        account.account_id,
+        amount,
+        "debit",
+        f"merchant:{outlet.outlet_id}",
+        body,
+        INITIATOR_CLIENT if episode.kind == "false_positive" else INITIATOR_EXTERNAL,
+    )
+
+    return event, "card"
+
+
+def _fraud_transfer(state: ClientState, account, ts, amount, episode, step, rng):
+    """
+    Подозрительный перевод и социальная инженерия это перевод,
+    а не покупка. Захват доступа вдобавок начинается со входа
+    с нового устройства.
+    """
+
+    if not state.ledger.payment_sources(ts, amount):
+        return None, "account"
+
+    subject = "session" if episode.kind == "account_takeover" else "account"
+
+    if episode.kind == "account_takeover" and step.kind == "strike":
+        _emit_takeover_login(state, ts - timedelta(minutes=4))
+
+    counterpart = f"cp_fraud_{stable_hash(state.client_id, ts.toordinal()) % 10 ** 8:08d}"
+
+    event = _emit_money(
+        state,
+        ts,
+        "transfer_out",
+        account.account_id,
+        amount,
+        "debit",
+        f"external:{counterpart}",
+        {
+            "channel": "app",
+            "counterparty": f"P. {counterpart[-4:]}",
+            "mcc": MCC_TRANSFER,
+            "merchant_country": "KZ",
+            "reason": "transfer",
+        },
+        # Социальную инженерию переводит сам клиент, захват
+        # доступа делают чужие руки.
+        INITIATOR_CLIENT if episode.kind == "social_engineering" else INITIATOR_EXTERNAL,
+    )
+
+    return event, subject
+
+
+def _emit_takeover_login(state: ClientState, ts: datetime) -> None:
+    """
+    Вход с нового устройства перед захватом доступа.
+    """
+
+    if ts < HISTORY_START or ts >= HISTORY_END:
+        return
+
+    if state.app_adopted_at is None or ts < state.app_adopted_at:
+        return
+
+    session_id = f"ses_{stable_hash('takeover', state.client_id, ts.toordinal()) % 10 ** 12:012d}"
+
+    state.emit(
+        state.factory.make(
+            "app_operation",
+            ts,
+            {
+                "domain": "auth",
+                "operation": "login",
+                "status": "success",
+                "amount": None,
+                "error_code": None,
+                "device_new": True,
+            },
+            initiator=INITIATOR_CLIENT,
+            correlation_id=session_id,
+            link_type="session",
+        )
+    )
+
+
+def _foreign_country(state: ClientState, rng) -> str:
+    return str(rng.weighted(params_module.active().geography.foreign_countries))
+
+
 def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     settings = params_module.active().fraud
@@ -704,30 +847,17 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
 
     amount = int(round(amount / 100) * 100)
 
-    country = "TR" if step.foreign else "KZ"
+    as_transfer = episode.kind in settings.transfer_kinds
 
-    body = {
-        "channel": "ecom" if step.online else "pos",
-        "card_id": card.card_id if card else None,
-        "merchant_name": "UNKNOWN MERCHANT" if episode.kind != "false_positive" else "TRAVEL SHOP",
-        "mcc": "5999",
-        "merchant_city": None if step.foreign else state.persona.settlement,
-        "merchant_country": country,
-        "is_online": step.online,
-        "is_subscription": False,
-        "reason": "purchase",
-    }
+    if as_transfer:
+        event, subject = _fraud_transfer(state, account, ts, amount, episode, step, rng)
+    else:
+        event, subject = _fraud_purchase(state, account, card, ts, amount, episode, step, rng)
 
-    if card is None or not state.ledger.payment_sources(ts, amount):
+    if event is None:
         return
 
-    event = _emit_money(
-        state, ts, "purchase", account.account_id, amount, "debit",
-        "external:unknown_merchant", body,
-        INITIATOR_CLIENT if episode.kind == "false_positive" else INITIATOR_EXTERNAL,
-    )
-
-    # Мошенническая покупка не попадает в список кандидатов на
+    # Мошенническая операция не попадает в список кандидатов на
     # обычный возврат: её оспаривают через chargeback, и два
     # возврата по одной операции превысили бы её сумму.
     state.note(ts, "fraud_episode_step", episode.kind, {"step": step.kind, "amount": amount})
@@ -743,15 +873,20 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
     if alert_ts >= HISTORY_END:
         return
 
-    band = fraud_behaviour.score_band(episode.kind, step.kind, step.foreign, step.amount_hint)
+    # Тревожность считается от доли месячного дохода, а не от
+    # подсказки шага: у пробной покупки подсказка это сумма в
+    # тенге, и доля всегда упиралась бы в единицу.
+    share = amount / max(1, state.persona.true_income)
+
+    band = fraud_behaviour.score_band(episode.kind, step.kind, step.foreign, share)
 
     alert = state.emit(
         state.factory.make(
             "fraud_alert",
             alert_ts,
             {
-                "subject": "card",
-                "card_id": card.card_id,
+                "subject": subject,
+                "card_id": card.card_id if card and subject == "card" else None,
                 "account_id": account.account_id,
                 "score_band": band,
                 "rule_code": fraud_behaviour.rule_code(episode.kind),
@@ -774,8 +909,8 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
             "fraud_decision",
             decision_ts,
             {
-                "subject": "card",
-                "card_id": card.card_id,
+                "subject": subject,
+                "card_id": card.card_id if card and subject == "card" else None,
                 "account_id": account.account_id,
                 "decision": decision,
                 "resolution": episode.client_response if episode.client_response != "no_response" else None,
@@ -829,20 +964,29 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
 
         _emit_case(state, case)
 
-        if episode.chargeback:
+        # Возврат по оспариванию бывает только там, где спорят
+        # с торговой точкой. Перевод, сделанный руками клиента
+        # под давлением, так не возвращают.
+        if episode.chargeback and episode.kind in settings.chargeback_kinds:
 
             back_ts = case.resolved_at + timedelta(days=int(rng.integers(*settings.chargeback_delay_days)))
 
             if back_ts < HISTORY_END:
                 _emit_money(
                     state, back_ts, "chargeback", account.account_id, amount, "credit",
-                    "external:unknown_merchant",
+                    f"merchant:{event.payload.get('outlet_id')}"
+                    if event.payload.get("outlet_id")
+                    else "external:merchant",
                     {
                         "channel": "system",
-                        "card_id": card.card_id,
+                        "card_id": event.payload.get("card_id"),
+                        "merchant_id": event.payload.get("merchant_id"),
+                        "outlet_id": event.payload.get("outlet_id"),
+                        "merchant_name": event.payload.get("merchant_name"),
+                        "mcc": event.payload.get("mcc"),
                         "cause_event_id": event.event_id,
                         "reason": "dispute_resolved",
-                        "merchant_country": country,
+                        "merchant_country": event.payload.get("merchant_country"),
                     },
                     INITIATOR_BANK,
                     correlation_id=case.case_id,
@@ -1027,10 +1171,18 @@ def _new_profile_value(state: ClientState, name: str, event):
         return "unemployed" if event.kind == "job_loss" else state.profile_values.get("income_type")
 
     if name == "industry":
-        return state.profile_values.get("industry")
+        # Новая работа это новая отрасль. Возврат прежнего
+        # значения делал эффект события пустым.
+        choice = keyed_rng(
+            NS_PROFILE, state.ordinal, int(event.ts.toordinal()), 1
+        ).weighted(params_module.active().population.industry_weights)
+        return str(choice)
 
     if name == "salary_day":
-        return state.profile_values.get("salary_day")
+        low, high = params_module.active().income.salary_day_range
+        return int(
+            keyed_rng(NS_PROFILE, state.ordinal, int(event.ts.toordinal()), 2).integers(low, high)
+        )
 
     return None
 
@@ -1046,11 +1198,10 @@ def _on_support_check(sim, state: ClientState, ts: datetime, payload: dict) -> N
 
     probability = support_module.contact_probability(state.persona, cause, ts, payload["stress"])
 
-    # Обращение по одному поводу не повторяется каждый день.
-    probability /= 6.0
-
     if rng.random() >= probability:
         return
+
+    state.support_last_by_cause[cause] = ts
 
     cause_event_id = None
 
@@ -1063,6 +1214,9 @@ def _on_support_check(sim, state: ClientState, ts: datetime, payload: dict) -> N
             cause_event_id = event.event_id
             break
         if cause == "card_blocked" and event.event_type == "card_blocked":
+            cause_event_id = event.event_id
+            break
+        if cause == "missed_installment" and event.event_type == "installment_missed":
             cause_event_id = event.event_id
             break
 

@@ -29,7 +29,7 @@ class FraudParams:
     kinds: tuple = EPISODE_KINDS
 
     # Базовая интенсивность эпизода в год на клиента.
-    base_rate_per_year: float = 0.085
+    base_rate_per_year: float = 0.030
 
     kind_weights: dict = field(
         default_factory=lambda: {
@@ -43,10 +43,36 @@ class FraudParams:
     )
 
     # Уязвимость и экспозиция.
-    vulnerability_factor: float = 2.4
-    online_exposure_factor: float = 1.6
-    travel_exposure_factor: float = 1.9
+    vulnerability_factor: float = 1.2
+    online_exposure_factor: float = 1.25
+    travel_exposure_factor: float = 1.35
     new_device_factor: float = 1.5
+
+    # Чем маскируется мошенническая покупка. Постоянное имя
+    # мерчанта и единственный MCC были бы готовым признаком
+    # для модели, поэтому точка выбирается из обычного
+    # каталога.
+    material_categories: dict = field(
+        default_factory=lambda: {
+            "electronics": 0.22,
+            "marketplace": 0.20,
+            "ecom": 0.18,
+            "clothing": 0.12,
+            "gambling": 0.10,
+            "travel": 0.08,
+            "restaurant": 0.06,
+            "convenience": 0.04,
+        }
+    )
+
+    # Виды эпизодов, которые выглядят как перевод, а не покупка.
+    transfer_kinds: tuple = ("suspicious_transfer", "social_engineering", "account_takeover")
+
+    # По каким видам клиент оспаривает операцию возвратом.
+    chargeback_kinds: tuple = ("card_compromise", "unusual_purchase")
+
+    # Доля месячного дохода, на которую делают пробную покупку.
+    probe_amount_share_of_income: tuple = (0.001, 0.02)
 
     # Шаги эпизода.
     probe_purchases: dict = field(
@@ -87,7 +113,7 @@ class FraudParams:
 
     block_decision_boost_high_band: float = 2.6
 
-    score_band_thresholds: tuple = (0.35, 0.70)
+    score_band_thresholds: tuple = (0.42, 0.82)
 
     detection_delay_minutes: tuple = (1, 240)
 

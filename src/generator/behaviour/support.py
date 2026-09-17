@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 from .. import params as params_module
 from ..life.persona import Persona
-from ..rng import NS_SUPPORT, event_rng, stable_hash
+from ..rng import NS_SUPPORT_CASE, event_rng, stable_hash
 from ..world.dictionaries import SUPPORT_CHANNELS, SUPPORT_TOPICS
 
 
@@ -111,7 +111,10 @@ def open_case(
     Обращение с исходом и сроком решения.
     """
 
-    rng = event_rng(NS_SUPPORT, persona.client_ordinal, ts.toordinal(), index, 3)
+    # Собственный неймспейс: ворота обращения разыгрываются в
+    # NS_SUPPORT тем же ключом, и общий поток делал первый
+    # выбор канала предопределённым.
+    rng = event_rng(NS_SUPPORT_CASE, persona.client_ordinal, ts.toordinal(), index, 3)
 
     topic = TOPIC_BY_CAUSE.get(cause, "product_question")
 

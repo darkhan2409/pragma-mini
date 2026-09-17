@@ -574,6 +574,231 @@ def _finance(data: dict) -> dict:
 CREDIT_FAMILIES = ("cash_loan", "credit_card", "refinance", "installment")
 
 
+def _correlation(pairs: list) -> float | None:
+    """
+    Связь скрытой черты с поведением, которым она управляет.
+    """
+
+    if len(pairs) < 10:
+        return None
+
+    xs = [x for x, _ in pairs]
+    ys = [y for _, y in pairs]
+
+    n = len(pairs)
+
+    mx, my = sum(xs) / n, sum(ys) / n
+
+    sx = (sum((x - mx) ** 2 for x in xs) / n) ** 0.5
+    sy = (sum((y - my) ** 2 for y in ys) / n) ** 0.5
+
+    if sx == 0 or sy == 0:
+        return None
+
+    return round(sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / n / sx / sy, 3)
+
+
+def _behaviour(data: dict) -> dict:
+    """
+    Проверка, что черта действительно управляет своим
+    поведением, а не украшает скрытую истину.
+    """
+
+    truth = {row["client_id"]: row for row in data["truth_clients"]}
+
+    counts: dict[str, Counter] = defaultdict(Counter)
+    outlets: dict[str, Counter] = defaultdict(Counter)
+    sessions: dict[str, set] = defaultdict(set)
+
+    for row in data["events"]:
+
+        client = row["client_id"]
+        kind = row["event_type"]
+        payload = row["payload"]
+
+        counts[client][kind] += 1
+
+        if kind == "purchase" and payload.get("outlet_id") and payload.get("status") == "approved":
+            outlets[client][payload["outlet_id"]] += 1
+
+        if kind == "app_screen" and row["correlation_id"]:
+            sessions[client].add(row["correlation_id"])
+
+    def pairs(trait: str, value) -> list:
+        return [
+            (row[trait], value(row["client_id"]))
+            for row in truth.values()
+            if row.get(trait) is not None
+        ]
+
+    repeat: list = []
+
+    for client, counter in outlets.items():
+        total = sum(counter.values())
+        if total < 20:
+            continue
+        again = total - len(counter)
+        row = truth.get(client)
+        if row is not None:
+            repeat.append((row["trait_merchant_loyalty"], again / total))
+
+    checks = {
+        "impulsivity_purchases": _correlation(
+            pairs("trait_spending_impulsivity", lambda c: counts[c]["purchase"])
+        ),
+        "digital_sessions": _correlation(
+            pairs("trait_digital_affinity", lambda c: len(sessions[c]))
+        ),
+        # Дисциплина измеряется ДОЛЕЙ пропущенных взносов, а не
+        # их числом: число зависит ещё и от того, сколько у
+        # клиента кредитов, и это размывает связь.
+        "discipline_missed": _correlation(
+            [
+                (
+                    row["trait_financial_discipline"],
+                    counts[row["client_id"]]["installment_missed"]
+                    / counts[row["client_id"]]["installment_due"],
+                )
+                for row in truth.values()
+                if counts[row["client_id"]]["installment_due"] >= 6
+            ]
+        ),
+        "savings_deposit_topups": _correlation(
+            pairs("trait_savings_propensity", lambda c: counts[c]["deposit_topup"])
+        ),
+        "credit_appetite_applications": _correlation(
+            pairs("trait_credit_appetite", lambda c: counts[c]["application_submitted"])
+        ),
+        "sociality_transfers": _correlation(
+            pairs("trait_sociality", lambda c: counts[c]["p2p_out"] + counts[c]["transfer_out"])
+        ),
+        "loyalty_repeat_outlets": _correlation(repeat),
+    }
+
+    strength = [abs(value) for value in checks.values() if value is not None]
+
+    return {
+        "correlations": checks,
+        "weakest": round(min(strength), 3) if strength else None,
+    }
+
+
+def _holdings(data: dict) -> dict:
+    """
+    Сколько продуктов держит клиент и каких.
+    """
+
+    clients = {row["client_id"] for row in data["truth_clients"]}
+
+    per_client: Counter = Counter()
+    by_family: Counter = Counter()
+    families_per_client: dict = defaultdict(Counter)
+
+    for row in data["events"]:
+
+        if row["event_type"] not in ("product_opened", "product_migrated"):
+            continue
+
+        family = row["payload"].get("product_family")
+
+        per_client[row["client_id"]] += 1
+        by_family[family] += 1
+        families_per_client[row["client_id"]][family] += 1
+
+    counts = sorted(per_client[client] for client in clients)
+
+    holders: dict = {}
+
+    for family in by_family:
+        distribution = Counter(
+            min(4, families_per_client[client][family])
+            for client in clients
+            if families_per_client[client][family] > 0
+        )
+        holders[family] = {str(key): value for key, value in sorted(distribution.items())}
+
+    return {
+        "contracts_per_client": _quantiles(counts),
+        "by_family": dict(by_family.most_common()),
+        "holders_by_count": holders,
+    }
+
+
+def _fraud_profile(data: dict) -> dict:
+    """
+    Частота и форма мошеннических эпизодов.
+    """
+
+    clients = {row["client_id"] for row in data["truth_clients"]}
+
+    episodes = Counter(
+        row["key"] for row in data["truth_events"] if row["kind"] == "fraud_episode"
+    )
+
+    months = max(1, len(_months_between(HISTORY_START, HISTORY_END)))
+
+    alerts = [row for row in data["events"] if row["event_type"] == "fraud_alert"]
+
+    return {
+        "episodes": dict(episodes.most_common()),
+        "episodes_per_client_year": round(
+            sum(episodes.values()) / max(1, len(clients)) / (months / 12.0), 4
+        ),
+        "alert_subjects": dict(Counter(row["payload"].get("subject") for row in alerts)),
+        "score_bands": dict(Counter(row["payload"].get("score_band") for row in alerts)),
+        "materialised_as": dict(
+            Counter(
+                row["event_type"]
+                for row in data["events"]
+                if row["link_type"] == "fraud_episode"
+            )
+        ),
+    }
+
+
+def _hours(data: dict) -> dict:
+    """
+    Время суток и соблюдение часов работы точек.
+    """
+
+    outlets = {row["outlet_id"]: row for row in data["merchants"]}
+
+    purchases = [
+        row
+        for row in data["events"]
+        if row["event_type"] == "purchase" and row["payload"].get("status") == "approved"
+    ]
+
+    if not purchases:
+        return {"night_share": None, "out_of_hours_share": None}
+
+    night = sum(1 for row in purchases if row["event_time"].hour < 6)
+
+    offline = 0
+    outside = 0
+
+    for row in purchases:
+
+        outlet = outlets.get(row["payload"].get("outlet_id"))
+
+        if outlet is None or outlet.get("is_online"):
+            continue
+
+        offline += 1
+
+        hour = row["event_time"].hour
+
+        if not (outlet["opening_hour"] <= hour < outlet["closing_hour"]):
+            outside += 1
+
+    return {
+        "night_share": round(night / len(purchases), 4),
+        "out_of_hours_share": round(outside / offline, 4) if offline else None,
+        "offline_purchases": offline,
+        "by_hour": dict(Counter(row["event_time"].hour for row in purchases)),
+    }
+
+
 def _credit(data: dict) -> dict:
     """
     Кредитный портфель: переходы просрочки, дисциплина платежей,
@@ -715,6 +940,12 @@ def _calibration(data: dict, report: dict) -> dict:
         "events_per_client_month_p90": report["activity"]["all_events"].get("p90"),
         "events_per_client_month_p95": report["activity"]["all_events"].get("p95"),
         "events_per_client_month_p99": report["activity"]["all_events"].get("p99"),
+        "contracts_per_client_median": report["holdings"]["contracts_per_client"].get("p50"),
+        "fraud_episodes_per_client_year": report["fraud_profile"]["episodes_per_client_year"],
+        "night_purchase_share": report["hours"]["night_share"],
+        "out_of_hours_pos_share": report["hours"]["out_of_hours_share"],
+        "support_chat_share": _support_chat_share(data),
+        "trait_behaviour_min_correlation": report["behaviour"]["weakest"],
         "dpd90_client_share": report["credit"]["dpd_client_share"]["dpd90"],
         "installment_missed_share": report["credit"]["installment_missed_share"],
         "approval_rate_credit": report["credit"]["approval_rate_credit"],
@@ -798,7 +1029,12 @@ def _app_domains(data: dict) -> dict:
     приложением вообще пользуется, а не долю операций.
     """
 
-    users: set = set()
+    # Знаменатель это ВСЕ клиенты, а не только те, кто открывал
+    # приложение. Так считает отчёт банка: доля раздела auth
+    # там 84.9 %, что совпадает с долей установивших приложение,
+    # а не с долей внутри них.
+    total = len({row["client_id"] for row in data["truth_clients"]})
+
     by_domain: dict[str, set] = defaultdict(set)
 
     for row in data["events"]:
@@ -806,20 +1042,30 @@ def _app_domains(data: dict) -> dict:
         if row["event_type"] not in ("app_operation", "app_screen"):
             continue
 
-        users.add(row["client_id"])
-
         domain = row["payload"].get("domain")
 
         if domain:
             by_domain[domain].add(row["client_id"])
 
-    if not users:
+    if not total:
         return {}
 
     return {
-        domain: round(len(clients) / len(users), 4)
+        domain: round(len(clients) / total, 4)
         for domain, clients in by_domain.items()
     }
+
+
+def _support_chat_share(data: dict) -> float | None:
+
+    cases = [row for row in data["events"] if row["event_type"] == "case_opened"]
+
+    if not cases:
+        return None
+
+    chat = sum(1 for row in cases if row["payload"].get("channel") == "chat")
+
+    return round(chat / len(cases), 4)
 
 
 def _rate(report: dict, event_type: str) -> float | None:
@@ -987,6 +1233,10 @@ def build_report(raw_dir: Path, stories: int = 6) -> dict:
     report["fraud"] = _fraud(data)
     report["defects"] = _defects(data)
     report["credit"] = _credit(data)
+    report["holdings"] = _holdings(data)
+    report["fraud_profile"] = _fraud_profile(data)
+    report["hours"] = _hours(data)
+    report["behaviour"] = _behaviour(data)
     report["finance"] = _finance(data)
     report["calibration"] = _calibration(data, report)
     report["leaks"] = _proxy(data)
@@ -1215,6 +1465,76 @@ def render_markdown(report: dict) -> str:
 
     out.append("")
     credit = report["credit"]
+
+    holdings = report["holdings"]
+
+    out.append("## Продукты на клиента")
+    out.append("")
+    out.append(
+        _table(
+            [[name, value] for name, value in holdings["contracts_per_client"].items()],
+            ["квантиль", "договоров"],
+        )
+    )
+    out.append("")
+    out.append(_table(list(holdings["by_family"].items()), ["семейство", "договоров"]))
+    out.append("")
+
+    fraud = report["fraud_profile"]
+
+    out.append("## Мошенничество: частота и форма")
+    out.append("")
+    out.append(
+        f"Эпизодов на клиента в год: {fraud['episodes_per_client_year']}."
+    )
+    out.append("")
+    out.append(_table(list(fraud["episodes"].items()), ["вид эпизода", "случаев"]))
+    out.append("")
+    out.append(
+        _table(
+            [
+                ["предмет срабатывания", fraud["alert_subjects"]],
+                ["полосы тревожности", fraud["score_bands"]],
+                ["чем материализуется", fraud["materialised_as"]],
+            ],
+            ["показатель", "значение"],
+        )
+    )
+    out.append("")
+
+    hours = report["hours"]
+
+    out.append("## Время покупок")
+    out.append("")
+    out.append(
+        _table(
+            [
+                ["ночных покупок", hours["night_share"]],
+                ["покупок вне часов работы точки", hours["out_of_hours_share"]],
+                ["офлайновых покупок", hours["offline_purchases"]],
+            ],
+            ["показатель", "значение"],
+        )
+    )
+    out.append("")
+
+    behaviour = report["behaviour"]
+
+    out.append("## Черты и поведение")
+    out.append("")
+    out.append(
+        "Черта обязана управлять тем поведением, ради которого она "
+        "существует. Значение около нуля означает, что черта украшает "
+        "скрытую истину и ничего не решает."
+    )
+    out.append("")
+    out.append(
+        _table(
+            list(behaviour["correlations"].items()),
+            ["черта и поведение", "корреляция"],
+        )
+    )
+    out.append("")
 
     out.append("## Кредитный портфель")
     out.append("")

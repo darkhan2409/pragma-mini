@@ -245,7 +245,7 @@ def candidates(
 
         if view.family in ("deposit", "deposit_certificate", "bonds"):
             weight *= max(0.1, 1.0 - 0.8 * stress)
-            weight *= min(3.0, max(0.2, assets / 400_000))
+            weight *= min(2.0, max(0.2, assets / 400_000))
 
         # Ранние последователи: цифровые клиенты берут новинки
         # раньше остальных.
@@ -299,17 +299,28 @@ def application_probability(
     органического интереса.
     """
 
-    settings = params_module.active().products.adoption
+    products = params_module.active().products
 
+    settings = products.adoption
+
+    stress_params = params_module.active().stress
+
+    # Интенсивность складывается по всем доступным продуктам:
+    # вероятность подать хоть какую-то заявку сегодня. Какую
+    # именно, решает pick. Потолок нужен только чтобы день не
+    # стал заведомым: раньше он был 0.35 и упирался постоянно.
     base = total_weight / 365.0
 
     if from_offer:
         base *= settings.get("offer_factor", 2.6)
+        base *= 1.0 + stress_params.offer_response_boost * stress
 
-    if candidate.view.family in ("cash_loan", "refinance"):
-        base *= 1.0 + 1.6 * stress
+    if candidate.view.family == "refinance":
+        base *= 1.0 + stress_params.refinance_interest_boost * stress
+    elif candidate.view.family in ("cash_loan", "credit_card", "installment"):
+        base *= 1.0 + stress_params.loan_interest_boost * stress
 
-    return float(min(0.35, max(0.0, base)))
+    return float(min(products.application_probability_cap, max(0.0, base)))
 
 
 def migration_targets(ts: datetime, held_codes: frozenset) -> tuple:

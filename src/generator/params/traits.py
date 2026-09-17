@@ -167,6 +167,13 @@ class TraitParams:
         }
     )
 
+    # Насколько черта меняет поведение, которым она управляет.
+    # Без этих множителей черта остаётся украшением: корреляция
+    # с собственным поведением была около нуля.
+    impulsivity_rate_factor: float = 3.4
+    sociality_transfer_factor: float = 1.0
+    favourite_outlet_bonus: float = 2.2
+
     channel_digital_factor: dict = field(
         default_factory=lambda: {
             "app": 2.1, "ecom": 2.3, "qr": 1.9, "pos": 1.0,

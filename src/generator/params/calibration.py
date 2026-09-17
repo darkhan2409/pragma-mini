@@ -122,6 +122,20 @@ DEFAULT_TARGETS: tuple = (
     _hypothesis("inbound_transfers_per_client_month", "channels", "events", 0.5, 2.0,
                 note="входящие переводы от внешних отправителей"),
 
+    # --- продукты, мошенничество, поведение ---
+    _hypothesis("contracts_per_client_median", "products", "contracts", 2, 4,
+                note="сколько договоров держит обычный клиент, включая открытые до окна"),
+    _hypothesis("fraud_episodes_per_client_year", "fraud", "events", 0.03, 0.08,
+                note="эпизод мошенничества у клиента в год"),
+    _hypothesis("night_purchase_share", "activity", "share", 0.02, 0.05,
+                note="покупки между полуночью и шестью утра"),
+    _hypothesis("out_of_hours_pos_share", "activity", "share", 0.0, 0.03,
+                note="покупки в точке вне её часов работы"),
+    _hypothesis("support_chat_share", "channels", "share", 0.35, 0.75,
+                note="доля обращений в поддержку через чат"),
+    _hypothesis("trait_behaviour_min_correlation", "activity", "correlation", 0.2, 1.0,
+                note="слабейшая из связей «черта и поведение, которым она управляет»"),
+
     _hypothesis("zero_month_share", "zero_months", "share", 0.10, 0.15,
                 note="месяцы ВООБЩЕ без записей; полоса из плана, реального эталона нет"),
     _absent("no_client_action_month_share", "zero_months", "share",

@@ -113,6 +113,12 @@ class ProductParams:
 
     application_cooldown_days: int = 20
 
+    # Потолок дневной вероятности заявки. Раньше вероятность
+    # считалась от суммы весов ВСЕХ кандидатов и почти каждый
+    # день упиралась в потолок: отсюда семь договоров на
+    # клиента вместо двух-трёх.
+    application_probability_cap: float = 0.08
+
     # Вехи просрочки.
     dpd_milestones: tuple = (1, 30, 60, 90)
 
@@ -147,9 +153,9 @@ class ProductParams:
     # Вероятность заплатить вовремя по полосам дисциплины.
     on_time_payment_probability: dict = field(
         default_factory=lambda: {
-            "low": 0.90,
-            "mid": 0.965,
-            "high": 0.995,
+            "low": 0.918,
+            "mid": 0.978,
+            "high": 0.998,
         }
     )
     discipline_bands: tuple = (0.33, 0.66)
@@ -169,14 +175,27 @@ class ProductParams:
 
     cure_probability_per_day: dict = field(
         default_factory=lambda: {
-            "low": 0.06,
-            "mid": 0.14,
-            "high": 0.26,
+            "low": 0.025,
+            "mid": 0.075,
+            "high": 0.17,
         }
     )
     early_repayment_share_per_year: float = 0.11
     early_repayment_min_months: int = 3
     restructure_share_at_dpd60: float = 0.14
+
+    # Проникновение продуктов до окна наблюдения: база и
+    # наклон по соответствующей черте.
+    prehistory_penetration: dict = field(
+        default_factory=lambda: {
+            "credit_card": (0.08, 0.30, "credit_appetite"),
+            "cash_loan": (0.07, 0.28, "credit_appetite"),
+            "deposit": (0.04, 0.24, "savings_propensity"),
+            "installment": (0.09, 0.22, "credit_appetite"),
+        }
+    )
+
+    prehistory_max_probability: float = 0.55
 
     # Депозиты.
     deposit_open_share_of_free_cash: tuple = (0.35, 0.95)
@@ -199,15 +218,15 @@ class ProductParams:
     adoption: dict = field(
         default_factory=lambda: {
             "base_rate_per_year": {
-                "debit_card": 0.55,
-                "credit_card": 0.22,
-                "cash_loan": 0.30,
-                "refinance": 0.07,
-                "installment": 0.40,
-                "deposit": 0.24,
-                "deposit_certificate": 0.09,
-                "bonds": 0.03,
-                "insurance": 0.16,
+                "debit_card": 0.10,
+                "credit_card": 0.13,
+                "cash_loan": 0.19,
+                "refinance": 0.05,
+                "installment": 0.26,
+                "deposit": 0.12,
+                "deposit_certificate": 0.02,
+                "bonds": 0.01,
+                "insurance": 0.07,
                 "service": 0.0,
             },
             "ramp_days": 240,

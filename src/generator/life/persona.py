@@ -231,7 +231,10 @@ def draw_persona(client_ordinal: int) -> Persona:
     declared_income = int(round(true_income * float(rng.uniform(0.88, 1.06)) / 5000) * 5000)
     declared_income = int(min(high_bound, max(low_bound, declared_income)))
 
-    salary_day = int(rng.integers(*settings.income.salary_day_range))
+    if income_type == "pensioner":
+        salary_day = int(rng.integers(*settings.income.pension_day_range))
+    else:
+        salary_day = int(rng.integers(*settings.income.salary_day_range))
 
     mandatory_low, mandatory_high = population.mandatory_share_by_stage[life_stage]
     mandatory_share = float(rng.uniform(mandatory_low, mandatory_high))

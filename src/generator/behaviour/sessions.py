@@ -182,6 +182,34 @@ def device_for(persona: Persona, index: int) -> tuple:
     return device_id, kind
 
 
+def stress_session_factor(episodes: tuple, ts) -> float:
+    """
+    В начале трудного периода в приложение заходят чаще:
+    проверяют остаток. Потом заходят реже: смотреть нечего.
+    """
+
+    from ..life import stress as stress_module
+
+    settings = params_module.active().stress
+
+    episode = stress_module.active_episode(episodes, ts)
+
+    if episode is None:
+        return 1.0
+
+    level = episode.level(ts)
+
+    if level <= 0.0:
+        return 1.0
+
+    early = ts <= episode.peak_end
+
+    if early:
+        return 1.0 + settings.app_checks_boost_early * level
+
+    return max(0.2, 1.0 - settings.app_checks_drop_late * level)
+
+
 def daily_session_rate(
     persona: Persona,
     ts: datetime,
@@ -225,7 +253,7 @@ def _goal_weights(persona: Persona, ts: datetime, context: SessionContext, adopt
     }
 
     if context.due_bills and "payments" in adopted:
-        weights[GOAL_PAYMENT] = 0.07 + 0.24 * min(3, len(context.due_bills))
+        weights[GOAL_PAYMENT] = 0.04 + 0.15 * min(3, len(context.due_bills))
 
     if "transfers" in adopted:
         weights[GOAL_TRANSFER] = 2.3
@@ -416,6 +444,12 @@ def _build_steps(
         family = context.recent_offer_family or rng.choice(("cash_loan", "deposit", "credit_card", "insurance"))
 
         domain = next((name for name, value in DOMAIN_FAMILY.items() if value == family), "loans")
+
+        # Изучение продукта тоже идёт в принятом домене: раньше
+        # эта ветка возвращалась до общего фильтра и рисовала
+        # экраны разделов, которых у клиента нет.
+        if domain not in adopted:
+            domain = "loans" if "loans" in adopted else next(iter(sorted(adopted)), "home")
 
         screens = BROWSE_SCREENS.get(domain, BROWSE_SCREENS["loans"])
 

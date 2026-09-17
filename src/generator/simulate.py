@@ -55,6 +55,7 @@ from .observe import coverage as coverage_module
 from .observe.envelope import Event, EventFactory
 from .rng import (
     COMPONENT_CONTENT,
+    NS_PREHISTORY,
     NS_PRODUCT_TIME,
     COMPONENT_OUTCOME,
     NS_ADOPTION,
@@ -145,6 +146,7 @@ class ClientState:
     purchases: list = field(default_factory=list)
     open_bills: list = field(default_factory=list)
     cases: list = field(default_factory=list)
+    support_last_by_cause: dict = field(default_factory=dict)
     closed_at: datetime | None = None
 
     # --------------------------------------------------------
@@ -652,19 +654,27 @@ class CommunitySimulation:
 
         span = max(1, (HISTORY_START - persona.relationship_start).days)
 
-        for family, probability in (
-            ("credit_card", 0.10 + 0.45 * persona.trait("credit_appetite")),
-            ("cash_loan", 0.08 + 0.40 * persona.trait("credit_appetite")),
-            ("deposit", 0.05 + 0.35 * persona.trait("savings_propensity")),
-            ("installment", 0.10 + 0.30 * persona.trait("credit_appetite")),
-        ):
+        products = self.settings.products
 
-            if rng.random() >= min(0.75, probability):
+        for index, (family, rule) in enumerate(products.prehistory_penetration.items()):
+
+            base, slope, trait = rule
+
+            probability = base + slope * persona.trait(trait)
+
+            # Отдельный поток: добавление правил предыстории не
+            # должно сдвинуть начальные остатки, которые
+            # разыгрываются из того же rng ниже.
+            family_rng = keyed_rng(NS_PREHISTORY, persona.client_ordinal, index)
+
+            if family_rng.random() >= min(products.prehistory_max_probability, probability):
                 continue
 
-            offset = int(rng.integers(0, span))
+            offset = int(family_rng.integers(0, span))
 
-            ts = persona.relationship_start + timedelta(days=offset, hours=int(rng.integers(9, 19)))
+            ts = persona.relationship_start + timedelta(
+                days=offset, hours=int(family_rng.integers(9, 19))
+            )
 
             if ts >= HISTORY_START:
                 continue
@@ -674,12 +684,37 @@ class CommunitySimulation:
             if item is None:
                 continue
 
-            amount, term = self._contract_terms(state, item, ts, rng)
+            amount, term = self._contract_terms(state, item, ts, family_rng)
 
-            self._open_contract(
-                state, item, ts, amount, term,
-                emit_events=ts >= REGISTRY_START,
+            # Правила банка действовали и до окна наблюдения:
+            # ни лишней карты сверх лимита, ни кредита сверх
+            # долговой нагрузки.
+            if not adoption_module.eligible(
+                persona,
+                item,
+                item.version_at(ts),
+                ts,
+                state.held_codes(ts),
+                state.held_counts(ts),
+                state.assets(),
+                True,
+                state.has_open_loan(),
+                len(state.open_contracts(ts)),
+            ):
+                continue
+
+            if family in ("cash_loan", "installment") and not self._prehistory_debt_fits(
+                state, ts, family, amount, term, item
+            ):
+                continue
+
+            contract = self._open_contract(
+                state, item, ts, amount, term, emit_events=ts >= REGISTRY_START
             )
+
+            # График строится сразу, чтобы следующий договор
+            # предыстории видел уже принятую нагрузку.
+            self._register_prehistory_loan(state, contract, family_rng)
 
         # Начальные остатки.
         opening_cash = _money(persona.true_income * rng.uniform(0.05, 0.45))
@@ -704,38 +739,6 @@ class CommunitySimulation:
         for account in state.ledger.accounts.values():
             account.opening_balance = account.balance
 
-        # Кредиты предыстории: график и остаток долга.
-        for contract in list(state.contracts.values()):
-
-            if contract.product_family not in ("cash_loan", "refinance", "installment"):
-                continue
-
-            if contract.amount_or_limit is None or contract.term is None:
-                continue
-
-            loan = loan_rules.open_loan(
-                contract.contract_id,
-                int(contract.amount_or_limit),
-                float(contract.rate or 0.28),
-                int(contract.term),
-                contract.opened_at,
-                autopay=rng.random() < self.settings.products.autopay_share,
-            )
-
-            # Платежи до окна считаются исполненными.
-            for item in loan.schedule:
-                if item.due_date < HISTORY_START:
-                    loan_rules.apply_payment(loan, item, item.amount, item.due_date)
-
-            if loan.principal_outstanding <= 0:
-                contract.status = CONTRACT_CLOSED
-                contract.closed_at = max(
-                    contract.opened_at, cal.add_months(contract.opened_at, int(contract.term))
-                )
-                continue
-
-            state.loans[contract.contract_id] = loan
-
         state.opening_state = {
             "product_events": {
                 "contracts_before_window": len(state.contracts),
@@ -759,6 +762,70 @@ class CommunitySimulation:
         era = state.habits.era_at(ts)
 
         return catalog.outlets_of(era.settlement, category)
+
+    def _prehistory_debt_fits(
+        self, state: ClientState, ts, family: str, amount, term, item
+    ) -> bool:
+        """
+        Долговая нагрузка проверяется и до окна наблюдения.
+        """
+
+        if amount is None or term is None:
+            return True
+
+        products = self.settings.products
+
+        ratio = float(products.bank_rules.get("max_debt_service_ratio", 0.5))
+
+        income = max(1, int(state.persona.true_income))
+
+        open_loans = tuple(loan for loan in state.loans.values() if not loan.closed)
+
+        existing = loan_rules.debt_service(open_loans, ts)
+
+        rate = self._rate_for(item.version_at(ts).terms, term)
+
+        payment = loan_rules.annuity_payment(int(amount), rate, int(term))
+
+        return (existing + payment) <= ratio * income
+
+    def _register_prehistory_loan(self, state: ClientState, contract, rng) -> None:
+        """
+        Кредит предыстории: график, исполненные до окна платежи
+        и остаток долга на начало наблюдения.
+        """
+
+        if contract is None:
+            return
+
+        if contract.product_family not in ("cash_loan", "refinance", "installment"):
+            return
+
+        if contract.amount_or_limit is None or contract.term is None:
+            return
+
+        loan = loan_rules.open_loan(
+            contract.contract_id,
+            int(contract.amount_or_limit),
+            float(contract.rate or 0.28),
+            int(contract.term),
+            contract.opened_at,
+            autopay=rng.random() < self.settings.products.autopay_share,
+        )
+
+        for item in loan.schedule:
+            if item.due_date < HISTORY_START:
+                loan_rules.apply_payment(loan, item, item.amount, item.due_date)
+
+        if loan.principal_outstanding <= 0:
+            contract.status = CONTRACT_CLOSED
+            contract.closed_at = max(
+                contract.opened_at,
+                cal.add_months(contract.opened_at, int(contract.term)),
+            )
+            return
+
+        state.loans[contract.contract_id] = loan
 
     def _rate_for(self, terms: dict, term) -> float:
         """

@@ -56,6 +56,7 @@ from .rng import (
     NS_PROFILE,
     NS_INBOUND,
     NS_SUPPORT,
+    NS_SUPPORT_CAUSE,
     NS_TRANSFER,
     event_rng,
     keyed_rng,
@@ -181,6 +182,7 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
             next_payday = payout.ts
 
     factor *= cal.payday_factor(day, last_payday, next_payday)
+    factor *= cal.month_factor(day)
 
     # --- регистрация клиента внутри окна ---
 
@@ -273,6 +275,12 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
             * params_module.active().activity.state_factor.get(state.state, 1.0)
             * persona.visible_share
             * 1.4
+            # Общительный клиент переводит деньги чаще.
+            * (
+                0.6
+                + params_module.active().traits.sociality_transfer_factor
+                * persona.trait("sociality", day)
+            )
         )
 
         scale = (budget_per_month / planned) if planned > 0 else 0.0
@@ -353,6 +361,28 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
     ):
         add(session.started_at, "session", {"session": session, "index": index})
 
+    # --- просрочка и ближайший платёж на сегодня ---
+    #
+    # worst_dpd обновляется вечерней проверкой кредита, поэтому
+    # планировщик видел бы вчерашнее состояние.
+
+    live_dpd = 0
+    days_to_due = None
+
+    for loan in state.loans.values():
+
+        if loan.closed:
+            continue
+
+        live_dpd = max(live_dpd, loan_rules.days_past_due(loan, day))
+
+        upcoming = loan.next_due(day)
+
+        if upcoming is not None:
+            remaining = (upcoming.due_date - day).days
+            if days_to_due is None or remaining < days_to_due:
+                days_to_due = remaining
+
     # --- коммуникации ---
 
     if state.consent_at is not None and day >= state.consent_at:
@@ -380,11 +410,12 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
             state_factor=params_module.active().activity.state_factor.get(state.state, 1.0),
             owned_families=state.owned_families(day),
             candidate_families=families,
-            dpd=state.worst_dpd(),
+            dpd=live_dpd,
             in_pause=lifecycle_module.pause_at(state.pauses, day) is not None,
             stress=stress,
             pending_notice=state.pending_notice,
             fraud_alert=state.fraud_alert_at is not None and (day - state.fraud_alert_at).days <= 5,
+            days_to_due=days_to_due,
         )
 
         for index, contact in enumerate(contacts):
@@ -403,25 +434,38 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
             add(day.replace(hour=0, minute=0, second=0), "installment_due",
                 {"contract_id": contract_id, "installment": item})
 
-        # Клиент платит сам: за несколько дней до срока, в срок
-        # или в льготные дни. Решение принято заранее и от
-        # порядка исполнения дня не зависит.
-        pending = loan.oldest_unpaid()
+        # Клиент платит сам: в срок или в льготные дни. Решение
+        # по каждому взносу принято заранее и от порядка
+        # исполнения дня не зависит.
+        #
+        # Смотреть надо на взнос ЭТОГО периода, а не на самый
+        # старый неоплаченный: иначе отставший клиент больше
+        # никогда не получит намерения заплатить, потому что
+        # дата старого взноса давно прошла, и просрочка станет
+        # вечной.
+        if not loan.autopay:
 
-        if pending is not None and pending.outstanding > 0 and not loan.autopay:
+            grace = params_module.active().products.grace_days_before_missed
 
-            plan = _payment_plan(state, loan, pending)
+            for item in loan.schedule:
 
-            if plan["will_pay"]:
+                if item.outstanding <= 0:
+                    continue
 
-                moment = pending.due_date + timedelta(days=plan["offset"])
+                elapsed = (day - item.due_date).days
 
-                if moment.date() == day.date():
+                if elapsed < 0 or elapsed > grace:
+                    continue
+
+                plan = _payment_plan(state, loan, item)
+
+                if plan["will_pay"] and plan["offset"] == elapsed:
                     add(
                         day.replace(hour=plan["hour"], minute=plan["minute"], second=0),
                         "loan_payment_intent",
                         {"contract_id": contract_id},
                     )
+                    break
 
         add(day.replace(hour=23, minute=30), "loan_check", {"contract_id": contract_id})
 
@@ -429,6 +473,38 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
 
     if day >= persona.relationship_start and "purchases" not in silenced:
         add(day.replace(hour=20, minute=15), "adoption", {"stress": stress, "app": app_adopted})
+
+    # --- крупная покупка как жизненное событие ---
+    #
+    # Раньше событие только запускало стресс, а самой покупки
+    # не порождало: «крупная покупка» ничего не покупала.
+
+    for index, event in enumerate(state.life_events):
+
+        if event.kind != "big_purchase" or event.ts.date() != day.date():
+            continue
+
+        if "purchases" in silenced:
+            continue
+
+        category = str(event.payload.get("category") or "home_goods")
+
+        moment = day.replace(
+            hour=int(event.ts.hour) or 15, minute=int(event.ts.minute), second=0
+        )
+
+        add(
+            moment,
+            "purchase",
+            {
+                "intent": needs_module.Intent(
+                    ts=moment, category=category, zone="other", from_routine=False
+                ),
+                "index": 900 + index,
+                "budget": budget,
+                "factor": factor * float(event.payload.get("amount_factor") or 1.0),
+            },
+        )
 
     # --- мошеннические эпизоды ---
 
@@ -461,17 +537,37 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
 
     # --- обращение в поддержку ---
 
-    cause = None
+    # Поводов может быть несколько сразу. Раньше цепочка elif
+    # прятала заблокированную карту за просрочкой, и в данных
+    # оставалась почти одна тема.
+    causes: list[str] = []
 
     if state.recent_failure_at is not None and (day - state.recent_failure_at).days <= 2:
-        cause = "failed_operation"
-    elif state.worst_dpd() >= 30:
-        cause = "delinquency"
-    elif any(item.is_blocked_at(day) for item in state.cards.values()):
-        cause = "card_blocked"
+        causes.append("failed_operation")
 
-    if cause is not None:
-        add(day.replace(hour=13, minute=20), "support_check", {"cause": cause, "stress": stress})
+    if any(item.is_blocked_at(day) for item in state.cards.values()):
+        causes.append("card_blocked")
+
+    if live_dpd >= 30:
+        causes.append("delinquency")
+    elif any(
+        event.event_type == "installment_missed" and (day - event.event_time).days <= 3
+        for event in state.events[-40:]
+    ):
+        causes.append("missed_installment")
+
+    if causes:
+
+        pick = keyed_rng(NS_SUPPORT_CAUSE, state.ordinal, day.toordinal())
+
+        cause = causes[int(pick.integers(0, len(causes)))]
+
+        last = state.support_last_by_cause.get(cause)
+
+        cooldown = params_module.active().activity.support_cooldown_days
+
+        if last is None or (day - last).days >= cooldown:
+            add(day.replace(hour=13, minute=20), "support_check", {"cause": cause, "stress": stress})
 
     # --- просроченные счета к оплате ---
 

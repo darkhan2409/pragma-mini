@@ -99,9 +99,11 @@ def spending_factor(budget: MonthlyBudget, persona: Persona) -> float:
         share = budget.discretionary / budget.income
         factor *= 0.65 + 0.9 * min(1.0, share / 0.35)
 
-    impulsivity = persona.trait("spending_impulsivity")
+    # Импульсивность влияет на ЧИСЛО покупок (behaviour/needs),
+    # а не на сумму. Иначе она разгоняет и то и другое, бюджет
+    # месяца гасит обе стороны, и связь черты с поведением
+    # пропадает.
 
-    factor *= 0.80 + 0.45 * impulsivity
 
     return float(max(0.2, min(2.2, factor)))
 

@@ -99,6 +99,9 @@ class MerchantParams:
     favourite_categories: tuple = (4, 10)
 
     # Доля покупок в любимой точке при высокой лояльности.
+    # Закрытая точка не продаёт. Ноль означает жёсткий запрет.
+    closed_outlet_weight: float = 0.0
+
     loyalty_to_favourite: tuple = (0.35, 0.88)
 
     # Смена привычек после жизненного события.

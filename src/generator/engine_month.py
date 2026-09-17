@@ -509,7 +509,7 @@ def finish(sim) -> CommunityResult:
                 }
             )
 
-        truth_clients.append(_truth_client(state))
+        truth_clients.append(_truth_client(state, sim.graph.households.get(ordinal)))
         truth_events.extend(state.truth)
         truth_events.extend(_truth_plan(state))
 
@@ -684,7 +684,7 @@ def _row(event) -> dict:
     }
 
 
-def _truth_client(state: ClientState) -> dict:
+def _truth_client(state: ClientState, household_id: str | None = None) -> dict:
 
     persona = state.persona
 
@@ -704,7 +704,7 @@ def _truth_client(state: ClientState) -> dict:
         "registered_in_window": persona.registered_in_window,
         "vanished_after_registration": persona.vanished_after_registration,
         "night_segment": persona.night_segment,
-        "household_id": None,
+        "household_id": household_id,
         "final_state": state.state,
         "hidden_cash": state.ledger.balance(state.ledger.cash_id),
         "hidden_other_bank": state.ledger.balance(state.ledger.other_bank_id),
