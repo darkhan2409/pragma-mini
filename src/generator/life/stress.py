@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 from .. import params as params_module
 from ..config import HISTORY_END, HISTORY_START
 from ..rng import NS_STRESS, keyed_rng
-from .events import LifeEvent
 from .persona import Persona
 
 

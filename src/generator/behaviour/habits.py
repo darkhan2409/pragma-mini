@@ -7,7 +7,7 @@ from .. import params as params_module
 from ..config import HISTORY_END, HISTORY_START
 from ..life import calendar as cal
 from ..life.persona import Persona
-from ..rng import NS_HABITS, keyed_rng, stable_hash, state_cache
+from ..rng import NS_HABITS, keyed_rng, stable_hash
 from ..world import merchants
 from ..world.dictionaries import CATEGORY_BY_NAME, CATEGORY_NAMES
 

@@ -98,6 +98,32 @@ class ActivityParams:
     # каждый день.
     support_cooldown_days: int = 14
 
+    # Согласие на рассылку отзывают.
+    consent_withdrawal_per_year: float = 0.06
+
+    # Оплата по QR: в Казахстане это основной способ платить в
+    # рознице, и раздел приложения для неё уже существовал.
+    qr_share_of_pos: float = 0.22
+    qr_min_digital_affinity: float = 0.25
+
+    # Сколько экранов сверх обязательного пути смотрят в
+    # сессии. Раньше сессия всегда была ровно три-четыре
+    # экрана.
+    session_extra_screens: dict = field(
+        default_factory=lambda: {
+            "balance": 1.4,
+            "payment": 0.8,
+            "transfer": 0.9,
+            "cards": 1.1,
+            "explore": 1.6,
+            "loan": 1.0,
+            "deposit": 1.0,
+            "market": 1.5,
+            "profile": 0.6,
+            "support": 0.7,
+        }
+    )
+
     weekend_factor_purchases: float = 1.10
     weekend_factor_sessions: float = 0.92
 
@@ -132,11 +158,6 @@ class ActivityParams:
     max_sessions_per_day: int = 9
     max_screens_per_session: int = 20
     max_purchases_per_day: int = 18
-    max_offline_settlements_per_day: int = 2
-    max_active_contracts: int = 9
-    max_retries_per_intent: int = 3
-    max_intents_per_session: int = 3
-    max_support_hops: int = 1
 
     # Внешние переводы и наличные.
     transfers_per_month: dict = field(
@@ -166,8 +187,6 @@ class ActivityParams:
 
     # Продолжительность сессии и шага.
     session_step_seconds: tuple = (4, 95)
-    session_max_seconds: int = 3600
-    min_step_seconds: int = 1
 
     # Сбой сервиса: общий для всех клиентов, в RAW не пишется.
     outage_day_probability: float = 0.05

@@ -7,26 +7,35 @@ from . import params as params_module
 from .config import (
     EVENT_TYPE_PRIORITY,
     HISTORY_END,
-    HISTORY_START,
     INITIATOR_CLIENT,
     INITIATOR_SYSTEM,
     PROFILE_FIELDS,
 )
-from .engine import _HANDLERS, _emit_money, _touch_client
+from .engine import _HANDLERS, _emit_money
 from .engine_credit import emit_product_closed
 from .finance import cards as card_rules
 from .finance import deposits as deposit_rules
-from .finance import loans as loan_rules
-from .finance.entities import ACCOUNT_CREDIT_CARD, ACCOUNT_DEPOSIT, CONTRACT_CLOSED
+from .finance.entities import (
+    ACCOUNT_CREDIT_CARD,
+    CARD_CLOSED,
+    CONTRACT_CLOSED,
+)
 from .finance.ledger import COUNTERPART_BANK, COUNTERPART_GOVERNMENT
 from .life import calendar as cal
 from .life import lifecycle as lifecycle_module
 from .life import stress as stress_module
 from .observe import coverage as coverage_module
 from .observe import defects as defect_module
-from .rng import NS_DEPOSIT, NS_LEDGER, keyed_rng, stable_hash
-from . import timeline as timeline_module
-from .simulate import ClientState, CommunityResult, _money
+from .rng import (
+    NS_CARD_CREDIT,
+    NS_CONSENT,
+    NS_DEPOSIT,
+    NS_DEPOSIT_CLOSE,
+    NS_LEDGER,
+    keyed_rng,
+    stable_hash,
+)
+from .simulate import ClientState, CommunityResult
 from .world.dictionaries import MCC_TRANSFER
 
 
@@ -39,6 +48,412 @@ from .world.dictionaries import MCC_TRANSFER
 # цикла и, если что-то изменилось, появляется новая версия
 # профиля.
 # ============================================================
+
+
+def _expire_cards(sim, state: ClientState, day: datetime) -> None:
+    """
+    Карта заканчивается по сроку и перевыпускается заранее.
+    Раньше перевыпуск бывал только после мошенничества.
+    """
+
+    from .engine_products import _reissue_card
+
+    for card in list(state.cards.values()):
+
+        if card.expires_at is None or card.closed_at is not None:
+            continue
+
+        if card.status == CARD_CLOSED:
+            continue
+
+        remaining = (card.expires_at - day).days
+
+        if remaining > 31 or remaining < 0:
+            continue
+
+        moment = day.replace(hour=12, minute=int(stable_hash(card.card_id) % 60))
+
+        if moment >= HISTORY_END:
+            continue
+
+        _reissue_card(state, card, moment, reason="expiry")
+
+
+def _close_deposits_early(sim, state: ClientState, day: datetime) -> None:
+    """
+    Досрочное закрытие вклада: деньги понадобились раньше срока.
+    В трудный период это случается чаще.
+    """
+
+    settings = params_module.active().products
+
+    stress = stress_module.level_at(state.stress_episodes, day)
+
+    boost = 1.0 + params_module.active().stress.deposit_close_boost * stress
+
+    monthly = settings.deposit_early_close_share_per_year / 12.0 * boost
+
+    for contract_id, deposit in list(state.deposits.items()):
+
+        contract = state.contracts.get(contract_id)
+
+        if contract is None or not contract.is_open_at(day):
+            continue
+
+        if deposit.matures_at <= day:
+            continue
+
+        rng = keyed_rng(NS_DEPOSIT_CLOSE, state.ordinal, day.toordinal(), stable_hash(contract_id) % 9973)
+
+        if rng.random() >= monthly:
+            continue
+
+        _close_deposit(state, day.replace(hour=15), deposit, early=True)
+
+
+def _withdraw_consent(state: ClientState, day: datetime) -> None:
+    """
+    Согласие на рассылку можно и отозвать. Раньше это была
+    дорога в одну сторону.
+    """
+
+    if state.consent_at is None or day <= state.consent_at:
+        return
+
+    settings = params_module.active().activity
+
+    rng = keyed_rng(NS_CONSENT, state.ordinal, day.toordinal())
+
+    if rng.random() >= settings.consent_withdrawal_per_year / 12.0:
+        return
+
+    state.consent_at = None
+
+    state.emit(
+        state.factory.make(
+            "profile_change",
+            day.replace(hour=19, minute=40),
+            {
+                "field_name": "consent_marketing",
+                "old_value": "true",
+                "new_value": "false",
+                "change_source": "client",
+                "confirmed": True,
+            },
+            initiator=INITIATOR_CLIENT,
+        )
+    )
+
+
+def _card_statement(sim, state: ClientState, day: datetime, month: datetime) -> None:
+    """
+    Выписка по карте рассрочки.
+
+    Проценты на наличный долг, минимальный платёж месяца и его
+    исполнение переводом со своего счёта. Неоплаченный платёж
+    это пропуск и просрочка, как у обычного кредита.
+    """
+
+    settings = params_module.active().products
+
+    month_index = cal.month_index(month)
+
+    for contract_id, credit in list(state.card_credits.items()):
+
+        if credit.closed:
+            continue
+
+        contract = state.contracts.get(contract_id)
+
+        if contract is None or not contract.is_open_at(day):
+            continue
+
+        # --- проценты на наличный долг ---
+
+        interest = card_rules.monthly_interest(credit)
+
+        if interest > 0:
+
+            credit.accrued_interest += interest
+
+            _emit_money(
+                state,
+                day.replace(hour=23, minute=5),
+                "fee_charge",
+                credit.account_id,
+                interest,
+                "debit",
+                COUNTERPART_BANK,
+                {
+                    "channel": "system",
+                    "contract_id": contract_id,
+                    "accrual_period": month.strftime("%Y-%m"),
+                    "reason": "periodic_contract_rule",
+                    "merchant_country": "KZ",
+                },
+                INITIATOR_SYSTEM,
+                correlation_id=contract_id,
+                link_type="contract",
+            )
+
+        payment = card_rules.minimum_payment(credit, month_index)
+
+        if payment <= 0:
+            continue
+
+        due_ts = day.replace(hour=23, minute=10)
+
+        due_event = state.emit(
+            state.factory.make(
+                "installment_due",
+                due_ts,
+                {
+                    "contract_id": contract_id,
+                    "installment_no": None,
+                    "amount_due": payment,
+                    "amount_paid": None,
+                    "principal_outstanding": credit.outstanding,
+                    "days_past_due": credit.dpd,
+                    "due_date": day.date().isoformat(),
+                    "cause_event_id": None,
+                    "reason": "card_statement",
+                },
+                initiator=INITIATOR_SYSTEM,
+                correlation_id=contract_id,
+                link_type="schedule",
+            )
+        )
+
+        paid = _pay_card(sim, state, day, credit, contract_id, payment, due_event, month_index)
+
+        if paid:
+            _card_arrears_cleared(state, day, credit, contract_id)
+            continue
+
+        _card_missed(state, day, credit, contract_id, payment, due_event)
+
+
+def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_event, month_index) -> bool:
+    """
+    Платёж по карте: перевод со своего счёта на счёт карты.
+    Обе стороны помечены own_account, поэтому деньги клиента не
+    исчезают и не появляются.
+    """
+
+    rng = keyed_rng(NS_CARD_CREDIT, state.ordinal, day.toordinal(), stable_hash(contract_id) % 9973)
+
+    settings = params_module.active().products
+
+    discipline = state.persona.trait("financial_discipline", day)
+
+    low, high = settings.discipline_bands
+
+    band = "high" if discipline > high else "mid" if discipline > low else "low"
+
+    if rng.random() >= settings.on_time_payment_probability[band]:
+        return False
+
+    def own_sources(value: int) -> list:
+        return [
+            item
+            for item in state.ledger.payment_sources(day, value)
+            if item.kind != "credit_card"
+        ]
+
+    sources = own_sources(payment)
+
+    # Как и по кредиту, деньги к сроку подтягивают из другого
+    # банка или наличными.
+    if not sources:
+
+        from .engine_credit import _topup_before_payment
+
+        if _topup_before_payment(state, day.replace(hour=22), payment, rng):
+            sources = own_sources(payment)
+
+    # Денег не хватило на весь минимальный платёж: платят
+    # сколько могут, как и по обычному кредиту. Иначе карта
+    # уходит в просрочку с первого же тесного месяца.
+    if not sources:
+
+        capacity = max(
+            (
+                item.available
+                for item in state.ledger.accounts.values()
+                if item.visible and item.is_open_at(day) and item.kind not in ("loan", "credit_card")
+            ),
+            default=0,
+        )
+
+        if capacity >= settings.partial_payment_min_share * payment:
+            payment = int(capacity)
+            sources = own_sources(payment)
+
+    if not sources or payment <= 0:
+        return False
+
+    source = sources[0]
+
+    moment = day.replace(hour=23, minute=15)
+
+    _emit_money(
+        state,
+        moment,
+        "loan_payment",
+        source.account_id,
+        payment,
+        "debit",
+        credit.account_id,
+        {
+            "channel": "app",
+            "contract_id": contract_id,
+            "counterparty": "own_account",
+            "cause_event_id": due_event.event_id,
+            "reason": "card_statement",
+            "mcc": MCC_TRANSFER,
+            "merchant_country": "KZ",
+        },
+        INITIATOR_CLIENT,
+        correlation_id=contract_id,
+        link_type="schedule",
+    )
+
+    _emit_money(
+        state,
+        moment + timedelta(seconds=1),
+        "transfer_in",
+        credit.account_id,
+        payment,
+        "credit",
+        source.account_id,
+        {
+            "channel": "system",
+            "contract_id": contract_id,
+            "counterparty": "own_account",
+            "reason": "card_statement",
+            "mcc": MCC_TRANSFER,
+            "merchant_country": "KZ",
+        },
+        INITIATOR_SYSTEM,
+        correlation_id=contract_id,
+        link_type="schedule",
+    )
+
+    applied = card_rules.apply_card_payment(credit, payment, month_index)
+
+    state.emit(
+        state.factory.make(
+            "installment_paid",
+            moment + timedelta(seconds=2),
+            {
+                "contract_id": contract_id,
+                "installment_no": None,
+                "amount_due": payment,
+                "amount_paid": applied,
+                "principal_outstanding": credit.outstanding,
+                "days_past_due": 0,
+                "due_date": day.date().isoformat(),
+                "cause_event_id": due_event.event_id,
+                "reason": "payment",
+            },
+            initiator=INITIATOR_CLIENT,
+            correlation_id=contract_id,
+            link_type="schedule",
+        )
+    )
+
+    return True
+
+
+def _card_missed(state: ClientState, day, credit, contract_id, payment, due_event) -> None:
+    """
+    Неоплаченная выписка: пропуск, рост просрочки и вехи.
+    """
+
+    settings = params_module.active().products
+
+    credit.dpd += 30
+
+    state.emit(
+        state.factory.make(
+            "installment_missed",
+            day.replace(hour=23, minute=20),
+            {
+                "contract_id": contract_id,
+                "installment_no": None,
+                "amount_due": payment,
+                "amount_paid": None,
+                "principal_outstanding": credit.outstanding,
+                "days_past_due": credit.dpd,
+                "due_date": day.date().isoformat(),
+                "cause_event_id": due_event.event_id,
+                "reason": "missed",
+            },
+            initiator=INITIATOR_SYSTEM,
+            correlation_id=contract_id,
+            link_type="schedule",
+        )
+    )
+
+    for milestone in settings.dpd_milestones:
+
+        if credit.dpd < milestone or milestone in credit.delinquency_marks:
+            continue
+
+        credit.delinquency_marks = credit.delinquency_marks + (milestone,)
+
+        state.emit(
+            state.factory.make(
+                "delinquency_registered",
+                day.replace(hour=23, minute=25),
+                {
+                    "contract_id": contract_id,
+                    "installment_no": None,
+                    "amount_due": payment,
+                    "amount_paid": None,
+                    "principal_outstanding": credit.outstanding,
+                    "days_past_due": milestone,
+                    "due_date": None,
+                    "cause_event_id": None,
+                    "reason": "delinquency",
+                },
+                initiator=INITIATOR_SYSTEM,
+                correlation_id=contract_id,
+                link_type="schedule",
+            )
+        )
+
+        break
+
+
+def _card_arrears_cleared(state: ClientState, day, credit, contract_id) -> None:
+
+    if credit.dpd <= 0:
+        return
+
+    state.emit(
+        state.factory.make(
+            "arrears_cleared",
+            day.replace(hour=23, minute=28),
+            {
+                "contract_id": contract_id,
+                "installment_no": None,
+                "amount_due": None,
+                "amount_paid": None,
+                "principal_outstanding": credit.outstanding,
+                "days_past_due": 0,
+                "due_date": None,
+                "cause_event_id": None,
+                "reason": "arrears_cleared",
+            },
+            initiator=INITIATOR_SYSTEM,
+            correlation_id=contract_id,
+            link_type="schedule",
+        )
+    )
+
+    credit.dpd = 0
+    credit.delinquency_marks = ()
 
 
 def _sweep_bills(sim, state: ClientState, ts: datetime, payload: dict) -> None:
@@ -223,6 +638,11 @@ def month_end(sim, state: ClientState, day: datetime) -> None:
             )
         )
 
+    _card_statement(sim, state, day, month)
+    _expire_cards(sim, state, day)
+    _close_deposits_early(sim, state, day)
+    _withdraw_consent(state, day)
+
     # --- счётчики месяца ---
 
     state.monthly_atm = 0
@@ -241,7 +661,7 @@ def month_end(sim, state: ClientState, day: datetime) -> None:
     _update_profile(state, day)
 
 
-def _close_deposit(state: ClientState, ts: datetime, deposit) -> None:
+def _close_deposit(state: ClientState, ts: datetime, deposit, early: bool = False) -> None:
     """
     Срок вышел: депозит либо пролонгируется на действующих
     условиях, либо закрывается с переводом остатка на карту.
@@ -262,7 +682,7 @@ def _close_deposit(state: ClientState, ts: datetime, deposit) -> None:
 
     catalog = product_catalog.catalog()
 
-    if rng.random() < settings.deposit_rollover_share and catalog.has(contract.product_code):
+    if not early and rng.random() < settings.deposit_rollover_share and catalog.has(contract.product_code):
 
         view = catalog.view(contract.product_code)
 

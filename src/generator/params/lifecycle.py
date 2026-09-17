@@ -45,7 +45,6 @@ class LifecycleParams:
     dormant_after_days_without_client_events: int = 45
     churn_risk_drop_ratio: float = 0.35
     churned_after_days_without_client_events: int = 180
-    returned_window_days: int = 30
 
     # Рост: клиентские события и обороты выросли к предыдущему кварталу.
     growing_ratio: float = 1.35

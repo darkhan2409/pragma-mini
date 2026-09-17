@@ -42,7 +42,6 @@ class RelationshipParams:
     # Доля клиентов сообщества, состоящих в домохозяйстве
     # с другим клиентом сообщества.
     household_pair_share: float = 0.22
-    household_extra_member_share: float = 0.18
 
     # Сколько связей каждого типа у клиента.
     degree: dict = field(
@@ -113,9 +112,6 @@ class RelationshipParams:
         }
     )
 
-    # Доля переводов, уходящих знакомому контрагенту.
-    known_counterparty_share: tuple = (0.62, 0.94)
-
     # Собственный счёт в другом банке есть почти у всех, кроме
     # клиентов, для которых этот банк единственный.
     own_other_bank_share: dict = field(
@@ -153,6 +149,13 @@ class RelationshipParams:
 
     inbound_amount_share_of_income: tuple = (0.02, 0.25)
 
+    # Зарплатный проект: часть работающих клиентов сообщества
+    # получает деньги от одного работодателя, в один день и с
+    # одной задержкой. Без этого «зарплатный проект» не виден
+    # в данных вовсе.
+    shared_employer_share: float = 0.28
+    shared_employers_per_community: int = 3
+
     # Что происходит при нехватке средств для перевода.
     transfer_shortfall: dict = field(
         default_factory=lambda: {
@@ -164,7 +167,3 @@ class RelationshipParams:
     )
 
     reduce_amount_factor: tuple = (0.25, 0.85)
-
-    # Редкий сетевой сценарий: цепочка переводов через дропов.
-    mule_ring_share: float = 0.004
-    mule_ring_size: tuple = (2, 4)

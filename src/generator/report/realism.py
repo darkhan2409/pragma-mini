@@ -4,7 +4,7 @@ import argparse
 import json
 import statistics
 from collections import Counter, defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import pyarrow.parquet as pq

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 from .. import params as params_module
 from ..life.persona import Persona
-from ..rng import NS_ADOPTION, keyed_rng, stable_unit
+from ..rng import stable_unit
 from ..world import products as product_catalog
 from ..world.hcb_timeline import Version
 from ..world.products import ProductView

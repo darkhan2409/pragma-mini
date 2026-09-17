@@ -46,7 +46,6 @@ class FraudParams:
     vulnerability_factor: float = 1.2
     online_exposure_factor: float = 1.25
     travel_exposure_factor: float = 1.35
-    new_device_factor: float = 1.5
 
     # Чем маскируется мошенническая покупка. Постоянное имя
     # мерчанта и единственный MCC были бы готовым признаком
@@ -129,8 +128,6 @@ class FraudParams:
 
     # Ложное срабатывание: обычная поездка или крупная покупка.
     false_positive_confirm_share: float = 0.86
-    false_positive_unblock_hours: tuple = (0, 24)
 
     # Восстановление активности после инцидента.
     recovery_days: tuple = (7, 45)
-    recovery_activity_factor: float = 0.62

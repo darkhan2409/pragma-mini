@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 from .. import params as params_module
 from ..life.persona import Persona
 from ..rng import NS_SUPPORT_CASE, event_rng, stable_hash
-from ..world.dictionaries import SUPPORT_CHANNELS, SUPPORT_TOPICS
 
 
 # ============================================================

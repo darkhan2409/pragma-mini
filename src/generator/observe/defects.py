@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 from .. import params as params_module
-from ..config import HISTORY_END
 from ..rng import NS_OBSERVE, keyed_rng, stable_hash
 from . import coverage
 from .envelope import Event, round_to_precision

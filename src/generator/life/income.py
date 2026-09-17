@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
@@ -8,7 +7,6 @@ from .. import params as params_module
 from ..config import HISTORY_END, HISTORY_START
 from ..rng import NS_INCOME, keyed_rng, stable_hash
 from . import calendar as cal
-from .events import LifeEvent
 from .persona import Persona
 from .stress import level_at
 
@@ -388,8 +386,16 @@ def payouts(persona: Persona, streams: tuple, stress_episodes: tuple) -> tuple:
 
                 planned = cal.day_in_month(month, day)
 
+                # У общего работодателя день выплаты и её
+                # задержка общие для всех своих сотрудников.
+                payer_seed = (
+                    stable_hash(stream.payer) % (2 ** 31)
+                    if stream.kind == "salary" and str(stream.payer or "").startswith("emp_")
+                    else persona.client_ordinal
+                )
+
                 rng = keyed_rng(
-                    NS_INCOME, persona.client_ordinal, 5,
+                    NS_INCOME, payer_seed, 5,
                     stable_hash(stream.stream_id, cal.month_index(month), slot) % (2 ** 31),
                 )
 

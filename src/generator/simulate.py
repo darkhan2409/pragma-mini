@@ -6,46 +6,29 @@ from datetime import datetime, timedelta
 
 from . import params as params_module
 from .behaviour import adoption as adoption_module
-from .behaviour import communications as comm_module
-from .behaviour import fraud as fraud_behaviour
 from .behaviour import habits as habits_module
-from .behaviour import merchants as merchant_choice
-from .behaviour import needs as needs_module
-from .behaviour import outcomes as outcome_module
-from .behaviour import sessions as session_module
-from .behaviour import support as support_module
 from .config import (
     HISTORY_END,
     HISTORY_START,
     INITIATOR_BANK,
     INITIATOR_CLIENT,
-    INITIATOR_EXTERNAL,
-    INITIATOR_SYSTEM,
     REGISTRY_START,
 )
-from .finance import cards as card_rules
-from .finance import deposits as deposit_rules
 from .finance import loans as loan_rules
 from .finance.entities import (
     ACCOUNT_CARD,
     ACCOUNT_CREDIT_CARD,
     ACCOUNT_DEPOSIT,
     CARD_ACTIVE,
-    CARD_BLOCKED,
     CONTRACT_CLOSED,
     Account,
-    Application,
     Card,
     Contract,
-    DepositState,
-    LoanState,
-    Offer,
 )
-from .finance.ledger import COUNTERPART_BANK, COUNTERPART_GOVERNMENT, Ledger
+from .finance.ledger import Ledger
 from .life import calendar as cal
 from .life import events as life_events
 from .life import fraud as fraud_plan
-from .life import household as household_module
 from .life import income as income_module
 from .life import lifecycle as lifecycle_module
 from .life import stress as stress_module
@@ -54,31 +37,15 @@ from .life.traits import event_shift
 from .observe import coverage as coverage_module
 from .observe.envelope import Event, EventFactory
 from .rng import (
-    COMPONENT_CONTENT,
     NS_PREHISTORY,
     NS_PRODUCT_TIME,
-    COMPONENT_OUTCOME,
     NS_ADOPTION,
     NS_CARD,
-    NS_DEPOSIT,
-    NS_FRAUD,
     NS_LEDGER,
-    NS_LOAN,
-    NS_PROFILE,
-    NS_SUPPORT,
-    NS_TRANSFER,
-    event_rng,
     keyed_rng,
     stable_hash,
 )
-from .world import communities, products as product_catalog, relationships as graph_module
-from .world.dictionaries import (
-    CATEGORY_BY_NAME,
-    MCC_CASH,
-    MCC_SALARY,
-    MCC_TRANSFER,
-    PROFILE_TRACKED_FIELDS,
-)
+from .world import products as product_catalog, relationships as graph_module
 
 
 # ============================================================
@@ -116,6 +83,7 @@ class ClientState:
     cards: dict = field(default_factory=dict)
     loans: dict = field(default_factory=dict)
     deposits: dict = field(default_factory=dict)
+    card_credits: dict = field(default_factory=dict)
     applications: dict = field(default_factory=dict)
     offers: list = field(default_factory=list)
 
@@ -514,6 +482,9 @@ class CommunitySimulation:
                 contract_id=contract_id,
                 product_code=view.code,
                 issued_at=ts,
+                expires_at=cal.add_months(
+                    ts, 12 * int(self.settings.products.card_expiry_years)
+                ),
             )
 
             state.cards[card.card_id] = card
@@ -966,7 +937,9 @@ class CommunitySimulation:
             return price, int(terms.get("term_months", 12))
 
         if family == "bonds":
-            return int(terms.get("min_amount_usd", 1_000)) * 500, int(terms.get("term_max_months", 12))
+            rate = self.settings.amounts.fx_rates.get("USD", 500.0)
+            amount = int(int(terms.get("min_amount_usd", 1_000)) * rate)
+            return amount, int(terms.get("term_max_months", 12))
 
         return None, None
 

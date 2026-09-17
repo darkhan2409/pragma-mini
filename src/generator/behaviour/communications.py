@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from .. import params as params_module
 from ..life.persona import Persona
@@ -64,7 +64,7 @@ def daily_rate(persona: Persona, ts: datetime, consented: bool, fatigue: int,
         return 0.0
 
     # Реальный якорь: около 3.8 отправок на клиента в месяц.
-    rate = 6.4 / 30.0
+    rate = 7.4 / 30.0
 
     # Молчащему клиенту банк пишет заметно реже: остаются
     # только сервисные сообщения и возврат в игру.

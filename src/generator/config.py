@@ -71,9 +71,9 @@ SOURCES = tuple(SOURCE_AVAILABILITY)
 PRECISION_SECOND = "second"
 PRECISION_MINUTE = "minute"
 PRECISION_DAY = "day"
-PRECISION_MONTH = "month"
 
-TIME_PRECISIONS = (PRECISION_SECOND, PRECISION_MINUTE, PRECISION_DAY, PRECISION_MONTH)
+# Точность month не встречается ни в одном источнике.
+TIME_PRECISIONS = (PRECISION_SECOND, PRECISION_MINUTE, PRECISION_DAY)
 
 # Точность времени источника: у витрины кредитного обслуживания
 # времени нет вовсе, у коммуникаций оно округлено до минуты.
@@ -239,6 +239,9 @@ def _f(name: str, dtype: str, nullable: bool, level: str, description: str) -> F
 
 MONEY_FIELDS: tuple[FieldSpec, ...] = (
     _f("amount", "int", False, LEVEL_OPERATION, "сумма операции в тенге"),
+    _f("currency", "str", True, LEVEL_OPERATION, "валюта счёта: всегда KZT"),
+    _f("original_amount", "int", True, LEVEL_OPERATION, "сумма в валюте страны покупки"),
+    _f("original_currency", "str", True, LEVEL_OPERATION, "валюта страны покупки"),
     _f("direction", "str", False, LEVEL_OPERATION, "debit или credit для счёта клиента"),
     _f("status", "str", False, LEVEL_OPERATION, "approved, declined или reversed"),
     _f("decline_reason", "str", True, LEVEL_OPERATION, "причина отказа, если операция не прошла"),

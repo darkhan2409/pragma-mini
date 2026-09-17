@@ -250,6 +250,13 @@ def check_client(events: list) -> list:
 
     known_ids = {event["event_id"] for event in ordered}
 
+    # Договоры карт рассрочки: у них выписка вместо графика.
+    card_contracts = {
+        event["payload"].get("contract_id")
+        for event in ordered
+        if event["payload"].get("reason") == "card_statement"
+    }
+
     def fail(check: str, detail: str) -> None:
         problems.append(Violation(check=check, client_id=client_id, detail=detail))
 
@@ -448,6 +455,13 @@ def check_client(events: list) -> list:
             continue
 
         outstanding = int(outstanding)
+
+        # Долг по карте рассрочки РАСТЁТ от новых покупок: это
+        # возобновляемый лимит, а не амортизируемый кредит.
+        # Правило убывающего долга к нему неприменимо.
+        if contract in card_contracts:
+            loan_principal[contract] = outstanding
+            continue
 
         if contract in loan_principal and kind not in ("loan_restructured", "schedule_created"):
             if outstanding > loan_principal[contract]:

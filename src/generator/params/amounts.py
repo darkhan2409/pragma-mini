@@ -100,6 +100,38 @@ class AmountParams:
     # Дешёвое покупают чаще дорогого. Вес категории в выборе
     # уменьшается с размером её корзины: кофе берут каждый день,
     # холодильник раз в несколько лет.
+    # Курсы к тенге. Нужны и для зарубежных покупок, и для
+    # облигаций в долларах: раньше курс 500 был зашит в код.
+    fx_rates: dict = field(
+        default_factory=lambda: {
+            "USD": 500.0,
+            "EUR": 545.0,
+            "RUB": 5.6,
+            "TRY": 14.5,
+            "AED": 136.0,
+            "GEL": 186.0,
+            "KGS": 5.7,
+            "UZS": 0.039,
+            "CNY": 69.0,
+            "THB": 14.2,
+            "GBP": 640.0,
+            "PLN": 126.0,
+            "AZN": 294.0,
+            "CZK": 22.0,
+            "EGP": 10.4,
+            "VND": 0.02,
+        }
+    )
+
+    country_currency: dict = field(
+        default_factory=lambda: {
+            "TR": "TRY", "AE": "AED", "GE": "GEL", "KG": "KGS", "UZ": "UZS",
+            "RU": "RUB", "CN": "CNY", "TH": "THB", "GB": "GBP", "PL": "PLN",
+            "AZ": "AZN", "CZ": "CZK", "EG": "EGP", "VN": "VND", "DE": "EUR",
+            "IT": "EUR", "ES": "EUR", "FR": "EUR", "US": "USD",
+        }
+    )
+
     reference_basket: int = 5_000
     frequency_from_basket: float = 0.62
     amount_bounds: tuple = (100, 8_000_000)
@@ -127,8 +159,6 @@ class AmountParams:
         }
     )
 
-    utilities_winter_factor: float = 1.42
-
     # Подписки.
     subscription_count: tuple = (0, 5)
     subscription_median: int = 2_500
@@ -136,7 +166,3 @@ class AmountParams:
     subscription_stop_share: float = 0.30
     subscription_price_change_share: float = 0.28
     subscription_price_change: tuple = (0.08, 0.30)
-
-    # Разовые редкие счета в месяц.
-    fine_rate_per_month: float = 0.16
-    tax_per_year: tuple = (1, 2)

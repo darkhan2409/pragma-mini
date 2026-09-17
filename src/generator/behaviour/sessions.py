@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .. import params as params_module
-from ..life import calendar as cal
 from ..life.persona import Persona
 from ..rng import (
     COMPONENT_CONTENT,
@@ -12,6 +11,7 @@ from ..rng import (
     COMPONENT_TIME,
     NS_DEVICE,
     NS_SESSION,
+    NS_SESSION_DEPTH,
     day_rng,
     event_rng,
     stable_hash,
@@ -216,6 +216,7 @@ def daily_session_rate(
     state: str,
     silenced: frozenset,
     app_adopted: bool,
+    stress_episodes: tuple = (),
 ) -> float:
 
     settings = params_module.active().activity
@@ -231,6 +232,10 @@ def daily_session_rate(
 
     if ts.weekday() >= 5:
         rate *= settings.weekend_factor_sessions
+
+    # В начале трудного периода заходят чаще: проверяют остаток.
+    # Потом реже: смотреть нечего.
+    rate *= stress_session_factor(stress_episodes, ts)
 
     return float(max(0.0, rate))
 
@@ -301,6 +306,7 @@ def plan_sessions(
     silenced: frozenset,
     app_adopted: bool,
     context: SessionContext,
+    stress_episodes: tuple = (),
 ) -> tuple:
     """
     Сессии приложения за день.
@@ -308,7 +314,7 @@ def plan_sessions(
 
     settings = params_module.active().activity
 
-    rate = daily_session_rate(persona, day, state, silenced, app_adopted)
+    rate = daily_session_rate(persona, day, state, silenced, app_adopted, stress_episodes)
 
     if rate <= 0.0:
         return ()
@@ -367,6 +373,7 @@ def plan_sessions(
             context=context,
             adopted=adopted,
             rng=content_rng,
+            session_index=ordinal * 16 + index,
         )
 
         sessions.append(
@@ -392,6 +399,7 @@ def _build_steps(
     context: SessionContext,
     adopted: tuple,
     rng,
+    session_index: int = 0,
 ) -> list:
     """
     Экраны и операции сессии. Длина зависит от цели.
@@ -481,6 +489,45 @@ def _build_steps(
         advance()
 
         steps.append(Step(kind="screen", ts=moment, domain=domain, screen=screen))
+
+    # Человек не идёт по приложению строго по одному пути: он
+    # заглядывает в соседние экраны того же раздела. Раньше
+    # сессия всегда была ровно три-четыре экрана.
+    extra_rng = event_rng(NS_SESSION_DEPTH, persona.client_ordinal, session_index, 0, COMPONENT_COUNT)
+
+    extra = extra_rng.poisson(
+        params_module.active().activity.session_extra_screens.get(goal, 0.8)
+    )
+
+    limit = params_module.active().activity.max_screens_per_session
+
+    wander = [item for item in steps if item.kind == "screen"]
+
+    for number in range(int(extra)):
+
+        if len(wander) + number + 1 >= limit:
+            break
+
+        source = wander[int(extra_rng.integers(0, len(wander)))] if wander else None
+
+        if source is None:
+            break
+
+        options = BROWSE_SCREENS.get(source.domain)
+
+        if not options:
+            continue
+
+        advance()
+
+        steps.append(
+            Step(
+                kind="screen",
+                ts=moment,
+                domain=source.domain,
+                screen=str(options[int(extra_rng.integers(0, len(options)))]),
+            )
+        )
 
     operation = GOAL_OPERATION.get(goal)
 

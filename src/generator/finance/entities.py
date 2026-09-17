@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime
 
 
@@ -89,6 +89,7 @@ class Card:
     block_reason: str | None = None
     closed_at: datetime | None = None
     reissued_from: str | None = None
+    expires_at: datetime | None = None
 
     # Интервалы блокировки. Состояние карты обязано зависеть от
     # ВРЕМЕНИ ОПЕРАЦИИ, а не от порядка исполнения действий:
@@ -204,6 +205,42 @@ class LoanState:
 
 
 @dataclass
+class CardCreditState:
+    """
+    Долг по карте рассрочки.
+
+    Home Credit продаёт не револьверную карту, а карту
+    рассрочки: покупка делится на равные части по числу
+    месяцев из тарифа, а снятые наличные копят проценты по
+    своей ставке. Минимальный платёж месяца это части к сроку
+    плюс доля от наличного долга.
+    """
+
+    contract_id: str
+    account_id: str
+    installment_months: int
+    purchase_rate: float
+    cash_rate: float
+    parts: list = field(default_factory=list)
+    cash_principal: int = 0
+    accrued_interest: int = 0
+    dpd: int = 0
+    delinquency_marks: tuple = ()
+    closed: bool = False
+
+    def due_for(self, month_index: int) -> int:
+        """
+        Сколько частей рассрочки приходится на этот месяц.
+        """
+
+        return int(sum(amount for due, amount in self.parts if due <= month_index))
+
+    @property
+    def outstanding(self) -> int:
+        return int(sum(amount for _, amount in self.parts) + self.cash_principal)
+
+
+@dataclass
 class DepositState:
     contract_id: str
     account_id: str
@@ -246,6 +283,7 @@ class SupportCase:
 
 
 __all__ = [
+    "CardCreditState",
     "ACCOUNT_CARD",
     "ACCOUNT_CASH",
     "ACCOUNT_CREDIT_CARD",

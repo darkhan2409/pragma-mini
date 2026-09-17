@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 from .. import params as params_module
 from ..config import HISTORY_END, HISTORY_START
-from ..rng import NS_PERSONA, numpy_rng, stable_hash, stable_unit, state_cache
+from ..rng import NS_PERSONA, keyed_rng, numpy_rng, stable_hash, stable_unit, state_cache
 from ..world import communities, geography
 from .traits import Traits, draw_traits
 
@@ -202,11 +202,31 @@ def draw_persona(client_ordinal: int) -> Persona:
         else None
     )
 
-    employer_id = (
-        f"emp_{stable_hash(settlement.name, industry, int(rng.integers(0, 4000))) % 10 ** 9:09d}"
-        if income_type in ("employed", "state_employee")
-        else None
-    )
+    employer_id = None
+
+    if income_type in ("employed", "state_employee"):
+
+        relationships = settings.relationships
+
+        community_id = (client_ordinal - 1) // relationships.community_size
+
+        # Зарплатный проект: часть клиентов сообщества работает
+        # у одного работодателя. Общий плательщик, общий день
+        # выплаты и общая задержка видны в данных без отдельного
+        # признака.
+        shared_rng = keyed_rng(NS_PERSONA, client_ordinal, 71)
+
+        if shared_rng.random() < relationships.shared_employer_share:
+
+            slot = int(shared_rng.integers(0, max(1, relationships.shared_employers_per_community)))
+
+            employer_id = f"emp_{stable_hash('shared', community_id, slot) % 10 ** 9:09d}"
+
+        else:
+
+            employer_id = (
+                f"emp_{stable_hash(settlement.name, industry, int(rng.integers(0, 4000))) % 10 ** 9:09d}"
+            )
 
     # --- доход ---
 

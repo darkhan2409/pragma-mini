@@ -123,28 +123,6 @@ class GeographyParams:
     # Круглосуточные точки: аптеки, АЗС, магазины у дома.
     around_the_clock_categories: tuple = ("pharmacy", "fuel", "convenience")
 
-    # Вероятность выезда в соседний город в месяц.
-    trip_to_neighbour_per_month: dict = field(
-        default_factory=lambda: {
-            "metropolis": 0.35,
-            "major_city": 0.45,
-            "regional_centre": 0.55,
-            "industrial_town": 0.65,
-            "small_town": 0.95,
-            "district_centre": 1.25,
-            "rural": 1.60,
-        }
-    )
-
-    # Куда ездят: в столицу региона или в соседний малый город.
-    trip_target_weights: dict = field(
-        default_factory=lambda: {"regional_capital": 0.62, "neighbour": 0.28, "metropolis": 0.10}
-    )
-
-    # Зарубежные поездки в год.
-    foreign_trips_per_year: tuple = (0.0, 2.5)
-    foreign_trip_days: tuple = (4, 18)
-
     foreign_countries: dict = field(
         default_factory=lambda: {
             "RU": 0.19, "TR": 0.16, "AE": 0.13, "CN": 0.09, "GE": 0.07,

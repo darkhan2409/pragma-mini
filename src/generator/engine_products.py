@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime, timedelta
 
 from . import params as params_module
@@ -14,7 +13,6 @@ from .config import (
     INITIATOR_CLIENT,
     INITIATOR_EXTERNAL,
     INITIATOR_SYSTEM,
-    PROFILE_FIELDS,
 )
 from .engine import _HANDLERS, _emit_money, _touch_client
 from .engine_app import unblock_card
@@ -23,22 +21,16 @@ from .finance import cards as card_rules
 from .finance import deposits as deposit_rules
 from .finance import loans as loan_rules
 from .finance.entities import (
-    ACCOUNT_DEPOSIT,
     CARD_ACTIVE,
-    CARD_BLOCKED,
     CONTRACT_CLOSED,
     Application,
     Card,
 )
 from .finance.ledger import COUNTERPART_BANK
 from .life import calendar as cal
-from .life import lifecycle as lifecycle_module
-from .life import stress as stress_module
 from .rng import (
     COMPONENT_CONTENT,
     NS_ADOPTION,
-    NS_CARD,
-    NS_DEPOSIT,
     NS_FRAUD,
     NS_FRAUD_MATERIAL,
     NS_PROFILE,
@@ -47,9 +39,9 @@ from .rng import (
     keyed_rng,
     stable_hash,
 )
-from .simulate import ClientState, _application_id, _money
+from .simulate import ClientState, _application_id
 from .world import products as product_catalog
-from .world.dictionaries import FUNNEL_SCREENS, MCC_CASH, MCC_TRANSFER
+from .world.dictionaries import FUNNEL_SCREENS, MCC_TRANSFER
 
 
 # ============================================================
@@ -326,6 +318,18 @@ def _on_adoption(sim, state: ClientState, ts: datetime, payload: dict) -> None:
     if rng.random() >= probability:
         return
 
+    # Заявки не подаются каждый день подряд: после отказа или
+    # оформления клиент выдерживает паузу.
+    cooldown = settings.application_cooldown_days
+
+    recent = max(
+        (item.submitted_at for item in state.applications.values()),
+        default=None,
+    )
+
+    if recent is not None and (ts - recent).days < cooldown:
+        return
+
     # --- заявка ---
 
     channels = tuple(candidate.version.channels) or ("branch",)
@@ -570,6 +574,18 @@ def _activate_product(sim, state: ClientState, contract, view, ts: datetime, rng
             withdrawal=bool(terms.get("withdrawal", False)),
             capitalisation=str(terms.get("capitalisation", "daily")),
         )
+
+        return
+
+    if family == "credit_card":
+
+        # Карта рассрочки: покупки делятся на части, наличные
+        # копят проценты. Без этого карта была бесплатным
+        # кредитом без конца.
+        if contract.account_id is not None:
+            state.card_credits[contract.contract_id] = card_rules.open_credit(
+                contract, contract.terms or {}
+            )
 
         return
 
@@ -925,8 +941,12 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
     if decision != "block":
         return
 
-    card_rules.block(card, decision_ts, "fraud_suspicion", days=settings.card_block_days
-                     if hasattr(settings, "card_block_days") else None)
+    # Блокировать нечего, если карта не при чём: подозрительный
+    # перевод банк останавливает без карты.
+    if card is None:
+        return
+
+    card_rules.block(card, decision_ts, "fraud_suspicion")
 
     contract = state.contracts.get(card.contract_id)
 
@@ -1008,7 +1028,7 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
             unblock_card(state, unblock_ts, card, INITIATOR_CLIENT, "confirmed_by_client")
 
 
-def _reissue_card(state: ClientState, card, ts: datetime) -> None:
+def _reissue_card(state: ClientState, card, ts: datetime, reason: str = "fraud_reissue") -> None:
 
     contract = state.contracts.get(card.contract_id)
 
@@ -1025,6 +1045,9 @@ def _reissue_card(state: ClientState, card, ts: datetime) -> None:
         activated_at=ts + timedelta(days=1),
         status=CARD_ACTIVE,
         reissued_from=card.card_id,
+        expires_at=cal.add_months(
+            ts, 12 * int(params_module.active().products.card_expiry_years)
+        ),
     )
 
     state.cards[fresh.card_id] = fresh
@@ -1045,7 +1068,7 @@ def _reissue_card(state: ClientState, card, ts: datetime) -> None:
                 "contract_id": card.contract_id,
                 "account_id": card.account_id,
                 "card_id": fresh.card_id,
-                "reason": "fraud_reissue",
+                "reason": reason,
                 "timestamp_quality": "exact",
             },
             initiator=INITIATOR_BANK,

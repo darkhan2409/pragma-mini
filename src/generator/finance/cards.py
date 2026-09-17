@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from .. import params as params_module
-from .entities import CARD_ACTIVE, CARD_BLOCKED, CARD_CLOSED, Card
+from .entities import CARD_ACTIVE, CARD_BLOCKED, CARD_CLOSED, Card, CardCreditState
 
 
 # ============================================================
@@ -150,7 +150,130 @@ def monthly_fee(terms: dict) -> int:
     return int(terms.get("fee_monthly", 0) or 0)
 
 
+def open_credit(contract, terms: dict) -> "CardCreditState":
+    """
+    Долговое состояние карты рассрочки по условиям договора.
+    """
+
+    settings = params_module.active().products
+
+    months = int(terms.get("installment_months") or settings.card_installment_months_default)
+
+    return CardCreditState(
+        contract_id=contract.contract_id,
+        account_id=contract.account_id,
+        installment_months=max(1, months),
+        purchase_rate=float(terms.get("purchase_rate") or 0.0),
+        cash_rate=float(terms.get("cash_rate_nominal") or 0.0),
+    )
+
+
+def add_purchase(state: "CardCreditState", amount: int, month_index: int) -> None:
+    """
+    Покупка делится на равные части по числу месяцев рассрочки.
+    Части встают в график, начиная со следующего месяца.
+    """
+
+    if amount <= 0:
+        return
+
+    months = max(1, state.installment_months)
+
+    part = amount // months
+
+    remainder = amount - part * (months - 1)
+
+    for number in range(months):
+        value = remainder if number == months - 1 else part
+        if value > 0:
+            state.parts.append((month_index + 1 + number, int(value)))
+
+
+def add_cash(state: "CardCreditState", amount: int) -> None:
+    """
+    Снятие наличных и переводы с карты копят процентный долг.
+    """
+
+    if amount > 0:
+        state.cash_principal += int(amount)
+
+
+def monthly_interest(state: "CardCreditState") -> int:
+    """
+    Проценты месяца на наличный долг. Покупки в рассрочке
+    процентов не несут: у карты рассрочки ставка покупок ноль.
+    """
+
+    if state.cash_principal <= 0 or state.cash_rate <= 0.0:
+        return 0
+
+    return int(round(state.cash_principal * state.cash_rate / 12.0))
+
+
+def minimum_payment(state: "CardCreditState", month_index: int) -> int:
+    """
+    Минимальный платёж месяца: части рассрочки к сроку плюс
+    доля наличного долга плюс начисленные проценты.
+    """
+
+    settings = params_module.active().products
+
+    parts = state.due_for(month_index)
+
+    cash = int(round(state.cash_principal * settings.card_cash_min_share))
+
+    return int(parts + cash + state.accrued_interest)
+
+
+def apply_card_payment(state: "CardCreditState", amount: int, month_index: int) -> int:
+    """
+    Платёж гасит сначала проценты, затем части рассрочки по
+    сроку, затем наличный долг.
+    """
+
+    remaining = int(amount)
+
+    if remaining <= 0:
+        return 0
+
+    paid = 0
+
+    take = min(remaining, state.accrued_interest)
+    state.accrued_interest -= take
+    remaining -= take
+    paid += take
+
+    kept: list = []
+
+    for due, value in sorted(state.parts):
+
+        if due <= month_index and remaining > 0:
+            take = min(remaining, value)
+            remaining -= take
+            paid += take
+            value -= take
+
+        if value > 0:
+            kept.append((due, value))
+
+    state.parts = kept
+
+    if remaining > 0 and state.cash_principal > 0:
+        take = min(remaining, state.cash_principal)
+        state.cash_principal -= take
+        remaining -= take
+        paid += take
+
+    return paid
+
+
 __all__ = [
+    "add_cash",
+    "add_purchase",
+    "apply_card_payment",
+    "minimum_payment",
+    "monthly_interest",
+    "open_credit",
     "block",
     "cashback_amount",
     "cashback_cap",

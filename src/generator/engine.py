@@ -1,85 +1,57 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime, timedelta
 
 from . import params as params_module
 from .behaviour import adoption as adoption_module
 from .behaviour import communications as comm_module
-from .behaviour import fraud as fraud_behaviour
 from .behaviour import habits as habits_module
 from .behaviour import merchants as merchant_choice
 from .behaviour import needs as needs_module
-from .behaviour import outcomes as outcome_module
 from .behaviour import sessions as session_module
-from .behaviour import support as support_module
 from .config import (
     HISTORY_END,
     HISTORY_START,
-    INITIATOR_BANK,
     INITIATOR_CLIENT,
     INITIATOR_EXTERNAL,
     INITIATOR_SYSTEM,
 )
 from .finance import cards as card_rules
-from .finance import deposits as deposit_rules
 from .finance import loans as loan_rules
 from .finance.entities import (
-    ACCOUNT_CARD,
-    ACCOUNT_CREDIT_CARD,
-    ACCOUNT_DEPOSIT,
-    CARD_ACTIVE,
     CARD_BLOCKED,
-    CONTRACT_CLOSED,
-    Application,
-    Card,
-    Offer,
 )
 from .finance.ledger import COUNTERPART_BANK, COUNTERPART_GOVERNMENT
 from .life import calendar as cal
 from .life import household as household_module
 from .life import lifecycle as lifecycle_module
 from .life import stress as stress_module
-from .life.traits import event_shift
-from .observe import coverage as coverage_module
-from .observe import defects as defect_module
 from .rng import (
+    COMPONENT_CHANNEL,
     COMPONENT_CONTENT,
     COMPONENT_OUTCOME,
     COMPONENT_TIME,
-    NS_ADOPTION,
-    NS_CARD,
-    NS_DEPOSIT,
-    NS_FRAUD,
     NS_LEDGER,
-    NS_LOAN,
-    NS_PROFILE,
+    NS_PURCHASE_SOURCE,
+    NS_QR,
     NS_INBOUND,
-    NS_SUPPORT,
     NS_SUPPORT_CAUSE,
     NS_TRANSFER,
     event_rng,
     keyed_rng,
-    stable_hash,
 )
 from .simulate import (
     Action,
     ClientState,
     CommunityResult,
     CommunitySimulation,
-    _application_id,
     _money,
     _transfer_id,
 )
-from .world import products as product_catalog
 from .world.dictionaries import (
-    CATEGORY_BY_NAME,
-    DECLINE_REASONS,
-    ERROR_CODES,
     MCC_CASH,
     MCC_SALARY,
     MCC_TRANSFER,
-    PROFILE_TRACKED_FIELDS,
 )
 
 
@@ -241,7 +213,8 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
         needs_module.daily_intents(persona, state.habits, day, state.state, factor, silenced)
     ):
         add(intent.ts, "purchase",
-            {"intent": intent, "index": index, "budget": budget, "factor": factor})
+            {"intent": intent, "index": index, "budget": budget,
+             "factor": factor, "stress": stress})
 
     # --- наличные ---
 
@@ -357,7 +330,9 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
     )
 
     for index, session in enumerate(
-        session_module.plan_sessions(persona, day, state.state, silenced, app_adopted, context)
+        session_module.plan_sessions(
+            persona, day, state.state, silenced, app_adopted, context, state.stress_episodes
+        )
     ):
         add(session.started_at, "session", {"session": session, "index": index})
 
@@ -503,6 +478,7 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
                 "index": 900 + index,
                 "budget": budget,
                 "factor": factor * float(event.payload.get("amount_factor") or 1.0),
+                "stress": stress,
             },
         )
 
@@ -615,6 +591,52 @@ def _touch_client(state: ClientState, ts: datetime) -> None:
 # --- деньги ---------------------------------------------------
 
 
+def _pick_spending_account(state: ClientState, ts: datetime, sources: list, stress: float):
+    """
+    Каким счётом платят. Под стрессом кредитный лимит
+    поднимается в очереди источников.
+    """
+
+    if len(sources) < 2 or stress <= 0.0:
+        return sources[0]
+
+    credit = next((item for item in sources if item.kind == "credit_card"), None)
+
+    if credit is None or credit is sources[0]:
+        return sources[0]
+
+    rise = params_module.active().stress.utilization_rise
+
+    rng = event_rng(NS_PURCHASE_SOURCE, state.ordinal, ts.toordinal(), int(ts.hour), COMPONENT_CHANNEL)
+
+    return credit if rng.random() < min(0.9, rise * stress) else sources[0]
+
+
+def _register_card_debt(state: ClientState, account_id: str, amount: int, ts, is_cash: bool) -> None:
+    """
+    Трата по кредитной карте становится долгом: покупка идёт в
+    рассрочку, наличные копят проценты.
+    """
+
+    if amount <= 0:
+        return
+
+    account = state.ledger.accounts.get(account_id)
+
+    if account is None or account.kind != "credit_card":
+        return
+
+    credit = state.card_credits.get(account.contract_id)
+
+    if credit is None or credit.closed:
+        return
+
+    if is_cash:
+        card_rules.add_cash(credit, amount)
+    else:
+        card_rules.add_purchase(credit, amount, cal.month_index(ts))
+
+
 def _emit_money(
     state: ClientState,
     ts: datetime,
@@ -641,6 +663,23 @@ def _emit_money(
     body["direction"] = direction
     body["status"] = status
     body["account_id"] = account_id
+    body.setdefault("currency", "KZT")
+
+    # Покупка за рубежом прошла в чужой валюте, а на счёт легла
+    # в тенге по курсу.
+    country = body.get("merchant_country")
+
+    if country and country != "KZ" and body.get("original_amount") is None:
+
+        fx = params_module.active().amounts
+
+        code = fx.country_currency.get(country)
+
+        rate = fx.fx_rates.get(code) if code else None
+
+        if rate:
+            body["original_currency"] = code
+            body["original_amount"] = int(round(int(amount) / rate))
 
     event = state.factory.make(
         event_type,
@@ -659,6 +698,17 @@ def _emit_money(
             state.ledger.post(ts, event.event_id, counterpart_account, account_id, int(amount))
 
         event.payload["balance_after"] = account.balance
+
+        # Трата по кредитной карте это долг, а не просто минус
+        # на счёте: она встаёт в рассрочку или копит проценты.
+        if direction == "debit" and event_type not in ("loan_payment", "fee_charge"):
+            _register_card_debt(
+                state,
+                account_id,
+                int(amount),
+                ts,
+                event_type in ("cash_withdrawal", "transfer_out", "p2p_out"),
+            )
 
     return state.emit(event)
 
@@ -917,8 +967,22 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     sources = state.ledger.payment_sources(ts, amount)
 
+    # Оплата по QR это тот же поход в магазин, но другой канал.
+    channel = choice.channel
+
+    if channel == "pos" and state.app_adopted_at is not None and ts >= state.app_adopted_at:
+
+        activity = params_module.active().activity
+
+        if persona.trait("digital_affinity", ts) >= activity.qr_min_digital_affinity:
+
+            qr_rng = event_rng(NS_QR, state.ordinal, ts.toordinal(), payload["index"], COMPONENT_CHANNEL)
+
+            if qr_rng.random() < activity.qr_share_of_pos:
+                channel = "qr"
+
     body = {
-        "channel": choice.channel,
+        "channel": channel,
         "merchant_id": choice.outlet.merchant_id,
         "outlet_id": choice.outlet.outlet_id,
         "merchant_name": choice.outlet.merchant_name,
@@ -956,7 +1020,9 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
                    {"amount": amount, "reason": "postponed"})
         return
 
-    account = sources[0]
+    # В трудный период чаще расплачиваются кредитным лимитом,
+    # а не своими деньгами.
+    account = _pick_spending_account(state, ts, sources, payload.get("stress", 0.0))
 
     card = state.usable_card(account.account_id, ts)
 

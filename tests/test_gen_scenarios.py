@@ -550,3 +550,218 @@ def test_forbidden_fields_never_appear(baseline):
     columns = set(baseline["events"][0])
 
     assert not (columns & FORBIDDEN_RAW_FIELDS)
+
+
+# ------------------------------------------------------------
+# КРЕДИТ КАК ПОВЕДЕНИЕ
+# ------------------------------------------------------------
+
+
+def test_debt_service_rule_rejects_oversized_requests(baseline):
+    """
+    Долговая нагрузка это правило, а не ярлык после отказа:
+    при запредельном запросе отказ приходит именно по ней.
+    """
+
+    data = _run("dsr_reject", clients=32)
+
+    decisions = [row for row in data["events"] if row["event_type"] == "application_decision"]
+
+    assert decisions, "решений по заявкам не оказалось"
+
+    reasons = Counter(
+        row["payload"].get("reject_reason")
+        for row in decisions
+        if row["payload"].get("decision") != "approved"
+    )
+
+    assert reasons["debt_service_ratio"] > 0
+
+    approved = [row for row in decisions if row["payload"].get("decision") == "approved"]
+
+    credit = [
+        row
+        for row in approved
+        if row["payload"].get("requested_amount")
+        and row["payload"].get("requested_term")
+    ]
+
+    # Кредитные заявки при нулевой допустимой нагрузке не проходят.
+    assert len(credit) < len(decisions)
+
+
+def test_disciplined_borrower_pays_on_time(baseline):
+
+    data = _run("credit_discipline", clients=32)
+
+    assert data["types"]["installment_paid"] > 0
+
+    paid = [row for row in data["events"] if row["event_type"] == "installment_paid"]
+
+    with_cause = [row for row in paid if row["payload"].get("cause_event_id")]
+
+    assert with_cause, "платёж не ссылается на выставленный взнос"
+
+    # Пропусков заметно меньше, чем платежей.
+    assert data["types"]["installment_missed"] < data["types"]["installment_paid"]
+
+
+def test_refinance_closes_previous_loans(baseline):
+
+    data = _run("refinance_closes_debt", clients=32)
+
+    closed = [
+        row
+        for row in data["events"]
+        if row["event_type"] == "loan_closed" and row["payload"].get("reason") == "refinanced"
+    ]
+
+    if not closed:
+        pytest.skip("в этой выборке рефинансирование не состоялось")
+
+    for row in closed:
+
+        client = row["client_id"]
+
+        disbursements = [
+            item
+            for item in data["by_client"][client]
+            if item["event_type"] == "loan_disbursement"
+            and item["event_time"] <= row["event_time"]
+        ]
+
+        assert disbursements, "закрытие рефинансированием без выдачи"
+
+        # Долг гасится деньгами, а не списывается молча.
+        payments = [
+            item
+            for item in data["by_client"][client]
+            if item["event_type"] == "loan_payment"
+            and item["payload"].get("contract_id") == row["payload"]["contract_id"]
+        ]
+
+        assert payments
+
+
+def test_money_comes_in_from_outside(baseline):
+
+    data = _run("inbound_money", clients=16)
+
+    inbound = [
+        row
+        for row in data["events"]
+        if row["event_type"] == "transfer_in" and row["payload"].get("reason") == "inbound"
+    ]
+
+    assert inbound, "входящих переводов извне не оказалось"
+
+    for row in inbound[:20]:
+        assert row["payload"]["counterparty"]
+        assert row["payload"]["balance_after"] is not None
+        assert row["change_initiator"] == "external_source"
+
+
+# ------------------------------------------------------------
+# МОШЕННИЧЕСТВО БЕЗ ГОТОВОГО ПРИЗНАКА
+# ------------------------------------------------------------
+
+
+def test_fraud_has_no_constant_merchant(baseline):
+    """
+    Мошенническая покупка не помечена постоянным именем точки и
+    единственным MCC: это был бы готовый признак для модели.
+    """
+
+    data = _run("card_compromise", clients=32)
+
+    names = {
+        row["payload"].get("merchant_name")
+        for row in data["events"]
+        if row["event_type"] == "purchase"
+    }
+
+    assert "UNKNOWN MERCHANT" not in names
+
+    alerts = [row for row in data["events"] if row["event_type"] == "fraud_alert"]
+
+    assert alerts
+
+    causes = {row["payload"]["cause_event_id"] for row in alerts}
+
+    mccs = {
+        row["payload"].get("mcc")
+        for row in data["events"]
+        if row["event_id"] in causes
+    }
+
+    assert len(mccs) > 1, f"все мошеннические операции в одном MCC: {mccs}"
+
+
+def test_transfer_fraud_is_a_transfer(baseline):
+
+    data = _run("transfer_fraud", clients=32)
+
+    alerts = [row for row in data["events"] if row["event_type"] == "fraud_alert"]
+
+    assert alerts
+
+    subjects = {row["payload"].get("subject") for row in alerts}
+
+    assert subjects - {"card"}, f"перевод оформлен как карта: {subjects}"
+
+    causes = {row["payload"]["cause_event_id"] for row in alerts}
+
+    kinds = {row["event_type"] for row in data["events"] if row["event_id"] in causes}
+
+    assert "transfer_out" in kinds
+
+
+# ------------------------------------------------------------
+# КАРТА РАССРОЧКИ
+# ------------------------------------------------------------
+
+
+def test_card_purchases_become_a_debt(baseline):
+    """
+    Покупка по карте рассрочки делится на части, наличные копят
+    проценты, а платёж по выписке гасит долг переводом со
+    своего счёта.
+    """
+
+    data = _run("card_installments", clients=32)
+
+    statements = [
+        row
+        for row in data["events"]
+        if row["event_type"] == "installment_due"
+        and row["payload"].get("reason") == "card_statement"
+    ]
+
+    if not statements:
+        pytest.skip("в этой выборке карт рассрочки не оказалось")
+
+    for row in statements[:20]:
+        assert row["payload"]["amount_due"] > 0
+        assert row["payload"]["contract_id"]
+
+    payments = [
+        row
+        for row in data["events"]
+        if row["event_type"] == "loan_payment"
+        and row["payload"].get("reason") == "card_statement"
+    ]
+
+    for row in payments[:20]:
+        # Обе стороны перевода между своими счетами помечены,
+        # иначе деньги клиента исчезали бы.
+        assert row["payload"]["counterparty"] == "own_account"
+
+    interest = [
+        row
+        for row in data["events"]
+        if row["event_type"] == "fee_charge"
+        and row["payload"].get("accrual_period")
+        and row["payload"].get("cause_event_id") is None
+    ]
+
+    assert interest, "начислений по договору не оказалось"

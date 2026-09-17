@@ -148,13 +148,12 @@ class ProductParams:
     # Обслуживание кредита.
     autopay_share: float = 0.58
     grace_days_before_missed: int = 3
-    topup_before_due_days: int = 5
 
     # Вероятность заплатить вовремя по полосам дисциплины.
     on_time_payment_probability: dict = field(
         default_factory=lambda: {
-            "low": 0.918,
-            "mid": 0.978,
+            "low": 0.935,
+            "mid": 0.985,
             "high": 0.998,
         }
     )
@@ -181,7 +180,6 @@ class ProductParams:
         }
     )
     early_repayment_share_per_year: float = 0.11
-    early_repayment_min_months: int = 3
     restructure_share_at_dpd60: float = 0.14
 
     # Проникновение продуктов до окна наблюдения: база и
@@ -199,20 +197,18 @@ class ProductParams:
 
     # Депозиты.
     deposit_open_share_of_free_cash: tuple = (0.35, 0.95)
-    deposit_topup_per_month: float = 0.35
     deposit_early_close_share_per_year: float = 0.12
     deposit_rollover_share: float = 0.62
 
     # Карты.
     card_activation_delay_days: tuple = (0, 9)
-    card_block_client_share_per_year: float = 0.06
     card_block_max_days: int = 21
-    card_reissue_delay_days: tuple = (2, 14)
     card_expiry_years: int = 4
 
-    # Кешбэк и комиссии.
-    cashback_settlement_day: int = 3
-    fee_settlement_day: int = 10
+    # Карта рассрочки: минимальный платёж по наличному долгу
+    # и запасной срок рассрочки, если тариф его не называет.
+    card_cash_min_share: float = 0.10
+    card_installment_months_default: int = 6
 
     # Распространение продукта.
     adoption: dict = field(

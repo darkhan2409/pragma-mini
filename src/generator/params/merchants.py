@@ -88,8 +88,6 @@ class MerchantParams:
 
     facilitators: tuple = ("QRPAY", "IOKA", "EPAY", "CLOUDPAY", "PAYBOX", "ROBOKASSA")
 
-    aggregators: tuple = ("WOLT", "GLOVO", "CHOCOFOOD", "YANDEX EDA", "AIRBA", "KASPI SHOP")
-
     terminal_noise_share: float = 0.22
 
     branch_number_share: float = 0.35

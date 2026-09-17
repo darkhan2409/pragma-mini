@@ -98,7 +98,15 @@ def plan_episodes(persona: Persona, events: tuple) -> tuple:
                 FraudStep(
                     ts=moment,
                     kind="probe",
-                    amount_hint=float(item_rng.integers(*settings.probe_amount)),
+                    # Проба соразмерна доходу жертвы, а не
+                    # фиксированной вилке в тенге.
+                    amount_hint=float(
+                        max(
+                            200,
+                            persona.true_income
+                            * item_rng.uniform(*settings.probe_amount_share_of_income),
+                        )
+                    ),
                     foreign=bool(item_rng.random() < 0.45),
                     online=True,
                 )

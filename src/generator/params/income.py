@@ -125,17 +125,10 @@ class IncomeParams:
 
     # Индексация и изменения суммы.
     annual_indexation: tuple = (0.02, 0.12)
-    indexation_month_weights: dict = field(
-        default_factory=lambda: {1: 0.45, 4: 0.15, 7: 0.20, 9: 0.10, 10: 0.10}
-    )
     raise_share_per_year: float = 0.24
     raise_factor: tuple = (1.06, 1.28)
     cut_share_per_year: float = 0.07
     cut_factor: tuple = (0.72, 0.94)
-
-    # Смена работодателя.
-    employer_change_share_per_year: float = 0.16
-    employer_gap_days: tuple = (0, 45)
 
     # Нерегулярный доход.
     irregular_events_per_month: tuple = (0.6, 3.2)

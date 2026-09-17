@@ -239,8 +239,17 @@ def month_state(
         return STATE_RETURNED, "first_action_after_pause"
 
     if days_since_client_event >= settings.churned_after_days_without_client_events:
+
         if not has_open_contract:
+
+            # Молчание без продуктов рано или поздно означает,
+            # что отношения закончились. Раньше это состояние
+            # было объявлено и недостижимо.
+            if days_since_client_event >= settings.closed_relationship_after_days:
+                return STATE_CLOSED, "relationship_closed"
+
             return STATE_CHURNED, "no_client_events_and_no_products"
+
         return STATE_DORMANT, "long_silence_with_open_contract"
 
     if days_since_client_event >= settings.dormant_after_days_without_client_events:
