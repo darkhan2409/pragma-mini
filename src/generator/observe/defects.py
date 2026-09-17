@@ -35,6 +35,20 @@ def _rng(event: Event, slot: int):
     return keyed_rng(NS_OBSERVE, stable_hash(event.event_id) % (2 ** 31), slot)
 
 
+def _paired(event: Event) -> bool:
+    """
+    Запись, у которой есть обязательная вторая половина.
+    """
+
+    if event.link_type == "transfer":
+        return True
+
+    if event.payload.get("counterparty") == "own_account":
+        return True
+
+    return event.event_type == "fee_charge" and event.payload.get("reason") == "transfer_fee"
+
+
 def _outage_rng(client_ordinal: int, source: str, ts: datetime):
     """
     Судьба записей сбойного дня общая для всего источника.
@@ -209,15 +223,29 @@ def apply(events: list, client_ordinal: int) -> tuple[list, dict]:
     observed: list[Event] = []
     corrections: dict[str, tuple] = {}
 
+    # Событие, на которое кто-то ссылается как на причину, не
+    # имеет права пропасть: иначе возврат будет указывать на
+    # покупку, которой в данных нет.
+    referenced = {
+        event.payload.get("cause_event_id")
+        for event in events
+        if event.payload.get("cause_event_id")
+    }
+
     for event in events:
 
         # --- сбой источника: записи дня не доходят ---
 
         # Сбой витрины не имеет права потерять одну сторону
-        # перевода: вторая сторона живёт у другого клиента, и
-        # пара перестала бы сходиться.
-        if event.link_type != "transfer" and coverage.in_outage(
-            client_ordinal, event.source, event.event_time
+        # парной проводки: у перевода вторая сторона живёт у
+        # другого клиента, у перевода между своими счетами обе
+        # стороны у одного, а комиссия привязана к переводу.
+        # В любом из этих случаев пропажа половины разрушила бы
+        # денежную связность.
+        if (
+            not _paired(event)
+            and event.event_id not in referenced
+            and coverage.in_outage(client_ordinal, event.source, event.event_time)
         ):
 
             recover_rng = _outage_rng(client_ordinal, event.source, event.event_time)

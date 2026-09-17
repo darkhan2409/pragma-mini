@@ -46,6 +46,7 @@ from .observe import defects as defect_module
 from .rng import (
     COMPONENT_CONTENT,
     COMPONENT_OUTCOME,
+    COMPONENT_TIME,
     NS_ADOPTION,
     NS_CARD,
     NS_DEPOSIT,
@@ -53,6 +54,7 @@ from .rng import (
     NS_LEDGER,
     NS_LOAN,
     NS_PROFILE,
+    NS_INBOUND,
     NS_SUPPORT,
     NS_TRANSFER,
     event_rng,
@@ -166,6 +168,20 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
     factor *= household_module.budget_pressure(budget, state.month_purchases, day)
     factor *= household_module.funds_pressure(state.ledger.payment_capacity(day), budget)
 
+    # После зарплаты тратят охотнее, перед ней придерживают.
+    last_payday = None
+    next_payday = None
+
+    for payout in state.payouts:
+        if payout.kind not in ("salary", "pension"):
+            continue
+        if payout.ts <= day:
+            last_payday = payout.ts if last_payday is None or payout.ts > last_payday else last_payday
+        elif next_payday is None or payout.ts < next_payday:
+            next_payday = payout.ts
+
+    factor *= cal.payday_factor(day, last_payday, next_payday)
+
     # --- регистрация клиента внутри окна ---
 
     if persona.registered_in_window and day.date() == persona.relationship_start.date():
@@ -222,7 +238,8 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
     for index, intent in enumerate(
         needs_module.daily_intents(persona, state.habits, day, state.state, factor, silenced)
     ):
-        add(intent.ts, "purchase", {"intent": intent, "index": index, "budget": budget})
+        add(intent.ts, "purchase",
+            {"intent": intent, "index": index, "budget": budget, "factor": factor})
 
     # --- наличные ---
 
@@ -278,6 +295,33 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
 
             add(ts, "transfer", {"relation": relation, "index": index})
 
+    # --- входящие переводы извне ---
+    #
+    # Внутрибанковские приходы порождает исходящий план другого
+    # клиента. Здесь только внешние отправители: родня, друзья,
+    # постоянные контрагенты.
+
+    for index, relation in enumerate(sim.graph.active(state.ordinal, day)):
+
+        if relation.inbound_frequency <= 0.0:
+            continue
+
+        if relation.counterpart.client_ordinal is not None:
+            continue
+
+        rng = event_rng(NS_INBOUND, state.ordinal, day.toordinal(), index, COMPONENT_TIME)
+
+        if rng.random() >= relation.inbound_frequency / 30.0:
+            continue
+
+        moment = day.replace(
+            hour=int(rng.integers(8, 22)),
+            minute=int(rng.integers(0, 60)),
+            second=0,
+        )
+
+        add(moment, "inbound_transfer", {"relation": relation, "index": index})
+
     # --- сессии приложения ---
 
     app_adopted = state.app_adopted_at is not None and day >= state.app_adopted_at
@@ -291,7 +335,7 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
         ),
         card_blocked=any(card.is_blocked_at(day) for card in state.cards.values()),
         recent_offer_family=state.offers[-1].product_family if state.offers else None,
-        has_loan=bool(state.loans),
+        has_loan=state.has_open_loan(),
         has_deposit=state.assets() > 0,
         has_card=any(card.usable_at(day) for card in state.cards.values()),
         accounts=len(state.ledger.visible_accounts(day)),
@@ -320,7 +364,7 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
             state.held_counts(day),
             state.assets(),
             app_adopted,
-            bool(state.loans),
+            state.has_open_loan(),
             len(state.open_contracts(day)),
             stress,
         )
@@ -358,6 +402,26 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
         if item is not None:
             add(day.replace(hour=0, minute=0, second=0), "installment_due",
                 {"contract_id": contract_id, "installment": item})
+
+        # Клиент платит сам: за несколько дней до срока, в срок
+        # или в льготные дни. Решение принято заранее и от
+        # порядка исполнения дня не зависит.
+        pending = loan.oldest_unpaid()
+
+        if pending is not None and pending.outstanding > 0 and not loan.autopay:
+
+            plan = _payment_plan(state, loan, pending)
+
+            if plan["will_pay"]:
+
+                moment = pending.due_date + timedelta(days=plan["offset"])
+
+                if moment.date() == day.date():
+                    add(
+                        day.replace(hour=plan["hour"], minute=plan["minute"], second=0),
+                        "loan_payment_intent",
+                        {"contract_id": contract_id},
+                    )
 
         add(day.replace(hour=23, minute=30), "loan_check", {"contract_id": contract_id})
 
@@ -613,7 +677,7 @@ def _on_bill(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         "mcc": merchant.mcc if merchant else None,
         "merchant_city": merchant.settlement if merchant else None,
         "merchant_country": "KZ",
-        "is_online": True,
+        "is_online": bool(merchant.is_online) if merchant is not None else True,
         "is_subscription": False,
         "reason": f"bill_{bill.kind}",
     }
@@ -722,7 +786,9 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     rng = event_rng(NS_LEDGER, state.ordinal, ts.toordinal(), payload["index"] + 50, COMPONENT_CONTENT)
 
-    factor = household_module.spending_factor(budget, persona)
+    # Фактор трат посчитан планировщиком дня и уже учитывает
+    # бюджет месяца, остаток на счёте и зарплатный цикл.
+    factor = payload["factor"]
 
     travel = None
     foreign = None
@@ -1119,6 +1185,50 @@ def graph_counterpart_name(state: ClientState) -> str:
 _HANDLERS: dict = {}
 
 
+def _on_inbound_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
+    """
+    Деньги пришли клиенту со стороны: помощь родных, возврат
+    долга, расчёт постоянного контрагента.
+    """
+
+    relation = payload["relation"]
+
+    account = state.primary_card_account(ts)
+
+    if account is None:
+        return
+
+    settings = params_module.active().relationships
+
+    rng = event_rng(
+        NS_INBOUND, state.ordinal, ts.toordinal(), payload["index"], COMPONENT_CONTENT
+    )
+
+    low, high = settings.inbound_amount_share_of_income
+
+    amount = int(state.persona.true_income * rng.uniform(low, high))
+
+    amount = max(1_000, int(round(amount / 100) * 100))
+
+    _emit_money(
+        state,
+        ts,
+        "transfer_in",
+        account.account_id,
+        amount,
+        "credit",
+        f"external:{relation.counterpart.counterpart_id}",
+        {
+            "channel": "system",
+            "counterparty": relation.counterpart.masked_name,
+            "mcc": MCC_TRANSFER,
+            "merchant_country": "KZ",
+            "reason": "inbound",
+        },
+        INITIATOR_EXTERNAL,
+    )
+
+
 def _on_cash_deposit(sim, state: ClientState, ts: datetime, payload: dict) -> None:
     """
     Наличные возвращаются на счёт: скрытый мир и наблюдаемый
@@ -1168,13 +1278,14 @@ _HANDLERS.update(
         "purchase": _on_purchase,
         "cash_withdrawal": _on_cash,
         "transfer": _on_transfer,
+        "inbound_transfer": _on_inbound_transfer,
     }
 )
 
 
 # Обработчики остальных доменов регистрируются в своих модулях.
 from .engine_app import unblock_card  # noqa: E402,F401
-from .engine_credit import close_loan, repay_loan  # noqa: E402,F401
+from .engine_credit import close_loan, payment_plan as _payment_plan, repay_loan  # noqa: E402,F401
 from .engine_products import _emit_case  # noqa: E402,F401
 from .engine_month import finish as _finish, month_end as _month_end  # noqa: E402
 

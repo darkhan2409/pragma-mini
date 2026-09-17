@@ -53,10 +53,10 @@ class ProductParams:
     approval_base: dict = field(
         default_factory=lambda: {
             "debit_card": 0.98,
-            "credit_card": 0.64,
-            "cash_loan": 0.57,
-            "refinance": 0.49,
-            "installment": 0.71,
+            "credit_card": 0.52,
+            "cash_loan": 0.44,
+            "refinance": 0.40,
+            "installment": 0.58,
             "deposit": 0.99,
             "deposit_certificate": 0.99,
             "bonds": 0.99,
@@ -116,22 +116,67 @@ class ProductParams:
     # Вехи просрочки.
     dpd_milestones: tuple = (1, 30, 60, 90)
 
+    # Сумма кредита как кратность месячному доходу. Банк не
+    # выдаёт восемь зарплат наличными: это и было главной
+    # причиной нереального уровня просрочки.
+    loan_amount_income_multiple: dict = field(
+        default_factory=lambda: {
+            "cash_loan": (1.0, 4.0),
+            "refinance": (1.0, 4.0),
+            "installment": (0.15, 1.2),
+            "credit_card": (0.8, 2.5),
+        }
+    )
+
+    loan_term_options: tuple = (6, 12, 18, 24, 36, 48, 60)
+    loan_term_weights: tuple = (0.08, 0.20, 0.14, 0.24, 0.20, 0.08, 0.06)
+
+    # Доля лимита карты, которую банк считает месячным
+    # обязательством при расчёте долговой нагрузки.
+    credit_card_payment_share_of_limit: float = 0.10
+
+    # Рефинансирование добирает немного наличных сверх
+    # погашаемых долгов.
+    refinance_cash_topup_share: tuple = (0.0, 0.3)
+
     # Обслуживание кредита.
     autopay_share: float = 0.58
     grace_days_before_missed: int = 3
     topup_before_due_days: int = 5
-    payment_discipline_factor: float = 0.75
+
+    # Вероятность заплатить вовремя по полосам дисциплины.
+    on_time_payment_probability: dict = field(
+        default_factory=lambda: {
+            "low": 0.90,
+            "mid": 0.965,
+            "high": 0.995,
+        }
+    )
+    discipline_bands: tuple = (0.33, 0.66)
+
+    # Частичный платёж имеет смысл, только если покрывает
+    # заметную часть взноса.
+    partial_payment_min_share: float = 0.20
+
+    # Клиент подтягивает деньги из другого банка к сроку.
+    loan_topup_from_other_bank_share: float = 0.86
+
+    # Автоплатёж повторяет попытку внутри льготных дней.
+    autopay_retry_days: int = 3
+
+    # Кредитной картой кредит не гасят.
+    loan_payment_from_credit_card: bool = False
+
     cure_probability_per_day: dict = field(
         default_factory=lambda: {
-            "low": 0.02,
-            "mid": 0.06,
-            "high": 0.12,
+            "low": 0.06,
+            "mid": 0.14,
+            "high": 0.26,
         }
     )
     early_repayment_share_per_year: float = 0.11
     early_repayment_min_months: int = 3
     restructure_share_at_dpd60: float = 0.14
-    write_off_dpd: int = 210
 
     # Депозиты.
     deposit_open_share_of_free_cash: tuple = (0.35, 0.95)

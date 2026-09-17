@@ -8,9 +8,9 @@ from .engine import _HANDLERS, _emit_money
 from .finance import loans as loan_rules
 from .finance.entities import CONTRACT_CLOSED
 from .life import stress as stress_module
-from .rng import NS_LOAN, keyed_rng, stable_hash
+from .rng import NS_LOAN, NS_REPAY, keyed_rng, stable_hash
 from .simulate import ClientState
-from .world.dictionaries import MCC_SALARY
+from .world.dictionaries import MCC_CASH, MCC_SALARY, MCC_TRANSFER
 
 
 # ============================================================
@@ -46,6 +46,72 @@ def loan_payload(contract_id: str, loan, **extra) -> dict:
     return body
 
 
+def payment_plan(state: ClientState, loan, item) -> dict:
+    """
+    Намерение клиента по конкретному взносу.
+
+    Решение принимается один раз на взнос и не зависит от
+    порядка исполнения дня: заплатит ли клиент, за сколько
+    дней до срока и в котором часу.
+    """
+
+    settings = params_module.active().products
+
+    rng = keyed_rng(
+        NS_REPAY,
+        state.ordinal,
+        stable_hash(loan.contract_id) % 9973,
+        int(item.number),
+    )
+
+    discipline = state.persona.trait("financial_discipline", item.due_date)
+
+    low, high = settings.discipline_bands
+
+    band = "high" if discipline > high else "mid" if discipline > low else "low"
+
+    stress = stress_module.level_at(state.stress_episodes, item.due_date)
+
+    probability = settings.on_time_payment_probability[band]
+    probability *= max(0.05, 1.0 - params_module.active().stress.missed_payment_boost * stress)
+
+    will_pay = rng.random() < probability
+
+    # Платят в день срока или в льготные дни. Раньше срока
+    # взнос ещё не выставлен, а деньги к нему подтягиваются
+    # отдельным пополнением внутри самого платежа.
+    offset = int(rng.integers(0, settings.grace_days_before_missed + 1))
+
+    return {
+        "will_pay": will_pay,
+        "offset": 0 if loan.autopay else offset,
+        "hour": int(rng.integers(9, 21)),
+        "minute": int(rng.integers(0, 60)),
+        "band": band,
+    }
+
+
+def _on_loan_payment_intent(sim, state: ClientState, ts: datetime, payload: dict) -> None:
+    """
+    Клиент сам платит по графику: до срока, в срок или в
+    льготные дни.
+    """
+
+    loan = state.loans.get(payload["contract_id"])
+
+    if loan is None or loan.closed or loan.autopay:
+        return
+
+    item = loan.oldest_unpaid()
+
+    if item is None or item.outstanding <= 0:
+        return
+
+    # Платят то, что должны на сегодня: текущий взнос вместе с
+    # накопившимся долгом.
+    repay_loan(state, ts, loan, loan_rules.arrears_amount(loan), "app")
+
+
 def _on_installment_due(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     contract_id = payload["contract_id"]
@@ -78,7 +144,119 @@ def _on_installment_due(sim, state: ClientState, ts: datetime, payload: dict) ->
     loan_rules.register_due(loan, item, event.event_id)
 
     if loan.autopay:
-        repay_loan(state, ts + timedelta(minutes=5), loan, item.amount, "system")
+        owed = max(int(item.amount), loan_rules.arrears_amount(loan))
+        repay_loan(state, ts + timedelta(minutes=5), loan, owed, "system")
+
+
+def _payment_sources(state: ClientState, ts: datetime, amount: int) -> list:
+    """
+    Счета, которыми платят кредит. Кредитной картой кредит не
+    гасят, если это не разрешено параметром.
+    """
+
+    sources = state.ledger.payment_sources(ts, amount)
+
+    if params_module.active().products.loan_payment_from_credit_card:
+        return sources
+
+    return [item for item in sources if item.kind != "credit_card"]
+
+
+def _payment_capacity(state: ClientState, ts: datetime) -> int:
+
+    allow_credit = params_module.active().products.loan_payment_from_credit_card
+
+    values = [
+        account.available
+        for account in state.ledger.accounts.values()
+        if account.visible
+        and account.is_open_at(ts)
+        and account.kind != "loan"
+        and (allow_credit or account.kind != "credit_card")
+    ]
+
+    return int(max(values)) if values else 0
+
+
+def _topup_before_payment(state: ClientState, ts: datetime, amount: int, rng) -> bool:
+    """
+    Клиент переводит деньги из другого банка к сроку платежа.
+    """
+
+    settings = params_module.active().products
+
+    if rng.random() >= settings.loan_topup_from_other_bank_share:
+        return False
+
+    account = state.primary_card_account(ts)
+
+    if account is None:
+        return False
+
+    shortfall = max(0, amount - account.available)
+
+    if shortfall <= 0:
+        return False
+
+    # Деньги берут откуда есть: со счёта в другом банке или
+    # наличными через банкомат.
+    sources = state.ledger.hidden_sources(shortfall)
+
+    if not sources:
+        return False
+
+    hidden = sources[0]
+
+    from_cash = hidden.account_id == state.ledger.cash_id
+
+    _emit_money(
+        state,
+        ts - timedelta(minutes=12),
+        "cash_deposit" if from_cash else "transfer_in",
+        account.account_id,
+        shortfall,
+        "credit",
+        hidden.account_id,
+        {
+            "channel": "atm" if from_cash else "app",
+            "counterparty": "Own account",
+            "reason": "topup_before_installment",
+            "mcc": MCC_CASH if from_cash else MCC_TRANSFER,
+            "merchant_country": "KZ",
+        },
+        INITIATOR_CLIENT,
+    )
+
+    return True
+
+
+def _decline_payment(state: ClientState, ts: datetime, loan, item, amount: int) -> None:
+    """
+    Неудачное автосписание: банк попробовал и не смог.
+    """
+
+    _emit_money(
+        state,
+        ts,
+        "loan_payment",
+        None,
+        max(1, int(amount)),
+        "debit",
+        "external:none",
+        {
+            "channel": "system",
+            "contract_id": loan.contract_id,
+            "cause_event_id": item.due_event_id,
+            "reason": "installment",
+            "decline_reason": "insufficient_funds",
+            "mcc": MCC_SALARY,
+            "merchant_country": "KZ",
+        },
+        INITIATOR_SYSTEM,
+        correlation_id=loan.contract_id,
+        link_type="schedule",
+        status="declined",
+    )
 
 
 def repay_loan(state: ClientState, ts: datetime, loan, amount: int, channel: str) -> None:
@@ -94,16 +272,69 @@ def repay_loan(state: ClientState, ts: datetime, loan, amount: int, channel: str
     if item is None:
         return
 
-    sources = state.ledger.payment_sources(ts, amount)
+    settings = params_module.active().products
+
+    sources = _payment_sources(state, ts, amount)
 
     if not sources:
+
+        # Денег на счёте не хватает. Клиент сначала пробует
+        # подтянуть их из другого банка, потом платит сколько
+        # может, и только затем попытка проваливается.
+        rng = keyed_rng(
+            NS_REPAY,
+            state.ordinal,
+            stable_hash(loan.contract_id) % 9973,
+            int(item.number),
+            1,
+        )
+
+        if _topup_before_payment(state, ts, amount, rng):
+            sources = _payment_sources(state, ts, amount)
+
+    if not sources:
+
+        capacity = _payment_capacity(state, ts)
+
+        if capacity >= settings.partial_payment_min_share * amount and capacity > 0:
+            amount = int(capacity)
+            sources = _payment_sources(state, ts, amount)
+
+    if not sources:
+
+        if channel == "system":
+            _decline_payment(state, ts, loan, item, amount)
+
         return
 
     account = sources[0]
 
-    paid = loan_rules.apply_payment(loan, item, amount, ts)
+    # Один платёж закрывает столько взносов, на сколько хватает
+    # денег. Клиент, отставший на месяц, догоняет график, а не
+    # остаётся в вечной просрочке из-за того, что платёж всегда
+    # уходит только в самый старый взнос.
+    covered: list = []
 
-    if paid <= 0:
+    remaining = int(amount)
+
+    while remaining > 0:
+
+        target = loan.oldest_unpaid()
+
+        if target is None:
+            break
+
+        paid = loan_rules.apply_payment(loan, target, remaining, ts)
+
+        if paid <= 0:
+            break
+
+        covered.append((target, paid))
+        remaining -= paid
+
+    total = sum(value for _, value in covered)
+
+    if total <= 0:
         return
 
     _emit_money(
@@ -111,13 +342,13 @@ def repay_loan(state: ClientState, ts: datetime, loan, amount: int, channel: str
         ts,
         "loan_payment",
         account.account_id,
-        paid,
+        total,
         "debit",
         f"loan:{loan.contract_id}",
         {
             "channel": channel,
             "contract_id": loan.contract_id,
-            "cause_event_id": item.due_event_id,
+            "cause_event_id": covered[0][0].due_event_id,
             "reason": "installment",
             "mcc": MCC_SALARY,
             "merchant_country": "KZ",
@@ -127,25 +358,26 @@ def repay_loan(state: ClientState, ts: datetime, loan, amount: int, channel: str
         link_type="schedule",
     )
 
-    state.emit(
-        state.factory.make(
-            "installment_paid",
-            ts + timedelta(seconds=2),
-            loan_payload(
-                loan.contract_id,
-                loan,
-                installment_no=item.number,
-                amount_due=item.amount,
-                amount_paid=paid,
-                due_date=item.due_date.date().isoformat(),
-                cause_event_id=item.due_event_id,
-                reason="payment",
-            ),
-            initiator=INITIATOR_SYSTEM if channel == "system" else INITIATOR_CLIENT,
-            correlation_id=loan.contract_id,
-            link_type="schedule",
+    for position, (target, paid) in enumerate(covered):
+        state.emit(
+            state.factory.make(
+                "installment_paid",
+                ts + timedelta(seconds=2 + position),
+                loan_payload(
+                    loan.contract_id,
+                    loan,
+                    installment_no=target.number,
+                    amount_due=target.amount,
+                    amount_paid=paid,
+                    due_date=target.due_date.date().isoformat(),
+                    cause_event_id=target.due_event_id,
+                    reason="payment",
+                ),
+                initiator=INITIATOR_SYSTEM if channel == "system" else INITIATOR_CLIENT,
+                correlation_id=loan.contract_id,
+                link_type="schedule",
+            )
         )
-    )
 
     if loan.dpd > 0 and loan_rules.arrears_amount(loan) == 0:
         _clear_arrears(state, ts, loan)
@@ -185,11 +417,26 @@ def _on_loan_check(sim, state: ClientState, ts: datetime, payload: dict) -> None
 
     rng = keyed_rng(NS_LOAN, state.ordinal, ts.toordinal(), stable_hash(contract_id) % 9973)
 
+    # Автосписание повторяет попытку, пока идут льготные дни:
+    # деньги могли прийти на счёт на день позже срока.
+    if loan.autopay:
+
+        pending = loan.oldest_unpaid()
+
+        if pending is not None and pending.status == "due" and pending.outstanding > 0:
+
+            elapsed = (ts - pending.due_date).days
+
+            if 0 < elapsed <= settings.autopay_retry_days:
+                repay_loan(state, ts + timedelta(seconds=15), loan, pending.outstanding, "system")
+
     arrears = loan_rules.arrears_amount(loan)
 
     if arrears > 0:
 
-        band = "high" if discipline > 0.66 else "mid" if discipline > 0.33 else "low"
+        low_band, high_band = settings.discipline_bands
+
+        band = "high" if discipline > high_band else "mid" if discipline > low_band else "low"
 
         cure = settings.cure_probability_per_day[band] * (1.0 - 0.6 * stress)
 
@@ -198,7 +445,13 @@ def _on_loan_check(sim, state: ClientState, ts: datetime, payload: dict) -> None
 
     for item in loan.schedule:
 
-        if item.status != "due":
+        # Частично оплаченный взнос это тоже нарушение графика.
+        # Пропустить его здесь значило бы зарегистрировать
+        # просрочку без события о пропуске.
+        if item.status not in ("due", "partially_paid"):
+            continue
+
+        if item.outstanding <= 0:
             continue
 
         if (ts - item.due_date).days <= settings.grace_days_before_missed:
@@ -285,7 +538,7 @@ def _on_loan_check(sim, state: ClientState, ts: datetime, payload: dict) -> None
         close_loan(state, ts, loan, early=False)
 
 
-def close_loan(state: ClientState, ts: datetime, loan, early: bool) -> None:
+def close_loan(state: ClientState, ts: datetime, loan, early: bool, reason: str | None = None) -> None:
 
     contract = state.contracts.get(loan.contract_id)
 
@@ -345,7 +598,7 @@ def close_loan(state: ClientState, ts: datetime, loan, early: bool) -> None:
             "loan_closed",
             ts + timedelta(seconds=210),
             loan_payload(loan.contract_id, loan, days_past_due=0,
-                         reason="early" if early else "scheduled"),
+                         reason=reason or ("early" if early else "scheduled")),
             initiator=INITIATOR_SYSTEM,
             correlation_id=loan.contract_id,
             link_type="schedule",
@@ -355,7 +608,7 @@ def close_loan(state: ClientState, ts: datetime, loan, early: bool) -> None:
     if contract is not None:
         contract.status = CONTRACT_CLOSED
         contract.closed_at = ts
-        emit_product_closed(state, ts, contract, "loan_closed")
+        emit_product_closed(state, ts, contract, reason or "loan_closed")
 
 
 def emit_product_closed(state: ClientState, ts: datetime, contract, reason: str) -> None:
@@ -387,7 +640,8 @@ def emit_product_closed(state: ClientState, ts: datetime, contract, reason: str)
 
 
 _HANDLERS["installment_due"] = _on_installment_due
+_HANDLERS["loan_payment_intent"] = _on_loan_payment_intent
 _HANDLERS["loan_check"] = _on_loan_check
 
 
-__all__ = ["close_loan", "emit_product_closed", "loan_payload", "repay_loan"]
+__all__ = ["close_loan", "emit_product_closed", "loan_payload", "payment_plan", "repay_loan"]

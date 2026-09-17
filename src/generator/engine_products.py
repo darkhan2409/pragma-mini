@@ -67,15 +67,93 @@ from .world.dictionaries import FUNNEL_SCREENS, MCC_CASH
 # ============================================================
 
 
+CREDIT_FAMILIES = ("cash_loan", "credit_card", "refinance", "installment")
+
+
+def _age_limit(persona, ts, income, dpd, loans) -> bool:
+    rules = params_module.active().products.bank_rules
+    age = persona.age_at(ts)
+    return age < int(rules.get("min_age", 18)) or age > int(rules.get("max_age", 79))
+
+
+def _income_not_confirmed(persona, ts, income, dpd, loans) -> bool:
+    threshold = params_module.active().products.low_income_threshold
+    return persona.income_type in ("unemployed", "student") or income < threshold
+
+
 REJECT_CASCADE = (
-    ("age_limit", lambda persona, ts, income, dpd, loans: persona.age_at(ts) < 21 or persona.age_at(ts) > 72),
-    ("income_not_confirmed", lambda persona, ts, income, dpd, loans: persona.income_type in ("unemployed", "student") or income < 95_000),
+    ("age_limit", _age_limit),
+    ("income_not_confirmed", _income_not_confirmed),
     ("existing_debt", lambda persona, ts, income, dpd, loans: loans >= 2),
-    ("debt_service_ratio", lambda persona, ts, income, dpd, loans: False),
 )
 
 
-def _approval(state: ClientState, candidate, ts: datetime, stress: float, rng) -> tuple:
+def _open_loans(state: ClientState) -> tuple:
+    return tuple(item for item in state.loans.values() if not item.closed)
+
+
+def _prospective_payment(state: ClientState, candidate, ts: datetime, amount, term) -> int:
+    """
+    Во сколько обойдётся клиенту новый договор в месяц.
+    """
+
+    settings = params_module.active().products
+
+    family = candidate.view.family
+
+    if amount is None:
+        return 0
+
+    if family == "credit_card":
+        return int(amount * settings.credit_card_payment_share_of_limit)
+
+    if family not in ("cash_loan", "refinance", "installment"):
+        return 0
+
+    terms = candidate.version.terms
+
+    rate = terms.get("rate")
+
+    if rate is None:
+        by_term = terms.get("rate_by_term") or {}
+        rate = by_term.get(str(term)) or by_term.get(term) or 0.28
+
+    return int(loan_rules.annuity_payment(int(amount), float(rate), int(term or 12)))
+
+
+def _debt_service_fits(state: ClientState, candidate, ts: datetime, amount, term) -> bool:
+    """
+    Долговая нагрузка после нового договора.
+
+    Рефинансирование закрывает старые кредиты, поэтому их
+    платежи из нагрузки вычитаются.
+    """
+
+    settings = params_module.active().products
+
+    ratio = float(settings.bank_rules.get("max_debt_service_ratio", 0.5))
+
+    income = max(1, int(state.persona.declared_income))
+
+    open_loans = _open_loans(state)
+
+    existing = loan_rules.debt_service(open_loans, ts)
+
+    if candidate.view.family == "refinance":
+        existing = 0
+
+    return (existing + _prospective_payment(state, candidate, ts, amount, term)) <= ratio * income
+
+
+def _approval(
+    state: ClientState,
+    candidate,
+    ts: datetime,
+    stress: float,
+    rng,
+    amount=None,
+    term=None,
+) -> tuple:
 
     settings = params_module.active().products
 
@@ -83,9 +161,18 @@ def _approval(state: ClientState, candidate, ts: datetime, stress: float, rng) -
 
     family = candidate.view.family
 
+    # Долговая нагрузка это ЖЁСТКОЕ правило, а не ярлык после
+    # отказа. Розыгрыш при этом не тратится: решение
+    # детерминировано.
+    if family in CREDIT_FAMILIES and not _debt_service_fits(state, candidate, ts, amount, term):
+        return False, "debt_service_ratio"
+
+    if family == "refinance" and state.primary_card_account(ts) is None:
+        return False, "documents_invalid"
+
     base = settings.approval_base.get(family, 0.9)
 
-    if family in ("cash_loan", "credit_card", "refinance", "installment"):
+    if family in CREDIT_FAMILIES:
 
         base += settings.approval_income_factor * min(1.0, persona.declared_income / 700_000)
         base += settings.approval_discipline_factor * (persona.trait("financial_discipline", ts) - 0.5)
@@ -96,7 +183,7 @@ def _approval(state: ClientState, candidate, ts: datetime, stress: float, rng) -
         if worst > 0:
             base -= settings.approval_dpd_penalty * min(1.0, worst / 60.0)
 
-        if len(state.loans) >= 1:
+        if _open_loans(state):
             base -= settings.approval_existing_loan_penalty
 
     low, high = settings.approval_bounds
@@ -108,7 +195,7 @@ def _approval(state: ClientState, candidate, ts: datetime, stress: float, rng) -
     if approved:
         return True, None
 
-    open_loans = sum(1 for item in state.loans.values() if not item.closed)
+    open_loans = len(_open_loans(state))
 
     for reason, rule in REJECT_CASCADE:
         if rule(persona, ts, persona.declared_income, state.worst_dpd(), open_loans):
@@ -202,7 +289,7 @@ def _on_adoption(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         state.held_counts(ts),
         state.assets(),
         app_adopted,
-        bool(state.loans),
+        state.has_open_loan(),
         len(state.open_contracts(ts)),
         stress,
     )
@@ -278,7 +365,7 @@ def _on_adoption(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     _touch_client(state, ts)
 
-    approved, reason = _approval(state, candidate, ts, stress, rng)
+    approved, reason = _approval(state, candidate, ts, stress, rng, amount, term)
 
     low, high = settings.decision_delay_seconds.get(channel, (60, 3600))
 
@@ -335,6 +422,29 @@ def _on_adoption(sim, state: ClientState, ts: datetime, payload: dict) -> None:
     _activate_product(sim, state, contract, candidate.view, open_ts, rng)
 
 
+def _close_refinanced(state: ClientState, ts: datetime, new_contract_id: str) -> None:
+    """
+    Закрывает кредиты, ради которых бралось рефинансирование.
+    """
+
+    from .engine_credit import close_loan
+
+    targets = [
+        item
+        for item in state.loans.values()
+        if not item.closed and item.contract_id != new_contract_id
+    ]
+
+    for position, loan in enumerate(targets):
+        close_loan(
+            state,
+            ts + timedelta(minutes=10 + position),
+            loan,
+            early=True,
+            reason="refinanced",
+        )
+
+
 def _activate_product(sim, state: ClientState, contract, view, ts: datetime, rng) -> None:
     """
     Первое действие по новому договору: выдача кредита,
@@ -380,6 +490,11 @@ def _activate_product(sim, state: ClientState, contract, view, ts: datetime, rng
                 correlation_id=contract.contract_id,
                 link_type="contract",
             )
+
+        # Рефинансирование не добавляет ещё один долг к прежним:
+        # выданные деньги гасят их и закрывают договоры.
+        if family == "refinance":
+            _close_refinanced(state, ts, contract.contract_id)
 
         loan = loan_rules.open_loan(
             contract.contract_id,
@@ -612,8 +727,9 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
         INITIATOR_CLIENT if episode.kind == "false_positive" else INITIATOR_EXTERNAL,
     )
 
-    state.purchases.append(event)
-
+    # Мошенническая покупка не попадает в список кандидатов на
+    # обычный возврат: её оспаривают через chargeback, и два
+    # возврата по одной операции превысили бы её сумму.
     state.note(ts, "fraud_episode_step", episode.kind, {"step": step.kind, "amount": amount})
 
     if step.kind != "strike" and episode.kind != "false_positive":

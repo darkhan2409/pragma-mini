@@ -170,12 +170,20 @@ def days_past_due(state: LoanState, day: datetime) -> int:
     oldest = None
 
     for item in state.schedule:
-        if item.status in ("missed", "partially_paid") and item.outstanding > 0:
+
+        if item.outstanding <= 0:
+            continue
+
+        if item.status == "missed":
             oldest = item
             break
-        if item.status == "due" and item.outstanding > 0:
-            overdue = (day - item.due_date).days
-            if overdue > settings.grace_days_before_missed:
+
+        # Взнос со сроком и частично оплаченный взнос живут по
+        # одному правилу: пока идут льготные дни, просрочки нет.
+        # Иначе веха просрочки регистрировалась бы раньше, чем
+        # событие о пропуске.
+        if item.status in ("due", "partially_paid"):
+            if (day - item.due_date).days > settings.grace_days_before_missed:
                 oldest = item
                 break
 
@@ -213,6 +221,22 @@ def payoff_amount(state: LoanState) -> int:
     return int(state.principal_outstanding + arrears_amount(state))
 
 
+def monthly_payment(state: LoanState) -> int:
+    """
+    Регулярный платёж по договору.
+
+    Берётся из графика, а не из ближайшего неоплаченного:
+    у кредита, где просрочены все оставшиеся платежи,
+    обязательство никуда не делось.
+    """
+
+    for item in state.schedule:
+        if item.status != "paid":
+            return int(item.amount)
+
+    return int(state.schedule[-1].amount) if state.schedule else 0
+
+
 def debt_service(states: tuple, ts: datetime) -> int:
     """
     Месячная нагрузка по всем кредитам клиента.
@@ -221,13 +245,41 @@ def debt_service(states: tuple, ts: datetime) -> int:
     total = 0
 
     for state in states:
-        if state.closed:
+        if state.closed or state.principal_outstanding <= 0:
             continue
-        item = state.next_due(ts)
-        if item is not None:
-            total += item.amount
+        total += monthly_payment(state)
 
     return int(total)
+
+
+def max_amount_for_dsr(
+    income: int,
+    existing_service: int,
+    annual_rate: float,
+    months: int,
+    max_ratio: float,
+) -> int:
+    """
+    Какую сумму банк готов выдать, чтобы платёж вместе с уже
+    имеющимися обязательствами уложился в долговую нагрузку.
+
+    Обратная функция к аннуитету: сколько тела соответствует
+    платежу, который клиент ещё может себе позволить.
+    """
+
+    capacity = int(max_ratio * income) - int(existing_service)
+
+    if capacity <= 0 or months <= 0:
+        return 0
+
+    monthly = annual_rate / 12.0
+
+    if monthly <= 0.0:
+        return int(capacity * months)
+
+    factor = (1.0 + monthly) ** months
+
+    return int(capacity * (factor - 1.0) / (monthly * factor))
 
 
 def restructure(state: LoanState, ts: datetime, extra_months: int) -> None:
@@ -260,6 +312,8 @@ def restructure(state: LoanState, ts: datetime, extra_months: int) -> None:
 
 
 __all__ = [
+    "max_amount_for_dsr",
+    "monthly_payment",
     "annuity_payment",
     "apply_payment",
     "arrears_amount",

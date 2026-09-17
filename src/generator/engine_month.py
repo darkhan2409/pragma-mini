@@ -69,6 +69,7 @@ def _sweep_bills(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
             body = dict(bill["body"])
             body["channel"] = "branch"
+            body["is_online"] = False
 
             _emit_money(
                 state, moment, "bill_payment", sources[0].account_id, bill["amount"], "debit",
@@ -230,8 +231,6 @@ def month_end(sim, state: ClientState, day: datetime) -> None:
     state.monthly_cashback = 0
     state.month_purchases = 0
     state.comm_fatigue = max(0, state.comm_fatigue - 4)
-
-    _sweep_bills(sim, state, day, {})
 
     # --- жизненный цикл ---
 

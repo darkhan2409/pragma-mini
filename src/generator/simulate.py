@@ -196,6 +196,14 @@ class ClientState:
 
         return True
 
+    def has_open_loan(self) -> bool:
+        """
+        Есть ли действующий кредит. Закрытый договор не делает
+        клиента заёмщиком.
+        """
+
+        return any(not item.closed for item in self.loans.values())
+
     def held_codes(self, ts: datetime) -> frozenset:
         return frozenset(
             contract.product_code
@@ -752,6 +760,89 @@ class CommunitySimulation:
 
         return catalog.outlets_of(era.settlement, category)
 
+    def _rate_for(self, terms: dict, term) -> float:
+        """
+        Ставка версии договора: прямая или по сроку.
+        """
+
+        rate = terms.get("rate")
+
+        if rate is not None:
+            return float(rate)
+
+        by_term = terms.get("rate_by_term") or {}
+
+        value = by_term.get(str(term)) or by_term.get(term)
+
+        return float(value) if value is not None else 0.28
+
+    def _fit_to_debt_service(
+        self,
+        state: ClientState,
+        ts: datetime,
+        family: str,
+        amount: int,
+        term,
+        terms: dict,
+        floor: int = 0,
+    ) -> int:
+        """
+        Сумма урезается так, чтобы платёж вместе с уже
+        имеющимися обязательствами укладывался в долговую
+        нагрузку банка.
+
+        Если даже минимальная сумма не влезает, она остаётся
+        минимальной, а отказ выносит решение по заявке.
+        """
+
+        products = self.settings.products
+
+        ratio = float(products.bank_rules.get("max_debt_service_ratio", 0.5))
+
+        income = max(1, int(state.persona.true_income))
+
+        open_loans = tuple(item for item in state.loans.values() if not item.closed)
+
+        existing = 0 if family == "refinance" else loan_rules.debt_service(open_loans, ts)
+
+        if family == "credit_card":
+            share = products.credit_card_payment_share_of_limit
+            capacity = int(ratio * income) - existing
+            allowed = int(capacity / share) if share > 0 else amount
+        else:
+            allowed = loan_rules.max_amount_for_dsr(
+                income, existing, self._rate_for(terms, term), int(term or 12), ratio
+            )
+
+        return max(floor, min(amount, allowed)) if allowed > 0 else max(floor, min(amount, floor))
+
+    def _refinance_amount(
+        self,
+        state: ClientState,
+        ts: datetime,
+        drawn: int,
+        low: int,
+        high: int,
+        rng,
+    ) -> int:
+        """
+        Рефинансирование гасит имеющиеся долги и добирает
+        немного наличных сверху.
+        """
+
+        outstanding = sum(
+            loan_rules.payoff_amount(item)
+            for item in state.loans.values()
+            if not item.closed
+        )
+
+        if outstanding <= 0:
+            return drawn
+
+        topup = rng.uniform(*self.settings.products.refinance_cash_topup_share)
+
+        return int(min(high, max(low, outstanding * (1.0 + topup))))
+
     def _contract_terms(self, state: ClientState, view, ts: datetime, rng) -> tuple:
 
         terms = view.version_at(ts).terms
@@ -763,26 +854,38 @@ class CommunitySimulation:
         if family == "debit_card":
             return None, None
 
+        products = self.settings.products
+
+        multiples = products.loan_amount_income_multiple
+
         if family == "credit_card":
             low = int(terms.get("limit_min", 20_000))
             high = int(terms.get("limit_max", 2_000_000))
-            limit = int(min(high, max(low, income * rng.uniform(1.0, 3.5))))
+            limit = int(min(high, max(low, income * rng.uniform(*multiples["credit_card"]))))
+            limit = self._fit_to_debt_service(state, ts, family, limit, None, terms)
             return int(round(limit / 10_000) * 10_000), int(terms.get("installment_months", 0)) or None
 
         if family in ("cash_loan", "refinance"):
             low = int(terms.get("amount_min", 10_000))
             high = int(terms.get("amount_max", 9_500_000))
-            amount = int(min(high, max(low, income * rng.uniform(1.5, 8.0))))
-            term = int(rng.choice([6, 12, 18, 24, 36, 48, 60], p=[0.08, 0.20, 0.14, 0.24, 0.20, 0.08, 0.06]))
+            amount = int(min(high, max(low, income * rng.uniform(*multiples[family]))))
+            term = int(rng.choice(list(products.loan_term_options), p=list(products.loan_term_weights)))
             term = max(int(terms.get("term_min", 6)), min(int(terms.get("term_max", 60)), term))
+
+            if family == "refinance":
+                amount = self._refinance_amount(state, ts, amount, low, high, rng)
+
+            amount = self._fit_to_debt_service(state, ts, family, amount, term, terms, floor=low)
             return int(round(amount / 1_000) * 1_000), term
 
         if family == "installment":
             low = int(terms.get("amount_min", 10_000))
             high = int(terms.get("amount_max", 1_500_000))
-            amount = int(min(high, max(low, income * rng.uniform(0.2, 1.6))))
+            amount = int(min(high, max(low, income * rng.uniform(*multiples["installment"]))))
             options = list(terms.get("term_options", (6, 12, 24)))
-            return int(round(amount / 1_000) * 1_000), int(rng.choice(options))
+            term = int(rng.choice(options))
+            amount = self._fit_to_debt_service(state, ts, family, amount, term, terms, floor=low)
+            return int(round(amount / 1_000) * 1_000), term
 
         if family in ("deposit", "deposit_certificate"):
             minimum = int(terms.get("min_amount", 1_000))

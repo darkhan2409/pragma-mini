@@ -429,6 +429,10 @@ def test_pause_silences_the_client_but_not_the_bank(baseline):
             for item in inside
             if item["event_type"] in silenced_types
             and item["change_initiator"] == "client"
+            # Обслуживание кредита это обязательство, а не
+            # повседневная активность: в паузе клиент всё равно
+            # заводит деньги на счёт к дате платежа.
+            and item["payload"].get("reason") != "topup_before_installment"
         ]
 
         assert not leaked, [item["event_type"] for item in leaked[:5]]

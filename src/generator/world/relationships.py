@@ -57,6 +57,9 @@ class Relationship:
     valid_from: datetime
     valid_to: datetime | None
     household_id: str | None
+    # Деньги ходят в обе стороны: сколько раз в месяц эта связь
+    # присылает деньги клиенту, а не получает их.
+    inbound_frequency: float = 0.0
 
     def active_at(self, ts: datetime) -> bool:
         if ts < self.valid_from:
@@ -112,6 +115,24 @@ def _external(kind: str, seed_text: str) -> Counterpart:
         client_ordinal=None,
         masked_name=masked_name(seed_text),
     )
+
+
+def _inbound_frequency(relation_type: str, rng) -> float:
+    """
+    Как часто связь присылает деньги клиенту.
+
+    Отдельный поток розыгрыша: добавление входящих переводов не
+    должно сдвинуть уже существующие рёбра графа.
+    """
+
+    settings = params_module.active().relationships
+
+    low, high = settings.inbound_frequency_per_month.get(relation_type, (0.0, 0.0))
+
+    if high <= 0.0:
+        return 0.0
+
+    return float(rng.uniform(low, high))
 
 
 def _internal(ordinal: int, client_id: str) -> Counterpart:
@@ -252,6 +273,10 @@ def build_graph(community_id: int, members: tuple, personas: dict) -> CommunityG
                         valid_from=start,
                         valid_to=None,
                         household_id=household_id,
+                        inbound_frequency=_inbound_frequency(
+                            "spouse",
+                            keyed_rng(NS_GRAPH, community_id, 5, ordinal * 100 + partner),
+                        ),
                     )
                 )
 
@@ -315,6 +340,15 @@ def build_graph(community_id: int, members: tuple, personas: dict) -> CommunityG
                         valid_from=start,
                         valid_to=valid_to,
                         household_id=households.get(ordinal),
+                        inbound_frequency=_inbound_frequency(
+                            relation_type,
+                            keyed_rng(
+                                NS_GRAPH,
+                                community_id,
+                                5,
+                                ordinal * 1000 + hash_index(relation_type) * 50 + position,
+                            ),
+                        ),
                     )
                 )
 

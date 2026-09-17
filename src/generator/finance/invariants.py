@@ -36,7 +36,10 @@ CREDIT_EVENTS = frozenset(
         "loan_disbursement",
         "refund",
         "chargeback",
+        # Перевод между своими счетами имеет обе стороны, поэтому
+        # пополнение и снятие вклада бывают и приходом, и расходом.
         "deposit_withdrawal",
+        "deposit_topup",
     }
 )
 
@@ -49,6 +52,7 @@ DEBIT_EVENTS = frozenset(
         "p2p_out",
         "loan_payment",
         "deposit_topup",
+        "deposit_withdrawal",
         "fee_charge",
     }
 )

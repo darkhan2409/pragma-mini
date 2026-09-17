@@ -123,6 +123,9 @@ NS_TRANSFER = 32
 NS_DEVICE = 33
 NS_TEST_ACCOUNT = 34
 NS_PRODUCT_TIME = 35
+NS_REPAY = 36
+NS_LOAN_TERMS = 37
+NS_INBOUND = 38
 
 
 # ============================================================

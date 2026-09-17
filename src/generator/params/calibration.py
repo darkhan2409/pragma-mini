@@ -110,6 +110,18 @@ DEFAULT_TARGETS: tuple = (
     _hypothesis("events_per_client_month_p90", "activity", "events", 150, 220),
     _hypothesis("events_per_client_month_p95", "activity", "events", 220, 300),
     _hypothesis("events_per_client_month_p99", "activity", "events", 400, 600),
+    # --- кредитный риск и денежный поток ---
+    _hypothesis("dpd90_client_share", "credit", "share", 0.03, 0.06,
+                note="доля клиентов, дошедших до просрочки 90+ за окно"),
+    _hypothesis("installment_missed_share", "credit", "share", 0.06, 0.12,
+                note="доля платежей графика, не оплаченных в льготный срок"),
+    _hypothesis("approval_rate_credit", "credit", "share", 0.40, 0.50,
+                note="одобрение по кредитным семействам; по остальным оно близко к единице"),
+    _hypothesis("loan_amount_to_income_median", "credit", "ratio", 1.0, 3.0,
+                note="выдача кредита к месячному доходу"),
+    _hypothesis("inbound_transfers_per_client_month", "channels", "events", 0.5, 2.0,
+                note="входящие переводы от внешних отправителей"),
+
     _hypothesis("zero_month_share", "zero_months", "share", 0.10, 0.15,
                 note="месяцы ВООБЩЕ без записей; полоса из плана, реального эталона нет"),
     _absent("no_client_action_month_share", "zero_months", "share",

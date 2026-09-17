@@ -138,6 +138,21 @@ class RelationshipParams:
         }
     )
 
+    # Деньги ходят в обе стороны: родня и друзья не только
+    # получают переводы, но и присылают их.
+    inbound_frequency_per_month: dict = field(
+        default_factory=lambda: {
+            "spouse": (0.5, 3.0),
+            "relative": (0.1, 1.0),
+            "friend": (0.05, 0.6),
+            "colleague": (0.0, 0.2),
+            "regular_counterparty": (0.1, 0.8),
+            "random_counterparty": (0.0, 0.15),
+        }
+    )
+
+    inbound_amount_share_of_income: tuple = (0.02, 0.25)
+
     # Что происходит при нехватке средств для перевода.
     transfer_shortfall: dict = field(
         default_factory=lambda: {

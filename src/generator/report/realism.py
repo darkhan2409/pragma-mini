@@ -571,6 +571,134 @@ def _finance(data: dict) -> dict:
     }
 
 
+CREDIT_FAMILIES = ("cash_loan", "credit_card", "refinance", "installment")
+
+
+def _credit(data: dict) -> dict:
+    """
+    Кредитный портфель: переходы просрочки, дисциплина платежей,
+    одобрение и размер выдачи.
+
+    Это первое, на что смотрит банковский аналитик, и первое,
+    что выдаёт нереалистичную синтетику.
+    """
+
+    events = data["events"]
+
+    clients = {row["client_id"] for row in data["truth_clients"]}
+
+    income = {row["client_id"]: row.get("true_income") or 0 for row in data["truth_clients"]}
+
+    # У заявки нет колонки семейства: она выводится из каталога
+    # продуктов по product_id.
+    family_by_product = {
+        row["product_id"]: row["product_family"] for row in data["products"]
+    }
+
+    worst: dict[str, int] = defaultdict(int)
+    borrowers: set = set()
+
+    due = paid = missed = partial = 0
+    autopay = manual = 0
+
+    approved: Counter = Counter()
+    decided: Counter = Counter()
+    reject_reasons: Counter = Counter()
+
+    ratios: list = []
+
+    closed: Counter = Counter()
+
+    topups = inbound = declined_payments = 0
+
+    for row in events:
+
+        kind = row["event_type"]
+        payload = row["payload"]
+
+        if kind == "schedule_created":
+            borrowers.add(row["client_id"])
+
+        elif kind == "delinquency_registered":
+            value = payload.get("days_past_due") or 0
+            worst[row["client_id"]] = max(worst[row["client_id"]], value)
+
+        elif kind == "installment_due":
+            due += 1
+
+        elif kind == "installment_paid":
+            paid += 1
+            if (payload.get("amount_paid") or 0) < (payload.get("amount_due") or 0):
+                partial += 1
+
+        elif kind == "installment_missed":
+            missed += 1
+
+        elif kind == "loan_payment":
+            if payload.get("status") == "declined":
+                declined_payments += 1
+            elif payload.get("channel") == "system":
+                autopay += 1
+            else:
+                manual += 1
+
+        elif kind == "application_decision":
+            family = family_by_product.get(payload.get("product_id"))
+            decided[family] += 1
+            if payload.get("decision") == "approved":
+                approved[family] += 1
+            else:
+                reject_reasons[payload.get("reject_reason")] += 1
+
+        elif kind == "loan_disbursement" and payload.get("status") == "approved":
+            base = income.get(row["client_id"]) or 0
+            if base > 0:
+                ratios.append((payload.get("amount") or 0) / base)
+
+        elif kind == "loan_closed":
+            closed[payload.get("reason")] += 1
+
+        elif kind == "transfer_in":
+            if payload.get("reason") == "topup_before_installment":
+                topups += 1
+            elif payload.get("reason") == "inbound":
+                inbound += 1
+
+    total = len(clients) or 1
+
+    credit_decided = sum(decided[name] for name in CREDIT_FAMILIES)
+    credit_approved = sum(approved[name] for name in CREDIT_FAMILIES)
+
+    months = max(1, len(_months_between(HISTORY_START, HISTORY_END)))
+
+    return {
+        "borrowers": len(borrowers),
+        "borrower_share": round(len(borrowers) / total, 4),
+        "dpd_client_share": {
+            f"dpd{level}": round(sum(1 for v in worst.values() if v >= level) / total, 4)
+            for level in (1, 30, 60, 90)
+        },
+        "installments_due": due,
+        "installments_paid": paid,
+        "installments_partial": partial,
+        "installment_missed_share": round(missed / due, 4) if due else None,
+        "autopay_payments": autopay,
+        "manual_payments": manual,
+        "declined_payments": declined_payments,
+        "approval_rate_total": round(sum(approved.values()) / sum(decided.values()), 4)
+        if decided
+        else None,
+        "approval_rate_credit": round(credit_approved / credit_decided, 4)
+        if credit_decided
+        else None,
+        "reject_reasons": dict(reject_reasons.most_common()),
+        "loan_amount_to_income": _quantiles(ratios),
+        "loans_closed": dict(closed.most_common()),
+        "topups_before_installment": topups,
+        "inbound_transfers_per_client_month": round(inbound / total / months, 4),
+    }
+
+
 def _calibration(data: dict, report: dict) -> dict:
 
     targets = data["manifest"].get("calibration_targets", [])
@@ -587,6 +715,11 @@ def _calibration(data: dict, report: dict) -> dict:
         "events_per_client_month_p90": report["activity"]["all_events"].get("p90"),
         "events_per_client_month_p95": report["activity"]["all_events"].get("p95"),
         "events_per_client_month_p99": report["activity"]["all_events"].get("p99"),
+        "dpd90_client_share": report["credit"]["dpd_client_share"]["dpd90"],
+        "installment_missed_share": report["credit"]["installment_missed_share"],
+        "approval_rate_credit": report["credit"]["approval_rate_credit"],
+        "loan_amount_to_income_median": report["credit"]["loan_amount_to_income"].get("p50"),
+        "inbound_transfers_per_client_month": report["credit"]["inbound_transfers_per_client_month"],
         "zero_month_share": report["activity"]["zero_month_share"],
         "segment_share_silent": report["activity"]["segments"].get("silent_0_2"),
         "segment_share_sleepy": report["activity"]["segments"].get("sleepy_3_15"),
@@ -853,6 +986,7 @@ def build_report(raw_dir: Path, stories: int = 6) -> dict:
     report["products"] = _products(data)
     report["fraud"] = _fraud(data)
     report["defects"] = _defects(data)
+    report["credit"] = _credit(data)
     report["finance"] = _finance(data)
     report["calibration"] = _calibration(data, report)
     report["leaks"] = _proxy(data)
@@ -1080,6 +1214,45 @@ def render_markdown(report: dict) -> str:
     finance = report["finance"]
 
     out.append("")
+    credit = report["credit"]
+
+    out.append("## Кредитный портфель")
+    out.append("")
+    out.append(
+        f"Заёмщиков {credit['borrowers']} ({credit['borrower_share']} от всех клиентов). "
+        f"Платежей к сроку {credit['installments_due']}, оплачено {credit['installments_paid']}, "
+        f"из них частично {credit['installments_partial']}."
+    )
+    out.append("")
+    out.append(
+        _table(
+            [[f"DPD {level}+", credit["dpd_client_share"][f"dpd{level}"]] for level in (1, 30, 60, 90)],
+            ["веха просрочки", "доля клиентов"],
+        )
+    )
+    out.append("")
+    out.append(
+        _table(
+            [
+                ["доля пропущенных платежей", credit["installment_missed_share"]],
+                ["платежей автосписанием", credit["autopay_payments"]],
+                ["платежей вручную", credit["manual_payments"]],
+                ["неудачных автосписаний", credit["declined_payments"]],
+                ["пополнений перед платежом", credit["topups_before_installment"]],
+                ["одобрение по кредитным продуктам", credit["approval_rate_credit"]],
+                ["одобрение по всем продуктам", credit["approval_rate_total"]],
+                ["выдача к доходу, медиана", credit["loan_amount_to_income"].get("p50")],
+                ["входящих переводов на клиент-месяц", credit["inbound_transfers_per_client_month"]],
+            ],
+            ["показатель", "значение"],
+        )
+    )
+    out.append("")
+    out.append(_table(list(credit["loans_closed"].items()), ["закрытие кредита", "случаев"]))
+    out.append("")
+    out.append(_table(list(credit["reject_reasons"].items()), ["причина отказа", "случаев"]))
+    out.append("")
+
     out.append("## Финансовые инварианты")
     out.append("")
     out.append(f"Нарушений: {finance['violations']}.")
