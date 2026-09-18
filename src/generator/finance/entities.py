@@ -186,6 +186,10 @@ class Installment:
     principal: int
     interest: int
     paid_amount: int = 0
+    # Сколько тела взноса уже погашено. Без этого счётчика доли
+    # округления частичных платежей оставались висеть на
+    # договоре, и полностью выплаченный кредит не закрывался.
+    principal_paid: int = 0
     paid_at: datetime | None = None
     status: str = "scheduled"
     due_event_id: str | None = None
@@ -239,6 +243,9 @@ class CardCreditState:
     installment_months: int
     purchase_rate: float
     cash_rate: float
+    # Части рассрочки: (месяц срока, сумма, event_id покупки).
+    # Часть помнит свою покупку: возврат снимает долг только по
+    # ней, а не по чужой покупке и не по наличному долгу.
     parts: list = field(default_factory=list)
     cash_principal: int = 0
     accrued_interest: int = 0
@@ -251,11 +258,11 @@ class CardCreditState:
         Сколько частей рассрочки приходится на этот месяц.
         """
 
-        return int(sum(amount for due, amount in self.parts if due <= month_index))
+        return int(sum(amount for due, amount, _ in self.parts if due <= month_index))
 
     @property
     def outstanding(self) -> int:
-        return int(sum(amount for _, amount in self.parts) + self.cash_principal)
+        return int(sum(amount for _, amount, _ in self.parts) + self.cash_principal)
 
 
 @dataclass

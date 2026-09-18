@@ -49,7 +49,6 @@ PROFILE_SCHEMA = pa.schema(
         ("profile_version", pa.int32()),
         ("valid_from", pa.timestamp("us")),
         ("valid_to", pa.timestamp("us")),
-        ("record_time", pa.timestamp("us")),
         ("change_source", pa.string()),
         ("confirmed", pa.bool_()),
         ("change_reason", pa.string()),
@@ -58,20 +57,15 @@ PROFILE_SCHEMA = pa.schema(
 )
 
 
-def as_of(versions: list, ts, record_time=None) -> dict | None:
+def as_of(versions: list, ts) -> dict | None:
     """
     Профиль на дату: последняя версия, которая уже действовала
-    к моменту `ts` и была известна банку к моменту `record_time`.
+    к моменту `ts`.
 
-    `valid_to` здесь намеренно НЕ фильтрует. Новая версия
-    поступает в витрину позже, чем начинает действовать, и
-    закрытие предыдущей по `valid_to` оставляло бы дыру: старая
-    версия уже закрыта, новая ещё не известна, и профиля нет
-    вовсе. Банк в этот момент знал предыдущую версию, и именно
-    её нужно вернуть.
-
-    Смену версии выражает следующая строка: как только её
-    `record_time` наступил, она и окажется последней.
+    `valid_to` здесь намеренно НЕ фильтрует: смену версии
+    выражает следующая строка, и как только её `valid_from`
+    наступил, она и окажется последней. Закрывать предыдущую по
+    `valid_to` незачем, а на границе это оставило бы дыру.
     """
 
     chosen = None
@@ -79,9 +73,6 @@ def as_of(versions: list, ts, record_time=None) -> dict | None:
     for row in versions:
 
         if row["valid_from"] > ts:
-            continue
-
-        if record_time is not None and row["record_time"] > record_time:
             continue
 
         if chosen is None or (
@@ -95,11 +86,12 @@ def as_of(versions: list, ts, record_time=None) -> dict | None:
 
 def known_at(versions: list, eval_ts) -> dict | None:
     """
-    Профиль, каким его видел бы препроцессинг на `eval_ts`:
-    действовал к этому моменту и уже дошёл до витрины.
+    Профиль, каким его видел бы препроцессинг на `eval_ts`.
+    Времени поступления у выгрузки нет, поэтому это то же самое,
+    что версия, действовавшая на `eval_ts`.
     """
 
-    return as_of(versions, eval_ts, record_time=eval_ts)
+    return as_of(versions, eval_ts)
 
 
 __all__ = ["PROFILE_FIELD_TYPES", "PROFILE_SCHEMA", "as_of", "known_at"]

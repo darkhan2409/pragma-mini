@@ -14,6 +14,7 @@ from .config import (
     INITIATOR_CLIENT,
     REGISTRY_START,
 )
+from .finance import deposits as deposit_rules
 from .finance import loans as loan_rules
 from .finance.entities import (
     ACCOUNT_CARD,
@@ -111,7 +112,9 @@ class ClientState:
 
     profile_values: dict = field(default_factory=dict)
     opening_state: dict = field(default_factory=dict)
-    purchases: list = field(default_factory=list)
+    # Возвраты и отмены, назначенные покупкой на будущие дни:
+    # ключ это порядковый номер дня исполнения.
+    pending_refunds: dict = field(default_factory=dict)
     open_bills: list = field(default_factory=list)
     cases: list = field(default_factory=list)
     support_last_by_cause: dict = field(default_factory=dict)
@@ -289,6 +292,16 @@ class CommunitySimulation:
             self.clients[ordinal] = self._prepare(self.personas[ordinal])
 
         self.by_client_id = {state.client_id: state for state in self.clients.values()}
+
+        # Очередь текущего дня. Она открыта во время исполнения:
+        # действие, порождённое другим действием этого же дня,
+        # встаёт в неё по своему времени.
+        self.queue: list = []
+        self.queue_changed = False
+
+    def schedule(self, action: Action) -> None:
+        self.queue.append(action)
+        self.queue_changed = True
 
     # --------------------------------------------------------
     # ПОДГОТОВКА
@@ -656,7 +669,7 @@ class CommunitySimulation:
             if item is None:
                 continue
 
-            amount, term = self._contract_terms(state, item, ts, family_rng)
+            amount, term = self._contract_terms(state, item, ts, family_rng, affordable=False)
 
             # Правила банка действовали и до окна наблюдения:
             # ни лишней карты сверх лимита, ни кредита сверх
@@ -705,6 +718,43 @@ class CommunitySimulation:
         for account in state.ledger.accounts.values():
             if account.kind == ACCOUNT_DEPOSIT:
                 account.balance = _money(persona.true_income * rng.uniform(1.0, 8.0))
+
+        # Вклад предыстории живёт так же, как открытый в окне: у
+        # него есть состояние, ставка и срок. Раньше состояния не
+        # было, и такой вклад не зарабатывал процентов, не
+        # заканчивался и не закрывался досрочно. Срок, вышедший до
+        # окна, считается пролонгированным: ближайшее окончание —
+        # первое внутри окна.
+        for contract in state.contracts.values():
+
+            if contract.product_family not in ("deposit", "deposit_certificate"):
+                continue
+
+            account = state.ledger.get(contract.account_id) if contract.account_id else None
+
+            if account is None or account.balance <= 0 or not contract.is_open_at(HISTORY_START):
+                continue
+
+            terms = contract.terms
+            term = int(contract.term or 12)
+
+            deposit = deposit_rules.open_deposit(
+                contract_id=contract.contract_id,
+                account_id=contract.account_id,
+                amount=account.balance,
+                rate=float(contract.rate or terms.get("rate") or 0.14),
+                opened_at=contract.opened_at,
+                term_months=term,
+                topup=bool(terms.get("topup", False)),
+                withdrawal=bool(terms.get("withdrawal", False)),
+                capitalisation=str(terms.get("capitalisation", "daily")),
+            )
+
+            while deposit.matures_at <= HISTORY_START:
+                deposit.matures_at = cal.add_months(deposit.matures_at, term)
+                contract.renewals += 1
+
+            state.deposits[contract.contract_id] = deposit
 
         # Остаток на первое наблюдение это opening state, а не
         # результат наблюдавшихся проводок.
@@ -882,7 +932,16 @@ class CommunitySimulation:
 
         return int(min(high, max(low, outstanding * (1.0 + topup))))
 
-    def _contract_terms(self, state: ClientState, view, ts: datetime, rng) -> tuple:
+    def _contract_terms(
+        self, state: ClientState, view, ts: datetime, rng, affordable: bool = True
+    ) -> tuple:
+        """
+        Сумма и срок будущего договора.
+
+        affordable: сумма вклада ограничена тем, что клиент может
+        собрать на одном счёте прямо сейчас. Предыстория передаёт
+        False: её остатки разыгрываются позже и отдельно.
+        """
 
         terms = view.version_at(ts).terms
 
@@ -931,7 +990,26 @@ class CommunitySimulation:
             free = max(minimum, state.ledger.total_visible_balance() + state.ledger.hidden_funds())
             amount = int(max(minimum, free * rng.uniform(*self.settings.products.deposit_open_share_of_free_cash)))
             options = list(terms.get("term_options", (12,)))
-            return int(round(amount / 1_000) * 1_000), int(rng.choice(options))
+            term = int(rng.choice(options))
+
+            if affordable:
+                # Вклад кладут с ОДНОГО счёта, подтянув недостающее
+                # наличными или переводом из другого банка. Сумма не
+                # больше того, что клиент способен собрать сейчас;
+                # меньше минимума — вклада не будет. Раньше сумма
+                # считалась от всех денег сразу, финансирование
+                # срывалось, и договор висел открытым без остатка.
+                reachable = state.ledger.payment_capacity(ts) + max(
+                    0,
+                    state.ledger.balance(state.ledger.cash_id),
+                    state.ledger.balance(state.ledger.other_bank_id),
+                )
+                amount = int(min(amount, reachable) // 1_000 * 1_000)
+                if amount < minimum:
+                    return None, term
+                return amount, term
+
+            return int(round(amount / 1_000) * 1_000), term
 
         if family == "insurance":
             price = int(terms.get("price_annual", 12_000))

@@ -36,11 +36,22 @@ class StressEpisode:
 
     def level(self, ts: datetime) -> float:
         """
-        Интенсивность на дату: нарастание, плато, спад.
+        Интенсивность на дату: нарастание, плато, спад, хвост.
+
+        У неразрешённого эпизода конца по существу нет: причина
+        осталась, и после окончания окна давление держится на
+        доле интенсивности до конца истории. Раньше исход
+        unresolved ничем не отличался от восстановления дохода.
         """
 
-        if ts < self.start or ts >= self.end:
+        if ts < self.start:
             return 0.0
+
+        if ts >= self.end:
+            if self.resolution != "unresolved":
+                return 0.0
+            tail = params_module.active().stress.unresolved_tail_share
+            return self.intensity * float(tail)
 
         if ts < self.peak_start:
             span = max(1.0, (self.peak_start - self.start).total_seconds())

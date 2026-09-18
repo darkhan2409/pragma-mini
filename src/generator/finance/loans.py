@@ -136,9 +136,17 @@ def apply_payment(state: LoanState, item: Installment, amount: int, ts: datetime
     item.paid_amount += payable
     item.paid_at = ts
 
-    share = payable / max(1, item.amount)
+    left = max(0, item.principal - item.principal_paid)
 
-    principal_part = int(round(item.principal * share))
+    if item.outstanding == 0:
+        # Последний платёж по взносу добирает остаток тела
+        # целиком: округление долей не оставляет хвоста.
+        principal_part = left
+    else:
+        share = payable / max(1, item.amount)
+        principal_part = min(left, int(round(item.principal * share)))
+
+    item.principal_paid += principal_part
 
     state.principal_outstanding = max(0, state.principal_outstanding - principal_part)
 

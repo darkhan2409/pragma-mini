@@ -576,6 +576,7 @@ def close_loan(state: ClientState, ts: datetime, loan, early: bool, reason: str 
             if item.status in ("scheduled", "due", "partially_paid", "missed"):
                 item.status = "paid"
                 item.paid_amount = item.amount
+                item.principal_paid = item.principal
 
         state.emit(
             state.factory.make(

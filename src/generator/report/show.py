@@ -59,7 +59,9 @@ def load(raw_dir: Path, client_id: str | None, ordinal: int | None) -> dict:
     for row in events:
         row["payload"] = json.loads(row["payload"])
 
-    events.sort(key=lambda row: (row["event_time"], row["sequence_number"]))
+    # Строки уже лежат в порядке ленты; сортировка только по
+    # времени события, устойчиво, чтобы порядок не менялся.
+    events.sort(key=lambda row: row["event_time"])
 
     return {
         "client_id": client_id,
@@ -211,11 +213,6 @@ def render(data: dict, limit: int | None, since: datetime | None,
 
         if row["time_precision"] != "second":
             marks.append(row["time_precision"])
-
-        delay = (row["record_time"] - row["event_time"]).total_seconds() / 3600.0
-
-        if delay >= 24:
-            marks.append(f"+{delay / 24:.0f}д")
 
         out.append(
             f"  {row['event_time'].strftime('%d.%m %H:%M')}  "

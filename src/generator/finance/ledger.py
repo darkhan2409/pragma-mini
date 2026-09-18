@@ -66,6 +66,9 @@ class Ledger:
         self.client_id = client_id
         self.accounts: dict[str, Account] = {}
         self.postings: list[Posting] = []
+        # Проводки по счёту: начисление процентов смотрит только на
+        # свой вклад, а не перебирает всю историю клиента.
+        self.by_account: dict[str, list[Posting]] = {}
         self._counter = 0
 
         self.cash_id = f"cash:{client_id}"
@@ -156,7 +159,30 @@ class Ledger:
 
         self.postings.append(posting)
 
+        for side in (debit, credit):
+            if side in self.accounts:
+                self.by_account.setdefault(side, []).append(posting)
+
         return posting
+
+    def signed_moves(self, account_id: str, start: datetime, stop: datetime) -> list[tuple]:
+        """
+        Знаковые движения по счёту в полуинтервале [start, stop).
+        """
+
+        out: list[tuple] = []
+
+        for posting in self.by_account.get(account_id, ()):
+
+            if not (start <= posting.ts < stop):
+                continue
+
+            if posting.credit == account_id:
+                out.append((posting.ts, posting.amount))
+            else:
+                out.append((posting.ts, -posting.amount))
+
+        return out
 
     # --------------------------------------------------------
 

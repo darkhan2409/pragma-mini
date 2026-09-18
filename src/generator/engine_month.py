@@ -108,7 +108,11 @@ def _close_deposits_early(sim, state: ClientState, day: datetime) -> None:
         if rng.random() >= monthly:
             continue
 
-        _close_deposit(state, day.replace(hour=15), deposit, early=True)
+        # После начисления процентов месяца (23:50) и до снимка
+        # остатков (23:55): штраф считается от всего начисленного,
+        # и лента не показывает процент, пришедший на уже закрытый
+        # счёт.
+        _close_deposit(state, day.replace(hour=23, minute=52), deposit, early=True)
 
 
 def _withdraw_consent(state: ClientState, day: datetime) -> None:
@@ -337,6 +341,7 @@ def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_ev
         INITIATOR_SYSTEM,
         correlation_id=contract_id,
         link_type="schedule",
+        post=False,
     )
 
     applied = card_rules.apply_card_payment(credit, payment, month_index)
@@ -516,28 +521,10 @@ def month_end(sim, state: ClientState, day: datetime) -> None:
         if deposit.closed:
             continue
 
-        account = state.ledger.get(deposit.account_id)
-
-        if account is None or account.balance <= 0:
+        if state.ledger.get(deposit.account_id) is None:
             continue
 
-        interest = deposit_rules.monthly_interest(deposit, account.balance, month)
-
-        if interest > 0:
-            _emit_money(
-                state, ts, "interest_credit", account.account_id, interest, "credit",
-                COUNTERPART_BANK,
-                {
-                    "channel": "system",
-                    "contract_id": contract_id,
-                    "accrual_period": month.strftime("%Y-%m"),
-                    "reason": "periodic_contract_rule",
-                    "merchant_country": "KZ",
-                },
-                INITIATOR_SYSTEM,
-                correlation_id=contract_id,
-                link_type="contract",
-            )
+        _credit_deposit_interest(state, ts, deposit, month)
 
         if deposit_rules.matured(deposit, day):
             _close_deposit(state, ts, deposit)
@@ -658,13 +645,54 @@ def month_end(sim, state: ClientState, day: datetime) -> None:
 
     # --- версия профиля ---
 
+    # Считается последним: к этому моменту все начисления,
+    # выписки и закрытия месяца уже прошли.
     _update_profile(state, day)
+
+
+def _credit_deposit_interest(state: ClientState, ts: datetime, deposit, month: datetime) -> int:
+    """
+    Проценты месяца по вкладу.
+
+    Считаются по остатку каждого дня месяца, а не по остатку на
+    его конец: вклад, открытый или снятый в середине, зарабатывает
+    ровно за прожитые дни. Зачисленное запоминается у вклада: при
+    досрочном закрытии пересчитывается именно оно.
+    """
+
+    interest = deposit_rules.monthly_interest(deposit, state.ledger, month)
+
+    if interest <= 0:
+        return 0
+
+    _emit_money(
+        state, ts, "interest_credit", deposit.account_id, interest, "credit",
+        COUNTERPART_BANK,
+        {
+            "channel": "system",
+            "contract_id": deposit.contract_id,
+            "accrual_period": month.strftime("%Y-%m"),
+            "reason": "periodic_contract_rule",
+            "merchant_country": "KZ",
+        },
+        INITIATOR_SYSTEM,
+        correlation_id=deposit.contract_id,
+        link_type="contract",
+    )
+
+    deposit.accrued += interest
+
+    return interest
 
 
 def _close_deposit(state: ClientState, ts: datetime, deposit, early: bool = False) -> None:
     """
     Срок вышел: депозит либо пролонгируется на действующих
     условиях, либо закрывается с переводом остатка на карту.
+
+    Досрочное закрытие (early) пролонгации не знает и стоит
+    клиенту начисленных процентов: они пересчитываются по ставке
+    до востребования и возвращаются банку до выплаты остатка.
     """
 
     settings = params_module.active().products
@@ -733,6 +761,38 @@ def _close_deposit(state: ClientState, ts: datetime, deposit, early: bool = Fals
 
         return
 
+    reason = "early_closure" if early else "matured"
+
+    if early:
+
+        # Досрочно закрытый вклад теряет начисленные проценты:
+        # они пересчитываются по ставке до востребования и
+        # возвращаются банку. Списание идёт ДО выплаты остатка,
+        # чтобы на карту ушло ровно причитающееся. Раньше early
+        # лишь запрещал пролонгацию, а закрытие записывалось как
+        # matured с полной выплатой.
+        penalty = min(
+            deposit_rules.early_penalty(deposit, ts, deposit.accrued),
+            max(0, account.balance),
+        )
+
+        if penalty > 0:
+
+            _emit_money(
+                state, ts, "fee_charge", account.account_id, penalty, "debit", COUNTERPART_BANK,
+                {
+                    "channel": "system",
+                    "contract_id": deposit.contract_id,
+                    "reason": "early_closure",
+                    "merchant_country": "KZ",
+                },
+                INITIATOR_SYSTEM,
+                correlation_id=deposit.contract_id,
+                link_type="contract",
+            )
+
+            ts = ts + timedelta(seconds=2)
+
     target = state.primary_card_account(ts)
 
     if target is not None and account.balance > 0:
@@ -741,7 +801,7 @@ def _close_deposit(state: ClientState, ts: datetime, deposit, early: bool = Fals
 
         _own_transfer(
             state, ts, "deposit_withdrawal", account.account_id, target.account_id,
-            account.balance, deposit.contract_id, "matured",
+            account.balance, deposit.contract_id, reason,
         )
 
     deposit.closed = True
@@ -750,7 +810,7 @@ def _close_deposit(state: ClientState, ts: datetime, deposit, early: bool = Fals
     contract.closed_at = ts
     account.closed_at = ts
 
-    emit_product_closed(state, ts, contract, "matured")
+    emit_product_closed(state, ts, contract, reason)
 
 
 def _update_state(state: ClientState, day: datetime) -> None:
@@ -810,9 +870,31 @@ def _update_state(state: ClientState, day: datetime) -> None:
         state.closed_at = None
 
 
-def _update_profile(state: ClientState, day: datetime) -> None:
+def _update_profile(
+    state: ClientState,
+    day: datetime,
+    moment: datetime | None = None,
+    reason: str = "monthly_recalculation",
+) -> None:
+    """
+    Версия профиля на момент её расчёта.
+
+    Профиль считается ПОСЛЕ операций дня: начислений, выписок и
+    закрытий. Датировать его началом дня нельзя — тогда утренняя
+    строка знает вечерний остаток и вечернюю утилизацию лимита,
+    а это утечка внутри дня.
+
+    Версии раньше регистрации не бывает: у человека, который ещё
+    не клиент, банк профиля не ведёт.
+    """
 
     persona = state.persona
+
+    if moment is None:
+        moment = day.replace(hour=23, minute=59, second=0, microsecond=0)
+
+    if moment < persona.relationship_start:
+        return
 
     values = dict(state.profile_values)
 
@@ -852,22 +934,19 @@ def _update_profile(state: ClientState, day: datetime) -> None:
     if values == state.profile_values and state.profile_versions:
         return
 
-    rng = keyed_rng(NS_LEDGER, state.ordinal, day.toordinal(), 99)
-
     version = len(state.profile_versions) + 1
 
     if state.profile_versions:
-        state.profile_versions[-1]["valid_to"] = day
+        state.profile_versions[-1]["valid_to"] = moment
 
     row = {
         "client_id": state.client_id,
         "profile_version": version,
-        "valid_from": day,
+        "valid_from": moment,
         "valid_to": None,
-        "record_time": day + timedelta(hours=int(rng.integers(1, 30))),
         "change_source": "system",
         "confirmed": True,
-        "change_reason": "monthly_recalculation",
+        "change_reason": reason,
     }
 
     row.update({name: values.get(name) for name in PROFILE_FIELDS})
@@ -895,28 +974,43 @@ def finish(sim) -> CommunityResult:
 
         state = sim.clients[ordinal]
 
-        _emit_refunds(state)
+        # Остаток проставляется по ПОЛНОЙ ленте клиента, до
+        # дефектов наблюдаемости: balance_after это состояние
+        # счёта, а не пересчёт по тому, что доехало до витрины.
+        assign_balances(state, sorted(state.events, key=_tape_order))
 
-        observed, corrections = defect_module.apply(state.events, ordinal)
+        observed, corrections, lost = defect_module.apply(state.events, ordinal)
 
-        observed.sort(
-            key=lambda item: (
-                item.event_time,
-                EVENT_TYPE_PRIORITY.get(item.event_type, 99),
-                item.event_version,
-                item.event_id,
-            )
-        )
-
-        _replay_balances(state, observed)
+        observed.sort(key=_tape_order)
 
         # Ошибка витрины вносится последней: остатки уже
         # посчитаны по настоящим суммам, и опечатка остаётся
         # только в той версии, которую банк потом исправил.
         defect_module.apply_first_version_errors(observed, corrections)
 
-        for index, event in enumerate(observed):
-            event.sequence_number = index
+        # Потерянная наблюдением строка остаётся в скрытой истине:
+        # по ней двигались деньги, и разрыв цепочки остатков в
+        # выгрузке объясняется именно ею. В RAW её нет.
+        for event in lost:
+            state.note(
+                event.event_time,
+                "unobserved_row",
+                event.source,
+                {
+                    "event_id": event.event_id,
+                    "event_type": event.event_type,
+                    "account_id": event.payload.get("account_id"),
+                    "amount": event.payload.get("amount"),
+                    "direction": event.payload.get("direction"),
+                    "status": event.payload.get("status"),
+                    "counterparty": event.payload.get("counterparty"),
+                },
+            )
+
+        # Порядок ленты несёт сам список: строки клиента уходят
+        # в файл подряд в этом порядке. Отдельного номера записи
+        # в выгрузке нет.
+        for event in observed:
             events.append(_row(event))
 
         profile_versions.extend(state.profile_versions)
@@ -976,69 +1070,41 @@ def finish(sim) -> CommunityResult:
     )
 
 
-def _emit_refunds(state: ClientState) -> None:
+def _tape_order(event) -> tuple:
     """
-    Возвраты и отмены: ссылаются на исходную операцию и не
-    превышают её сумму.
+    Порядок строк клиента в файле выгрузки.
     """
 
-    for plan in defect_module.plan_refunds(state.purchases):
-
-        if plan["ts"] >= HISTORY_END:
-            continue
-
-        cause = plan["cause"]
-
-        account_id = cause.payload.get("account_id")
-
-        if account_id is None:
-            continue
-
-        body = {
-            "channel": "system",
-            "card_id": cause.payload.get("card_id"),
-            "merchant_id": cause.payload.get("merchant_id"),
-            "outlet_id": cause.payload.get("outlet_id"),
-            "merchant_name": cause.payload.get("merchant_name"),
-            "mcc": cause.payload.get("mcc"),
-            "merchant_city": cause.payload.get("merchant_city"),
-            "merchant_country": cause.payload.get("merchant_country"),
-            "cause_event_id": cause.event_id,
-            "reason": plan["kind"],
-            "is_online": cause.payload.get("is_online"),
-            "is_subscription": False,
-        }
-
-        _emit_money(
-            state,
-            plan["ts"],
-            plan["kind"],
-            account_id,
-            int(plan["amount"]),
-            "credit",
-            f"merchant:{cause.payload.get('outlet_id')}"
-            if cause.payload.get("outlet_id")
-            else "external:merchant",
-            body,
-            INITIATOR_SYSTEM,
-            correlation_id=cause.event_id,
-            link_type=plan["kind"],
-        )
+    return (
+        event.event_time,
+        EVENT_TYPE_PRIORITY.get(event.event_type, 99),
+        event.event_version,
+        event.event_id,
+    )
 
 
-def _replay_balances(state: ClientState, observed: list) -> None:
+def assign_balances(state: ClientState, tape: list) -> None:
     """
-    balance_after пересчитывается по ИТОГОВОМУ порядку ленты,
-    уже после дефектов наблюдаемости.
+    Проставляет balance_after по ПОЛНОЙ ленте клиента, в том
+    порядке, в котором строки лягут в файл.
 
-    Внутри симуляции проводки применяются в порядке принятия
-    решений, а дефекты вдобавок огрубляют время части записей.
-    Наблюдаемый остаток обязан продолжать предыдущий остаток
-    того же счёта, поэтому цепочка строится по тому порядку,
-    в котором строки лягут в датасет.
+    Зачем пересчёт вообще нужен: внутри симуляции проводки
+    применяются в порядке принятия решений, а часть записей
+    датируется прошлым или будущим относительно этого момента
+    (пополнение перед платежом, возврат покупки, конец месяца).
+    Наблюдаемый остаток обязан продолжать предыдущий остаток того
+    же счёта, поэтому running-баланс раскладывается по порядку
+    ленты. Суммы при этом настоящие, и итог совпадает с ledger.
 
-    Повторная доставка и исправление несут ТОТ ЖЕ остаток, что
-    и первая версия записи: новых денег они не создают.
+    Почему по полной, а не по наблюдаемой ленте: строка, которую
+    сбой источника не донёс до витрины, это потеря НАБЛЮДЕНИЯ, а
+    не отмена движения денег. Пересчёт по наблюдаемой ленте
+    переписывал бы всю последующую цепочку так, будто зачисления
+    не было, и выгрузка врала бы о деньгах. Разрыв должен
+    остаться видимым, а не исчезнуть.
+
+    Дубли и исправления получают остаток копированием payload и
+    здесь не участвуют: новых денег они не создают.
     """
 
     balances = {
@@ -1047,9 +1113,7 @@ def _replay_balances(state: ClientState, observed: list) -> None:
         if account.visible
     }
 
-    applied: dict = {}
-
-    for event in observed:
+    for event in tape:
 
         payload = event.payload
 
@@ -1061,23 +1125,11 @@ def _replay_balances(state: ClientState, observed: list) -> None:
         if payload.get("status") != "approved":
             continue
 
-        # Повторная доставка и исправление получают ВСЁ, что
-        # пересчёт записал в первую версию. Иначе версии одной
-        # записи разошлись бы по полям, которых исправление
-        # вообще не касалось.
-        if event.event_id in applied:
-            payload.update(applied[event.event_id])
-            continue
-
         if event.event_type == "balance_snapshot":
             value = balances[account_id]
-            written = {
-                "balance_after": value,
-                "amount": abs(value),
-                "direction": "credit" if value >= 0 else "debit",
-            }
-            payload.update(written)
-            applied[event.event_id] = written
+            payload["balance_after"] = value
+            payload["amount"] = abs(value)
+            payload["direction"] = "credit" if value >= 0 else "debit"
             continue
 
         amount = int(payload.get("amount") or 0)
@@ -1088,8 +1140,6 @@ def _replay_balances(state: ClientState, observed: list) -> None:
 
         payload["balance_after"] = balances[account_id]
 
-        applied[event.event_id] = {"balance_after": balances[account_id]}
-
 
 def _row(event) -> dict:
 
@@ -1099,10 +1149,8 @@ def _row(event) -> dict:
         "event_type": event.event_type,
         "source": event.source,
         "event_time": event.event_time,
-        "record_time": event.record_time,
         "effective_at": event.effective_at,
         "time_precision": event.time_precision,
-        "sequence_number": event.sequence_number,
         "event_version": event.event_version,
         "change_initiator": event.change_initiator,
         "correlation_id": event.correlation_id,
@@ -1189,7 +1237,13 @@ def _truth_plan(state: ClientState) -> list:
                 "ts": episode.end,
                 "kind": "stress_end",
                 "key": episode.resolution,
-                "value": json.dumps({"trigger": episode.trigger}, ensure_ascii=False),
+                # Исход эпизода это ПЛАН скрытой истории, а не
+                # вывод из поведения клиента: отчёт подписывает
+                # его именно так и не выдаёт за наблюдение.
+                "value": json.dumps(
+                    {"trigger": episode.trigger, "planned": True},
+                    ensure_ascii=False,
+                ),
             }
         )
 
@@ -1248,4 +1302,4 @@ def _truth_plan(state: ClientState) -> list:
 _HANDLERS["bill_sweep"] = _sweep_bills
 
 
-__all__ = ["finish", "month_end"]
+__all__ = ["assign_balances", "finish", "month_end"]

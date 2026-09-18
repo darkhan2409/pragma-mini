@@ -16,16 +16,17 @@ from ..rng import stable_hash
 # КОНВЕРТ СОБЫТИЯ
 # ============================================================
 #
-#   event_time      когда действие или факт произошли
-#   record_time     когда запись стала доступна банку
+#   event_time      когда действие или факт произошли; это
+#                   единственное время записи: момента
+#                   поступления в хранилище у выгрузки нет
 #   effective_at    с какого момента действует изменение
 #   time_precision  точность времени источника
 #   event_version   версия исправляемой записи
 #   correlation_id  связь частей одной бизнес-цепочки
 #   link_type       тип связи
 #
-# Исправление сохраняет event_id, увеличивает event_version и
-# получает новый record_time. Повторная доставка той же записи
+# Исправление сохраняет event_id и увеличивает event_version.
+# Повторная доставка несёт ту же версию и то же содержимое и
 # отличается от нового бизнес-события именно этим.
 #
 # Неприменимое поле отсутствует или равно null. Заполнять его
@@ -41,36 +42,39 @@ class Event:
     source: str
     event_time: datetime
     payload: dict
-    record_time: datetime | None = None
     effective_at: datetime | None = None
     time_precision: str = "second"
-    sequence_number: int = 0
     event_version: int = 1
     change_initiator: str = INITIATOR_SYSTEM
     correlation_id: str | None = None
     link_type: str | None = None
     is_test_account: bool = False
 
-    def copy_as_duplicate(self, record_time: datetime) -> Event:
+    def copy_as_duplicate(self) -> Event:
         """
-        Повторная доставка той же записи: версия прежняя,
-        record_time другой.
+        Повторная доставка той же записи: версия, содержимое и
+        вид связи прежние.
+
+        Метки доставки в конверте нет намеренно. Дубль узнаётся по
+        паре (event_id, event_version) с тем же содержимым, а не по
+        особому link_type: метка затирала бы деловой вид связи, и
+        повторно доставленный перевод переставал бы быть переводом.
         """
 
-        return replace(self, record_time=record_time, link_type="duplicate")
+        return replace(self)
 
-    def copy_as_correction(self, record_time: datetime, payload: dict) -> Event:
+    def copy_as_correction(self, payload: dict) -> Event:
         """
-        Исправление: тот же event_id, версия выше, новый
-        record_time.
+        Исправление: тот же event_id, версия выше, вид связи тот же.
+
+        Исправление уточняет содержимое записи и не меняет того,
+        частью какой цепочки она была.
         """
 
         return replace(
             self,
             payload=payload,
-            record_time=record_time,
             event_version=self.event_version + 1,
-            link_type="correction",
         )
 
 
@@ -115,7 +119,6 @@ class EventFactory:
             source=source,
             event_time=ts,
             payload=clean,
-            record_time=None,
             effective_at=effective_at if effective_at is not None else ts,
             time_precision=precision or SOURCE_PRECISION[source],
             change_initiator=initiator,

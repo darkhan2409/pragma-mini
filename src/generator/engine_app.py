@@ -368,6 +368,9 @@ def _own_transfer(
     Перевод между своими счетами: две стороны с одинаковой
     суммой и отметкой own_account, чтобы деньги не выглядели
     ни внешним расходом, ни внешним доходом.
+
+    Проводка одна: её делает первая нога, вторая только записывает
+    событие с остатком. Иначе деньги двигались бы дважды.
     """
 
     debit = _emit_money(
@@ -397,6 +400,7 @@ def _own_transfer(
         INITIATOR_SYSTEM,
         correlation_id=contract_id,
         link_type="contract",
+        post=False,
     )
 
 
@@ -463,8 +467,6 @@ def _on_communication(sim, state: ClientState, ts: datetime, payload: dict) -> N
                 "product_id": product_id,
                 "purpose": contact.purpose,
                 "delivered": contact.delivered,
-                "day_of_week": ts.weekday(),
-                "hour": ts.hour,
             },
             initiator=INITIATOR_BANK,
             correlation_id=contact.offer_id,

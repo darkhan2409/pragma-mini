@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from collections import Counter, defaultdict
+from datetime import timedelta
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -136,35 +137,99 @@ def test_envelope_is_filled(dataset):
         floor = REGISTRY_START if row["source"] == "product_events" else HISTORY_START
 
         assert floor <= row["event_time"] < HISTORY_END
-        assert row["record_time"] is not None
-        assert row["record_time"] >= row["event_time"]
         assert row["time_precision"] in TIME_PRECISIONS
         assert row["event_version"] >= 1
         assert row["change_initiator"] in CHANGE_INITIATORS
         assert row["link_type"] is None or row["link_type"] in LINK_TYPES
 
 
-def test_sequence_numbers_are_dense(dataset):
+def test_world_seed_and_population_seed_are_independent():
+    """
+    Общий world_seed даёт группам один мир, разные seed популяции —
+    разных клиентов. Другой world_seed создаёт другой мир, не
+    трогая клиентов.
+    """
 
-    by_client = defaultdict(list)
+    from src.generator import params as params_module
+    from src.generator import rng as rng_module
+    from src.generator.world import communities, geography, merchants
+
+    settings = params_module.load(None).with_overrides({"merchants": {"catalog_scale": 0.02}})
+    params_module.activate(settings)
+
+    before = rng_module.state_key()
+
+    def snapshot(population_seed: int, world_seed: int):
+        rng_module.configure(population_seed, settings.fingerprint(), world_seed)
+        places = tuple(item.name for item in geography.settlements())
+        first = geography.settlements()[0]
+        brands = tuple(
+            str(brand)
+            for category in merchants.available_categories(first)[:3]
+            for brand in merchants.brands_for(category, first)
+        )
+        clients = tuple(communities.client_id(index) for index in range(1, 6))
+        return places, brands, clients
+
+    try:
+        train = snapshot(101, 42)
+        val = snapshot(202, 42)
+        test = snapshot(303, 42)
+        other_world = snapshot(101, 999)
+    finally:
+        rng_module.configure(before[0], before[2], before[1])
+
+    # Мир общий: география и бренды совпадают у трёх групп.
+    assert train[0] == val[0] == test[0]
+    assert train[1] == val[1] == test[1]
+
+    # Популяции разные и не пересекаются.
+    assert len({train[2], val[2], test[2]}) == 3
+    assert not set(train[2]) & set(val[2])
+    assert not set(val[2]) & set(test[2])
+    assert not set(train[2]) & set(test[2])
+
+    # Другой мир при той же популяции: справочники другие, клиенты те же.
+    assert other_world[1] != train[1]
+    assert other_world[2] == train[2]
+
+
+def test_client_rows_lie_together_in_tape_order(dataset):
+    """
+    Номера записи в выгрузке нет: порядок несёт сама лента.
+    Строки клиента лежат подряд, и время события внутри клиента
+    не убывает.
+    """
+
+    seen: list[str] = []
+    previous: dict[str, object] = {}
 
     for row in dataset["events"]:
-        by_client[row["client_id"]].append(row["sequence_number"])
 
-    for client_id, numbers in by_client.items():
-        assert sorted(numbers) == list(range(len(numbers))), client_id
+        client_id = row["client_id"]
+
+        if not seen or seen[-1] != client_id:
+            assert client_id not in seen, f"строки клиента {client_id} разорваны"
+            seen.append(client_id)
+
+        last = previous.get(client_id)
+        assert last is None or row["event_time"] >= last, client_id
+        previous[client_id] = row["event_time"]
+
+    assert len(seen) > 1
 
 
 def test_corrections_keep_the_event_id(dataset):
     """
-    Исправление сохраняет event_id, повышает версию и получает
-    более поздний record_time.
+    Исправление сохраняет event_id, повышает версию и стоит в
+    ленте после исходной записи. Место в ленте это позиция
+    строки: отдельного номера записи в выгрузке нет.
     """
 
     versions = defaultdict(list)
 
-    for row in dataset["events"]:
-        versions[row["event_id"]].append(row)
+    for order, row in enumerate(dataset["events"]):
+        versions[row["event_id"]].append((order, row))
 
     corrected = 0
 
@@ -173,10 +238,10 @@ def test_corrections_keep_the_event_id(dataset):
         if len(rows) < 2:
             continue
 
-        rows.sort(key=lambda item: (item["event_version"], item["record_time"]))
+        rows.sort(key=lambda item: (item[1]["event_version"], item[0]))
 
-        for left, right in zip(rows, rows[1:]):
-            assert right["record_time"] >= left["record_time"]
+        for (left_at, left), (right_at, right) in zip(rows, rows[1:]):
+            assert right_at > left_at
             assert right["event_version"] >= left["event_version"]
             if right["event_version"] > left["event_version"]:
                 corrected += 1
@@ -280,6 +345,71 @@ def test_coverage_covers_every_client_and_source(dataset):
             assert row["first_available_at"] <= row["first_seen"]
 
 
+def test_profile_is_known_only_after_it_is_computed(dataset):
+    """
+    Версия профиля датируется моментом своего расчёта.
+
+    Профиль месяца считается ПОСЛЕ вечерних начислений, выписок и
+    закрытий. Дата 00:00 того же дня означала бы, что утренняя
+    строка знает вечерний остаток и вечернюю утилизацию лимита.
+
+    Первой версии раньше клиента тоже не бывает: пришедший до
+    окна известен банку с его начала, зарегистрированный внутри
+    окна — с момента регистрации.
+    """
+
+    in_window = {
+        row["client_id"]: bool(row["registered_in_window"])
+        for row in dataset["truth_clients"]
+    }
+
+    by_client = defaultdict(list)
+
+    for row in dataset["profile"]:
+        by_client[row["client_id"]].append(row)
+
+    first_moment = {}
+
+    for row in dataset["events"]:
+        known = first_moment.get(row["client_id"])
+        if known is None or row["event_time"] < known:
+            first_moment[row["client_id"]] = row["event_time"]
+
+    assert by_client
+
+    for client_id, rows in by_client.items():
+
+        rows.sort(key=lambda item: item["profile_version"])
+
+        first = rows[0]
+
+        assert first["valid_from"] >= HISTORY_START, client_id
+
+        if in_window[client_id]:
+            assert first["change_reason"] == "registration", client_id
+        else:
+            assert first["change_reason"] == "opening_state", client_id
+            assert first["valid_from"] == HISTORY_START, client_id
+
+        # Профиль не может быть известен раньше первой записи о
+        # клиенте, если она вообще есть.
+        moment = first_moment.get(client_id)
+
+        if moment is not None and in_window[client_id]:
+            assert first["valid_from"] <= moment, client_id
+
+        for row in rows[1:]:
+
+            assert row["change_reason"] == "monthly_recalculation", client_id
+
+            # Конец дня, после начислений месяца.
+            assert (row["valid_from"].hour, row["valid_from"].minute) == (23, 59), client_id
+
+            # Пересчёт бывает в последний день месяца.
+            following = row["valid_from"] + timedelta(days=1)
+            assert following.month != row["valid_from"].month, client_id
+
+
 def test_profile_is_versioned(dataset):
 
     by_client = defaultdict(list)
@@ -346,6 +476,25 @@ def test_test_accounts_are_marked(dataset):
 # ------------------------------------------------------------
 
 
+def _unobserved(dataset: dict) -> dict:
+    """
+    Строки, потерянные сбоем источника, по клиентам.
+
+    В RAW их нет, но остаток следующей наблюдаемой строки их
+    учёл: без них разрыв цепочки выглядел бы ошибкой арифметики.
+    """
+
+    truth_by_client = defaultdict(list)
+
+    for row in dataset["truth_events"]:
+        truth_by_client[row["client_id"]].append(row)
+
+    return {
+        client_id: invariants_module.unobserved_rows(rows)
+        for client_id, rows in truth_by_client.items()
+    }
+
+
 def test_financial_invariants_hold(dataset):
 
     by_client = defaultdict(list)
@@ -353,7 +502,7 @@ def test_financial_invariants_hold(dataset):
     for row in dataset["events"]:
         by_client[row["client_id"]].append(row)
 
-    problems = invariants_module.check_all(by_client)
+    problems = invariants_module.check_all(by_client, _unobserved(dataset))
 
     assert not problems, [str(item) for item in problems[:5]]
 
@@ -400,17 +549,39 @@ def test_periodic_charges_have_no_cause_but_have_a_period(dataset):
     assert checked > 0
 
 
+def _acting_rows(rows: list) -> dict:
+    """
+    Действующая версия каждой записи.
+
+    Первая версия может нести ошибку витрины, и банк исправляет
+    её следующей версией. Сравнивать суммы нужно по тому, что
+    банк утверждает сейчас, а не по опечатке, которую он уже
+    признал неверной.
+    """
+
+    acting: dict = {}
+
+    for row in rows:
+        known = acting.get(row["event_id"])
+        if known is None or row["event_version"] > known["event_version"]:
+            acting[row["event_id"]] = row
+
+    return acting
+
+
 def test_refunds_reference_their_purchase(dataset):
+
+    acting = _acting_rows(dataset["events"])
 
     amounts = {
         row["event_id"]: row["payload"]["amount"]
-        for row in dataset["events"]
+        for row in acting.values()
         if row["event_type"] == "purchase"
     }
 
     refunds = [
         row
-        for row in dataset["events"]
+        for row in acting.values()
         if row["event_type"] in ("refund", "reversal", "chargeback")
     ]
 
@@ -509,6 +680,190 @@ def test_same_seed_same_content_across_workers_and_chunks(dataset, tmp_path):
     assert other_chunk["content_sha256"] == dataset["manifest"]["content_sha256"]
 
 
+def _crash_after(batches: int):
+    """
+    Прогон, который падает после указанного числа пачек.
+    """
+
+    from src.generator import emit as emit_module
+
+    real = emit_module._run_batch
+    done = {"count": 0}
+
+    def crashing(job):
+        if done["count"] >= batches:
+            raise RuntimeError("прогон прерван")
+        done["count"] += 1
+        return real(job)
+
+    return emit_module, real, crashing
+
+
+def test_resume_completes_a_partial_run(dataset, tmp_path):
+    """
+    Продолженный прогон даёт ровно тот же датасет, что и прогон
+    без остановки.
+
+    Раньше манифест собирался из результатов ТЕКУЩЕГО прогона, и
+    после `--resume` в нём стояли строки и контрольные суммы
+    одной последней пачки, хотя в файлах лежали все.
+    """
+
+    from src.generator.emit import PARTS_DIR, RUN_FILE
+
+    out = tmp_path / "partial"
+
+    module, real, crashing = _crash_after(1)
+
+    module._run_batch = crashing
+
+    try:
+        with pytest.raises(RuntimeError):
+            _emit(out, workers=1, chunk_clients=COMMUNITY_SIZE)
+    finally:
+        module._run_batch = real
+
+    # Прерванный прогон оставляет черновик и свою карточку.
+    assert (out / RUN_FILE).exists()
+    assert (out / PARTS_DIR).exists()
+    assert not (out / "manifest.json").exists()
+
+    from src.generator.emit import generate_dataset
+
+    generate_dataset(
+        total_clients=CLIENTS,
+        out_dir=out,
+        seed=42,
+        workers=1,
+        chunk_clients=COMMUNITY_SIZE,
+        catalog_scale=CATALOG_SCALE,
+        community_size=COMMUNITY_SIZE,
+        resume=True,
+        quiet=True,
+    )
+
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+
+    assert manifest["rows"] == dataset["manifest"]["rows"]
+    assert manifest["content_sha256"] == dataset["manifest"]["content_sha256"]
+    assert manifest["file_sha256"] == dataset["manifest"]["file_sha256"]
+
+    # Манифест сходится с файлами.
+    assert pq.read_table(out / "events.parquet").num_rows == manifest["rows"]["events"]
+
+    # Черновик убран только после записи результата.
+    assert not (out / PARTS_DIR).exists()
+    assert not (out / RUN_FILE).exists()
+
+
+def test_resume_refuses_other_config(tmp_path):
+    """
+    Продолжить можно только тот же прогон. Куски разных миров в
+    одной выгрузке были бы неотличимы от настоящих данных.
+    """
+
+    from src.generator.emit import GenerationError, generate_dataset
+
+    out = tmp_path / "partial"
+
+    module, real, crashing = _crash_after(1)
+
+    module._run_batch = crashing
+
+    try:
+        with pytest.raises(RuntimeError):
+            _emit(out, workers=1, chunk_clients=COMMUNITY_SIZE)
+    finally:
+        module._run_batch = real
+
+    with pytest.raises(GenerationError) as error:
+        generate_dataset(
+            total_clients=CLIENTS,
+            out_dir=out,
+            seed=7,
+            workers=1,
+            chunk_clients=COMMUNITY_SIZE,
+            catalog_scale=CATALOG_SCALE,
+            community_size=COMMUNITY_SIZE,
+            resume=True,
+            quiet=True,
+        )
+
+    assert "seed" in str(error.value)
+
+
+def test_resume_refuses_a_missing_part(tmp_path):
+    """
+    Маркер пачки обещает её части. Части нет — черновик испорчен,
+    и продолжать сборку нельзя.
+
+    Раньше склейка молча пропускала отсутствующий part-файл:
+    манифест брал число строк из маркера, а итоговая таблица
+    оказывалась короче обещанного.
+    """
+
+    from src.generator.emit import PARTS_DIR, GenerationError, generate_dataset
+
+    out = tmp_path / "partial"
+
+    module, real, crashing = _crash_after(1)
+
+    module._run_batch = crashing
+
+    try:
+        with pytest.raises(RuntimeError):
+            _emit(out, workers=1, chunk_clients=COMMUNITY_SIZE)
+    finally:
+        module._run_batch = real
+
+    (out / PARTS_DIR / "events-00000.parquet").unlink()
+
+    with pytest.raises(GenerationError, match="черновик повреждён"):
+        generate_dataset(
+            total_clients=CLIENTS,
+            out_dir=out,
+            seed=42,
+            workers=1,
+            chunk_clients=COMMUNITY_SIZE,
+            catalog_scale=CATALOG_SCALE,
+            community_size=COMMUNITY_SIZE,
+            resume=True,
+            quiet=True,
+        )
+
+    assert not (out / "manifest.json").exists()
+
+
+def test_every_planned_action_has_a_handler():
+    """
+    Вид действия без обработчика это потерянный механизм
+    поведения, а не пустой день.
+    """
+
+    import ast
+    import inspect
+
+    from src.generator import engine as engine_module
+
+    source = inspect.getsource(engine_module._plan_day)
+
+    kinds = {
+        node.args[1].value
+        for node in ast.walk(ast.parse(source.lstrip()))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "add"
+        and len(node.args) >= 2
+        and isinstance(node.args[1], ast.Constant)
+    }
+
+    assert kinds
+
+    missing = sorted(kinds - set(engine_module._HANDLERS))
+
+    assert not missing, missing
+
+
 def test_other_seed_changes_content(dataset, tmp_path):
 
     other = _emit(tmp_path / "seed7", workers=1, chunk_clients=COMMUNITY_SIZE, seed=7)
@@ -558,13 +913,6 @@ def test_all_sources_and_most_event_types_appear(dataset):
 
 def test_defects_are_present(dataset):
 
-    delays = [
-        (row["record_time"] - row["event_time"]).total_seconds()
-        for row in dataset["events"]
-    ]
-
-    assert max(delays) > 3600, "поздних записей нет"
-
     precisions = {row["time_precision"] for row in dataset["events"]}
 
     assert len(precisions) >= 2
@@ -596,16 +944,20 @@ def test_invariants_hold_on_the_last_versions(dataset):
     for row in dataset["events"]:
         by_client[row["client_id"]].append(row)
 
+    unobserved = _unobserved(dataset)
+
     problems = []
 
-    for events in by_client.values():
+    for client_id, events in by_client.items():
 
         latest = invariants_module.authoritative(events)
 
         assert latest, "после отбора последних версий не осталось записей"
 
-        problems.extend(invariants_module.check_client(latest))
-        problems.extend(invariants_module.check_money_conservation(latest))
+        lost = unobserved.get(client_id, ())
+
+        problems.extend(invariants_module.check_client(latest, lost))
+        problems.extend(invariants_module.check_money_conservation(latest, lost))
 
     assert not problems, [str(item) for item in problems[:5]]
 
@@ -673,9 +1025,9 @@ def test_corrections_touch_only_declared_fields(dataset):
 
 def test_profile_never_disappears_between_versions(dataset):
     """
-    Новая версия поступает в витрину позже, чем начинает
-    действовать. В этом промежутке банк знал предыдущую версию,
-    и профиль обязан находиться.
+    На любой момент между двумя версиями профиль находится:
+    до valid_from следующей версии действует предыдущая, с него
+    — следующая. Дыры на границе нет.
     """
 
     from src.generator import profile as profile_module
@@ -697,16 +1049,12 @@ def test_profile_never_disappears_between_versions(dataset):
 
         for previous, following in zip(versions, versions[1:]):
 
-            # Момент, когда предыдущая версия уже закрыта, а
-            # новая ещё не дошла до витрины.
-            moment = following["valid_from"]
-
-            if following["record_time"] <= moment:
-                continue
+            # Микросекунда до смены версии: действует предыдущая.
+            moment = following["valid_from"] - timedelta(microseconds=1)
 
             checked += 1
 
-            known = profile_module.as_of(versions, moment, record_time=moment)
+            known = profile_module.as_of(versions, moment)
 
             if known is None:
                 holes += 1
@@ -714,7 +1062,11 @@ def test_profile_never_disappears_between_versions(dataset):
 
             assert known["profile_version"] == previous["profile_version"]
 
-    assert checked > 0, "границ версий с задержкой поступления не нашлось"
+            # Ровно в момент смены действует уже следующая.
+            switched = profile_module.as_of(versions, following["valid_from"])
+            assert switched is not None and switched["profile_version"] == following["profile_version"]
+
+    assert checked > 0, "границ версий не нашлось"
     assert holes == 0, f"профиль пропадал {holes} раз"
 
 
@@ -735,7 +1087,7 @@ def test_profile_switches_once_the_new_version_is_known(dataset):
 
         for following in versions[1:]:
 
-            known = profile_module.known_at(versions, following["record_time"])
+            known = profile_module.known_at(versions, following["valid_from"])
 
             assert known is not None
             assert known["profile_version"] >= following["profile_version"]

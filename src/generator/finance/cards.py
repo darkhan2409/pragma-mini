@@ -179,10 +179,11 @@ def open_credit(contract, terms: dict) -> "CardCreditState":
     )
 
 
-def add_purchase(state: "CardCreditState", amount: int, month_index: int) -> None:
+def add_purchase(state: "CardCreditState", amount: int, month_index: int, cause_event_id: str) -> None:
     """
     Покупка делится на равные части по числу месяцев рассрочки.
-    Части встают в график, начиная со следующего месяца.
+    Части встают в график, начиная со следующего месяца, и каждая
+    помнит покупку, из которой родилась.
     """
 
     if amount <= 0:
@@ -197,7 +198,7 @@ def add_purchase(state: "CardCreditState", amount: int, month_index: int) -> Non
     for number in range(months):
         value = remainder if number == months - 1 else part
         if value > 0:
-            state.parts.append((month_index + 1 + number, int(value)))
+            state.parts.append((month_index + 1 + number, int(value), cause_event_id))
 
 
 def add_cash(state: "CardCreditState", amount: int) -> None:
@@ -207,6 +208,48 @@ def add_cash(state: "CardCreditState", amount: int) -> None:
 
     if amount > 0:
         state.cash_principal += int(amount)
+
+
+def reverse_purchase(state: "CardCreditState", amount: int, cause_event_id: str | None) -> int:
+    """
+    Возврат покупки снимает долг ЭТОЙ покупки.
+
+    Гасятся только части, рождённые возвращённой покупкой, начиная
+    с самой поздней: вернувшая деньги покупка не должна тянуть
+    график до конца срока. Чужие части и наличный долг не
+    трогаются: покупка, уже выплаченная выписками, долга не
+    оставила, и её возврат это просто деньги на счёте. Гасить
+    ими посторонний долг значило бы списать то, чего клиент не
+    возвращал.
+
+    Начисленные проценты не трогаются: они уже набежали на долг,
+    который действительно существовал.
+
+    Возвращает сколько долга снято.
+    """
+
+    remaining = int(amount)
+
+    if remaining <= 0 or not cause_event_id:
+        return 0
+
+    released = 0
+    kept: list = []
+
+    for due, value, cause in sorted(state.parts, key=lambda part: part[0], reverse=True):
+
+        if cause == cause_event_id and remaining > 0:
+            take = min(remaining, value)
+            remaining -= take
+            released += take
+            value -= take
+
+        if value > 0:
+            kept.append((due, value, cause))
+
+    state.parts = sorted(kept, key=lambda part: part[0])
+
+    return released
 
 
 def monthly_interest(state: "CardCreditState") -> int:
@@ -256,7 +299,7 @@ def apply_card_payment(state: "CardCreditState", amount: int, month_index: int) 
 
     kept: list = []
 
-    for due, value in sorted(state.parts):
+    for due, value, cause in sorted(state.parts, key=lambda part: part[0]):
 
         if due <= month_index and remaining > 0:
             take = min(remaining, value)
@@ -265,7 +308,7 @@ def apply_card_payment(state: "CardCreditState", amount: int, month_index: int) 
             value -= take
 
         if value > 0:
-            kept.append((due, value))
+            kept.append((due, value, cause))
 
     state.parts = kept
 

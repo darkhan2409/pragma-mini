@@ -16,10 +16,9 @@ from .envelope import Event, round_to_precision
 # Идеально чистая история нереалистична. Дефект принадлежит
 # ИСТОЧНИКУ, а не равномерному шуму по всем данным:
 #
-#   задержка record_time по профилю источника
 #   поздние записи
 #   дубли и технические повторы
-#   исправления: тот же event_id, версия выше, новый record_time
+#   исправления: тот же event_id, версия выше
 #   пропуски полей с причиной
 #   сбой источника: записи дня не доходят вовсе
 #   смена схемы: поле начинает собираться с определённой даты
@@ -28,6 +27,13 @@ from .envelope import Event, round_to_precision
 # Проход идёт по идентичности события, а не по номеру строки:
 # вставка события в другом месте ленты ничего не сдвигает.
 # ============================================================
+
+
+# Источники, чья запись несёт проводку. Огрубление времени
+# переставило бы её относительно соседних движений по счёту, и
+# наблюдаемый остаток перестал бы продолжать предыдущий. Время
+# теряет витрина договоров, а не касса.
+MONEY_SOURCES: frozenset[str] = frozenset({"transactions", "loans"})
 
 
 def _rng(event: Event, slot: int):
@@ -64,23 +70,6 @@ def _outage_rng(client_ordinal: int, source: str, ts: datetime):
         ts.toordinal(),
         9,
     )
-
-
-def _record_delay(event: Event, rng) -> datetime:
-
-    settings = params_module.active().defects
-
-    low, high = settings.record_delay_minutes.get(event.source, (0, 60))
-
-    minutes = rng.integers(low, high + 1)
-
-    late_share = settings.late_arrival_share.get(event.source, 0.0)
-
-    if late_share and rng.random() < late_share:
-        days = rng.integers(*settings.late_arrival_days)
-        return event.event_time + timedelta(days=int(days), minutes=int(minutes))
-
-    return event.event_time + timedelta(minutes=int(minutes))
 
 
 def _apply_schema_change(event: Event) -> Event:
@@ -152,6 +141,9 @@ def _coarse_precision(event: Event, rng) -> Event:
 
     settings = params_module.active().defects
 
+    if event.source in MONEY_SOURCES:
+        return event
+
     share = settings.coarse_precision_share.get(event.source, 0.0)
 
     if share <= 0.0 or rng.random() >= share:
@@ -206,21 +198,30 @@ def plan_correction(event: Event, rng) -> tuple[str, object] | None:
     return None
 
 
-def apply(events: list, client_ordinal: int) -> tuple[list, dict]:
+def apply(events: list, client_ordinal: int) -> tuple[list, dict, list]:
     """
     Наблюдаемая лента: к каждому событию применяются дефекты
     его источника.
 
-    Возвращает пару: наблюдаемые записи и план ошибок первой
-    версии `{event_id: (поле, неверное значение)}`. Ошибка
-    вносится ПОСЛЕ пересчёта остатков, чтобы цепочка остатков
-    строилась по настоящей сумме, а не по опечатке витрины.
+    Возвращает тройку: наблюдаемые записи, план ошибок первой
+    версии `{event_id: (поле, неверное значение)}` и записи,
+    которых сбой источника не донёс до выгрузки вовсе.
+
+    Потерянная запись это потеря НАБЛЮДЕНИЯ, а не отмена события:
+    деньги по ней двигались, остаток счёта её учёл, и переписывать
+    остальную цепочку так, будто её не было, нельзя. Поэтому
+    потери возвращаются наружу и уходят в скрытую истину.
+
+    Ошибка первой версии вносится ПОСЛЕ простановки остатков,
+    чтобы цепочка строилась по настоящей сумме, а не по опечатке
+    витрины.
     """
 
     settings = params_module.active().defects
 
     observed: list[Event] = []
     corrections: dict[str, tuple] = {}
+    lost: list[Event] = []
 
     # Событие, на которое кто-то ссылается как на причину, не
     # имеет права пропасть: иначе возврат будет указывать на
@@ -250,12 +251,12 @@ def apply(events: list, client_ordinal: int) -> tuple[list, dict]:
             recover_rng = _outage_rng(client_ordinal, event.source, event.event_time)
 
             if recover_rng.random() >= settings.outage_recovers_share:
+                lost.append(event)
                 continue
 
-            # Источник восстановился и досдал записи позже.
-            record_time = event.event_time + timedelta(days=1, minutes=int(recover_rng.integers(0, 720)))
-        else:
-            record_time = None
+            # Источник восстановился и досдал записи. Времени
+            # поступления у выгрузки нет, поэтому досланная
+            # запись неотличима от обычной.
 
         rng = _rng(event, 1)
 
@@ -263,22 +264,16 @@ def apply(events: list, client_ordinal: int) -> tuple[list, dict]:
         current = _apply_field_missing(current, rng)
         current = _coarse_precision(current, rng)
 
-        if record_time is None:
-            record_time = _record_delay(current, rng)
-
-        current = replace(current, record_time=record_time)
-
         observed.append(current)
 
-        # --- дубль: та же запись, другой record_time ---
+        # --- дубль: та же запись ещё раз ---
 
         duplicate_share = settings.duplicate_share.get(event.source, 0.0)
 
         if duplicate_share and rng.random() < duplicate_share:
-            delay = rng.integers(*settings.duplicate_delay_minutes)
-            observed.append(current.copy_as_duplicate(record_time + timedelta(minutes=int(delay))))
+            observed.append(current.copy_as_duplicate())
 
-        # --- исправление: версия выше, новый record_time ---
+        # --- исправление: версия выше ---
         #
         # Исправление несёт НАСТОЯЩЕЕ значение. Ошибка попадёт
         # в первую версию позже, когда остатки уже посчитаны.
@@ -290,16 +285,10 @@ def apply(events: list, client_ordinal: int) -> tuple[list, dict]:
             plan = plan_correction(current, rng)
 
             if plan is not None:
-                hours = rng.integers(*settings.correction_delay_hours)
-                observed.append(
-                    current.copy_as_correction(
-                        record_time + timedelta(hours=int(hours)),
-                        dict(current.payload),
-                    )
-                )
+                observed.append(current.copy_as_correction(dict(current.payload)))
                 corrections[current.event_id] = plan
 
-    return observed, corrections
+    return observed, corrections, lost
 
 
 def apply_first_version_errors(observed: list, corrections: dict) -> None:
@@ -380,4 +369,4 @@ def plan_refunds(purchases: list) -> list:
     return planned
 
 
-__all__ = ["apply", "plan_refunds"]
+__all__ = ["MONEY_SOURCES", "apply", "plan_refunds"]

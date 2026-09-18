@@ -6,7 +6,15 @@ from datetime import datetime
 from .. import params as params_module
 from ..life import calendar as cal
 from ..life.persona import Persona
-from ..rng import NS_NEEDS, day_rng, event_rng, COMPONENT_CONTENT, COMPONENT_COUNT, COMPONENT_TIME
+from ..rng import (
+    NS_NEEDS,
+    COMPONENT_CHANNEL,
+    COMPONENT_CONTENT,
+    COMPONENT_COUNT,
+    COMPONENT_TIME,
+    day_rng,
+    event_rng,
+)
 from ..world.dictionaries import CATEGORY_BY_NAME, CATEGORY_NAMES
 from .habits import Habits
 from .routines import routine_for
@@ -237,7 +245,7 @@ def cash_need(persona: Persona, ts: datetime, silenced: frozenset) -> bool:
 
     rate = per_month * (0.4 + 1.6 * cash_level) / 30.0
 
-    rng = day_rng(NS_NEEDS, persona.client_ordinal, ts.toordinal(), COMPONENT_CHANNEL := 4)
+    rng = day_rng(NS_NEEDS, persona.client_ordinal, ts.toordinal(), COMPONENT_CHANNEL)
 
     return rng.random() < rate
 

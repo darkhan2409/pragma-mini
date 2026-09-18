@@ -17,7 +17,6 @@ MISSING_REASONS = (
     "not_applicable",
     "not_collected",
     "source_unavailable",
-    "late_arrival",
     "redacted",
     "unknown",
 )
@@ -28,36 +27,8 @@ class DefectParams:
 
     missing_reasons: tuple = MISSING_REASONS
 
-    # Задержка поступления записи в хранилище, в минутах.
-    record_delay_minutes: dict = field(
-        default_factory=lambda: {
-            "profile": (0, 120),
-            "applications": (0, 30),
-            "product_events": (5, 720),
-            "loans": (240, 1_440),
-            "transactions": (1, 2_880),
-            "antifraud": (0, 15),
-            "communications": (1, 90),
-            "banners": (60, 1_440),
-            "app_screens": (240, 2_880),
-            "app_operations": (5, 240),
-            "support": (0, 60),
-        }
-    )
-
-    # Доля записей с особенно долгой задержкой.
-    late_arrival_share: dict = field(
-        default_factory=lambda: {
-            "transactions": 0.035,
-            "product_events": 0.02,
-            "app_screens": 0.05,
-            "banners": 0.04,
-            "loans": 0.01,
-            "communications": 0.01,
-        }
-    )
-
-    late_arrival_days: tuple = (2, 21)
+    # Времени поступления записи в хранилище у выгрузки нет:
+    # задержки, опоздания и порядок доставки не моделируются.
 
     # Дубли одной и той же записи.
     duplicate_share: dict = field(
@@ -70,8 +41,6 @@ class DefectParams:
         }
     )
 
-    duplicate_delay_minutes: tuple = (1, 720)
-
     # Исправление ранее записанного события.
     correction_share: dict = field(
         default_factory=lambda: {
@@ -82,8 +51,6 @@ class DefectParams:
             "applications": 0.006,
         }
     )
-
-    correction_delay_hours: tuple = (2, 480)
 
     correction_fields: dict = field(
         default_factory=lambda: {

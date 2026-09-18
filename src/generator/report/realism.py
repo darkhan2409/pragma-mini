@@ -988,7 +988,6 @@ def _fraud(data: dict) -> dict:
 
 def _defects(data: dict) -> dict:
 
-    delays = defaultdict(list)
     duplicates = 0
     corrections = 0
     missing = Counter()
@@ -996,11 +995,6 @@ def _defects(data: dict) -> dict:
     seen: dict[str, int] = Counter()
 
     for row in data["events"]:
-
-        if row["record_time"] is not None:
-            delays[row["source"]].append(
-                round((row["record_time"] - row["event_time"]).total_seconds() / 60.0, 1)
-            )
 
         seen[row["event_id"]] += 1
 
@@ -1019,10 +1013,6 @@ def _defects(data: dict) -> dict:
     reasons = Counter(row["coverage_reason"] for row in data["coverage"] if row["coverage_reason"])
 
     return {
-        "record_delay_minutes": {
-            source: _quantiles(values, points=(0.5, 0.9, 0.99))
-            for source, values in sorted(delays.items())
-        },
         "duplicates": max(0, duplicates),
         "corrections": corrections,
         "precision": dict(Counter(row["time_precision"] for row in data["events"])),
@@ -1040,7 +1030,20 @@ def _finance(data: dict) -> dict:
     for row in data["events"]:
         by_client[row["client_id"]].append(row)
 
-    problems = invariants_module.check_all(by_client)
+    # Строки, потерянные сбоем источника, в RAW отсутствуют, но
+    # деньги по ним двигались. Без них разрыв наблюдаемой цепочки
+    # выглядел бы сломанной арифметикой.
+    truth_by_client = defaultdict(list)
+
+    for row in data["truth_events"]:
+        truth_by_client[row["client_id"]].append(row)
+
+    unobserved = {
+        client_id: invariants_module.unobserved_rows(rows)
+        for client_id, rows in truth_by_client.items()
+    }
+
+    problems = invariants_module.check_all(by_client, unobserved)
 
     transfers = defaultdict(set)
 
@@ -1062,6 +1065,11 @@ def _finance(data: dict) -> dict:
         "violations": len(problems),
         "violations_by_check": dict(Counter(item.check for item in problems)),
         "examples": [str(item) for item in problems[:5]],
+        "unobserved_rows": sum(len(rows) for rows in unobserved.values()),
+        "unobserved_rule": (
+            "строка, потерянная сбоем источника, в RAW отсутствует, а остаток её учёл: "
+            "разрыв наблюдаемой цепочки объясняется ею и нарушением не считается"
+        ),
         "internal_transfers": len(transfers),
         "internal_transfers_paired": paired,
         "corrected_events": corrected,
@@ -2035,7 +2043,7 @@ def render_markdown(report: dict) -> str:
                       ["причина эпизода", "случаев"]))
     out.append("")
     out.append(_table([[name, count] for name, count in stress["resolutions"].items()],
-                      ["исход эпизода", "случаев"]))
+                      ["исход эпизода (план)", "случаев"]))
     out.append("")
     out.append(_table([[name, count] for name, count in stress["delinquency_milestones"].items()],
                       ["веха DPD", "случаев"]))
@@ -2100,15 +2108,7 @@ def render_markdown(report: dict) -> str:
     defects = report["defects"]
 
     out.append("")
-    out.append("## Дефекты и задержки источников")
-    out.append("")
-    out.append(
-        _table(
-            [[source, stats.get("p50"), stats.get("p90"), stats.get("p99")]
-             for source, stats in defects["record_delay_minutes"].items()],
-            ["источник", "медиана, мин", "P90", "P99"],
-        )
-    )
+    out.append("## Дефекты источников")
     out.append("")
     out.append(f"Дублей: {defects['duplicates']}, исправлений: {defects['corrections']}, "
                f"тестовых аккаунтов: {defects['test_accounts']}.")
@@ -2239,6 +2239,8 @@ def render_markdown(report: dict) -> str:
         "витрины, ради которой появилось исправление."
     )
     out.append("")
+    out.append(f"{finance['unobserved_rule'].capitalize()}.")
+    out.append("")
     out.append(
         _table(
             [
@@ -2246,6 +2248,7 @@ def render_markdown(report: dict) -> str:
                 ["из них парных", finance["internal_transfers_paired"]],
                 ["исправленных записей", finance["corrected_events"]],
                 ["отклонённых операций", finance["declined_operations"]],
+                ["строк потеряно наблюдением", finance["unobserved_rows"]],
             ],
             ["показатель", "значение"],
         )

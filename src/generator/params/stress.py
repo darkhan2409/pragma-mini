@@ -45,6 +45,11 @@ class StressParams:
     # Базовая интенсивность спонтанного шока в год.
     random_shock_per_year: float = 0.22
 
+    # Доля интенсивности, которая остаётся после окончания
+    # неразрешённого эпизода. Исход unresolved означает, что
+    # причина никуда не делась: давление слабеет, но не исчезает.
+    unresolved_tail_share: float = 0.35
+
     # Вероятность, что жизненное событие породит стресс.
     trigger_probability: dict = field(
         default_factory=lambda: {

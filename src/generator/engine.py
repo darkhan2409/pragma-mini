@@ -26,6 +26,7 @@ from .life import calendar as cal
 from .life import household as household_module
 from .life import lifecycle as lifecycle_module
 from .life import stress as stress_module
+from .observe import defects as defect_module
 from .rng import (
     COMPONENT_CHANNEL,
     COMPONENT_CONTENT,
@@ -77,22 +78,51 @@ def run_community(community_id: int, ordinals: tuple) -> CommunityResult:
     sim = CommunitySimulation(community_id, ordinals)
 
     for state in sim.clients.values():
+
         sim._prehistory(state)
         state.state = lifecycle_module.initial_state(state.persona, HISTORY_START)
+
+        # Клиент, пришедший до окна наблюдения, известен банку с
+        # первого его дня: первая версия профиля описывает то, с
+        # чем он вошёл в окно. Клиент, зарегистрированный внутри
+        # окна, получает первую версию в момент регистрации.
+        if state.persona.relationship_start < HISTORY_START:
+            _update_profile(
+                state,
+                HISTORY_START,
+                moment=HISTORY_START,
+                reason="opening_state",
+            )
 
     day = HISTORY_START
 
     while day < HISTORY_END:
 
-        actions: list[Action] = []
+        sim.queue = []
 
         for ordinal in sorted(sim.clients):
-            actions.extend(_plan_day(sim, sim.clients[ordinal], day))
+            sim.queue.extend(_plan_day(sim, sim.clients[ordinal], day))
 
-        actions.sort(key=lambda item: (item.ts, item.ordinal, item.order))
+        sim.queue.sort(key=_action_order)
 
-        for action in actions:
+        index = 0
+
+        while index < len(sim.queue):
+
+            action = sim.queue[index]
+            index += 1
+
             _execute(sim, action)
+
+            if sim.queue_changed:
+                # Возврат, назначенный только что исполненной
+                # покупкой, встаёт в очередь по своему времени:
+                # деньги возвращаются до следующих решений дня,
+                # а не после всей симуляции.
+                sim.queue[index:] = sorted(sim.queue[index:], key=_action_order)
+                sim.queue_changed = False
+
+        sim.queue = []
 
         if (day + timedelta(days=1)).month != day.month:
             for ordinal in sorted(sim.clients):
@@ -103,9 +133,18 @@ def run_community(community_id: int, ordinals: tuple) -> CommunityResult:
     return _finish(sim)
 
 
+# Возврат назначается уже во время дня, поэтому своего номера
+# в плане у него нет: внутри одной секунды он идёт последним.
+REFUND_ORDER = 10_000
+
+
 # ============================================================
 # ПЛАН ДНЯ
 # ============================================================
+
+
+def _action_order(action: Action) -> tuple:
+    return (action.ts, action.ordinal, action.order)
 
 
 def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> list:
@@ -595,6 +634,12 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
     if state.open_bills:
         add(day.replace(hour=21, minute=5), "bill_sweep", {})
 
+    # --- назначенные ранее возвраты ---
+
+    for key in sorted(moment for moment in state.pending_refunds if moment <= day.toordinal()):
+        for plan in state.pending_refunds.pop(key):
+            add(plan["ts"], "refund", {"plan": plan})
+
     # --- банк узнал об изменении профиля ---
 
     for index, event in enumerate(state.life_events):
@@ -610,13 +655,22 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
 
 
 def _execute(sim: CommunitySimulation, action: Action) -> None:
+    """
+    Одно действие плана.
+
+    Вид без обработчика это ошибка сборки, а не пустой день:
+    молчаливый пропуск отнимал бы у клиента целый механизм
+    поведения, и данные выглядели бы правдоподобно.
+    """
 
     state = sim.clients[action.ordinal]
 
     handler = _HANDLERS.get(action.kind)
 
-    if handler is not None:
-        handler(sim, state, action.ts, action.payload)
+    if handler is None:
+        raise KeyError(f"нет обработчика для действия {action.kind!r}")
+
+    handler(sim, state, action.ts, action.payload)
 
 
 def _touch_client(state: ClientState, ts: datetime) -> None:
@@ -657,7 +711,9 @@ def _pick_spending_account(state: ClientState, ts: datetime, sources: list, stre
     return credit if rng.random() < min(0.9, rise * stress) else sources[0]
 
 
-def _register_card_debt(state: ClientState, account_id: str, amount: int, ts, is_cash: bool) -> None:
+def _register_card_debt(
+    state: ClientState, account_id: str, amount: int, ts, is_cash: bool, cause_event_id: str
+) -> None:
     """
     Трата по кредитной карте становится долгом: покупка идёт в
     рассрочку, наличные копят проценты.
@@ -679,7 +735,38 @@ def _register_card_debt(state: ClientState, account_id: str, amount: int, ts, is
     if is_cash:
         card_rules.add_cash(credit, amount)
     else:
-        card_rules.add_purchase(credit, amount, cal.month_index(ts))
+        card_rules.add_purchase(credit, amount, cal.month_index(ts), cause_event_id)
+
+
+def _release_card_debt(
+    state: ClientState, account_id: str, amount: int, cause_event_id: str | None
+) -> None:
+    """
+    Возврат по кредитной карте снимает долг ТОЙ покупки, которую
+    вернули, а не просто кладёт деньги на счёт.
+
+    Раньше покупка ставила части рассрочки в график, а её полный
+    возврат их не убирал: клиент оставался должен банку за то,
+    чего не покупал. Потом возврат снимал долг без разбора и
+    добирался до наличного: возврат уже выплаченной покупки
+    гасил снятые наличные. Возврат без причины долга не снимает:
+    непонятно, чьего.
+    """
+
+    if not cause_event_id:
+        return
+
+    account = state.ledger.accounts.get(account_id)
+
+    if account is None or account.kind != "credit_card":
+        return
+
+    credit = state.card_credits.get(account.contract_id)
+
+    if credit is None or credit.closed:
+        return
+
+    card_rules.reverse_purchase(credit, int(amount), cause_event_id)
 
 
 def _emit_money(
@@ -695,10 +782,14 @@ def _emit_money(
     correlation_id: str | None = None,
     link_type: str | None = None,
     status: str = "approved",
+    post: bool = True,
 ):
     """
     Одна денежная операция: проводка и событие с balance_after.
     Отклонённая операция проводки не создаёт.
+
+    post=False — вторая нога перевода между своими счетами:
+    событие с остатком есть, проводки нет, её сделала первая нога.
     """
 
     account = state.ledger.get(account_id) if account_id else None
@@ -737,10 +828,17 @@ def _emit_money(
 
     if status == "approved" and account is not None:
 
-        if direction == "debit":
-            state.ledger.post(ts, event.event_id, account_id, counterpart_account, int(amount))
-        else:
-            state.ledger.post(ts, event.event_id, counterpart_account, account_id, int(amount))
+        # Вторая нога перевода между своими счетами денег не
+        # двигает: проводка первой ноги уже изменила оба остатка.
+        # Повторная проводка удваивала пополнение вклада в ledger,
+        # снимала с карты вдвое больше и считала проценты с
+        # удвоенного остатка. RAW этого не показывал: balance_after
+        # там пересчитывается по ленте, страдала только симуляция.
+        if post:
+            if direction == "debit":
+                state.ledger.post(ts, event.event_id, account_id, counterpart_account, int(amount))
+            else:
+                state.ledger.post(ts, event.event_id, counterpart_account, account_id, int(amount))
 
         event.payload["balance_after"] = account.balance
 
@@ -753,7 +851,13 @@ def _emit_money(
                 int(amount),
                 ts,
                 event_type in ("cash_withdrawal", "transfer_out", "p2p_out"),
+                event.event_id,
             )
+
+        # Возврат, отмена и chargeback идут обратным ходом: долг
+        # той же покупки уменьшается на вернувшуюся сумму.
+        if direction == "credit" and event_type in ("refund", "reversal", "chargeback"):
+            _release_card_debt(state, account_id, int(amount), event.payload.get("cause_event_id"))
 
     return state.emit(event)
 
@@ -784,6 +888,9 @@ def _on_registration(sim, state: ClientState, ts: datetime, payload: dict) -> No
     sim._open_contract(state, view, ts.replace(hour=12), None, None)
 
     _touch_client(state, ts)
+
+    # Профиль появляется вместе с клиентом, а не в конце месяца.
+    _update_profile(state, ts, moment=ts, reason="registration")
 
     state.note(ts, "state_transition", lifecycle_module.STATE_ONBOARDING, {"cause": "registration"})
 
@@ -964,7 +1071,7 @@ def _on_subscription(sim, state: ClientState, ts: datetime, payload: dict) -> No
         f"merchant:{subscription.outlet_id}", body, INITIATOR_SYSTEM,
     )
 
-    state.purchases.append(event)
+    _schedule_refunds(sim, state, event)
     state.month_purchases += amount
 
 
@@ -1095,7 +1202,7 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         f"merchant:{choice.outlet.outlet_id}", body, INITIATOR_CLIENT,
     )
 
-    state.purchases.append(event)
+    _schedule_refunds(sim, state, event)
     state.month_purchases += amount
 
     _touch_client(state, ts)
@@ -1124,6 +1231,85 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             state.monthly_cashback += value
             key = (contract.contract_id, account.account_id)
             state.pending_cashback[key] = state.pending_cashback.get(key, 0) + value
+
+
+def _schedule_refunds(sim, state: ClientState, event) -> None:
+    """
+    Возврат и отмена назначаются в момент покупки.
+
+    Раньше они рождались после всей симуляции, и вернувшиеся
+    деньги не влияли ни на одно решение клиента: он продолжал
+    жить так, будто покупка не отменялась. Теперь возврат
+    встаёт в очередь своего дня и доходит до счёта вовремя.
+    """
+
+    for plan in defect_module.plan_refunds([event]):
+
+        moment = plan["ts"]
+
+        if not (HISTORY_START <= moment < HISTORY_END):
+            continue
+
+        if moment.toordinal() == event.event_time.toordinal():
+            sim.schedule(
+                Action(
+                    ts=moment,
+                    ordinal=state.ordinal,
+                    order=REFUND_ORDER,
+                    kind="refund",
+                    payload={"plan": plan},
+                )
+            )
+            continue
+
+        state.pending_refunds.setdefault(moment.toordinal(), []).append(plan)
+
+
+def _on_refund(sim, state: ClientState, ts: datetime, payload: dict) -> None:
+    """
+    Возврат или отмена: ссылается на исходную операцию и не
+    превышает её сумму.
+    """
+
+    plan = payload["plan"]
+
+    cause = plan["cause"]
+
+    account_id = cause.payload.get("account_id")
+
+    if account_id is None:
+        return
+
+    body = {
+        "channel": "system",
+        "card_id": cause.payload.get("card_id"),
+        "merchant_id": cause.payload.get("merchant_id"),
+        "outlet_id": cause.payload.get("outlet_id"),
+        "merchant_name": cause.payload.get("merchant_name"),
+        "mcc": cause.payload.get("mcc"),
+        "merchant_city": cause.payload.get("merchant_city"),
+        "merchant_country": cause.payload.get("merchant_country"),
+        "cause_event_id": cause.event_id,
+        "reason": plan["kind"],
+        "is_online": cause.payload.get("is_online"),
+        "is_subscription": False,
+    }
+
+    _emit_money(
+        state,
+        ts,
+        plan["kind"],
+        account_id,
+        int(plan["amount"]),
+        "credit",
+        f"merchant:{cause.payload.get('outlet_id')}"
+        if cause.payload.get("outlet_id")
+        else "external:merchant",
+        body,
+        INITIATOR_SYSTEM,
+        correlation_id=cause.event_id,
+        link_type=plan["kind"],
+    )
 
 
 def _on_cash(sim, state: ClientState, ts: datetime, payload: dict) -> None:
@@ -1483,6 +1669,7 @@ _HANDLERS.update(
         "bill": _on_bill,
         "subscription": _on_subscription,
         "purchase": _on_purchase,
+        "refund": _on_refund,
         "cash_withdrawal": _on_cash,
         "transfer": _on_transfer,
         "inbound_transfer": _on_inbound_transfer,
@@ -1494,7 +1681,11 @@ _HANDLERS.update(
 from .engine_app import unblock_card  # noqa: E402,F401
 from .engine_credit import close_loan, payment_plan as _payment_plan, repay_loan  # noqa: E402,F401
 from .engine_products import _emit_case  # noqa: E402,F401
-from .engine_month import finish as _finish, month_end as _month_end  # noqa: E402
+from .engine_month import (  # noqa: E402
+    _update_profile,
+    finish as _finish,
+    month_end as _month_end,
+)
 
 
 __all__ = ["run_community"]

@@ -55,10 +55,8 @@ EVENTS_SCHEMA = pa.schema(
         ("event_type", pa.string()),
         ("source", pa.string()),
         ("event_time", pa.timestamp("us")),
-        ("record_time", pa.timestamp("us")),
         ("effective_at", pa.timestamp("us")),
         ("time_precision", pa.string()),
-        ("sequence_number", pa.int64()),
         ("event_version", pa.int32()),
         ("change_initiator", pa.string()),
         ("correlation_id", pa.string()),
@@ -204,6 +202,16 @@ TABLES = {
 
 PARTS_DIR = "parts"
 
+# Карточка прогона: с чем он был начат. Продолжение чужого
+# прогона собрало бы датасет из кусков разных миров.
+RUN_FILE = "run.json"
+
+
+class GenerationError(RuntimeError):
+    """
+    Выгрузку нельзя собрать: прогон не сходится сам с собой.
+    """
+
 
 # ============================================================
 # КОНТРОЛЬНАЯ СУММА СОДЕРЖИМОГО
@@ -259,6 +267,30 @@ def _write(path: Path, rows: list, schema: pa.Schema) -> None:
     pq.write_table(table, path, compression="zstd")
 
 
+def _write_json(path: Path, payload: dict) -> None:
+    """
+    Файл появляется целиком или не появляется вовсе.
+
+    Прерванный прогон не имеет права оставить наполовину
+    написанный маркер: по нему пачка считалась бы готовой.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    temporary = path.with_name(path.name + ".tmp")
+
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+
+    os.replace(temporary, path)
+
+
+def _batch_marker(out: Path, index: int) -> Path:
+    return out / PARTS_DIR / f"batch-{index:05d}.json"
+
+
 def _truth_clients_schema(rows: list) -> pa.Schema:
 
     base = [
@@ -299,12 +331,12 @@ _WORKER: dict = {}
 
 
 def _worker_init(seed: int, params_path: str | None, catalog_scale: float | None,
-                 community_size: int | None) -> None:
+                 community_size: int | None, world_seed: int | None = None) -> None:
 
     settings = _build_params(params_path, catalog_scale, community_size)
 
     params_module.activate(settings)
-    rng_module.configure(seed, settings.fingerprint())
+    rng_module.configure(seed, settings.fingerprint(), world_seed)
 
     _WORKER["ready"] = True
 
@@ -377,6 +409,20 @@ def _run_batch(job: tuple) -> tuple:
         out / PARTS_DIR / f"truth_clients-{batch_index:05d}.parquet",
         rows["truth_clients"],
         _truth_clients_schema(rows["truth_clients"]),
+    )
+
+    # Маркер пишется ПОСЛЕДНИМ и целиком: пачка готова только
+    # тогда, когда все её part-файлы на месте. Итоговые суммы
+    # собираются из маркеров, поэтому продолженный прогон знает
+    # и про те пачки, которых сам не считал.
+    _write_json(
+        _batch_marker(out, batch_index),
+        {
+            "batch": batch_index,
+            "communities": list(community_ids),
+            "digests": {name: list(value) for name, value in digests.items()},
+            "counts": counts,
+        },
     )
 
     return batch_index, digests, counts
@@ -523,12 +569,22 @@ def _write_catalogs(out: Path) -> dict:
 
 
 def _merge_parts(out: Path, name: str, batches: int, schema: pa.Schema | None = None) -> int:
+    """
+    Склейка part-файлов в итоговую таблицу.
 
-    relative = TABLES[name][0] if name in TABLES else f"truth/clients.parquet"
+    Пишется во временный файл и переименовывается: прерванная
+    склейка не оставляет обрезанной таблицы на месте настоящей.
+    Части не удаляются здесь — они нужны, пока манифест не
+    записан, иначе прерывание отнимет и части, и результат.
+    """
+
+    relative = TABLES[name][0] if name in TABLES else "truth/clients.parquet"
 
     target = out / relative
 
     target.parent.mkdir(parents=True, exist_ok=True)
+
+    temporary = target.with_name(target.name + ".tmp")
 
     writer = None
     rows = 0
@@ -537,26 +593,35 @@ def _merge_parts(out: Path, name: str, batches: int, schema: pa.Schema | None = 
 
         part = out / PARTS_DIR / f"{name}-{index:05d}.parquet"
 
+        # Каждая пачка пишет каждую таблицу, пусть и пустую, а
+        # маркер появляется после всех частей. Части нет при
+        # маркере — черновик испорчен, и молча собрать датасет
+        # короче обещанного нельзя.
         if not part.exists():
-            continue
+            raise GenerationError(
+                f"пачка {index}: маркер есть, а части {part.name} нет — "
+                "черновик повреждён, прогон нужно начать заново"
+            )
 
         table = pq.read_table(part)
 
         if writer is None:
-            writer = pq.ParquetWriter(target, table.schema, compression="zstd")
+            writer = pq.ParquetWriter(temporary, table.schema, compression="zstd")
 
         if table.num_rows:
             writer.write_table(table)
             rows += table.num_rows
 
-        part.unlink()
-
     if writer is None:
         empty = schema or (TABLES[name][1] if name in TABLES else None)
         if empty is not None:
-            _write(target, [], empty)
+            _write(temporary, [], empty)
+        else:
+            return rows
     else:
         writer.close()
+
+    os.replace(temporary, target)
 
     return rows
 
@@ -566,10 +631,40 @@ def _file_hashes(out: Path) -> dict:
     hashes = {}
 
     for path in sorted(out.rglob("*.parquet")):
+
+        # Части это черновик сборки, а не выгрузка: в контрольные
+        # суммы датасета они не входят.
+        if PARTS_DIR in path.relative_to(out).parts:
+            continue
+
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         hashes[str(path.relative_to(out)).replace("\\", "/")] = digest
 
     return hashes
+
+
+def _run_card(
+    settings,
+    seed: int,
+    world_seed,
+    total_clients: int,
+    chunk_clients: int,
+    community_size: int,
+) -> dict:
+    """
+    С чем начат прогон. Продолжать можно только его самого.
+    """
+
+    return {
+        "generator_version": GENERATOR_VERSION,
+        "schema_version": SCHEMA_VERSION,
+        "seed": seed,
+        "world_seed": world_seed,
+        "total_clients": total_clients,
+        "chunk_clients": chunk_clients,
+        "community_size": community_size,
+        "generation_config_sha256": settings.fingerprint(),
+    }
 
 
 # ============================================================
@@ -581,6 +676,7 @@ def generate_dataset(
     total_clients: int,
     out_dir: Path,
     seed: int = SEED,
+    world_seed: int | None = None,
     workers: int = 1,
     chunk_clients: int = 256,
     params_path: str | None = None,
@@ -595,7 +691,7 @@ def generate_dataset(
     settings = _build_params(params_path, catalog_scale, community_size)
 
     params_module.activate(settings)
-    rng_module.configure(seed, settings.fingerprint())
+    rng_module.configure(seed, settings.fingerprint(), world_seed)
 
     if out.exists() and not resume:
         shutil.rmtree(out)
@@ -618,59 +714,102 @@ def generate_dataset(
         for index, community_ids in enumerate(batches)
     ]
 
-    if resume:
-        jobs = [
-            job
-            for job in jobs
-            if not (out / PARTS_DIR / f"events-{job[0]:05d}.parquet").exists()
-        ]
+    card = _run_card(settings, seed, rng_module.current_world_seed(),
+                     total_clients, chunk_clients, size)
 
-    digests = {name: ContentDigest() for name in list(TABLES) + ["truth_clients"]}
-    counts = {name: 0 for name in list(TABLES) + ["truth_clients"]}
+    run_path = out / RUN_FILE
+
+    if resume and run_path.exists():
+
+        stored = json.loads(run_path.read_text(encoding="utf-8"))
+
+        if stored != card:
+            differing = sorted(
+                key for key in set(stored) | set(card) if stored.get(key) != card.get(key)
+            )
+            raise GenerationError(
+                "продолжение чужого прогона: не совпадает " + ", ".join(differing)
+            )
+
+    elif resume and (out / PARTS_DIR).exists():
+        raise GenerationError(
+            f"в {out} есть незавершённые части, но нет {RUN_FILE}: "
+            "продолжать нечего, прогон не описан"
+        )
+
+    _write_json(run_path, card)
+
+    if resume:
+        # Готова та пачка, у которой есть маркер. Существование
+        # part-файла ничего не значит: его мог оставить прогон,
+        # прерванный на середине записи.
+        jobs = [job for job in jobs if not _batch_marker(out, job[0]).exists()]
 
     done = 0
 
     def report(result) -> None:
         nonlocal done
-        _, batch_digests, batch_counts = result
         done += 1
-        for name, value in batch_digests.items():
-            digests[name].merge(value)
-            counts[name] += batch_counts[name]
         if not quiet:
-            print(f"batches: {done}/{len(jobs)}  events: {counts['events']:,}")
+            print(f"batches: {done}/{len(jobs)}")
 
     if workers <= 1 or len(jobs) <= 1:
-        _worker_init(seed, params_path, catalog_scale, community_size)
+        _worker_init(seed, params_path, catalog_scale, community_size, world_seed)
         for job in jobs:
             report(_run_batch(job))
     else:
         with Pool(
             processes=min(workers, len(jobs)),
             initializer=_worker_init,
-            initargs=(seed, params_path, catalog_scale, community_size),
+            initargs=(seed, params_path, catalog_scale, community_size, world_seed),
         ) as pool:
             for result in pool.imap_unordered(_run_batch, jobs):
                 report(result)
 
-    for name in TABLES:
-        _merge_parts(out, name, len(batches))
+    # Итог собирается из маркеров ВСЕХ пачек, а не из того, что
+    # посчитал текущий прогон: продолженная сборка обязана дать
+    # тот же манифест, что и сборка без остановки.
+    digests = {name: ContentDigest() for name in list(TABLES) + ["truth_clients"]}
+    counts = {name: 0 for name in list(TABLES) + ["truth_clients"]}
 
-    _merge_parts(out, "truth_clients", len(batches))
+    for index in range(len(batches)):
 
-    parts_dir = out / PARTS_DIR
+        marker = _batch_marker(out, index)
 
-    if parts_dir.exists():
-        for leftover in parts_dir.iterdir():
-            leftover.unlink()
-        parts_dir.rmdir()
+        if not marker.exists():
+            raise GenerationError(
+                f"пачка {index} не завершена: без её маркера датасет собирать нельзя"
+            )
+
+        record = json.loads(marker.read_text(encoding="utf-8"))
+
+        for name, value in record["digests"].items():
+            digests[name].merge(tuple(value))
+            counts[name] += int(record["counts"][name])
+
+    for name in list(TABLES) + ["truth_clients"]:
+
+        merged = _merge_parts(out, name, len(batches))
+
+        # Склеенное обязано сойтись с обещанным маркерами: иначе
+        # манифест назовёт строки, которых в файле нет.
+        if merged != counts[name]:
+            raise GenerationError(
+                f"таблица {name}: склеено строк {merged}, а маркеры пачек обещают "
+                f"{counts[name]} — черновик повреждён, прогон нужно начать заново"
+            )
 
     catalog_info = _write_catalogs(out)
 
     manifest = {
         "generator_version": GENERATOR_VERSION,
         "schema_version": SCHEMA_VERSION,
+        # Два seed: мир и популяция. Общий world_seed у групп
+        # означает один Казахстан, одни бренды и одни точки;
+        # разные seed популяции — разных клиентов.
         "seed": seed,
+        "population_seed": seed,
+        "world_seed": rng_module.current_world_seed(),
         "total_clients": total_clients,
         "community_size": size,
         "communities": community_count,
@@ -684,12 +823,8 @@ def generate_dataset(
                 "available_from": SOURCE_AVAILABILITY[source].isoformat(),
                 "time_precision": SOURCE_PRECISION[source],
                 "defect_profile": {
-                    "record_delay_minutes": list(
-                        settings.defects.record_delay_minutes.get(source, (0, 60))
-                    ),
                     "duplicate_share": settings.defects.duplicate_share.get(source, 0.0),
                     "correction_share": settings.defects.correction_share.get(source, 0.0),
-                    "late_arrival_share": settings.defects.late_arrival_share.get(source, 0.0),
                     "outage_days_per_year": settings.defects.outage_days_per_year.get(source, 0.0),
                 },
             }
@@ -703,7 +838,7 @@ def generate_dataset(
             "подтверждённое profile_change важнее анкеты заявки",
             "анкета заявки важнее системного пересчёта профиля",
             "системный пересчёт важнее косвенных признаков транзакций",
-            "при равном record_time выигрывает большая event_version",
+            "у одного event_id действует наибольшая event_version",
         ],
         "bank_timeline": [
             {key: (value.isoformat() if isinstance(value, (date, datetime)) else value)
@@ -726,10 +861,19 @@ def generate_dataset(
 
     manifest["file_sha256"] = _file_hashes(out)
 
-    (out / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2, default=str),
-        encoding="utf-8",
-    )
+    _write_json(out / "manifest.json", manifest)
+
+    # Черновик убирается только теперь, когда результат записан.
+    # Прерывание до этой строки оставляет части на месте, и
+    # прогон продолжается, а не начинается заново.
+    parts_dir = out / PARTS_DIR
+
+    if parts_dir.exists():
+        for leftover in sorted(parts_dir.iterdir()):
+            leftover.unlink()
+        parts_dir.rmdir()
+
+    run_path.unlink(missing_ok=True)
 
     return counts
 
@@ -750,7 +894,9 @@ def main() -> None:
     parser.add_argument("--preset", choices=tuple(PRESETS), default="smoke")
     parser.add_argument("--clients", type=int, default=None)
     parser.add_argument("--out", type=Path, default=None)
-    parser.add_argument("--seed", type=int, default=SEED)
+    parser.add_argument("--seed", type=int, default=SEED, help="seed популяции: клиенты и поведение")
+    parser.add_argument("--world-seed", type=int, default=None,
+                        help="seed мира: география, мерчанты и точки; по умолчанию равен seed популяции")
     parser.add_argument("--workers", type=int, default=default_workers())
     parser.add_argument("--chunk-clients", type=int, default=256)
     parser.add_argument("--params", type=str, default=None)
@@ -771,6 +917,7 @@ def main() -> None:
         total_clients=total,
         out_dir=out,
         seed=args.seed,
+        world_seed=args.world_seed,
         workers=args.workers,
         chunk_clients=args.chunk_clients,
         params_path=args.params,

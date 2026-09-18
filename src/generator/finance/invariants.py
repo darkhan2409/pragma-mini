@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -72,6 +73,89 @@ class Violation:
         return f"{self.check}: {self.client_id}: {self.detail}"
 
 
+# ============================================================
+# ПОТЕРЯННОЕ НАБЛЮДЕНИЕ
+# ============================================================
+#
+# Сбой источника не доносит запись до выгрузки. Деньги по ней
+# двигались, и остаток следующей наблюдаемой строки её учитывает,
+# поэтому в наблюдаемой цепочке образуется разрыв.
+#
+# Разрыв допустим ТОЛЬКО там, где его объясняет потерянная
+# строка этого же счёта. Ничем не объяснённый разрыв остаётся
+# нарушением: именно так отличается честная потеря наблюдения от
+# сломанной арифметики.
+#
+# Скрытая истина сюда приходит из truth и нужна проверкам и
+# отчёту генератора. Препроцессинг её не читает и ищет разрывы
+# по самой выгрузке.
+# ============================================================
+
+
+UNOBSERVED_KIND = "unobserved_row"
+
+
+def unobserved_rows(truth_events: list) -> list[dict]:
+    """
+    Строки, потерянные наблюдением, из скрытой истории клиента.
+    """
+
+    out: list[dict] = []
+
+    for row in truth_events:
+
+        if row.get("kind") != UNOBSERVED_KIND:
+            continue
+
+        value = row.get("value")
+
+        data = json.loads(value) if isinstance(value, str) else dict(value or {})
+
+        data["event_time"] = row["ts"]
+
+        out.append(data)
+
+    return out
+
+
+def _signed(row: dict) -> int:
+    """
+    Знаковое движение по счёту клиента.
+    """
+
+    amount = int(row.get("amount") or 0)
+
+    return amount if row.get("direction") == "credit" else -amount
+
+
+def _pending_by_account(unobserved) -> dict[str, list[tuple]]:
+    """
+    Потерянные движения по счетам, в порядке времени события.
+    """
+
+    pending: dict[str, list[tuple]] = defaultdict(list)
+
+    for row in unobserved:
+
+        account = row.get("account_id")
+
+        if account is None or row.get("status") not in (None, "approved"):
+            continue
+
+        # Снимок остатка денег не двигает: его сумма это сам
+        # остаток, а не проводка. Потерянный снимок ничего в
+        # цепочке не объясняет.
+        if row.get("event_type") == "balance_snapshot":
+            continue
+
+        pending[account].append((row["event_time"], _signed(row), row.get("counterparty")))
+
+    for items in pending.values():
+        items.sort(key=lambda item: item[0])
+
+    return pending
+
+
 def authoritative(events: list) -> list:
     """
     Для проверок берётся ПОСЛЕДНЯЯ версия каждой записи.
@@ -88,7 +172,7 @@ def authoritative(events: list) -> list:
     latest: dict[str, dict] = {}
     position: dict[str, int] = {}
 
-    for event in events:
+    for order, event in enumerate(events):
 
         key = event["event_id"]
 
@@ -99,8 +183,8 @@ def authoritative(events: list) -> list:
 
         # Место в ленте принадлежит ПЕРВОЙ версии: исправление
         # уточняет запись, но не переносит событие во времени.
-        order = event["sequence_number"]
-
+        # Место это позиция строки в ленте клиента; отдельного
+        # номера записи в выгрузке нет.
         if key not in position or order < position[key]:
             position[key] = order
 
@@ -117,11 +201,12 @@ def versions_by_event(events: list) -> dict:
 
     grouped: dict[str, list] = {}
 
-    for event in events:
-        grouped.setdefault(event["event_id"], []).append(event)
+    for order, event in enumerate(events):
+        grouped.setdefault(event["event_id"], []).append((order, event))
 
-    for rows in grouped.values():
-        rows.sort(key=lambda item: (item["event_version"], item["record_time"]))
+    for key, rows in grouped.items():
+        rows.sort(key=lambda item: (item[1]["event_version"], item[0]))
+        grouped[key] = [event for _, event in rows]
 
     return grouped
 
@@ -173,6 +258,10 @@ def check_corrections(events: list) -> list:
 
     client_id = events[0]["client_id"]
 
+    # Место записи в ленте это позиция строки: отдельного номера
+    # записи в выгрузке нет.
+    position = {id(event): order for order, event in enumerate(events)}
+
     problems: list[Violation] = []
 
     for event_id, rows in versions_by_event(events).items():
@@ -199,10 +288,10 @@ def check_corrections(events: list) -> list:
                 # Дубль: та же версия, та же запись целиком.
                 continue
 
-            if row["record_time"] <= first["record_time"]:
+            if position[id(row)] <= position[id(first)]:
                 problems.append(
                     Violation("correction_not_later", client_id,
-                              f"{event_id}: исправление не позже оригинала")
+                              f"{event_id}: исправление стоит в ленте не позже оригинала")
                 )
 
             if row["event_type"] != first["event_type"]:
@@ -234,9 +323,13 @@ def check_corrections(events: list) -> list:
     return problems
 
 
-def check_client(events: list) -> list:
+def check_client(events: list, unobserved=()) -> list:
     """
     Все финансовые инварианты одного клиента.
+
+    unobserved: строки, которые сбой источника не донёс до
+    выгрузки. Разрыв цепочки остатков считается объяснённым
+    ровно на их сумму и только на том же счёте.
     """
 
     if not events:
@@ -264,6 +357,28 @@ def check_client(events: list) -> list:
 
     last_balance: dict[str, int] = {}
 
+    pending = _pending_by_account(unobserved)
+    cursor: dict[str, int] = defaultdict(int)
+
+    def missing_before(account: str, moment) -> int:
+        """
+        Сумма потерянных наблюдением движений счёта, случившихся
+        не позже этого момента и ещё не учтённых.
+        """
+
+        items = pending.get(account)
+
+        if not items:
+            return 0
+
+        total = 0
+
+        while cursor[account] < len(items) and items[cursor[account]][0] <= moment:
+            total += items[cursor[account]][1]
+            cursor[account] += 1
+
+        return total
+
     for event in ordered:
 
         kind = event["event_type"]
@@ -286,11 +401,13 @@ def check_client(events: list) -> list:
 
         amount = int(payload.get("amount") or 0)
 
+        missing = missing_before(account, event["event_time"])
+
         if kind == "balance_snapshot":
-            if account in last_balance and last_balance[account] != int(balance):
+            if account in last_balance and last_balance[account] + missing != int(balance):
                 fail(
                     "balance_snapshot_matches_chain",
-                    f"{account}: снимок {balance} против цепочки {last_balance[account]}",
+                    f"{account}: снимок {balance} против цепочки {last_balance[account] + missing}",
                 )
             last_balance[account] = int(balance)
             continue
@@ -300,7 +417,7 @@ def check_client(events: list) -> list:
         signed = amount if direction == "credit" else -amount
 
         if account in last_balance:
-            expected = last_balance[account] + signed
+            expected = last_balance[account] + missing + signed
             if expected != int(balance):
                 fail(
                     "balance_after_chain",
@@ -475,12 +592,17 @@ def check_client(events: list) -> list:
     return problems
 
 
-def check_money_conservation(events: list) -> list:
+def check_money_conservation(events: list, unobserved=()) -> list:
     """
     Изменение совокупного клиентского баланса объясняется
     чистыми внешними потоками и проводками между клиентскими
     и банковскими счетами. Внутренние переводы взаимно
     сокращаются и в общее изменение не входят.
+
+    Движение, потерянное наблюдением, в выгрузке строкой не
+    представлено, но остаток его учёл: оно входит во внешний
+    поток по тем же правилам, что и наблюдаемое. Потеря раньше
+    первого наблюдения счёта уже сидит в его начальном остатке.
     """
 
     if not events:
@@ -495,6 +617,9 @@ def check_money_conservation(events: list) -> list:
 
     external = 0
 
+    pending = _pending_by_account(unobserved)
+    cursor: dict[str, int] = defaultdict(int)
+
     for event in ordered:
 
         kind = event["event_type"]
@@ -508,6 +633,14 @@ def check_money_conservation(events: list) -> list:
 
         if account is None or balance is None:
             continue
+
+        items = pending.get(account) or ()
+
+        while cursor[account] < len(items) and items[cursor[account]][0] <= event["event_time"]:
+            _, signed_lost, counterparty_lost = items[cursor[account]]
+            cursor[account] += 1
+            if account in last_balance and counterparty_lost != "own_account":
+                external += signed_lost
 
         amount = int(payload.get("amount") or 0)
         direction = payload.get("direction")
@@ -545,13 +678,21 @@ def check_money_conservation(events: list) -> list:
     return []
 
 
-def check_all(events_by_client: dict) -> list:
+def check_all(events_by_client: dict, unobserved_by_client: dict | None = None) -> list:
+    """
+    unobserved_by_client: клиент -> строки, потерянные наблюдением
+    (из скрытой истины). Без них любая потеря источника выглядит
+    разрывом арифметики.
+    """
 
     problems: list[Violation] = []
 
-    for events in events_by_client.values():
-        problems.extend(check_client(events))
-        problems.extend(check_money_conservation(events))
+    lost = unobserved_by_client or {}
+
+    for client_id, events in events_by_client.items():
+        rows = lost.get(client_id, ())
+        problems.extend(check_client(events, rows))
+        problems.extend(check_money_conservation(events, rows))
         problems.extend(check_corrections(events))
 
     return problems
@@ -559,6 +700,7 @@ def check_all(events_by_client: dict) -> list:
 
 __all__ = [
     "CORRECTABLE_FIELDS",
+    "UNOBSERVED_KIND",
     "CREDIT_EVENTS",
     "DEBIT_EVENTS",
     "MONEY_EVENTS",
@@ -570,5 +712,6 @@ __all__ = [
     "check_client",
     "check_corrections",
     "check_money_conservation",
+    "unobserved_rows",
     "versions_by_event",
 ]

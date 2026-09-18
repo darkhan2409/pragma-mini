@@ -182,7 +182,6 @@ DEFAULT_TARGETS: tuple = (
     _absent("confirmed_closure_share", "pauses", "share",
             "доля клиентов с ПОДТВЕРЖДЁННЫМ закрытием отношений; "
             "молчание на конце окна сюда не входит"),
-    _absent("source_delay_distribution", "defects", "minutes", "нужны record_time хранилища"),
     _absent("duplicate_share", "defects", "share", "нужны технические дубли хранилища"),
     _absent("correction_share", "defects", "share", "нужны версии записей хранилища"),
 )

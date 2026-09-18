@@ -44,25 +44,67 @@ def open_deposit(
     )
 
 
-def monthly_interest(state: DepositState, balance: int, month: datetime) -> int:
+def monthly_interest(state: DepositState, ledger, month: datetime) -> int:
     """
-    Проценты за месяц. Ежедневная капитализация приведена к
-    месячному начислению: банк выплачивает его одной проводкой.
+    Проценты за месяц по ФАКТИЧЕСКОМУ остатку каждого дня.
+
+    Считать по остатку на конец месяца нельзя: вклад, открытый
+    тридцать первого числа, получал бы столько же, сколько
+    пролежавший весь месяц, а пополнение под конец месяца давало
+    бы доход, которого не было.
+
+    Вклад, открытый в середине месяца, зарабатывает только за
+    прожитые дни: до открытия остаток по счёту был нулевым.
     """
 
-    if balance <= 0 or state.closed:
+    if state.closed:
         return 0
 
-    days = (cal.next_month(month) - cal.month_start(month)).days
+    account = ledger.get(state.account_id)
+
+    if account is None:
+        return 0
+
+    start = cal.month_start(month)
+    stop = cal.next_month(month)
+
+    moves = sorted(ledger.signed_moves(state.account_id, start, stop))
+
+    # Остаток на начало месяца: текущий минус движения месяца.
+    opening = account.balance - sum(delta for _, delta in moves)
 
     daily = state.rate / 365.0
 
-    if state.capitalisation == "daily":
-        amount = balance * ((1.0 + daily) ** days - 1.0)
-    else:
-        amount = balance * state.rate / 12.0
+    accrued = 0.0
+    balance = opening
+    moment = start
 
-    return int(round(amount))
+    for ts, delta in list(moves) + [(stop, 0)]:
+
+        edge = min(ts, stop)
+
+        # Проценты считаются по КАЛЕНДАРНЫМ дням: вклад, открытый
+        # тридцать первого в десять утра, зарабатывает за этот
+        # день, а не округляется до нуля.
+        days = (edge.date() - moment.date()).days
+
+        if days > 0 and balance > 0:
+            if state.capitalisation == "daily":
+                segment = balance * ((1.0 + daily) ** days - 1.0)
+                # Капитализация: процент отрезка входит в базу
+                # следующего отрезка того же месяца. Иначе вклад с
+                # пополнением в середине месяца недополучал бы
+                # процент на уже начисленный процент.
+                balance += segment
+            else:
+                segment = balance * state.rate * days / 365.0
+
+            accrued += segment
+
+        moment = edge
+        balance += delta
+
+    return int(round(accrued))
 
 
 def matured(state: DepositState, ts: datetime) -> bool:
@@ -71,8 +113,10 @@ def matured(state: DepositState, ts: datetime) -> bool:
 
 def early_penalty(state: DepositState, ts: datetime, accrued: int) -> int:
     """
-    Досрочное закрытие: проценты пересчитываются, излишек
-    возвращается банку.
+    Досрочное закрытие: проценты пересчитываются по ставке до
+    востребования, а она равна нулю — всё начисленное
+    возвращается банку. Больше остатка счёта списать нельзя, но
+    остаток видит только вызывающий: это ограничение ставит он.
     """
 
     if ts >= state.matures_at:

@@ -17,8 +17,8 @@ REFERENCE_DIR = DATA_DIR / "reference"
 
 PRODUCT_TIMELINE_PATH = REFERENCE_DIR / "home_product_timeline.yaml"
 
-GENERATOR_VERSION = "3.0"
-SCHEMA_VERSION = 3
+GENERATOR_VERSION = "4.0"
+SCHEMA_VERSION = 5
 
 SEED = 42
 
@@ -103,6 +103,10 @@ CHANGE_INITIATORS = (
     INITIATOR_EXTERNAL,
 )
 
+# Вид деловой связи записи, и только он. Способа доставки здесь
+# нет: повторная доставка и исправление узнаются по паре
+# (event_id, event_version), а не по особой метке. Метка затирала
+# бы вид связи, и исправленный перевод переставал быть переводом.
 LINK_TYPES = (
     "offer",
     "application",
@@ -115,8 +119,6 @@ LINK_TYPES = (
     "reversal",
     "refund",
     "chargeback",
-    "correction",
-    "duplicate",
 )
 
 
@@ -429,9 +431,8 @@ _spec(
         _f("offer_id", "str", True, LEVEL_COMMUNICATION, "предложение"),
         _f("product_id", "str", True, LEVEL_PRODUCT, "продукт предложения"),
         _f("purpose", "str", False, LEVEL_COMMUNICATION, "offer, service, collection, security, survey, winback"),
-        _f("delivered", "bool", False, LEVEL_COMMUNICATION, "доставлено ли сообщение"),
-        _f("day_of_week", "int", False, LEVEL_COMMUNICATION, "день недели отправки"),
-        _f("hour", "int", False, LEVEL_COMMUNICATION, "час отправки"),
+        _f("delivered", "bool", True, LEVEL_COMMUNICATION,
+           "true — доставка подтверждена, false — недоставка подтверждена, null — результат неизвестен"),
     ),
     "банк отправил сообщение",
 )

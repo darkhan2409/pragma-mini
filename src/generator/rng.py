@@ -22,19 +22,27 @@ from .config import SEED
 # иначе смена seed в одном процессе вернула бы старое значение.
 # ============================================================
 
-_STATE: dict[str, Any] = {"seed": SEED, "fingerprint": "default"}
+_STATE: dict[str, Any] = {"seed": SEED, "world_seed": SEED, "fingerprint": "default"}
 
 
-def configure(seed: int = SEED, fingerprint: str = "default") -> None:
+def configure(seed: int = SEED, fingerprint: str = "default", world_seed: int | None = None) -> None:
     """
-    Устанавливает seed и отпечаток параметров процесса.
-    Сбрасывает все кэши, привязанные к состоянию.
+    Устанавливает seed популяции, seed мира и отпечаток параметров
+    процесса. Сбрасывает все кэши, привязанные к состоянию.
+
+    world_seed по умолчанию равен seed популяции: одиночная
+    выгрузка ведёт себя как прежде. Разные группы одного набора
+    задают ОДИН world_seed и РАЗНЫЕ seed популяции, и тогда мир у
+    них общий, а клиенты и поведение разные.
     """
 
-    if _STATE["seed"] != seed or _STATE["fingerprint"] != fingerprint:
+    world = int(seed if world_seed is None else world_seed)
+
+    if _STATE["seed"] != seed or _STATE["world_seed"] != world or _STATE["fingerprint"] != fingerprint:
         clear_caches()
 
     _STATE["seed"] = int(seed)
+    _STATE["world_seed"] = world
     _STATE["fingerprint"] = str(fingerprint)
 
 
@@ -42,8 +50,12 @@ def current_seed() -> int:
     return int(_STATE["seed"])
 
 
-def state_key() -> tuple[int, str]:
-    return (int(_STATE["seed"]), str(_STATE["fingerprint"]))
+def current_world_seed() -> int:
+    return int(_STATE["world_seed"])
+
+
+def state_key() -> tuple[int, int, str]:
+    return (int(_STATE["seed"]), int(_STATE["world_seed"]), str(_STATE["fingerprint"]))
 
 
 _CACHES: list[dict] = []
@@ -299,12 +311,24 @@ class KeyedRandom:
         return chosen
 
 
+# Розыгрыши МИРА: справочники, общие для всех групп одного
+# набора. Они сеются world_seed, а не seed популяции, поэтому
+# train, validation и test видят один Казахстан, одни бренды и
+# одни торговые точки. Продуктовый каталог и его хронология
+# случайности не используют вовсе и одинаковы всегда.
+WORLD_NAMESPACES: frozenset[int] = frozenset({NS_CATALOG, NS_MERCHANT})
+
+
 def keyed_rng(*key: int) -> KeyedRandom:
     """
     Поток, включающий seed процесса.
+
+    Неймспейсы мира берут world_seed, остальные — seed популяции.
     """
 
-    return KeyedRandom((current_seed(), *key))
+    root = current_world_seed() if key and key[0] in WORLD_NAMESPACES else current_seed()
+
+    return KeyedRandom((root, *key))
 
 
 # ============================================================

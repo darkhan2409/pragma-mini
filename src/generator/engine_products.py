@@ -43,7 +43,7 @@ from .rng import (
 )
 from .simulate import ClientState, _application_id
 from .world import products as product_catalog
-from .world.dictionaries import FUNNEL_SCREENS, MCC_TRANSFER
+from .world.dictionaries import FUNNEL_SCREENS, MCC_CASH, MCC_TRANSFER
 
 
 # ============================================================
@@ -343,6 +343,10 @@ def _on_adoption(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     amount, term = sim._contract_terms(state, candidate.view, ts, rng)
 
+    # Класть нечего: заявки на вклад без денег не бывает.
+    if amount is None and candidate.view.family in ("deposit", "deposit_certificate"):
+        return
+
     application = Application(
         application_id=_application_id(state.client_id, ts, len(state.applications)),
         client_id=state.client_id,
@@ -452,6 +456,74 @@ def _close_refinanced(state: ClientState, ts: datetime, new_contract_id: str) ->
         )
 
 
+def _gather_on_card(state: ClientState, ts: datetime, amount: int) -> bool:
+    """
+    Клиент собирает сумму вклада на карте: недостающее приходит
+    наличными через банкомат или переводом из другого банка.
+    Случайности здесь нет — решение открыть вклад уже принято с
+    оглядкой на все деньги клиента.
+    """
+
+    account = state.primary_card_account(ts)
+
+    if account is None:
+        return False
+
+    shortfall = max(0, amount - account.available)
+
+    if shortfall <= 0:
+        return True
+
+    sources = state.ledger.hidden_sources(shortfall)
+
+    if not sources:
+        return False
+
+    hidden = sources[0]
+
+    from_cash = hidden.account_id == state.ledger.cash_id
+
+    _emit_money(
+        state,
+        ts,
+        "cash_deposit" if from_cash else "transfer_in",
+        account.account_id,
+        shortfall,
+        "credit",
+        hidden.account_id,
+        {
+            "channel": "atm" if from_cash else "app",
+            "counterparty": "Own account",
+            "reason": "deposit_funding",
+            "mcc": MCC_CASH if from_cash else MCC_TRANSFER,
+            "merchant_country": "KZ",
+        },
+        INITIATOR_CLIENT,
+    )
+
+    return True
+
+
+def _cancel_unfunded(state: ClientState, ts: datetime, contract) -> None:
+    """
+    Договор вклада, под который не нашлось денег, аннулируется
+    сразу. Открытый вклад с нулевым остатком не зарабатывает и не
+    заканчивается, а в ленте выглядел бы живым продуктом.
+    """
+
+    moment = ts + timedelta(minutes=3)
+
+    contract.status = CONTRACT_CLOSED
+    contract.closed_at = moment
+
+    account = state.ledger.get(contract.account_id) if contract.account_id else None
+
+    if account is not None:
+        account.closed_at = moment
+
+    emit_product_closed(state, moment, contract, "not_funded")
+
+
 def _activate_product(sim, state: ClientState, contract, view, ts: datetime, rng) -> None:
     """
     Первое действие по новому договору: выдача кредита,
@@ -541,13 +613,25 @@ def _activate_product(sim, state: ClientState, contract, view, ts: datetime, rng
 
         amount = int(contract.amount_or_limit or 0)
 
-        sources = [
-            item
-            for item in state.ledger.payment_sources(ts, amount)
-            if item.account_id != contract.account_id
-        ]
+        def sources_for(value: int) -> list:
+            return [
+                item
+                for item in state.ledger.payment_sources(ts, value)
+                if item.account_id != contract.account_id
+            ]
+
+        sources = sources_for(amount) if amount > 0 else []
+
+        # На одном счёте суммы нет: клиент собирает её на карте —
+        # наличными или переводом из другого банка.
+        if amount > 0 and not sources and _gather_on_card(state, ts + timedelta(minutes=1), amount):
+            sources = sources_for(amount)
 
         if not sources or amount <= 0:
+            # Вклад без денег не живёт. Раньше договор оставался
+            # открытым без остатка, процентов и срока; теперь он
+            # аннулируется сразу, и это видно в ленте.
+            _cancel_unfunded(state, ts, contract)
             return
 
         from .engine_app import _own_transfer
@@ -1376,6 +1460,11 @@ def _migrate_products(sim, state: ClientState, ts: datetime, rng) -> None:
             continue
 
         amount, term = sim._contract_terms(state, target, ts, rng)
+
+        # Преемник-вклад без денег не открывается: прежний договор
+        # остаётся.
+        if amount is None and target.family in ("deposit", "deposit_certificate"):
+            continue
 
         contract.status = CONTRACT_CLOSED
         contract.closed_at = ts
