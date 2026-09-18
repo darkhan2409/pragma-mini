@@ -1,0 +1,545 @@
+from __future__ import annotations
+
+from collections import Counter
+from datetime import datetime
+from typing import Iterable, Sequence
+
+import pyarrow as pa
+
+from .artifacts import _md_table
+from .history import (
+    INTERNAL_COLUMNS,
+    CanonicalStore,
+    ClientHistory,
+    history_as_of,
+)
+
+
+# ============================================================
+# ИДЕЯ
+# ============================================================
+#
+# Отчёт этапа 3 проверяет не данные, а ПРАВИЛА чтения.
+#
+# Внутри одного среза: ничего из будущего не видно, у события
+# ровно одна версия, бизнес-порядок не ломается, служебные поля
+# наружу не выходят.
+#
+# Между срезами: набор известных событий только растёт, версия
+# события не понижается, а содержимое уже известного события не
+# меняется от того, что срез стал позже. Последнее и есть главное
+# обещание этапа: более поздний срез добавляет будущее, но не
+# переписывает прошлое.
+# ============================================================
+
+
+CHECKS = {
+    "no_future_rows": "во входе нет строк с event_time на границе cutoff либо позже",
+    "one_version_per_event": "у каждого события ровно одна строка",
+    "business_order_non_decreasing": "бизнес-порядок не убывает по времени события",
+    "internal_columns_hidden": "служебные поля выбора версии наружу не выдаются",
+    "profile_known_at_cutoff": "версия профиля уже действовала к cutoff",
+    "known_events_only_grow": "между срезами набор известных событий только растёт",
+    "versions_only_grow": "между срезами версия события не понижается",
+    "past_is_immutable": "содержимое уже известного события не меняется от более позднего среза",
+}
+
+
+def month_starts(start: datetime, end: datetime) -> list[datetime]:
+    """
+    Начала месяцев в [start, end].
+    """
+
+    out: list[datetime] = []
+
+    year, month = start.year, start.month
+
+    while datetime(year, month, 1) <= end:
+        moment = datetime(year, month, 1)
+        if moment >= start:
+            out.append(moment)
+        month += 1
+        if month == 13:
+            month = 1
+            year += 1
+
+    return out
+
+
+def choose_cutoffs(window_start: datetime, final_cutoff: datetime, extract_time: datetime, count: int) -> list[datetime]:
+    """
+    Срезы для отчёта: конечный cutoff группы плюс равномерно
+    разреженные более ранние начала месяцев.
+
+    Расписание обучающих срезов здесь не выбирается: это только
+    точки, на которых проверяются правила чтения.
+    """
+
+    limit = min(final_cutoff, extract_time)
+
+    candidates = [moment for moment in month_starts(window_start, limit) if moment <= limit]
+
+    if not candidates:
+        return [limit]
+
+    if candidates[-1] != limit:
+        candidates.append(limit)
+
+    if len(candidates) <= count:
+        return candidates
+
+    step = (len(candidates) - 1) / (count - 1)
+
+    picked = sorted({candidates[round(index * step)] for index in range(count)})
+
+    if picked[-1] != limit:
+        picked[-1] = limit
+
+    return picked
+
+
+# ============================================================
+# ПРОВЕРКИ
+# ============================================================
+
+
+def _content_key(table: pa.Table, columns: Sequence[str]) -> dict[str, tuple]:
+
+    rows = table.select(list(columns)).to_pylist()
+    ids = table.column("event_id").to_pylist()
+
+    return {event_id: tuple(sorted(row.items(), key=lambda item: item[0])) for event_id, row in zip(ids, rows)}
+
+
+def check_single(history: ClientHistory) -> list[str]:
+    """
+    Нарушения правил внутри одного среза.
+    """
+
+    problems: list[str] = []
+
+    events = history.events
+    cutoff = history.cutoff
+
+    if events.num_rows:
+
+        event_time = events.column("event_time").to_pylist()
+
+        if any(value >= cutoff for value in event_time):
+            problems.append("no_future_rows: событие не раньше cutoff")
+
+        ids = events.column("event_id").to_pylist()
+        if len(ids) != len(set(ids)):
+            problems.append("one_version_per_event: событие встречается дважды")
+
+        if any(later < earlier for earlier, later in zip(event_time, event_time[1:])):
+            problems.append("business_order_non_decreasing: порядок убывает по времени события")
+
+    leaked = [name for name in INTERNAL_COLUMNS if name in events.column_names]
+    if leaked:
+        problems.append(f"internal_columns_hidden: наружу вышли {leaked}")
+
+    if history.profile is not None and history.profile["valid_from"] >= cutoff:
+        problems.append("profile_known_at_cutoff: выбрана версия, которая ещё не действует")
+
+    return problems
+
+
+def check_across(previous: ClientHistory, current: ClientHistory, columns: Sequence[str]) -> list[str]:
+    """
+    Нарушения правил между двумя срезами одного клиента.
+    """
+
+    problems: list[str] = []
+
+    before = dict(
+        zip(previous.events.column("event_id").to_pylist(), previous.events.column("event_version").to_pylist())
+    )
+    after = dict(
+        zip(current.events.column("event_id").to_pylist(), current.events.column("event_version").to_pylist())
+    )
+
+    lost = set(before) - set(after)
+    if lost:
+        problems.append(f"known_events_only_grow: пропало событий {len(lost)}")
+
+    downgraded = [key for key in before if key in after and after[key] < before[key]]
+    if downgraded:
+        problems.append(f"versions_only_grow: версия понизилась у {len(downgraded)} событий")
+
+    old = _content_key(previous.events, columns)
+    new = _content_key(current.events, columns)
+
+    changed = [key for key in old if key in new and old[key] != new[key]]
+
+    if changed:
+        problems.append(f"past_is_immutable: содержимое изменилось у {len(changed)} событий")
+
+    return problems
+
+
+# ============================================================
+# ОТЧЁТ
+# ============================================================
+
+
+def temporal_report(
+    store: CanonicalStore,
+    clients: Iterable[str | int],
+    cutoffs: Sequence[datetime],
+    group: str | None = None,
+) -> dict:
+
+    cutoffs = sorted(cutoffs)
+
+    counts: Counter = Counter()
+    coverage_states: Counter = Counter()
+    limitations: Counter = Counter()
+    problems: list[dict] = []
+
+    per_cutoff: dict[str, dict] = {}
+
+    checked_clients = 0
+    entity_states: Counter = Counter()
+    pending_total = 0
+    transfers_visible = 0
+    transfers_lonely = 0
+
+    content_columns: list[str] | None = None
+
+    for client in clients:
+
+        checked_clients += 1
+
+        previous: ClientHistory | None = None
+
+        for cutoff in cutoffs:
+
+            history = history_as_of(store, client, cutoff)
+
+            if content_columns is None:
+                content_columns = list(history.events.column_names)
+
+            slot = per_cutoff.setdefault(
+                cutoff.isoformat(),
+                {"clients": 0, "events": 0, "with_profile": 0, "history_incomplete": 0},
+            )
+
+            slot["clients"] += 1
+            slot["events"] += history.n_events
+            slot["with_profile"] += int(history.profile is not None)
+            slot["history_incomplete"] += int(history.relationship.history_incomplete)
+
+            for key, value in history.counts.items():
+                counts[key] += value
+
+            for item in history.coverage:
+                coverage_states[item.state] += 1
+
+            for item in history.entities:
+                entity_states[f"{item.kind}:{item.state}"] += 1
+                pending_total += len(item.pending)
+
+            for item in history.transfers:
+                if item.pair_state == "counterpart_visible":
+                    transfers_visible += 1
+                else:
+                    transfers_lonely += 1
+
+            for note in history.limitations:
+                limitations[note.split(":")[0]] += 1
+
+            found = check_single(history)
+
+            if previous is not None:
+                found += check_across(previous, history, content_columns or [])
+
+            for item in found:
+                problems.append(
+                    {"client_id": history.client_id, "cutoff": cutoff.isoformat(), "problem": item}
+                )
+
+            previous = history
+
+    return {
+        "stage": "history",
+        "group": group,
+        "status": "ok" if not problems else "violations",
+        "cutoffs": [moment.isoformat() for moment in cutoffs],
+        "clients_checked": checked_clients,
+        "checks": CHECKS,
+        "problems": problems[:50],
+        "problem_count": len(problems),
+        "rows": dict(sorted(counts.items())),
+        "per_cutoff": per_cutoff,
+        "coverage_states": dict(sorted(coverage_states.items())),
+        "entity_states": dict(sorted(entity_states.items())),
+        "pending_changes": pending_total,
+        "transfers": {
+            "counterpart_visible": transfers_visible,
+            "counterpart_not_visible": transfers_lonely,
+            "rule": "встречная сторона видна только после своего события; иначе перевод односторонний",
+        },
+        "limitations": dict(sorted(limitations.items())),
+        "rules": {
+            "cutoff": "исключительная граница: событие обязано быть строго раньше",
+            "versions": "у события действует наибольшая версия; повторная доставка не создаёт действия",
+            "order": "бизнес-порядок по времени события и приоритету типа; версии события делят одно место",
+            "profile": "valid_from < cutoff, valid_to не фильтрует",
+            "coverage": "состояние только из датированных полей; недатированные причины остаются вне состояния",
+            "internal": "служебные флаги выбора версии наружу не выдаются",
+        },
+    }
+
+
+# ============================================================
+# ЧИТАЕМАЯ ИСТОРИЯ
+# ============================================================
+
+
+def _fmt(value) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, bool):
+        return "да" if value else "нет"
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ")
+    return str(value)
+
+
+def render_history_md(history: ClientHistory, tail: int = 15) -> str:
+
+    out: list[str] = []
+
+    out.append(f"# Клиент {history.client_id} на {history.cutoff.isoformat(sep=' ')}\n")
+    out.append(
+        "Показано то, что банк знал строго до этого момента: события, "
+        "произошедшие раньше cutoff, в действующей версии.\n"
+    )
+
+    counts = history.counts
+
+    out.append("## Что видно и что ещё нет\n")
+    out.append(
+        _md_table(
+            [
+                ["строк у клиента всего", counts["rows"]],
+                ["видно событий", counts["visible"]],
+                ["ещё не произошло", counts["event_not_happened"]],
+                ["повторных доставок отброшено", counts["duplicate"]],
+                ["перекрыто старшей версией", counts["superseded"]],
+                ["конфликтов отброшено", counts["conflict_dropped"]],
+            ],
+            ["показатель", "значение"],
+        )
+    )
+
+    meta = history.profile_meta
+
+    out.append("\n## Профиль\n")
+
+    if history.profile is None:
+        out.append(f"Версии профиля на эту дату ещё нет: известно {meta['versions_known']} из {meta['versions_total']}.\n")
+    else:
+        profile = history.profile
+        out.append(
+            _md_table(
+                [
+                    ["версия", meta["profile_version"]],
+                    ["действует с", _fmt(meta["valid_from"])],
+                    ["возраст версии, дней", meta["age_days"]],
+                    ["возраст клиента", _fmt(profile.get("age"))],
+                    ["город", _fmt(profile.get("city"))],
+                    ["доход заявленный", _fmt(profile.get("declared_income"))],
+                    ["месяцев с банком по профилю", _fmt(profile.get("relationship_months"))],
+                    ["договоров", _fmt(profile.get("contracts_count"))],
+                ],
+                ["поле", "значение"],
+            )
+        )
+
+    relationship = history.relationship
+
+    out.append("\n## Отношения с банком\n")
+    out.append(
+        _md_table(
+            [
+                ["наблюдение началось", _fmt(relationship.observed_start)],
+                ["наблюдается дней", _fmt(relationship.observed_days)],
+                ["история неполна", _fmt(relationship.history_incomplete)],
+                ["закрыты", _fmt(relationship.closed_at)],
+            ],
+            ["показатель", "значение"],
+        )
+    )
+
+    out.append("\n## Источники на эту дату\n")
+    out.append(
+        _md_table(
+            [
+                [
+                    item.source,
+                    item.state,
+                    _fmt(item.first_available_at),
+                    _fmt(item.first_seen),
+                    _fmt(item.last_available_at),
+                ]
+                for item in history.coverage
+            ],
+            ["источник", "состояние", "запуск источника", "клиент замечен", "объявленный конец"],
+        )
+    )
+
+    if history.entities:
+
+        out.append("\n## Счета, карты, договоры, заявки\n")
+        out.append(
+            _md_table(
+                [
+                    [
+                        item.kind,
+                        item.entity_id,
+                        _fmt(item.state),
+                        _fmt(item.since),
+                        _fmt(item.opening_observed),
+                        _fmt(item.last_transition),
+                        ", ".join(f"{name} c {_fmt(moment)}" for name, moment in item.pending) or "—",
+                    ]
+                    for item in history.entities[:20]
+                ],
+                ["вид", "идентификатор", "состояние", "с", "открытие наблюдалось", "последний переход", "ещё не в силе"],
+            )
+        )
+
+    if history.transfers:
+
+        out.append("\n## Переводы\n")
+        out.append(
+            _md_table(
+                [
+                    [
+                        item.transfer_id,
+                        _fmt(item.side),
+                        _fmt(item.amount),
+                        _fmt(item.event_time),
+                        item.pair_state,
+                        _fmt(item.counterpart_client_id),
+                    ]
+                    for item in history.transfers[-10:]
+                ],
+                ["перевод", "сторона", "сумма", "когда", "встречная сторона", "контрагент"],
+            )
+        )
+
+    if history.products:
+
+        out.append("\n## Продукты по справочнику на эту дату\n")
+        out.append(
+            _md_table(
+                [
+                    [key, item.get("state"), _fmt(item.get("product_code")), _fmt(item.get("status"))]
+                    for key, item in list(history.products.items())[:12]
+                ],
+                ["продукт и версия", "состояние справочника", "код", "статус продукта"],
+            )
+        )
+
+    events = history.events
+
+    if events.num_rows:
+
+        out.append(f"\n## Последние {min(tail, events.num_rows)} событий в бизнес-порядке\n")
+
+        rows = events.slice(max(0, events.num_rows - tail)).to_pylist()
+
+        out.append(
+            _md_table(
+                [
+                    [
+                        _fmt(row["event_time"]),
+                        row["event_type"],
+                        row["source"],
+                        row["version_role"],
+                        _fmt(row.get("amount")),
+                        _fmt(row.get("merchant_name") or row.get("counterparty") or row.get("template")),
+                    ]
+                    for row in rows
+                ],
+                ["время события", "тип", "источник", "роль версии", "сумма", "кому или что"],
+            )
+        )
+
+    if history.limitations:
+        out.append("\n## Ограничения восстановления\n")
+        out.extend(f"- {item}" for item in history.limitations)
+        out.append("")
+
+    return "\n".join(out) + "\n"
+
+
+def render_temporal_md(report: dict) -> str:
+
+    out: list[str] = []
+
+    out.append(f"# История на дату: группа {report.get('group') or '—'}\n")
+    out.append(f"Статус: **{report['status']}**. Нарушений правил: {report['problem_count']}.\n")
+
+    out.append("## Правила\n")
+    out.append(_md_table([[name, text] for name, text in report["rules"].items()], ["правило", "смысл"]))
+
+    out.append("\n## Проверки\n")
+    out.append(_md_table([[name, text] for name, text in report["checks"].items()], ["проверка", "что утверждает"]))
+
+    if report["problems"]:
+        out.append("\n## Нарушения\n")
+        out.extend(f"- {item['client_id']} на {item['cutoff']}: {item['problem']}" for item in report["problems"])
+        out.append("")
+
+    out.append(f"\nПроверено клиентов: {report['clients_checked']}, срезов: {len(report['cutoffs'])}.\n")
+
+    out.append("\n## По срезам\n")
+    out.append(
+        _md_table(
+            [
+                [cutoff, item["clients"], item["events"], item["with_profile"], item["history_incomplete"]]
+                for cutoff, item in sorted(report["per_cutoff"].items())
+            ],
+            ["cutoff", "клиентов", "видимых событий", "с профилем", "с неполной историей"],
+        )
+    )
+
+    out.append("\n## Отброшено при чтении\n")
+    out.append(_md_table([[name, value] for name, value in report["rows"].items()], ["причина", "строк"]))
+
+    out.append("\n## Состояния источников\n")
+    out.append(_md_table([[name, value] for name, value in report["coverage_states"].items()], ["состояние", "случаев"]))
+
+    out.append("\n## Переводы\n")
+    out.append(
+        _md_table(
+            [
+                ["встречная сторона видна", report["transfers"]["counterpart_visible"]],
+                ["встречная сторона не видна", report["transfers"]["counterpart_not_visible"]],
+            ],
+            ["показатель", "случаев"],
+        )
+    )
+    out.append(f"\n{report['transfers']['rule']}.\n")
+
+    if report["limitations"]:
+        out.append("\n## Ограничения восстановления\n")
+        out.append(_md_table([[name, value] for name, value in report["limitations"].items()], ["ограничение", "случаев"]))
+
+    return "\n".join(out) + "\n"
+
+
+__all__ = [
+    "CHECKS",
+    "check_across",
+    "check_single",
+    "choose_cutoffs",
+    "month_starts",
+    "render_history_md",
+    "render_temporal_md",
+    "temporal_report",
+]
