@@ -23,8 +23,6 @@ mini-pragma-emit = "src.generator.emit:main"
 mini-pragma-report = "src.generator.report.realism:main"
 mini-pragma-show = "src.generator.report.show:main"
 mini-pragma-preprocess = "src.preprocessing.run:main"
-mini-pragma-tokenize = "src.tokenizer.run:main"
-mini-pragma-train = "src.model.train:main"
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -42,6 +40,8 @@ packages = [
     "src.generator.observe",
     "src.generator.report",
     "src.preprocessing",
+    "src.preprocessing.canonical",
+    "src.preprocessing.semantic",
     "src.tokenizer",
     "src.model",
 ]
