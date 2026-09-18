@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from src.preprocessing.calendar import CALENDAR_FEATURES, calendar_features  # noqa: F401
 from src.tokenizer.dataset import TokenBatch
 
 from .batching import BatchError
@@ -116,53 +117,14 @@ def squash_np(hours, scale: float = TIME_SCALE) -> np.ndarray:
 # ============================================================
 
 
-CALENDAR_FEATURES = 6
+# Календарь приходит из препроцессинга: правила (пояс, длины
+# циклов, порядок колонок) объявлены в его конфигурации, входят
+# в отпечаток этапа и в манифест. Здесь только использование,
+# второй реализации нет.
 
 # Масштаб простоя: год. Делением на squash(год) признак попадает
 # в разумный диапазон, не теряя различий между днём и месяцем.
 INACTIVITY_NORM_HOURS = 24.0 * 365.0
-
-
-def calendar_features(ts) -> np.ndarray:
-    """
-    Час, день недели и день месяца события на единичной окружности.
-
-    Колонки: sin/cos часа, sin/cos дня недели, sin/cos дня месяца.
-
-    Час дробный: 09:30 и 09:00 это разные моменты суток. День
-    недели считается от 1970-01-01, который был четвергом, поэтому
-    сдвиг на три дня делает понедельник нулём. День месяца берётся
-    нумерацией с нуля: первое число это 0.
-    """
-
-    moments = np.asarray(ts).astype("datetime64[us]")
-
-    if moments.size == 0:
-        return np.zeros((0, CALENDAR_FEATURES), dtype=np.float32)
-
-    day = moments.astype("datetime64[D]")
-
-    hour = (moments - day).astype("timedelta64[us]").astype(np.int64) / HOUR_US
-
-    day_of_week = (day.astype(np.int64) + 3) % 7
-
-    day_of_month = (day - moments.astype("datetime64[M]")).astype(np.int64)
-
-    angles = np.stack(
-        [
-            2.0 * np.pi * hour / 24.0,
-            2.0 * np.pi * day_of_week / 7.0,
-            2.0 * np.pi * day_of_month / 31.0,
-        ],
-        axis=1,
-    )
-
-    out = np.empty((moments.size, CALENDAR_FEATURES), dtype=np.float32)
-
-    out[:, 0::2] = np.sin(angles)
-    out[:, 1::2] = np.cos(angles)
-
-    return out
 
 
 def inactivity_feature(hours) -> np.ndarray:
