@@ -1,0 +1,411 @@
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Iterator
+
+from src.preprocessing.artifacts import sha256_file
+from src.preprocessing.canonical.build import REGISTRY_FILE as CANONICAL_REGISTRY_FILE
+from src.preprocessing.canonical.build import STAGE as CANONICAL_STAGE
+from src.preprocessing.history import CanonicalStore
+from src.preprocessing.manifest import fingerprint_path, load_fingerprint, outputs_intact
+from src.preprocessing.semantic.as_of import SemanticHistory, open_merchants, open_products, semantic_as_of
+from src.preprocessing.semantic.build import REGISTRY_FILE as SEMANTIC_REGISTRY_FILE
+from src.preprocessing.semantic.build import STAGE as SEMANTIC_STAGE
+from src.preprocessing.split import SPLIT_MANIFEST_FILE, TRAIN_INDEX_FILE, catalog_digests
+from src.preprocessing.split import STAGE as SPLIT_STAGE
+from src.preprocessing.split import SplitError, TrainCorpus
+
+from .schema import SemanticSchema
+
+
+# ============================================================
+# ИДЕЯ
+# ============================================================
+#
+# Единственный вход fit: train на fit_end через разрешённый
+# корпус разделения, поверх него смысловой слой.
+#
+# Второй реализации видимости здесь нет и быть не может. Всё,
+# что знает токенизатор о том, какие строки ему разрешены,
+# приходит из split.TrainCorpus: он проверяет пригодность,
+# свежесть canonical, горизонт и сам индекс, а клиента выдаёт
+# только из разрешённой группы.
+#
+# Справочники продуктов и мерчантов передаются сюда явно и
+# сверяются с теми, на которых построено разделение: иначе
+# название продукта и расшифровка точки пришли бы из другого
+# мира, а отпечаток этого не заметил бы.
+# ============================================================
+
+
+CATALOG_FILES: tuple[str, ...] = ("products", "merchants")
+
+READY = "ready"
+DIAGNOSTIC = "diagnostic"
+
+
+class CorpusError(ValueError):
+    """
+    Разрешённый корпус открыть нельзя.
+    """
+
+
+@dataclass(frozen=True)
+class Readiness:
+    """
+    Готов набор целиком или используется как диагностика.
+
+    Короткий горизонт и неподтверждённый общий мир не делают
+    работу бессмысленной, но и молчать о них нельзя: вердикт
+    едет во все манифесты токенизатора.
+    """
+
+    status: str
+    reasons: tuple[str, ...]
+
+    @property
+    def ready(self) -> bool:
+        return self.status == READY
+
+    def as_dict(self) -> dict:
+        return {"status": self.status, "reasons": list(self.reasons)}
+
+
+def _readiness(manifest: dict) -> Readiness:
+    """
+    Вердикт готовности по двум вердиктам разделения.
+
+    Ограничения разделения сюда не переписываются: они и так
+    едут в ограничения входа, а вердикт должен называть причину
+    один раз.
+    """
+
+    reasons: list[str] = []
+
+    if not manifest.get("contract_met", True):
+        for item in (manifest.get("contract") or {}).get("reasons", ()):
+            reasons.append(f"горизонт: {item}")
+
+    if not manifest.get("shared_world", True):
+        for item in (manifest.get("world") or {}).get("mismatches", ()) or ["общий мир групп не подтверждён"]:
+            reasons.append(f"мир: {item}")
+
+    if not manifest.get("usable", True):
+        reasons.append("разделение объявлено непригодным")
+
+    return Readiness(DIAGNOSTIC if reasons else READY, tuple(reasons))
+
+
+def _marker(processed: Path, stage: str, group: str | None, what: str) -> dict:
+    """
+    Маркер этапа препроцессинга вместе с проверкой его выходов.
+    """
+
+    stored = load_fingerprint(fingerprint_path(processed, stage, group))
+
+    if stored is None:
+        raise CorpusError(f"нет маркера этапа {what}: выполните препроцессинг заново")
+
+    if not outputs_intact(stored, processed):
+        raise CorpusError(
+            f"выходы этапа {what} изменились после сборки: словарь учился бы на других файлах, "
+            "выполните этап заново"
+        )
+
+    return stored
+
+
+class FitCorpus:
+    """
+    Train на fit_end со смыслом. Ничего не учит и не пишет.
+    """
+
+    def __init__(
+        self,
+        corpus: TrainCorpus,
+        schema: SemanticSchema,
+        merchants,
+        manifest: dict,
+        group: str,
+        raw_dir: Path,
+        processed_dir: Path,
+        readiness: Readiness,
+        inputs: dict[str, str],
+    ):
+        self.corpus = corpus
+        self.schema = schema
+        self.merchants = merchants
+        self.manifest = manifest
+        self.group = group
+        self.raw_dir = Path(raw_dir)
+        self.processed_dir = Path(processed_dir)
+        self.readiness = readiness
+        self.inputs = dict(inputs)
+
+    # --- границы ---
+
+    @property
+    def fit_end(self) -> datetime:
+        return self.corpus.fit_end
+
+    @property
+    def client_ids(self) -> list[str]:
+        return sorted(self.corpus.client_ids)
+
+    @property
+    def declared_rows(self) -> int:
+        """
+        Сколько видимых строк объявило разделение.
+        """
+
+        return int(self.manifest["train_corpus"]["checksum"]["events_rows"])
+
+    @property
+    def declared_profile_rows(self) -> int:
+        return int(self.manifest["train_corpus"]["checksum"]["profile_rows"])
+
+    @property
+    def content_sha256(self) -> str:
+        return self.manifest["train_corpus"]["checksum"]["content_sha256"]
+
+    @property
+    def declared_clients_without_profile(self) -> int:
+        return int(self.manifest["groups"][self.group]["clients_without_profile"])
+
+    @property
+    def split_limitations(self) -> tuple[str, ...]:
+        return tuple(self.manifest.get("limitations", ()))
+
+    # --- чтение ---
+
+    def history(self, client_id: str) -> SemanticHistory:
+        """
+        Смысловая история разрешённого клиента на fit_end.
+        """
+
+        return semantic_as_of(
+            self.corpus.store,
+            self.corpus.require(client_id),
+            self.fit_end,
+            self.merchants,
+        )
+
+    def iter_histories(self) -> Iterator[SemanticHistory]:
+        """
+        Клиенты по одному, в устойчивом порядке. Историй в памяти
+        не накапливается: статистику считают на лету.
+        """
+
+        for client_id in self.client_ids:
+            yield self.history(client_id)
+
+    # --- открытие ---
+
+    @staticmethod
+    def open(
+        processed_dir: Path,
+        raw_dir: Path,
+        group: str = "train",
+        allow_short_horizon: bool = False,
+    ) -> "FitCorpus":
+
+        processed = Path(processed_dir)
+        raw = Path(raw_dir)
+
+        split_dir = processed / SPLIT_STAGE
+        canonical_dir = processed / CANONICAL_STAGE / group
+
+        manifest_path = split_dir / SPLIT_MANIFEST_FILE
+
+        if not manifest_path.exists():
+            raise CorpusError(
+                f"нет {manifest_path}: разрешённый train-корпус выдаёт этап разделения, "
+                "выполните его для этого набора"
+            )
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        if manifest.get("train_corpus", {}).get("group") != group:
+            raise CorpusError(
+                f"разрешённая для fit группа это {manifest.get('train_corpus', {}).get('group')!r}, "
+                f"а запрошена {group!r}: учиться на другой группе нельзя"
+            )
+
+        # Маркеры этапов: отпечаток говорит о согласии маркера с
+        # манифестом, а целы ли сами файлы, проверяют выходы.
+        _marker(processed, CANONICAL_STAGE, group, f"canonical/{group}")
+        _marker(processed, SPLIT_STAGE, None, "split")
+        _marker(processed, SEMANTIC_STAGE, group, f"semantic/{group}")
+
+        catalogs = FitCorpus._catalogs(raw, manifest, group)
+
+        try:
+            corpus = TrainCorpus.open(
+                split_dir,
+                canonical_dir,
+                processed_dir=processed,
+                allow_short_horizon=allow_short_horizon,
+                products=open_products(raw),
+            )
+        except SplitError as error:
+            raise CorpusError(str(error)) from error
+
+        schema = SemanticSchema.open(processed, group)
+
+        semantic_path, field_path = SemanticSchema.paths(processed, group)
+
+        inputs = {
+            SPLIT_MANIFEST_FILE: sha256_file(manifest_path),
+            TRAIN_INDEX_FILE: sha256_file(split_dir / TRAIN_INDEX_FILE),
+            SEMANTIC_REGISTRY_FILE: sha256_file(semantic_path),
+            CANONICAL_REGISTRY_FILE: sha256_file(field_path),
+            **{f"catalog/{name}.parquet": digest for name, digest in catalogs.items()},
+        }
+
+        return FitCorpus(
+            corpus=corpus,
+            schema=schema,
+            merchants=open_merchants(raw),
+            manifest=manifest,
+            group=group,
+            raw_dir=raw,
+            processed_dir=processed,
+            readiness=_readiness(manifest),
+            inputs=inputs,
+        )
+
+    @staticmethod
+    def _catalogs(raw: Path, manifest: dict, group: str) -> dict[str, str]:
+        """
+        Справочники выгрузки обязаны быть теми же, на которых
+        построено разделение.
+
+        Сравнивается содержимое, а не байты файла: отпечаток
+        считает та же функция, что и этап разделения, поэтому
+        «тот же мир» здесь значит ровно то же самое, что там.
+        """
+
+        declared = (manifest.get("world") or {}).get("catalogs", {}).get(group, {})
+
+        actual = catalog_digests(raw)
+
+        digests: dict[str, str] = {}
+
+        for name in CATALOG_FILES:
+
+            path = raw / "catalog" / f"{name}.parquet"
+
+            if not path.exists():
+                raise CorpusError(
+                    f"нет справочника {path}: без него смысловой слой не расшифрует "
+                    "ни продукт, ни торговую точку"
+                )
+
+            digests[name] = sha256_file(path)
+
+            expected = declared.get(name)
+
+            if expected is not None and expected != actual.get(name):
+                raise CorpusError(
+                    f"справочник {name} выгрузки {raw} не тот, на котором построено разделение: "
+                    "словарь учился бы на другом мире"
+                )
+
+        return digests
+
+
+class GroupCorpus:
+    """
+    Смысловая история любой группы на любой разрешённый момент.
+
+    Ничему не учит: этим читают данные, которые кодируются уже
+    замороженными артефактами. Разрешение на клиента здесь даёт
+    не разделение, а принадлежность группе: val и test это её
+    собственные клиенты, и границу держит cutoff.
+    """
+
+    def __init__(self, store: CanonicalStore, merchants, group: str, raw_dir: Path,
+                 processed_dir: Path, client_ids: list[str], readiness: Readiness,
+                 final_cutoff: datetime | None = None):
+        self.store = store
+        self.merchants = merchants
+        self.group = group
+        self.raw_dir = Path(raw_dir)
+        self.processed_dir = Path(processed_dir)
+        self.client_ids = list(client_ids)
+        self.readiness = readiness
+        # Конечный cutoff группы по фактическому разделению.
+        # None значит, что разделения рядом нет и момент придётся
+        # взять из конфигурации или назвать явно.
+        self.final_cutoff = final_cutoff
+
+    @property
+    def extract_time(self) -> datetime:
+        return self.store.extract_time
+
+    def history(self, client_id: str, cutoff: datetime) -> SemanticHistory:
+        return semantic_as_of(self.store, client_id, cutoff, self.merchants)
+
+    @staticmethod
+    def open(processed_dir: Path, raw_dir: Path, group: str) -> "GroupCorpus":
+
+        processed = Path(processed_dir)
+        raw = Path(raw_dir)
+
+        canonical_dir = processed / CANONICAL_STAGE / group
+
+        if not canonical_dir.exists():
+            raise CorpusError(f"нет {canonical_dir}: группа {group} не собрана этапом canonical")
+
+        _marker(processed, CANONICAL_STAGE, group, f"canonical/{group}")
+
+        manifest_path = processed / SPLIT_STAGE / SPLIT_MANIFEST_FILE
+
+        readiness = Readiness(READY, ())
+        clients: list[str] | None = None
+        final_cutoff: datetime | None = None
+
+        if manifest_path.exists():
+
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+            readiness = _readiness(manifest)
+
+            entry = (manifest.get("groups") or {}).get(group)
+
+            if entry is not None:
+                clients = list(entry["clients"])
+                final_cutoff = datetime.fromisoformat(entry["window"]["final_cutoff"])
+                FitCorpus._catalogs(raw, manifest, group)
+
+        store = CanonicalStore(canonical_dir, products=open_products(raw))
+
+        if clients is None:
+            # Разделения нет: состав группы берётся из адресной
+            # книги canonical, тестовые аккаунты исключаются.
+            clients = [row["client_id"] for row in store.clients if not row["is_test_account"]]
+
+        return GroupCorpus(
+            store=store,
+            merchants=open_merchants(raw),
+            group=group,
+            raw_dir=raw,
+            processed_dir=processed,
+            client_ids=sorted(clients),
+            readiness=readiness,
+            final_cutoff=final_cutoff,
+        )
+
+
+__all__ = [
+    "CATALOG_FILES",
+    "DIAGNOSTIC",
+    "READY",
+    "CorpusError",
+    "FitCorpus",
+    "GroupCorpus",
+    "Readiness",
+]
