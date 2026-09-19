@@ -5,7 +5,9 @@ from datetime import datetime, timedelta
 from . import params as params_module
 from .config import INITIATOR_BANK, INITIATOR_CLIENT, INITIATOR_SYSTEM
 from .engine import _HANDLERS, _emit_money
+from .finance import deposits as deposit_rules
 from .finance import loans as loan_rules
+from .finance.ledger import NON_PAYMENT_KINDS
 from .finance.entities import CONTRACT_CLOSED
 from .life import stress as stress_module
 from .rng import NS_LOAN, NS_REPAY, keyed_rng, stable_hash
@@ -171,11 +173,43 @@ def _payment_capacity(state: ClientState, ts: datetime) -> int:
         for account in state.ledger.accounts.values()
         if account.visible
         and account.is_open_at(ts)
-        and account.kind != "loan"
+        and account.kind not in NON_PAYMENT_KINDS
         and (allow_credit or account.kind != "credit_card")
     ]
 
     return int(max(values)) if values else 0
+
+
+def _withdraw_from_deposit(state: ClientState, ts: datetime, target, amount: int) -> bool:
+    """
+    Снятие со вклада на карту к сроку платежа.
+
+    Вклад не платёжный счёт: списать с него взнос или покупку
+    нельзя. Деньги выводятся отдельной операцией, и только если
+    условия продукта разрешают снятие (deposits.can_withdraw).
+    """
+
+    candidates = [
+        item
+        for item in state.deposits.values()
+        if deposit_rules.can_withdraw(item, ts, amount, state.ledger.balance(item.account_id))
+    ]
+
+    if not candidates:
+        return False
+
+    deposit = max(candidates, key=lambda item: state.ledger.balance(item.account_id))
+
+    from .engine_app import _own_transfer
+
+    _own_transfer(
+        state, ts, "deposit_withdrawal", deposit.account_id, target.account_id,
+        amount, deposit.contract_id, "withdrawal_before_payment",
+    )
+
+    deposit.principal = max(0, deposit.principal - amount)
+
+    return True
 
 
 def _topup_before_payment(state: ClientState, ts: datetime, amount: int, rng) -> bool:
@@ -203,7 +237,10 @@ def _topup_before_payment(state: ClientState, ts: datetime, amount: int, rng) ->
     sources = state.ledger.hidden_sources(shortfall)
 
     if not sources:
-        return False
+        # Наличных и другого банка не хватило: остаётся вклад, если
+        # его условия разрешают снятие. Это отдельная операция с
+        # проверкой условий, а не платёж со вклада напрямую.
+        return _withdraw_from_deposit(state, ts - timedelta(minutes=12), account, shortfall)
 
     hidden = sources[0]
 

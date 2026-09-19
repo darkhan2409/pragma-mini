@@ -12,6 +12,7 @@ from .config import (
     SOURCE_AVAILABILITY,
 )
 from .engine import _HANDLERS, _emit_money, _touch_client
+from .finance import deposits as deposit_rules
 from .finance import loans as loan_rules
 from .finance.entities import CARD_BLOCKED, Offer
 from .finance.ledger import COUNTERPART_GOVERNMENT
@@ -328,6 +329,11 @@ def _pay_bill_in_app(state: ClientState, ts: datetime, bill: dict, session, rng)
 
 
 def _topup_deposit(state: ClientState, ts: datetime, deposit, rng) -> None:
+
+    # Условия продукта проверяются здесь, а не только при выборе
+    # цели: пополнять можно между открытием и окончанием срока.
+    if not deposit_rules.can_topup(deposit, ts):
+        return
 
     amount = int(round(max(5_000, state.persona.true_income * rng.uniform(0.05, 0.35)) / 1_000) * 1_000)
 

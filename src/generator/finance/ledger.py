@@ -56,6 +56,15 @@ class InsufficientFunds(Exception):
     pass
 
 
+# Счета, с которых не платят. Кредитный счёт — долг, а не деньги.
+# Вклад — деньги, но не платёжные: покупки, счета, переводы и
+# взносы идут с карт и текущих счетов, а со вклада деньги выводятся
+# отдельной операцией с проверкой условий продукта
+# (deposits.can_withdraw). Раньше вклад стоял в очереди источников,
+# и клиенты платили со срочных вкладов, запрещённых к снятию.
+NON_PAYMENT_KINDS: tuple[str, ...] = ("loan", "deposit")
+
+
 class Ledger:
     """
     Счета клиента и все проводки по ним.
@@ -203,11 +212,11 @@ class Ledger:
             for account in self.accounts.values()
             if account.visible
             and account.is_open_at(ts)
-            and account.kind != "loan"
+            and account.kind not in NON_PAYMENT_KINDS
             and account.available >= amount
         ]
 
-        order = {"card": 0, "current": 1, "credit_card": 2, "deposit": 3}
+        order = {"card": 0, "current": 1, "credit_card": 2}
 
         candidates.sort(key=lambda item: (order.get(item.kind, 9), item.account_id))
 
@@ -224,7 +233,7 @@ class Ledger:
             for account in self.accounts.values()
             if account.visible
             and account.is_open_at(ts)
-            and account.kind != "loan"
+            and account.kind not in NON_PAYMENT_KINDS
         ]
 
         return int(max(sources)) if sources else 0
@@ -238,6 +247,7 @@ class Ledger:
 
 
 __all__ = [
+    "NON_PAYMENT_KINDS",
     "COUNTERPART_BANK",
     "COUNTERPART_GOVERNMENT",
     "InsufficientFunds",

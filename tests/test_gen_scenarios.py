@@ -1752,6 +1752,148 @@ def test_forced_early_closure_forfeits_interest_live():
     _reset_defaults()
 
 
+def test_deposits_are_not_payment_accounts():
+    """
+    Вклад не платёжный счёт: покупки, счета и взносы идут с карт и
+    текущих счетов, а деньги со вклада выводятся отдельной операцией
+    с проверкой условий продукта.
+
+    Ledger предлагал вклад как запасной источник денег, и клиенты
+    платили со срочных вкладов, запрещённых к снятию: на check это
+    было 287 списаний на 5,6 млн тенге.
+    """
+
+    state = _deposit_client()
+
+    ts = datetime(2025, 3, 10, 15, 0)
+
+    # Миллион на вкладе платёжной ёмкости не даёт.
+    assert state.ledger.payment_sources(ts, 5_000) == []
+    assert state.ledger.payment_capacity(ts) == 0
+
+    state.ledger.post(ts, "ev_cash", state.ledger.cash_id, "card1", 20_000)
+
+    assert [item.account_id for item in state.ledger.payment_sources(ts, 5_000)] == ["card1"]
+    assert state.ledger.payment_capacity(ts) == 20_000
+
+    # Снятие со вклада — отдельная операция, и только по условиям.
+    from src.generator import engine  # noqa: F401  (engine раньше остальных модулей движка)
+    from src.generator.engine_credit import _withdraw_from_deposit
+
+    deposit = state.deposits["k1"]
+    card = state.ledger.get("card1")
+
+    deposit.withdrawal_allowed = False
+
+    assert _withdraw_from_deposit(state, ts, card, 100_000) is False
+    assert state.ledger.balance("dep1") == 1_000_000
+    assert not [event for event in state.events if event.event_type == "deposit_withdrawal"]
+
+    deposit.withdrawal_allowed = True
+
+    assert _withdraw_from_deposit(state, ts, card, 100_000) is True
+    assert state.ledger.balance("dep1") == 900_000
+    assert state.ledger.balance("card1") == 120_000
+    assert deposit.principal == 900_000
+
+    legs = [event for event in state.events if event.event_type == "deposit_withdrawal"]
+
+    assert [event.payload["reason"] for event in legs] == ["withdrawal_before_payment"] * 2
+
+    _reset_defaults()
+
+
+def test_no_payments_leave_deposit_accounts(baseline):
+    """
+    В живой ленте со счёта вклада уходят только снятия и комиссии:
+    ни покупок, ни счетов, ни переводов, ни наличных.
+    """
+
+    rows = _acting(baseline["events"])
+
+    deposit_accounts = {
+        row["payload"].get("account_id")
+        for row in rows
+        if row["event_type"] == "product_opened"
+        and row["payload"].get("product_family") in ("deposit", "deposit_certificate")
+    }
+    deposit_accounts.discard(None)
+
+    assert deposit_accounts, "в выборке нет вкладов"
+
+    debits = Counter(
+        row["event_type"]
+        for row in rows
+        if row["payload"].get("account_id") in deposit_accounts
+        and row["payload"].get("direction") == "debit"
+        and row["payload"].get("status") == "approved"
+        and row["event_type"] != "balance_snapshot"
+    )
+
+    assert set(debits) <= {"deposit_withdrawal", "fee_charge"}, dict(debits)
+
+
+def test_rollover_resets_accrued_interest():
+    """
+    Пролонгация открывает новый срок: проценты прошлого срока
+    заработаны и капитализированы, досрочное закрытие нового срока
+    их не отнимает.
+
+    accrued копился через все сроки, и штраф при досрочном закрытии
+    забирал проценты уже завершённых сроков: 511 624 тенге вместо
+    130 819 текущего срока.
+    """
+
+    from src.generator import engine  # noqa: F401  (engine раньше engine_month)
+    from src.generator.engine_month import _close_deposit, _credit_deposit_interest
+
+    state = _deposit_client()
+
+    # Продукт из каталога и гарантированная пролонгация.
+    state.contracts["k1"].product_code = "DEPOSIT_HOOM"
+    params_module.activate(
+        params_module.DEFAULT.with_overrides({"products": {"deposit_rollover_share": 1.0}})
+    )
+
+    deposit = state.deposits["k1"]
+
+    for month, last_day in (
+        (datetime(2025, 1, 1), datetime(2025, 1, 31, 23, 50)),
+        (datetime(2025, 2, 1), datetime(2025, 2, 28, 23, 50)),
+    ):
+        _credit_deposit_interest(state, last_day, deposit, month)
+
+    earned = deposit.accrued
+
+    assert earned > 0
+
+    _close_deposit(state, datetime(2025, 3, 31, 23, 50), deposit)
+
+    lifecycle = [
+        event.event_type for event in state.events if event.event_type in ("product_renewed", "product_closed")
+    ]
+
+    assert lifecycle == ["product_renewed"]
+    assert not deposit.closed
+    assert deposit.accrued == 0
+    assert deposit.principal == state.ledger.balance("dep1") == 1_000_000 + earned
+
+    fresh = _credit_deposit_interest(state, datetime(2025, 4, 30, 23, 50), deposit, datetime(2025, 4, 1))
+
+    assert fresh > 0
+
+    _close_deposit(state, datetime(2025, 5, 10, 23, 52), deposit, early=True)
+
+    fees = [event for event in state.events if event.event_type == "fee_charge"]
+
+    # Штраф — только проценты нового срока.
+    assert [event.payload["amount"] for event in fees] == [fresh]
+    assert state.ledger.balance("card1") == 1_000_000 + earned
+    assert deposit.closed
+
+    _reset_defaults()
+
+
 def test_unresolved_stress_keeps_a_tail():
     """
     Неразрешённый эпизод не заканчивается вместе со своим окном.

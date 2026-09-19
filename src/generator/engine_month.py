@@ -20,7 +20,7 @@ from .finance.entities import (
     CARD_CLOSED,
     CONTRACT_CLOSED,
 )
-from .finance.ledger import COUNTERPART_BANK, COUNTERPART_GOVERNMENT
+from .finance.ledger import COUNTERPART_BANK, COUNTERPART_GOVERNMENT, NON_PAYMENT_KINDS
 from .life import calendar as cal
 from .life import lifecycle as lifecycle_module
 from .life import stress as stress_module
@@ -284,7 +284,7 @@ def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_ev
             (
                 item.available
                 for item in state.ledger.accounts.values()
-                if item.visible and item.is_open_at(day) and item.kind not in ("loan", "credit_card")
+                if item.visible and item.is_open_at(day) and item.kind not in (*NON_PAYMENT_KINDS, "credit_card")
             ),
             default=0,
         )
@@ -733,6 +733,13 @@ def _close_deposit(state: ClientState, ts: datetime, deposit, early: bool = Fals
 
         deposit.rate = float(contract.rate or deposit.rate)
         deposit.matures_at = cal.add_months(ts, int(contract.term or 12))
+
+        # Новый срок начинается с чистого листа: проценты прошлого
+        # срока заработаны и капитализированы, досрочное закрытие
+        # нового срока их не отнимает. Раньше accrued копился
+        # через все сроки, и штраф забирал проценты завершённых.
+        deposit.principal = int(account.balance)
+        deposit.accrued = 0
 
         state.emit(
             state.factory.make(
