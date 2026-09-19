@@ -36,7 +36,7 @@ from ..projection import ENTITY_REFS, EVENT_TYPE_FIELD, INITIATOR_FIELD, SEMANTI
 # ============================================================
 
 
-KEYS_VERSION = "1.2.0"
+KEYS_VERSION = "1.3.0"
 
 # Вид значения. Их ровно три. Служебные поля сюда не попадают
 # вовсе: их отсеяла модельная проекция.
@@ -141,7 +141,11 @@ DIRECT_KEYS: dict[str, SemanticKey] = {
     "purpose": _k("purpose", CATEGORICAL, "назначение коммуникации"),
     "delivered": _k("delivered", CATEGORICAL, "результат доставки: подтверждена, не доставлено или неизвестно"),
     "slot": _k("slot", CATEGORICAL, "место показа баннера в приложении"),
-    "offer": _k("offer", TEXT, "текст оффера баннера: не идентификатор предложения"),
+    # Закрытый перечень кодов предложения (cash_loan, credit_card,
+    # cashback и далее), а не свободный текст: разбивать его на
+    # куски нечего. Идентификатором предложения он при этом не
+    # является — тот остаётся ссылкой offer_ref.
+    "offer": _k("offer", CATEGORICAL, "код предложения баннера: не идентификатор предложения"),
     # --- приложение ---
     "firebase_screen": _k("firebase_screen", CATEGORICAL, "экран приложения"),
     "funnel_stage": _k("funnel_stage", CATEGORICAL, "стадия воронки заявки"),
@@ -526,7 +530,8 @@ AMBIGUOUS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("fraud_resolution", "case_resolution"),
      "исход проверки мошенничества и исход обращения в поддержку это разные вещи"),
     (("product_code", "product_family", "offer"),
-     "конкретный продукт, семейство продуктов и текст оффера это три разных смысла"),
+     "конкретный продукт, семейство продуктов и код предложения это три разных смысла: "
+     "предложение в баннере называет повод показа, а не сам продукт"),
     (("merchant_city", "profile_city", "profile_region"),
      "город точки это место покупки, а город профиля это место жизни клиента"),
     (("is_online", "is_subscription", "delivered", "confirmed", "device_new"),

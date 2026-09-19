@@ -1,11 +1,11 @@
 {
   "canonical": {
     "modules": {
-      "build": "9971fd27d7e2d1b69ae374d22bed4961ff9e4b09ef7e445b7861724d83ea284e",
+      "build": "8501081117d6521e8e2ea72cef50a93cfb6fc1ae7d41a42fc25b52129e0a29dc",
       "entities": "b5c5c9ce5bf603180d015240f05805784eac15f3ee1ab3e724790fd636cd48e5",
       "events": "b01174d7fbd49686331676154c7722f257d1ea02824d1cd719232f5fb31ff6c1",
       "links": "e2c2433ca98db04808efbaded2e70335ca667143e598393b2e17188a8aa34176",
-      "projection": "7ea18c60c80bba958c7813d6b56235923ec7a60cdff60e5d3f7048650130890e",
+      "projection": "4dc68fb4f1ed8bd0e3e5e7d4942793cc23e9592f1d248b7255245b13405e3535",
       "rawdata": "855535b92f7941c2ec336860f1b034ec1ebd8e3dd2ee3eb64b317dca8c793b77",
       "registry": "1234fdeead72128355de8a5c0c9030e2954a1551c5637c2ea0b3bb898df2d293",
       "run": "fd28ff0d9516c8637d505d139183e9bc543e78469fb9198fe6d9661b16f02b60",
@@ -13,7 +13,7 @@
       "settings": "ffc7a88040483809516c3766f27a2d97f3dc595fddefc3111d551abefc5c37f8",
       "sidecars": "3971a8dfda75c64ac50176b0f4049d292ca3551cc0e1467a113bd0d8ad004aaa"
     },
-    "version": "4.4.0"
+    "version": "4.5.0"
   },
   "history": {
     "modules": {
@@ -37,28 +37,28 @@
   "semantic": {
     "modules": {
       "activity": "6952897434eddfdfcdb551cccb940efd024dd01451d1efb9298301726879abe4",
-      "as_of": "8b10c707b7ce9a00f34296715b246c39e76f387c5f47266d834522d3a11179b4",
-      "build": "da258441883d47f18c5b8b5576613570bbeba523946b5bb15ad0af8d21ce49c8",
+      "as_of": "7e3d6bf2f3eb4c92d7507a159eea35232d1eedd2f747a67b9ff67a281ff12364",
+      "build": "1eb58a6a1dbc2c2b6afd978c0e5e9a2a5bd5b5c32fdc03da1930f077a7b229fc",
       "calendar": "08d954afba88cc96ef138b00d9279b1fa1feccadd7cf6caa76a984164f088958",
       "chains": "294fa47b2c31d2de3391b232cb09e9d54dd8b11fba88e235b34a257a0ddeafc8",
       "formulas": "bd052475adf17a5e22ede445d5ab4625a415213448fb47323413c6ed05804451",
       "history": "5baa7688e7a78646239e4eb37e4e14597c2e7df7e9d6219e7fb5a40379cf5117",
-      "keys": "dff4a7d89bf7cf059c0212902049ab30219f1e225b4f37a0a20eeb9dfb53c131",
+      "keys": "cfa162d6d569fc58f94de9c4d7ed3d88f35484141ce4774f954cd5e190eb20e1",
       "merchants": "d5f334d4e7bf0258fb0a132399586a0c8abd1b39c5d8ea200242c6ae870d8bd3",
-      "projection": "7ea18c60c80bba958c7813d6b56235923ec7a60cdff60e5d3f7048650130890e",
+      "projection": "4dc68fb4f1ed8bd0e3e5e7d4942793cc23e9592f1d248b7255245b13405e3535",
       "run": "fd28ff0d9516c8637d505d139183e9bc543e78469fb9198fe6d9661b16f02b60",
       "settings": "ffc7a88040483809516c3766f27a2d97f3dc595fddefc3111d551abefc5c37f8",
       "time": "6931425ff8a1259d5493e7b8098d1dc9ac52b6cf2c0b873e60fd37d7add1ea6e"
     },
-    "version": "2.5.0"
+    "version": "2.7.0"
   },
   "split": {
     "modules": {
       "history": "5baa7688e7a78646239e4eb37e4e14597c2e7df7e9d6219e7fb5a40379cf5117",
       "run": "fd28ff0d9516c8637d505d139183e9bc543e78469fb9198fe6d9661b16f02b60",
       "settings": "ffc7a88040483809516c3766f27a2d97f3dc595fddefc3111d551abefc5c37f8",
-      "split": "2843c224d2e2141e5ce2b76e88294e71711de58a90264fbf84cb04a176e5afa1"
+      "split": "1efe9b415d4d8ca0ca0207946a7fbf4eae0c57f62c0ee190fe6936e271060493"
     },
-    "version": "3.4.0"
+    "version": "3.5.0"
   }
 }

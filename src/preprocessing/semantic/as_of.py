@@ -52,7 +52,7 @@ from .merchants import MerchantCatalog
 # ============================================================
 
 
-SEMANTIC_VERSION = "1.3.0"
+SEMANTIC_VERSION = "1.4.0"
 
 
 def hour_known(row: dict) -> bool:
@@ -78,12 +78,20 @@ class SemanticEvent:
     внутри слоя, чтобы связь и расчёт можно было надёжно
     приложить к своему событию. В values он не попадает и границу
     модели не пересекает.
+
+    event_id и event_version тоже внутренние и тоже не становятся
+    значениями. Они названы отдельно от порядкового номера,
+    потому что номер устойчив только внутри одной истории: он
+    зависит от состава видимых событий, а трассировка к исходной
+    записи обязана пережить другой срез и другую сборку.
     """
 
     client_id: str
     event_time: datetime
     source: str
     stable_event_index: int
+    event_id: str
+    event_version: int
     values: dict[str, object]
     calendar: tuple[float, ...]
     timing: time_module.EventTiming
@@ -98,6 +106,8 @@ class SemanticEvent:
             "event_time": self.event_time,
             "source": self.source,
             "stable_event_index": self.stable_event_index,
+            "event_id": self.event_id,
+            "event_version": self.event_version,
             "values": dict(self.values),
             "calendar": list(self.calendar),
             "timing": self.timing.as_dict(),
@@ -480,6 +490,8 @@ def semantic_as_of(
                 event_time=row["event_time"],
                 source=row["source"],
                 stable_event_index=row["stable_event_index"],
+                event_id=row["event_id"],
+                event_version=row["event_version"],
                 values=values_per_event[index],
                 calendar=tuple(float(value) for value in calendars[index]) if len(calendars) else (),
                 timing=timings[index],

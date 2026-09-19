@@ -55,7 +55,7 @@ from .settings import GroupWindow, PreprocessingConfig
 
 
 STAGE = "split"
-STAGE_VERSION = "3.4.0"
+STAGE_VERSION = "3.5.0"
 SCHEMA_VERSION = 1
 
 SPLIT_MANIFEST_FILE = "split_manifest.json"
@@ -473,7 +473,8 @@ class TrainCorpus:
 
     @staticmethod
     def open(split_dir: Path, canonical_dir: Path, processed_dir: Path | None = None,
-             allow_unusable: bool = False, allow_short_horizon: bool = False) -> "TrainCorpus":
+             allow_unusable: bool = False, allow_short_horizon: bool = False,
+             products: pa.Table | None = None) -> "TrainCorpus":
         """
         allow_unusable — режим диагностики: снимает проверки
         пригодности и свежести. Обучение открывает корпус без него.
@@ -482,6 +483,12 @@ class TrainCorpus:
         Технически такое разделение исправно, но договорённый
         горизонт оно не выполняет, и молчаливое согласие на это
         принимать нельзя.
+
+        products — справочник продуктов выгрузки. Без него
+        название продукта не расшифровывается: смысловой слой
+        поверх такого корпуса молча потерял бы product_name.
+        Корпус справочник не читает сам: файл лежит в RAW, а
+        разрешение на группу выдаёт разделение.
         """
 
         split_dir = Path(split_dir)
@@ -557,17 +564,20 @@ class TrainCorpus:
                 )
 
         return TrainCorpus(
-            store=CanonicalStore(canonical_dir),
+            store=CanonicalStore(canonical_dir, products=products),
             index=index,
             fit_end=datetime.fromisoformat(corpus["fit_end"]),
             client_ids=list(manifest["groups"][TRAIN_GROUP]["clients"]),
         )
 
-    def history(self, client_id: str) -> ClientHistory:
+    def require(self, client_id: str) -> str:
         """
-        История разрешённого клиента на fit_end. Обращение по
-        client_idx не поддерживается: разрешение выдаётся по
-        client_id из манифеста.
+        Проверка разрешения на клиента.
+
+        Вынесена из history отдельным методом, потому что читать
+        корпус можно не только лентой событий: смысловой слой
+        строится поверх того же store, и обходить разрешение он
+        не должен.
         """
 
         if client_id not in self._allowed:
@@ -576,7 +586,16 @@ class TrainCorpus:
                 "он исключён, принадлежит другой группе либо отсутствует в разделении"
             )
 
-        return history_as_of(self.store, client_id, self.fit_end)
+        return client_id
+
+    def history(self, client_id: str) -> ClientHistory:
+        """
+        История разрешённого клиента на fit_end. Обращение по
+        client_idx не поддерживается: разрешение выдаётся по
+        client_id из манифеста.
+        """
+
+        return history_as_of(self.store, self.require(client_id), self.fit_end)
 
 
 # ============================================================

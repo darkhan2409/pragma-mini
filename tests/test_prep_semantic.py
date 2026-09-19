@@ -87,10 +87,11 @@ def test_every_allowed_field_has_one_meaning_and_disputes_are_listed():
     assert key_for("amount", "transactions").key == key_for("amount", "app_operations").key
     assert any(item["key"] == "transaction_amount" for item in registry["allowed_sharing"])
 
-    # Продукт, семейство и оффер не смешаны.
+    # Продукт, семейство и предложение не смешаны.
     kinds = {name: item["value_kind"] for name, item in registry["keys"].items()}
     assert {"product_code", "product_family", "offer"} <= set(kinds)
     assert kinds["mcc"] == "categorical", "цифровой код это категория, а не величина"
+    assert kinds["offer"] == "categorical", "код предложения это закрытый перечень, а не свободный текст"
     assert kinds["transaction_amount"] == "numeric"
     assert kinds["merchant_name"] == "text"
 

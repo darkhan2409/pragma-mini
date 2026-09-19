@@ -35,7 +35,7 @@ from .merchants import MERCHANT_KEYS
 
 
 STAGE = "semantic"
-STAGE_VERSION = "2.5.0"
+STAGE_VERSION = "2.7.0"
 SCHEMA_VERSION = 1
 
 REGISTRY_FILE = "semantic_registry.json"

@@ -44,7 +44,7 @@ if TYPE_CHECKING:  # pragma: no cover - только для подсказок �
 # ============================================================
 
 
-PROJECTION_VERSION = "1.2.0"
+PROJECTION_VERSION = "1.3.0"
 
 EVENT_TYPE_FIELD = "event_type"
 INITIATOR_FIELD = "change_initiator"
@@ -117,7 +117,7 @@ SEMANTIC_PAYLOAD_FIELDS: dict[str, str] = {
     "template": "шаблон сообщения",
     "purpose": "назначение коммуникации",
     "delivered": "сообщение доставлено",
-    "offer": "текст оффера баннера",
+    "offer": "код предложения баннера",
     "slot": "место показа в приложении",
     # --- приложение ---
     "domain": "раздел приложения",

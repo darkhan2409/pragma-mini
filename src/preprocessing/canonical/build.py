@@ -58,7 +58,7 @@ from .sidecars import build_coverage, build_profile
 
 
 STAGE = "canonical"
-STAGE_VERSION = "4.4.0"
+STAGE_VERSION = "4.5.0"
 
 STATUS_OK = "ok"
 STATUS_ROW_COUNT_MISMATCH = "row_count_mismatch"
