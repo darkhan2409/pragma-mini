@@ -25,7 +25,7 @@ from . import time as time_module
 # ============================================================
 
 
-CHAINS_VERSION = "1.2.0"
+CHAINS_VERSION = "1.3.0"
 
 IN_PROGRESS = "in_progress"
 
@@ -149,6 +149,33 @@ class ChainsError(ValueError):
     """
 
 
+def _precision(row: dict) -> str:
+    """
+    Объявленная точность записи по общему правилу слоя.
+    """
+
+    try:
+        return time_module.effective_precision(row)
+    except time_module.PrecisionError as error:
+        raise ChainsError(f"{error}: судить о порядке событий по ней нельзя") from error
+
+
+def _known_days(row: dict, cause: dict) -> float:
+    """
+    Сутки между причиной и следствием в точности пары: оба момента
+    усечены до более грубой из двух объявленных точностей. У
+    дневной записи источник знает только дату, и дробные сутки
+    между ней и причиной были бы выдумкой.
+    """
+
+    precision = time_module.coarser(_precision(row), _precision(cause))
+
+    later = time_module.floor_to_precision(row["event_time"], precision)
+    earlier = time_module.floor_to_precision(cause["event_time"], precision)
+
+    return (later - earlier).total_seconds() / 86400.0
+
+
 def _resolution(row: dict) -> float:
     """
     Насколько грубо источник знает время этой записи, в сутках.
@@ -158,12 +185,7 @@ def _resolution(row: dict) -> float:
     на весь слой — time.effective_precision.
     """
 
-    try:
-        precision = time_module.effective_precision(row)
-    except time_module.PrecisionError as error:
-        raise ChainsError(f"{error}: судить о порядке событий по ней нельзя") from error
-
-    return PRECISION_DAYS[precision]
+    return PRECISION_DAYS[_precision(row)]
 
 
 def _interval(row: dict, cause: dict) -> tuple[float | None, float, str | None]:
@@ -181,7 +203,9 @@ def _interval(row: dict, cause: dict) -> tuple[float | None, float, str | None]:
     observed = (row["event_time"] - cause["event_time"]).total_seconds() / 86400.0
 
     if observed >= 0:
-        return observed, observed, None
+        # Признак — в объявленной точности пары; наблюдение
+        # остаётся сырым: оно объясняет признак, а не подменяет его.
+        return _known_days(row, cause), observed, None
 
     tolerance = max(_resolution(row), _resolution(cause))
 

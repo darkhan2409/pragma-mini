@@ -306,6 +306,47 @@ def test_profile_change_keeps_the_meaning_of_the_changed_field(tmp_path):
         profile_change_keys("внезапное_поле")
 
 
+def test_related_interval_respects_declared_precision(tmp_path):
+    """
+    Интервал причина–следствие тоже считается в объявленной
+    точности пары: у дневной записи источник знает только дату.
+
+    Положительный интервал брался сырым, и модель получала доли
+    суток между записями, у которых часа не было: на срезе
+    2026-01-01 таких связей было 344.
+    """
+
+    mini = MiniRaw(tmp_path / "raw", history_start=FULL_HORIZON)
+    _client(mini, "c1")
+
+    first = mini.event("c1", "purchase", "2023-03-05 10:00:00", payload=purchase_payload(amount=12500))
+
+    # Возврат того же дня с дневной точностью: ноль суток.
+    mini.event(
+        "c1", "refund", "2023-03-05 15:00:00", precision="day",
+        payload=purchase_payload(amount=12500, direction="credit", reason="refund", cause_event_id=first),
+    )
+
+    second = mini.event("c1", "purchase", "2023-03-08 09:30:00", payload=purchase_payload(amount=3000))
+
+    # Возврат назавтра с дневной точностью: ровно сутки.
+    mini.event(
+        "c1", "refund", "2023-03-09 18:45:00", precision="day",
+        payload=purchase_payload(amount=3000, direction="credit", reason="refund", cause_event_id=second),
+    )
+
+    history = semantic_as_of(_store(mini.write(), tmp_path / "canonical"), "c1", datetime(2023, 4, 1))
+
+    refunds = [item for item in history.events if item.values["event_type"] == "refund"]
+
+    assert [item.values["days_since_related_event"] for item in refunds] == [0.0, 1.0]
+
+    # Наблюдение остаётся сырым: оно объясняет признак, а не подменяет его.
+    observed = sorted(relation.observed_days for relation in history.relations)
+
+    assert observed == pytest.approx([5.0 / 24.0, 1.0 + 9.25 / 24.0], abs=1e-9)
+
+
 def test_backwards_relation_gives_a_reason_not_a_negative_feature(tmp_path):
     """
     Причина не может произойти после следствия. Если порядок

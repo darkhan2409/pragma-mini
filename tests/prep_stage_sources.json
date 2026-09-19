@@ -38,9 +38,9 @@
     "modules": {
       "activity": "6952897434eddfdfcdb551cccb940efd024dd01451d1efb9298301726879abe4",
       "as_of": "8b10c707b7ce9a00f34296715b246c39e76f387c5f47266d834522d3a11179b4",
-      "build": "e49e883d90ffdd796746e3524f0b5d3f52d887b31df82fad5d57b6e5445a1622",
+      "build": "da258441883d47f18c5b8b5576613570bbeba523946b5bb15ad0af8d21ce49c8",
       "calendar": "08d954afba88cc96ef138b00d9279b1fa1feccadd7cf6caa76a984164f088958",
-      "chains": "a8fc2c6bed73a5ce417b80eb2189e731f12ffe7e602ccb0a69349f63d473406b",
+      "chains": "294fa47b2c31d2de3391b232cb09e9d54dd8b11fba88e235b34a257a0ddeafc8",
       "formulas": "bd052475adf17a5e22ede445d5ab4625a415213448fb47323413c6ed05804451",
       "history": "5baa7688e7a78646239e4eb37e4e14597c2e7df7e9d6219e7fb5a40379cf5117",
       "keys": "dff4a7d89bf7cf059c0212902049ab30219f1e225b4f37a0a20eeb9dfb53c131",
@@ -50,7 +50,7 @@
       "settings": "ffc7a88040483809516c3766f27a2d97f3dc595fddefc3111d551abefc5c37f8",
       "time": "6931425ff8a1259d5493e7b8098d1dc9ac52b6cf2c0b873e60fd37d7add1ea6e"
     },
-    "version": "2.4.0"
+    "version": "2.5.0"
   },
   "split": {
     "modules": {
