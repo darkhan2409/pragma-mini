@@ -38,6 +38,11 @@ from ..observe import leak_audit
 
 CLIENT_INITIATORS = (INITIATOR_CLIENT,)
 
+# Явные отметки перевода между своими счетами. Счёт клиента в ДРУГОМ
+# банке такой отметки не несёт: он замаскирован под человека, как и
+# любой внешний контрагент.
+OWN_ACCOUNT_NAMES = frozenset({"Own account", "own_account"})
+
 
 def _quantiles(values: list, points=(0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99)) -> dict:
 
@@ -1110,6 +1115,19 @@ def _behaviour(data: dict) -> dict:
     """
     Проверка, что черта действительно управляет своим
     поведением, а не украшает скрытую истину.
+
+    Поведение измеряется тем, что черта РЕШАЕТ, а не тем, что с ней
+    рядом лежит. Два правила, купленные опытом:
+
+    Считать надо только действия самого клиента. Подписка списывается
+    без него, отклонённая операция не состоялась, перевод себе в
+    другой банк ничего не говорит об общительности.
+
+    Число событий у клиента задаёт прежде всего его режим активности,
+    и разброс этого множителя в десятки раз топит любую черту. Поэтому
+    рядом с обычной корреляцией считается корреляция ОСТАТКА: у
+    каждого клиента вычитается среднее его режима, и связь ищется
+    среди похожих клиентов.
     """
 
     truth = {row["client_id"]: row for row in data["truth_clients"]}
@@ -1117,6 +1135,8 @@ def _behaviour(data: dict) -> dict:
     counts: dict[str, Counter] = defaultdict(Counter)
     outlets: dict[str, Counter] = defaultdict(Counter)
     sessions: dict[str, set] = defaultdict(set)
+    own_purchases: dict[str, int] = defaultdict(int)
+    counterparties: dict[str, set] = defaultdict(set)
 
     for row in data["events"]:
 
@@ -1126,8 +1146,32 @@ def _behaviour(data: dict) -> dict:
 
         counts[client][kind] += 1
 
-        if kind == "purchase" and payload.get("outlet_id") and payload.get("status") == "approved":
+        approved = payload.get("status") == "approved"
+
+        if kind == "purchase" and payload.get("outlet_id") and approved:
             outlets[client][payload["outlet_id"]] += 1
+
+        # Покупка, которую клиент действительно сделал сам: без
+        # подписок и без отказов банка.
+        if (
+            kind == "purchase"
+            and approved
+            and not payload.get("is_subscription")
+            and row["change_initiator"] == INITIATOR_CLIENT
+        ):
+            own_purchases[client] += 1
+
+        # Живой человек на другом конце перевода. Явная отметка
+        # «свой счёт» контрагентом не считается. Счёт клиента в другом
+        # банке замаскирован под человека намеренно, поэтому остаётся
+        # в кругу как одна постоянная добавка у всех, кто его имеет.
+        if (
+            kind in ("p2p_out", "transfer_out")
+            and approved
+            and payload.get("counterparty")
+            and payload["counterparty"] not in OWN_ACCOUNT_NAMES
+        ):
+            counterparties[client].add(payload["counterparty"])
 
         if kind == "app_screen" and row["correlation_id"]:
             sessions[client].add(row["correlation_id"])
@@ -1138,6 +1182,39 @@ def _behaviour(data: dict) -> dict:
             for row in truth.values()
             if row.get(trait) is not None
         ]
+
+    def within_mode(trait: str, value) -> list:
+        """
+        Те же пары, но поведение взято как отклонение от среднего
+        по своему режиму активности. Режим задан персоной и черте
+        не подчиняется, поэтому его вклад надо снять, чтобы увидеть
+        вклад самой черты.
+
+        Режимы меньше трёх клиентов отбрасываются: среднее по двоим
+        не среднее.
+        """
+
+        by_mode: dict[str, list] = defaultdict(list)
+
+        for row in truth.values():
+            if row.get(trait) is None:
+                continue
+            by_mode[row.get("activity_mode")].append(row)
+
+        out: list = []
+
+        for rows in by_mode.values():
+
+            if len(rows) < 3:
+                continue
+
+            values = [value(row["client_id"]) for row in rows]
+            average = sum(values) / len(values)
+
+            for row, item in zip(rows, values):
+                out.append((row[trait], item - average))
+
+        return out
 
     repeat: list = []
 
@@ -1150,12 +1227,31 @@ def _behaviour(data: dict) -> dict:
         if row is not None:
             repeat.append((row["trait_merchant_loyalty"], again / total))
 
+    # Черта и то, что она решает. Значения берутся один раз и
+    # считаются дважды: как есть и как остаток по режиму.
+    targets = {
+        "impulsivity_purchases": ("trait_spending_impulsivity", lambda c: own_purchases[c]),
+        "digital_sessions": ("trait_digital_affinity", lambda c: len(sessions[c])),
+        "savings_deposit_topups": (
+            "trait_savings_propensity",
+            lambda c: counts[c]["deposit_topup"],
+        ),
+        "credit_appetite_applications": (
+            "trait_credit_appetite",
+            lambda c: counts[c]["application_submitted"],
+        ),
+        # Общительность задаёт КРУГ людей, а не число переводов:
+        # число нормируется месячным бюджетом переводов, и круг
+        # в нём сокращается полностью.
+        "sociality_counterparties": ("trait_sociality", lambda c: len(counterparties[c])),
+    }
+
     checks = {
         "impulsivity_purchases": _correlation(
-            pairs("trait_spending_impulsivity", lambda c: counts[c]["purchase"])
+            pairs(*targets["impulsivity_purchases"])
         ),
         "digital_sessions": _correlation(
-            pairs("trait_digital_affinity", lambda c: len(sessions[c]))
+            pairs(*targets["digital_sessions"])
         ),
         # Дисциплина измеряется ДОЛЕЙ пропущенных взносов, а не
         # их числом: число зависит ещё и от того, сколько у
@@ -1172,22 +1268,39 @@ def _behaviour(data: dict) -> dict:
             ]
         ),
         "savings_deposit_topups": _correlation(
-            pairs("trait_savings_propensity", lambda c: counts[c]["deposit_topup"])
+            pairs(*targets["savings_deposit_topups"])
         ),
         "credit_appetite_applications": _correlation(
-            pairs("trait_credit_appetite", lambda c: counts[c]["application_submitted"])
+            pairs(*targets["credit_appetite_applications"])
         ),
-        "sociality_transfers": _correlation(
-            pairs("trait_sociality", lambda c: counts[c]["p2p_out"] + counts[c]["transfer_out"])
+        "sociality_counterparties": _correlation(
+            pairs(*targets["sociality_counterparties"])
         ),
         "loyalty_repeat_outlets": _correlation(repeat),
     }
 
-    strength = [abs(value) for value in checks.values() if value is not None]
+    residual = {
+        name: _correlation(within_mode(trait, value))
+        for name, (trait, value) in targets.items()
+    }
+
+    strength = {
+        name: abs(value) for name, value in checks.items() if value is not None
+    }
+
+    weakest = min(strength, key=strength.get) if strength else None
 
     return {
         "correlations": checks,
-        "weakest": round(min(strength), 3) if strength else None,
+        "correlations_within_mode": residual,
+        "weakest": round(strength[weakest], 3) if weakest else None,
+        "weakest_pair": weakest,
+        "rule": (
+            "основная таблица считает связь как есть; остаток по режиму "
+            "снимает вклад режима активности, потому что режим задан "
+            "персоной и черте не подчиняется; доли, то есть дисциплина и "
+            "лояльность, в остатке не нуждаются и в него не входят"
+        ),
     }
 
 
@@ -2180,13 +2293,40 @@ def render_markdown(report: dict) -> str:
     out.append(
         "Черта обязана управлять тем поведением, ради которого она "
         "существует. Значение около нуля означает, что черта украшает "
-        "скрытую истину и ничего не решает."
+        "скрытую истину и ничего не решает. Считаются только действия "
+        "самого клиента: без подписок, отказов банка и переводов на "
+        "свой счёт в другом банке."
     )
     out.append("")
     out.append(
         _table(
             list(behaviour["correlations"].items()),
             ["черта и поведение", "корреляция"],
+        )
+    )
+    out.append("")
+
+    if behaviour["weakest_pair"]:
+        out.append(
+            f"Слабейшая связь: {behaviour['weakest_pair']} "
+            f"({behaviour['weakest']}). Именно она решает, выполнена ли "
+            "гипотеза о минимальной связи черты с поведением."
+        )
+        out.append("")
+
+    out.append(
+        "Ниже та же связь после вычета среднего по режиму активности. "
+        "Режим задан персоной, черте не подчиняется и меняет число "
+        "событий в десятки раз, поэтому он маскирует вклад самой черты. "
+        "Остаток отвечает на вопрос иначе: решает ли черта что-нибудь "
+        "среди ПОХОЖИХ клиентов. На малой выборке он шумный, потому что "
+        "режимов несколько и в каждом остаётся горстка клиентов."
+    )
+    out.append("")
+    out.append(
+        _table(
+            list(behaviour["correlations_within_mode"].items()),
+            ["черта и поведение", "остаток по режиму"],
         )
     )
     out.append("")

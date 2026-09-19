@@ -677,7 +677,33 @@ def test_same_seed_same_content_across_workers_and_chunks(dataset, tmp_path):
 
     other_chunk = _emit(tmp_path / "chunked", workers=2, chunk_clients=16)
 
+    assert other_chunk["rows"] == dataset["manifest"]["rows"]
     assert other_chunk["content_sha256"] == dataset["manifest"]["content_sha256"]
+
+
+def test_same_chunk_size_gives_byte_identical_files(dataset, tmp_path):
+    """
+    При том же размере пачки выгрузка совпадает ПОБАЙТОВО, сколько
+    бы воркеров ни считало: склейка идёт по индексу пачки, а не по
+    порядку их готовности.
+
+    Содержимое проверяется отдельно и порядку строк безразлично.
+    Байтовая сверка ловит другое: сжатие, порядок колонок, раскладку
+    групп строк, версию pyarrow — всё, из-за чего одинаковые данные
+    лежат на диске по-разному. Сверяются именно файлы выгрузки:
+    манифест в file_sha256 не входит, там только parquet.
+
+    Байты требуются только при РАВНОМ размере пачки: склейка пишет
+    одну группу строк на часть, поэтому раскладка parquet законно
+    зависит от chunk_clients. Расширять эту проверку на прогон с
+    другим размером пачки нельзя — она станет ложно падающей.
+    """
+
+    # Базовая фикстура идёт с одним воркером и тем же размером пачки.
+    same_chunk = _emit(tmp_path / "bytes", workers=3, chunk_clients=COMMUNITY_SIZE)
+
+    assert same_chunk["rows"] == dataset["manifest"]["rows"]
+    assert same_chunk["file_sha256"] == dataset["manifest"]["file_sha256"]
 
 
 def _crash_after(batches: int):
