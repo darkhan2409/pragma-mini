@@ -9,7 +9,13 @@ from src.generator.config import (
     INITIATOR_CLIENT,
     SOURCES,
 )
-from src.generator.report.realism import _absence, _activity, _windows
+from src.generator.report.realism import (
+    _absence,
+    _activity,
+    _behaviour,
+    _windows,
+)
+from src.generator.world.relationships import masked_name
 
 
 # ============================================================
@@ -345,3 +351,136 @@ def test_unknown_month_breaks_a_pause_instead_of_gluing_it():
 
     # Установленных исходов нет — делить не на что.
     assert result["returned_by_window_end_share"] is None
+
+
+# ------------------------------------------------------------
+# ЧЕРТА И ПОВЕДЕНИЕ
+# ------------------------------------------------------------
+#
+# Общительность меряется КРУГОМ контрагентов, и весь вопрос в
+# том, кого в этот круг пускать. Собственный счёт клиента в
+# другом банке выглядит в ленте переводом человеку: у него
+# замаскированное человеческое имя и никакой отметки «свой
+# счёт». Опознать его можно только по скрытой истине.
+
+
+QUIET = tuple(f"q{index}" for index in range(6))
+SOCIABLE = tuple(f"s{index}" for index in range(6))
+
+
+def _trait_client(client_id: str, sociality: float) -> dict:
+    return {
+        "client_id": client_id,
+        "trait_sociality": sociality,
+        "activity_mode": "steady",
+    }
+
+
+def _transfer(client_id: str, counterparty, event_type: str = "transfer_out",
+              status: str = "approved") -> dict:
+    return {
+        "client_id": client_id,
+        "event_type": event_type,
+        "change_initiator": INITIATOR_CLIENT,
+        "correlation_id": None,
+        "payload": {"status": status, "counterparty": counterparty},
+    }
+
+
+def _behaviour_data(own_transfers: bool = True, decoys: bool = False) -> dict:
+    """
+    Двенадцать клиентов: у тихих один живой контрагент, у общительных
+    два. Черта расставлена по кругу в точности, поэтому корреляция
+    обязана выйти ровно 1.0.
+
+    Собственный счёт в другом банке есть только у тихих — так и
+    бывает, этот счёт есть не у каждого. Засчитать его живым
+    человеком значит сравнять круг тихих с кругом общительных:
+    разброс исчезнет, и связь пропадёт совсем.
+
+    У одного общительного клиента контрагент носит ТО ЖЕ имя, что
+    собственный счёт тихого. Для него это настоящий человек, и из
+    круга он уходить не должен.
+    """
+
+    clients = [_trait_client(client, 0.2) for client in QUIET]
+    clients += [_trait_client(client, 0.8) for client in SOCIABLE]
+
+    events: list = []
+    relationships: list = []
+
+    for client in QUIET:
+
+        events.append(_transfer(client, f"{client}-друг"))
+
+        relationships.append(
+            {
+                "client_id": client,
+                "counterpart_kind": "own_account",
+                "relation_type": "own_account_other_bank",
+            }
+        )
+
+        if own_transfers:
+            # Ровно то имя, под которым генератор прячет такой счёт,
+            # и перевод на него не один: круг от этого не растёт.
+            events.append(_transfer(client, masked_name(f"own:{client}")))
+            events.append(_transfer(client, masked_name(f"own:{client}")))
+
+        if decoys:
+            events.append(_transfer(client, f"{client}-отказ", status="declined"))
+            events.append(_transfer(client, "Own account"))
+            events.append(_transfer(client, "own_account"))
+            events.append(_transfer(client, None))
+
+    for index, client in enumerate(SOCIABLE):
+
+        # Однофамилец собственного счёта тихого клиента: имена в мире
+        # повторяются, и на чужой счёт это имя не указывает.
+        friend = masked_name(f"own:{QUIET[0]}") if index == 0 else f"{client}-друг"
+
+        events.append(_transfer(client, friend))
+        events.append(_transfer(client, f"{client}-подруга", event_type="p2p_out"))
+
+    return {
+        "truth_clients": clients,
+        "events": events,
+        "truth_relationships": relationships,
+    }
+
+
+def test_own_account_in_another_bank_is_not_a_live_counterparty():
+    """
+    Перевод себе в другой банк не говорит об общительности, а в ленте
+    ничем не помечен: контрагентом стоит замаскированное человеческое
+    имя, идентификатора контрагента в payload нет вовсе.
+
+    Если такой счёт попадает в круг, метрика меряет не черту, а
+    наличие счёта в другом банке. Здесь этот счёт есть у всех тихих
+    клиентов, поэтому ошибка сравняла бы круги и связь исчезла бы
+    совсем: разброса не осталось бы, и корреляции не было бы вовсе.
+    """
+
+    result = _behaviour(_behaviour_data())
+
+    assert result["correlations"]["sociality_counterparties"] == 1.0
+    assert result["correlations_within_mode"]["sociality_counterparties"] == 1.0
+
+    # Круг не зависит от того, лежит ли в ленте перевод себе.
+    without = _behaviour(_behaviour_data(own_transfers=False))
+
+    assert (
+        without["correlations"]["sociality_counterparties"]
+        == result["correlations"]["sociality_counterparties"]
+    )
+
+
+def test_declined_and_marked_own_transfers_are_not_counterparties():
+    """
+    Отказанный перевод не состоялся, а перевод между своими счетами
+    внутри банка помечен явно. Ни тот, ни другой круга не расширяют.
+    """
+
+    result = _behaviour(_behaviour_data(decoys=True))
+
+    assert result["correlations"]["sociality_counterparties"] == 1.0

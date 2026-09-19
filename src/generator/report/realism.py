@@ -20,6 +20,7 @@ from ..config import (
 )
 from ..finance import invariants as invariants_module
 from ..observe import leak_audit
+from ..world.relationships import masked_name
 
 
 # ============================================================
@@ -40,7 +41,8 @@ CLIENT_INITIATORS = (INITIATOR_CLIENT,)
 
 # Явные отметки перевода между своими счетами. Счёт клиента в ДРУГОМ
 # банке такой отметки не несёт: он замаскирован под человека, как и
-# любой внешний контрагент.
+# любой внешний контрагент, и опознаётся по имени из скрытой истины
+# (_own_account_names).
 OWN_ACCOUNT_NAMES = frozenset({"Own account", "own_account"})
 
 
@@ -1111,6 +1113,31 @@ def _correlation(pairs: list) -> float | None:
     return round(sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / n / sx / sy, 3)
 
 
+def _own_account_names(data: dict) -> dict:
+    """
+    Имя, под которым в ленте спрятан собственный счёт клиента в
+    другом банке.
+
+    В RAW такой перевод неотличим от перевода человеку: отметки
+    «свой счёт» у него нет, контрагент несёт замаскированное
+    человеческое имя, а идентификатора контрагента в payload нет
+    вовсе. Имя восстанавливается из скрытой истины по той же формуле,
+    по которой генератор его и выдал: внешняя связь
+    own_account_other_bank строится из текста «own:<клиент>»
+    (world/relationships.py).
+
+    Сверка идёт по имени и только у своего хозяина: то же имя у
+    другого клиента принадлежит настоящему человеку.
+    """
+
+    return {
+        row["client_id"]: masked_name(f"own:{row['client_id']}")
+        for row in data["truth_relationships"]
+        if row["relation_type"] == "own_account_other_bank"
+        and row["counterpart_kind"] == "own_account"
+    }
+
+
 def _behaviour(data: dict) -> dict:
     """
     Проверка, что черта действительно управляет своим
@@ -1131,6 +1158,8 @@ def _behaviour(data: dict) -> dict:
     """
 
     truth = {row["client_id"]: row for row in data["truth_clients"]}
+
+    own_names = _own_account_names(data)
 
     counts: dict[str, Counter] = defaultdict(Counter)
     outlets: dict[str, Counter] = defaultdict(Counter)
@@ -1161,15 +1190,17 @@ def _behaviour(data: dict) -> dict:
         ):
             own_purchases[client] += 1
 
-        # Живой человек на другом конце перевода. Явная отметка
-        # «свой счёт» контрагентом не считается. Счёт клиента в другом
-        # банке замаскирован под человека намеренно, поэтому остаётся
-        # в кругу как одна постоянная добавка у всех, кто его имеет.
+        # Живой человек на другом конце перевода. Ни явная отметка
+        # «свой счёт», ни замаскированный под человека собственный
+        # счёт в другом банке живым человеком не считаются: круг
+        # общения они не расширяют, а добавка у них разная, потому
+        # что такой счёт есть не у каждого.
         if (
             kind in ("p2p_out", "transfer_out")
             and approved
             and payload.get("counterparty")
             and payload["counterparty"] not in OWN_ACCOUNT_NAMES
+            and payload["counterparty"] != own_names.get(client)
         ):
             counterparties[client].add(payload["counterparty"])
 
