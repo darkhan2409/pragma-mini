@@ -66,24 +66,18 @@ def check_causes(events_path: Path) -> dict:
 
     known: dict[str, dict] = {}
 
-    columns = ["event_id", "client_id", "event_time", "event_version", "time_precision"]
-
-    if "timestamp_quality" in parquet.schema_arrow.names:
-        columns.append("timestamp_quality")
+    columns = ["event_id", "client_id", "event_time"]
 
     for index in range(parquet.num_row_groups):
         chunk = parquet.read_row_group(index, columns=columns)
         for row in chunk.to_pylist():
-            if row["event_id"] in referenced:
-                current = known.get(row["event_id"])
-                if current is None or row["event_version"] < current["event_version"]:
-                    known[row["event_id"]] = row
+            if row["event_id"] in referenced and row["event_id"] not in known:
+                known[row["event_id"]] = row
 
     total = 0
     resolved = 0
     cross_client = 0
     cause_after_effect = 0
-    cause_after_effect_coarse = 0
     missing: Counter = Counter()
 
     for index in range(parquet.num_row_groups):
@@ -104,11 +98,6 @@ def check_causes(events_path: Path) -> dict:
                 cross_client += 1
             if target["event_time"] > row["event_time"]:
                 cause_after_effect += 1
-                # Витрина теряет время у части записей: у такой
-                # причины день известен, а час нет, и порядок
-                # внутри дня восстановить нельзя.
-                if target.get("time_precision") != "second" or target.get("timestamp_quality") == "date_only":
-                    cause_after_effect_coarse += 1
 
     return {
         "references": total,
@@ -116,10 +105,9 @@ def check_causes(events_path: Path) -> dict:
         "unresolved": dict(missing),
         "cross_client": cross_client,
         "cause_after_effect": cause_after_effect,
-        "cause_after_effect_with_coarse_cause": cause_after_effect_coarse,
         "rule": (
-            "цель ищется среди событий той же группы; причина, оказавшаяся позже следствия по времени "
-            "бизнеса, почти всегда это запись с потерянным временем, и такие случаи считаются отдельной строкой"
+            "цель ищется среди событий той же группы; время событий точное, поэтому причина "
+            "позже следствия это поломка данных, а не потерянный час"
         ),
     }
 
@@ -131,18 +119,21 @@ def check_transfers(transfers: pa.Table) -> dict:
 
     sides = Counter(transfers.column("side").to_pylist())
 
+    # Парность считается по СТОРОНАМ, а не по числу клиентов:
+    # перевод между своими счетами наблюдается целиком у одного
+    # человека, и раньше он попадал в «видна одна сторона».
     by_id: dict[str, set[str]] = defaultdict(set)
-    for transfer_id, client_id in zip(
-        transfers.column("transfer_id").to_pylist(), transfers.column("client_id").to_pylist()
+    for transfer_id, side in zip(
+        transfers.column("transfer_id").to_pylist(), transfers.column("side").to_pylist()
     ):
-        by_id[transfer_id].add(client_id)
+        by_id[transfer_id].add(side)
 
     return {
         "sides": transfers.num_rows,
         "transfers": len(by_id),
         "by_side": dict(sorted(sides.items())),
-        "both_sides_in_full_extract": sum(1 for clients in by_id.values() if len(clients) > 1),
-        "one_side_in_full_extract": sum(1 for clients in by_id.values() if len(clients) == 1),
+        "both_sides_in_full_extract": sum(1 for kinds in by_id.values() if len(kinds) > 1),
+        "one_side_in_full_extract": sum(1 for kinds in by_id.values() if len(kinds) == 1),
         "rule": (
             "это статистика по ВСЕЙ выгрузке для отчёта качества, а не признак строки. "
             "Обе стороны, найденные в выгрузке, не значат, что на конкретном cutoff встречная "
@@ -263,42 +254,69 @@ def check_entities(seen: dict[tuple[str, str], dict], coverage: pa.Table, histor
     }
 
 
+# Деловые ключи payload, каждый из которых собирает свою
+# цепочку. Метки связи в конверте больше нет: вид цепочки задаёт
+# имя ключа, и переименовать его молча нельзя.
+CHAIN_FIELDS: tuple[str, ...] = (
+    "application_id",
+    "contract_id",
+    "case_id",
+    "offer_id",
+    "session_id",
+    "transfer_id",
+)
+
+
 def check_chains(events_path: Path) -> dict:
     """
-    Цепочки по correlation_id: сколько, какого размера и из чего.
+    Цепочки по деловым ключам payload: сколько, какого размера и
+    из чего.
+
+    Одна запись может входить в несколько цепочек сразу: платёж
+    из приложения принадлежит и договору, и сессии. Это не
+    двойной счёт, а два разных разреза одной ленты.
     """
 
     parquet = pq.ParquetFile(events_path)
 
+    present = [name for name in CHAIN_FIELDS if name in parquet.schema_arrow.names]
+
+    if not present:
+        return {"chains": 0, "by_field": {}, "rule": "деловых ключей связи в выгрузке нет"}
+
     chains: dict[tuple[str, str], Counter] = defaultdict(Counter)
 
     for index in range(parquet.num_row_groups):
-        chunk = parquet.read_row_group(index, columns=["correlation_id", "link_type", "event_type"])
-        for correlation, link_type, event_type in zip(
-            chunk.column("correlation_id").to_pylist(),
-            chunk.column("link_type").to_pylist(),
-            chunk.column("event_type").to_pylist(),
-        ):
-            if not correlation:
-                continue
-            chains[(link_type or "unset", correlation)][event_type] += 1
 
-    by_link: dict[str, dict] = {}
+        chunk = parquet.read_row_group(index, columns=[*present, "event_type"])
 
-    for (link_type, _), composition in chains.items():
-        slot = by_link.setdefault(link_type, {"chains": 0, "sizes": Counter(), "event_types": Counter()})
+        types = chunk.column("event_type").to_pylist()
+
+        for field_name in present:
+            for value, event_type in zip(chunk.column(field_name).to_pylist(), types):
+                if not value:
+                    continue
+                chains[(field_name, value)][event_type] += 1
+
+    by_field: dict[str, dict] = {}
+
+    for (field_name, _), composition in chains.items():
+        slot = by_field.setdefault(field_name, {"chains": 0, "sizes": Counter(), "event_types": Counter()})
         slot["chains"] += 1
         slot["sizes"][sum(composition.values())] += 1
         slot["event_types"].update(composition)
 
-    for slot in by_link.values():
+    for slot in by_field.values():
         slot["sizes"] = _quantiles(slot["sizes"])
         slot["event_types"] = dict(sorted(slot["event_types"].items(), key=lambda item: -item[1])[:8])
 
     return {
         "chains": len(chains),
-        "by_link_type": dict(sorted(by_link.items())),
-        "rule": "цепочка это correlation_id; незавершённая цепочка остаётся незавершённой",
+        "by_field": dict(sorted(by_field.items())),
+        "rule": (
+            "цепочка это деловой ключ payload; одна запись может входить в несколько цепочек, "
+            "незавершённая цепочка остаётся незавершённой"
+        ),
     }
 
 

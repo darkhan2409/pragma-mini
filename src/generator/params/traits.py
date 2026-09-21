@@ -111,8 +111,8 @@ class TraitParams:
 
     mode_shift: dict = field(
         default_factory=lambda: {
+            "silent": {"digital_affinity": -0.22, "sociality": -0.14},
             "rare": {"digital_affinity": -0.14, "sociality": -0.08},
-            "moderate": {},
             "regular": {"digital_affinity": 0.06},
             "high": {"digital_affinity": 0.14, "spending_impulsivity": 0.08, "sociality": 0.08},
             "extreme": {"digital_affinity": 0.22, "spending_impulsivity": 0.16, "mobility": 0.12, "sociality": 0.12},

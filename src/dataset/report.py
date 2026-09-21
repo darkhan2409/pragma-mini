@@ -180,7 +180,7 @@ def render_report_md(report: dict) -> str:
         out.append(
             _md_table(
                 [
-                    [group, item["dataset"], item["split_manifest"], item["agree"], item["comparable"]]
+                    [group, item["dataset"], item["corpus_manifest"], item["agree"], item["comparable"]]
                     for group, item in sorted(report["eligible_agreement"].items())
                 ],
                 ["группа", "в наборе", "в разделении", "совпало", "сравнимо"],
@@ -296,7 +296,6 @@ def render_golden_md(examples: list[dict]) -> str:
                             row["event_time"][:16],
                             row["n_tokens"],
                             row["eligible"],
-                            row["hour_known"],
                             row["selection_reason"],
                         ]
                         for row in example["events"]

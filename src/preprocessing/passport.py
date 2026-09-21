@@ -47,7 +47,7 @@ from .settings import GROUPS, PreprocessingConfig
 
 
 STAGE = "passport"
-STAGE_VERSION = "4.3.0"
+STAGE_VERSION = "5.0.0"
 
 # Статусы по возрастанию тяжести. Ready означает «данные пригодны
 # целиком»; всё остальное запрещает объявлять набор готовым.
@@ -79,9 +79,9 @@ CONTRACT_VIOLATION_KINDS: tuple[str, ...] = (
 
 # Структурно обязательные поля конверта: без любого из них
 # строка необрабатываема. Пустое значение здесь не «расхождение
-# с каталогом ключей», а поломка выгрузки: порядок, версии и
-# связи по такой строке построить нельзя, а молча выбросить её
-# нельзя тем более. Поэтому null в них блокирует группу, и
+# с каталогом ключей», а поломка выгрузки: порядок и связи по
+# такой строке построить нельзя, а молча выбросить её нельзя
+# тем более. Поэтому null в них блокирует группу, и
 # диагностический флаг этого не снимает.
 #
 # payload в список не входит: пустой payload canonical уже
@@ -92,8 +92,6 @@ REQUIRED_ENVELOPE_FIELDS: tuple[str, ...] = (
     "event_type",
     "source",
     "event_time",
-    "event_version",
-    "is_test_account",
 )
 
 MONTH_NOT_GENERATED = "—"
@@ -130,16 +128,10 @@ class EventsScan:
     row_groups: int = 0
     by_source: Counter = field(default_factory=Counter)
     by_type: Counter = field(default_factory=Counter)
-    by_initiator: Counter = field(default_factory=Counter)
-    by_precision: Counter = field(default_factory=Counter)
-    by_link_type: Counter = field(default_factory=Counter)
-    by_version: Counter = field(default_factory=Counter)
     event_time_min: datetime | None = None
     event_time_max: datetime | None = None
     pair_hashes: list[np.ndarray] = field(default_factory=list)
     clients: set = field(default_factory=set)
-    test_rows: int = 0
-    test_clients: set = field(default_factory=set)
     month_counts: Counter = field(default_factory=Counter)
     before_start_by_source: Counter = field(default_factory=Counter)
     before_start_by_type: Counter = field(default_factory=Counter)
@@ -197,25 +189,23 @@ def _merge_max(current: datetime | None, candidate: datetime | None) -> datetime
     return candidate if current is None or candidate > current else current
 
 
-def _hash_pairs(event_id: pa.Array | pa.ChunkedArray, version: pa.Array | pa.ChunkedArray) -> np.ndarray:
+def _hash_ids(event_id: pa.Array | pa.ChunkedArray) -> np.ndarray:
     """
-    uint64-отпечаток пары (event_id, event_version) без хранения
-    самих строк: повторы находятся через np.unique в конце.
+    uint64-отпечаток event_id без хранения самих строк: повторы
+    находятся через np.unique в конце.
 
-    Считается blake2b по паре: pandas ради одной хеш-функции
-    держать незачем, а её реализация между версиями не
-    обещана стабильной.
+    Считается blake2b: pandas ради одной хеш-функции держать
+    незачем, а его реализация между версиями не обещана
+    стабильной.
     """
-
-    joined = pc.binary_join_element_wise(event_id, pc.cast(version, pa.string()), ":")
 
     return np.fromiter(
         (
             int.from_bytes(hashlib.blake2b(value.encode("utf-8"), digest_size=8).digest(), "little")
-            for value in joined.to_pylist()
+            for value in event_id.to_pylist()
         ),
         dtype=np.uint64,
-        count=len(joined),
+        count=len(event_id),
     )
 
 
@@ -244,10 +234,6 @@ def scan_events(raw: RawDataset, config: PreprocessingConfig) -> EventsScan:
 
         scan.by_source.update(_counter(chunk.column("source")))
         scan.by_type.update(_counter(chunk.column("event_type")))
-        scan.by_initiator.update(_counter(chunk.column("change_initiator")))
-        scan.by_precision.update(_counter(chunk.column("time_precision")))
-        scan.by_link_type.update(_counter(chunk.column("link_type")))
-        scan.by_version.update(_counter(chunk.column("event_version")))
 
         event_time = chunk.column("event_time")
 
@@ -259,9 +245,13 @@ def scan_events(raw: RawDataset, config: PreprocessingConfig) -> EventsScan:
 
         sources = np.asarray(chunk.column("source").to_pylist(), dtype=object)
 
-        # --- версии и повторы ---
+        # --- повторы идентификаторов ---
+        #
+        # Запись приходит в выгрузку ровно один раз. Повтор
+        # event_id — поломка, а не дефект доставки, и считается
+        # по идентификатору, а не по паре с версией.
 
-        scan.pair_hashes.append(_hash_pairs(chunk.column("event_id"), chunk.column("event_version")))
+        scan.pair_hashes.append(_hash_ids(chunk.column("event_id")))
 
         # --- клиенты ---
 
@@ -283,12 +273,6 @@ def scan_events(raw: RawDataset, config: PreprocessingConfig) -> EventsScan:
                 scan.split_clients.add(client)
 
             scan.current_client = client
-
-        test_mask = chunk.column("is_test_account")
-        test_count = int(pc.sum(test_mask).as_py() or 0)
-        if test_count:
-            scan.test_rows += test_count
-            scan.test_clients.update(pc.unique(chunk.filter(test_mask).column("client_id")).to_pylist())
 
         # --- месяцы ---
 
@@ -340,9 +324,6 @@ def scan_profile(raw: RawDataset) -> dict[str, Any]:
 
     rows = 0
     per_client: Counter = Counter()
-    valid_from_min = valid_from_max = None
-    change_source: Counter = Counter()
-    change_reason: Counter = Counter()
     null_counts: Counter = Counter()
     columns: list[str] = []
 
@@ -355,29 +336,17 @@ def scan_profile(raw: RawDataset) -> dict[str, Any]:
             continue
 
         per_client.update(_counter(chunk.column("client_id")))
-        change_source.update(_counter(chunk.column("change_source")))
-        change_reason.update(_counter(chunk.column("change_reason")))
 
         for name in columns:
             null_counts[name] += chunk.column(name).null_count
 
-        low, high = _min_max(chunk.column("valid_from"))
-        valid_from_min = _merge_min(valid_from_min, low)
-        valid_from_max = _merge_max(valid_from_max, high)
-
-    versions = np.array(list(per_client.values()), dtype=np.int64)
+    repeated = sorted(name for name, count in per_client.items() if count > 1)
 
     return {
         "rows": rows,
         "clients": len(per_client),
-        "versions_per_client": (
-            {"min": int(versions.min()), "median": float(np.median(versions)), "max": int(versions.max())}
-            if versions.size
-            else {}
-        ),
-        "valid_from": {"min": valid_from_min, "max": valid_from_max},
-        "change_source": dict(sorted(change_source.items())),
-        "change_reason": dict(sorted(change_reason.items())),
+        "clients_with_several_rows": repeated[:10],
+        "rule": "профиль это одна итоговая строка на клиента; вторая строка это поломка контракта",
         "null_share": {name: round(null_counts[name] / rows, 6) for name in columns} if rows else {},
     }
 
@@ -619,7 +588,7 @@ def sources_check(raw: RawDataset, config: PreprocessingConfig) -> dict[str, Any
             late_base.append(source)
 
     others = {
-        name: {"available_from": info.available_from.isoformat(), "time_precision": info.time_precision}
+        name: {"available_from": info.available_from.isoformat()}
         for name, info in sorted(manifest.sources.items())
         if name not in config.base_sources
     }
@@ -630,7 +599,6 @@ def sources_check(raw: RawDataset, config: PreprocessingConfig) -> dict[str, Any
         "base_available_later_than_required": late_base,
         "late_connected_sources": others,
         "schema_changes": list(manifest.schema_changes),
-        "time_precision": {name: info.time_precision for name, info in sorted(manifest.sources.items())},
     }
 
 
@@ -641,9 +609,9 @@ def sources_check(raw: RawDataset, config: PreprocessingConfig) -> dict[str, Any
 
 def _events_summary(scan: EventsScan, config: PreprocessingConfig) -> dict[str, Any]:
 
-    pairs = np.concatenate(scan.pair_hashes) if scan.pair_hashes else np.zeros(0, dtype=np.uint64)
-    _, counts = np.unique(pairs, return_counts=True)
-    repeated_pairs = int((counts > 1).sum())
+    ids = np.concatenate(scan.pair_hashes) if scan.pair_hashes else np.zeros(0, dtype=np.uint64)
+    _, counts = np.unique(ids, return_counts=True)
+    repeated_ids = int((counts > 1).sum())
     repeated_rows = int((counts[counts > 1] - 1).sum())
 
     return {
@@ -653,22 +621,12 @@ def _events_summary(scan: EventsScan, config: PreprocessingConfig) -> dict[str, 
         "event_time": {"min": scan.event_time_min, "max": scan.event_time_max},
         "by_source": dict(sorted(scan.by_source.items())),
         "by_event_type": dict(sorted(scan.by_type.items())),
-        "by_change_initiator": dict(sorted(scan.by_initiator.items())),
-        "by_time_precision": dict(sorted(scan.by_precision.items())),
-        "by_link_type": dict(sorted(scan.by_link_type.items())),
-        "by_event_version": dict(sorted(scan.by_version.items())),
-        # Исправление и повторная доставка узнаются по версиям, а не
-        # по метке в конверте: метки доставки в контракте нет, и
-        # деловой link_type её не несёт.
-        "corrections": sum(
-            count for value, count in scan.by_version.items() if value != "null" and int(value) > 1
-        ),
-        "duplicates": repeated_rows,
-        "repeated_id_version_pairs": {"pairs": repeated_pairs, "extra_rows": repeated_rows},
+        # Запись приходит в выгрузку ровно один раз. Повтор
+        # event_id — поломка контракта, а не дефект доставки.
+        "repeated_event_ids": {"ids": repeated_ids, "extra_rows": repeated_rows},
         "reversal_like": {
             name: scan.by_type.get(name, 0) for name in ("refund", "reversal", "chargeback")
         },
-        "test_accounts": {"rows": scan.test_rows, "clients": len(scan.test_clients)},
         "required_nulls": dict(sorted(scan.required_nulls.items())),
     }
 
@@ -889,10 +847,11 @@ def build_passport(
             place = f"{event_type}.{field_name}" if field_name not in ("", "None") else event_type
             contract_violations.append(f"{place}: {kind} в {count} строках")
 
-    repeated = report["events"]["repeated_id_version_pairs"]
-    if repeated["pairs"]:
-        limitations.append(
-            f"повторные пары (event_id, event_version): {repeated['pairs']} пар, {repeated['extra_rows']} лишних строк"
+    repeated = report["events"]["repeated_event_ids"]
+    if repeated["ids"]:
+        errors.append(
+            f"повторяющийся event_id: {repeated['ids']} идентификаторов, "
+            f"{repeated['extra_rows']} лишних строк; запись обязана приходить один раз"
         )
 
     before = report["months"]["before_history_start"]["rows"]
@@ -1030,15 +989,12 @@ def render_passport_md(report: dict) -> str:
                 ["строк", events["rows"]],
                 ["клиентов", events["clients"]],
                 ["event_time", f"{_fmt(events['event_time']['min'])} … {_fmt(events['event_time']['max'])}"],
-                ["исправлений (correction)", events["corrections"]],
-                ["дублей (duplicate)", events["duplicates"]],
                 [
-                    "повторных пар (event_id, version)",
-                    f"{events['repeated_id_version_pairs']['pairs']} пар / "
-                    f"{events['repeated_id_version_pairs']['extra_rows']} лишних строк",
+                    "повторов event_id",
+                    f"{events['repeated_event_ids']['ids']} идентификаторов / "
+                    f"{events['repeated_event_ids']['extra_rows']} лишних строк",
                 ],
                 ["refund / reversal / chargeback", ", ".join(f"{k}={v}" for k, v in events["reversal_like"].items())],
-                ["тестовые аккаунты", f"{events['test_accounts']['rows']} строк / {events['test_accounts']['clients']} клиентов"],
             ],
             ["показатель", "значение"],
         )
@@ -1063,18 +1019,6 @@ def render_passport_md(report: dict) -> str:
         )
     )
 
-    out.append("\n### Конверт\n")
-    out.append(
-        _md_table(
-            [
-                ["change_initiator", ", ".join(f"{k}={v}" for k, v in sorted(events["by_change_initiator"].items()))],
-                ["time_precision", ", ".join(f"{k}={v}" for k, v in sorted(events["by_time_precision"].items()))],
-                ["link_type", ", ".join(f"{k}={v}" for k, v in sorted(events["by_link_type"].items()))],
-                ["event_version", ", ".join(f"{k}={v}" for k, v in sorted(events["by_event_version"].items()))],
-            ],
-            ["поле", "распределение"],
-        )
-    )
 
     payload = report["payload"]
     out.append("\n## Payload по каталогу ключей\n")
@@ -1110,10 +1054,7 @@ def render_passport_md(report: dict) -> str:
             [
                 ["строк", profile["rows"]],
                 ["клиентов", profile["clients"]],
-                ["версий на клиента", _fmt(profile["versions_per_client"])],
-                ["valid_from", f"{_fmt(profile['valid_from']['min'])} … {_fmt(profile['valid_from']['max'])}"],
-                ["change_source", _fmt(profile["change_source"])],
-                ["change_reason", _fmt(profile["change_reason"])],
+                ["клиентов с лишними строками", len(profile["clients_with_several_rows"])],
             ],
             ["показатель", "значение"],
         )
@@ -1193,8 +1134,8 @@ def render_passport_md(report: dict) -> str:
     out.append("\nПодключены позже:\n")
     out.append(
         _md_table(
-            [[source, item["available_from"], item["time_precision"]] for source, item in sources["late_connected_sources"].items()],
-            ["источник", "available_from", "точность времени"],
+            [[source, item["available_from"]] for source, item in sources["late_connected_sources"].items()],
+            ["источник", "available_from"],
         )
     )
     if sources["schema_changes"]:

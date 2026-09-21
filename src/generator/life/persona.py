@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .. import params as params_module
-from ..config import HISTORY_END, HISTORY_START
+from .. import config
 from ..rng import NS_PERSONA, keyed_rng, numpy_rng, stable_hash, stable_unit, state_cache
 from ..world import communities, geography
 from .traits import Traits, draw_traits
@@ -35,7 +35,6 @@ class Persona:
     client_ordinal: int
     client_id: str
     community_id: int
-    is_test_account: bool
 
     # --- демография ---
     birth_date: datetime
@@ -88,7 +87,7 @@ class Persona:
 
     @property
     def age(self) -> int:
-        return self.age_at(HISTORY_START)
+        return self.age_at(config.HISTORY_START)
 
     def is_pensioner_at(self, ts: datetime) -> bool:
         return self.income_type == "pensioner" or self.age_at(ts) >= PENSION_AGE
@@ -159,7 +158,7 @@ def draw_persona(client_ordinal: int) -> Persona:
     low, high = population.stage_age_range[life_stage]
     age = int(rng.integers(low, high))
 
-    birth_date = HISTORY_START - timedelta(days=int(age * 365.25) + int(rng.integers(0, 365)))
+    birth_date = config.HISTORY_START - timedelta(days=int(age * 365.25) + int(rng.integers(0, 365)))
 
     gender = _weighted(rng, population.gender_weights)
 
@@ -285,14 +284,14 @@ def draw_persona(client_ordinal: int) -> Persona:
     registered_in_window = bool(rng.random() < population.registration_in_window_share)
 
     if registered_in_window:
-        span = (HISTORY_END - HISTORY_START).days - population.registration_margin_days
+        span = (config.HISTORY_END - config.HISTORY_START).days - population.registration_margin_days
         offset = int(rng.integers(1, max(2, span)))
-        relationship_start = HISTORY_START + timedelta(days=offset)
+        relationship_start = config.HISTORY_START + timedelta(days=offset)
     else:
         shape, scale_months = population.tenure_months_gamma
         tenure = int(min(population.tenure_months_max, max(1, rng.gamma(shape, scale_months))))
         tenure = min(tenure, max(1, (age - 18) * 12))
-        relationship_start = HISTORY_START - timedelta(days=int(tenure * 30.44))
+        relationship_start = config.HISTORY_START - timedelta(days=int(tenure * 30.44))
 
     vanished = bool(
         registered_in_window and rng.random() < population.registered_and_vanished_share
@@ -310,13 +309,11 @@ def draw_persona(client_ordinal: int) -> Persona:
         settlement_type=settlement.settlement_type,
     )
 
-    is_test_account = stable_unit("test_account", client_ordinal) < population.test_account_share
 
     return Persona(
         client_ordinal=client_ordinal,
         client_id=communities.client_id(client_ordinal),
         community_id=communities.community_of(client_ordinal),
-        is_test_account=bool(is_test_account),
         birth_date=birth_date,
         gender=gender,
         life_stage=life_stage,

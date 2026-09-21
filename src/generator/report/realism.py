@@ -9,15 +9,14 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
+from .. import config
 from ..config import (
-    HISTORY_END,
-    HISTORY_START,
-    INITIATOR_CLIENT,
-    INITIATOR_EXTERNAL,
-    INITIATOR_SYSTEM,
+    CLIENT_ACTION_EVENT_TYPES,
+    EXTERNAL_EVENT_TYPES,
     RAW_DIR,
     SOURCES,
 )
+from ..params.calibration import EVENTS_PER_MONTH_BY_MODE
 from ..finance import invariants as invariants_module
 from ..observe import leak_audit
 from ..world.relationships import masked_name
@@ -36,8 +35,6 @@ from ..world.relationships import masked_name
 # целостные истории клиентов и аудит proxy-утечек.
 # ============================================================
 
-
-CLIENT_INITIATORS = (INITIATOR_CLIENT,)
 
 # Явные отметки перевода между своими счетами. Счёт клиента в ДРУГОМ
 # банке такой отметки не несёт: он замаскирован под человека, как и
@@ -256,7 +253,7 @@ def _windows(data: dict) -> dict:
             windows[client_id] = {"start": None, "end": None, "months": [], "closed_at": None}
             continue
 
-        start = max(HISTORY_START, min(starts))
+        start = max(config.HISTORY_START, min(starts))
 
         # --- конец: закрытие отношений либо открытый конец ---
 
@@ -268,7 +265,7 @@ def _windows(data: dict) -> dict:
 
         closed_at = min(closings) if closings else None
 
-        end = min(HISTORY_END, closed_at) if closed_at is not None else HISTORY_END
+        end = min(config.HISTORY_END, closed_at) if closed_at is not None else config.HISTORY_END
 
         if end <= start:
             windows[client_id] = {"start": start, "end": end, "months": [], "closed_at": closed_at}
@@ -311,6 +308,82 @@ def _windows(data: dict) -> dict:
 # ============================================================
 
 
+def _mode_bands(data: dict) -> dict:
+    """
+    Попал ли клиент в полосу событий своего режима активности.
+
+    Полоса — это ОЖИДАНИЕ, а не ограничитель. Клиент, выпавший
+    из неё, остаётся в данных целиком: здесь его считают и
+    называют, но ленту не трогают. Обрезка превратила бы
+    наблюдение в подгонку, а разрыв в истории — в выдумку.
+
+    Считается по месяцам, в которых клиент вообще наблюдался:
+    делить на весь горизонт у того, кто пришёл в банк вчера,
+    значит объявить его молчуном без оснований.
+    """
+
+    months = max(1, len(_months_between(config.HISTORY_START, config.HISTORY_END)))
+
+    per_client: Counter = Counter()
+
+    for row in data["events"]:
+        per_client[row["client_id"]] += 1
+
+    mode_of = {
+        row["client_id"]: row.get("activity_mode")
+        for row in data["truth_clients"]
+    }
+
+    per_mode: dict[str, dict] = {}
+    outside: list[dict] = []
+
+    for client, mode in sorted(mode_of.items()):
+
+        band = EVENTS_PER_MONTH_BY_MODE.get(mode)
+
+        if band is None:
+            continue
+
+        rate = per_client.get(client, 0) / months
+
+        slot = per_mode.setdefault(
+            mode,
+            {"clients": 0, "below": 0, "above": 0, "band": list(band), "rates": []},
+        )
+
+        slot["clients"] += 1
+        slot["rates"].append(rate)
+
+        low, high = band
+
+        if rate < low:
+            slot["below"] += 1
+            outside.append({"client_id": client, "mode": mode, "per_month": round(rate, 2),
+                            "band": list(band), "side": "below"})
+        elif rate > high:
+            slot["above"] += 1
+            outside.append({"client_id": client, "mode": mode, "per_month": round(rate, 2),
+                            "band": list(band), "side": "above"})
+
+    for slot in per_mode.values():
+        rates = slot.pop("rates")
+        slot["events_per_month"] = _quantiles(rates) if rates else {}
+        slot["outside_share"] = round((slot["below"] + slot["above"]) / max(1, slot["clients"]), 4)
+
+    total = sum(slot["clients"] for slot in per_mode.values())
+
+    return {
+        "by_mode": dict(sorted(per_mode.items())),
+        "clients_outside": len(outside),
+        "outside_share": round(len(outside) / max(1, total), 4),
+        "examples": outside[:10],
+        "rule": (
+            "полоса это ожидание, а не ограничитель: клиент вне полосы остаётся "
+            "в данных целиком и только называется здесь"
+        ),
+    }
+
+
 def _activity(data: dict) -> dict:
     """
     События на клиент-месяц по классам инициатора.
@@ -334,19 +407,29 @@ def _activity(data: dict) -> dict:
 
     per_client_month: dict[tuple, Counter] = defaultdict(Counter)
 
+    def _external(row) -> bool:
+        """
+        Деньги пришли ЧУЖОЙ рукой.
+
+        Зачисление на свой счёт со своего же счёта такой рукой не
+        является: это вторая нога собственного перевода клиента,
+        и отметка own_account её называет.
+        """
+
+        if row["event_type"] not in EXTERNAL_EVENT_TYPES:
+            return False
+
+        return row["payload"].get("counterparty") != "own_account"
+
     for row in data["events"]:
 
         key = (row["client_id"], _month(row["event_time"]))
 
         per_client_month[key]["all"] += 1
 
-        initiator = row["change_initiator"]
-
-        if initiator == INITIATOR_CLIENT:
+        if row["event_type"] in CLIENT_ACTION_EVENT_TYPES:
             per_client_month[key]["client"] += 1
-        elif initiator == INITIATOR_SYSTEM:
-            per_client_month[key]["system"] += 1
-        elif initiator == INITIATOR_EXTERNAL:
+        elif _external(row):
             # Зарплата от работодателя, перевод от родни и чужая
             # рука мошенника — это не банк.
             per_client_month[key]["external"] += 1
@@ -489,7 +572,26 @@ def _activity(data: dict) -> dict:
         "segments": {name: round(count / grid, 4) for name, count in segments.items()} if grid else {},
         "events_by_type": dict(Counter(row["event_type"] for row in data["events"]).most_common()),
         "events_by_source": dict(Counter(row["source"] for row in data["events"]).most_common()),
-        "events_by_initiator": dict(Counter(row["change_initiator"] for row in data["events"])),
+        "events_by_action": {
+            "client": sum(
+                1 for row in data["events"] if row["event_type"] in CLIENT_ACTION_EVENT_TYPES
+            ),
+            "external": sum(
+                1
+                for row in data["events"]
+                if row["event_type"] in EXTERNAL_EVENT_TYPES
+                and row["payload"].get("counterparty") != "own_account"
+            ),
+            "bank": sum(
+                1
+                for row in data["events"]
+                if row["event_type"] not in CLIENT_ACTION_EVENT_TYPES
+                and not (
+                    row["event_type"] in EXTERNAL_EVENT_TYPES
+                    and row["payload"].get("counterparty") != "own_account"
+                )
+            ),
+        },
     }
 
 
@@ -534,7 +636,7 @@ def _absence(data: dict) -> dict:
 
     for row in data["events"]:
 
-        if row["change_initiator"] != INITIATOR_CLIENT:
+        if row["event_type"] not in CLIENT_ACTION_EVENT_TYPES:
             continue
 
         key = (row["client_id"], _month(row["event_time"]))
@@ -970,7 +1072,7 @@ def _fraud(data: dict) -> dict:
     by_cause = defaultdict(list)
 
     for row in data["events"]:
-        cause = row["payload"].get("cause_event_id") or row.get("correlation_id")
+        cause = row["payload"].get("cause_event_id")
         if cause:
             by_cause[cause].append(row["event_type"])
 
@@ -994,9 +1096,14 @@ def _fraud(data: dict) -> dict:
 
 
 def _defects(data: dict) -> dict:
+    """
+    Дефекты выгрузки: пропуски полей, сбои источников и
+    повторяющиеся идентификаторы.
 
-    duplicates = 0
-    corrections = 0
+    Повтор event_id — уже не дубль доставки, а поломка: запись
+    приходит в выгрузку ровно один раз.
+    """
+
     missing = Counter()
 
     seen: dict[str, int] = Counter()
@@ -1005,27 +1112,17 @@ def _defects(data: dict) -> dict:
 
         seen[row["event_id"]] += 1
 
-        if row["event_version"] > 1:
-            corrections += 1
-
-        payload = row["payload"]
-
-        for name, value in payload.items():
+        for name, value in row["payload"].items():
             if value is None:
                 missing[f"{row['event_type']}.{name}"] += 1
-
-    duplicates = sum(count - 1 for count in seen.values() if count > 1) - corrections
 
     coverage = Counter(row["coverage_status"] for row in data["coverage"])
     reasons = Counter(row["coverage_reason"] for row in data["coverage"] if row["coverage_reason"])
 
     return {
-        "duplicates": max(0, duplicates),
-        "corrections": corrections,
-        "precision": dict(Counter(row["time_precision"] for row in data["events"])),
+        "repeated_event_ids": sum(count - 1 for count in seen.values() if count > 1),
         "coverage_status": dict(coverage),
         "coverage_reason": dict(reasons),
-        "test_accounts": sum(1 for row in data["truth_clients"] if row["is_test_account"]),
         "top_missing_fields": dict(missing.most_common(12)),
     }
 
@@ -1055,20 +1152,16 @@ def _finance(data: dict) -> dict:
     transfers = defaultdict(set)
 
     for row in data["events"]:
-        if row["event_type"] in ("p2p_out", "p2p_in") and row["correlation_id"]:
-            transfers[row["correlation_id"]].add(row["event_type"])
+        if row["event_type"] in ("p2p_out", "p2p_in") and row["payload"].get("transfer_id"):
+            transfers[row["payload"]["transfer_id"]].add(row["event_type"])
 
     paired = sum(1 for sides in transfers.values() if len(sides) == 2)
 
-    corrected = sum(
-        1
-        for rows in by_client.values()
-        for versions in invariants_module.versions_by_event(rows).values()
-        if len({row["event_version"] for row in versions}) > 1
+    repeated = sum(
+        len(invariants_module.repeated_event_ids(rows)) for rows in by_client.values()
     )
 
     return {
-        "checked_version": "last",
         "violations": len(problems),
         "violations_by_check": dict(Counter(item.check for item in problems)),
         "examples": [str(item) for item in problems[:5]],
@@ -1079,7 +1172,7 @@ def _finance(data: dict) -> dict:
         ),
         "internal_transfers": len(transfers),
         "internal_transfers_paired": paired,
-        "corrected_events": corrected,
+        "repeated_event_ids": repeated,
         "declined_operations": sum(
             1 for row in data["events"] if row["payload"].get("status") == "declined"
         ),
@@ -1186,7 +1279,7 @@ def _behaviour(data: dict) -> dict:
             kind == "purchase"
             and approved
             and not payload.get("is_subscription")
-            and row["change_initiator"] == INITIATOR_CLIENT
+            and row["event_type"] in CLIENT_ACTION_EVENT_TYPES
         ):
             own_purchases[client] += 1
 
@@ -1204,8 +1297,8 @@ def _behaviour(data: dict) -> dict:
         ):
             counterparties[client].add(payload["counterparty"])
 
-        if kind == "app_screen" and row["correlation_id"]:
-            sessions[client].add(row["correlation_id"])
+        if kind == "app_screen" and row["payload"].get("session_id"):
+            sessions[client].add(row["payload"]["session_id"])
 
     def pairs(trait: str, value) -> list:
         return [
@@ -1387,9 +1480,11 @@ def _fraud_profile(data: dict) -> dict:
         row["key"] for row in data["truth_events"] if row["kind"] == "fraud_episode"
     )
 
-    months = max(1, len(_months_between(HISTORY_START, HISTORY_END)))
+    months = max(1, len(_months_between(config.HISTORY_START, config.HISTORY_END)))
 
     alerts = [row for row in data["events"] if row["event_type"] == "fraud_alert"]
+
+    alert_ids = {row["event_id"] for row in alerts}
 
     return {
         "episodes": dict(episodes.most_common()),
@@ -1402,7 +1497,7 @@ def _fraud_profile(data: dict) -> dict:
             Counter(
                 row["event_type"]
                 for row in data["events"]
-                if row["link_type"] == "fraud_episode"
+                if row["payload"].get("cause_event_id") in alert_ids
             )
         ),
     }
@@ -1546,7 +1641,7 @@ def _credit(data: dict) -> dict:
     credit_decided = sum(decided[name] for name in CREDIT_FAMILIES)
     credit_approved = sum(approved[name] for name in CREDIT_FAMILIES)
 
-    months = max(1, len(_months_between(HISTORY_START, HISTORY_END)))
+    months = max(1, len(_months_between(config.HISTORY_START, config.HISTORY_END)))
 
     return {
         "borrowers": len(borrowers),
@@ -1771,9 +1866,9 @@ def _sessions(data: dict, report: dict) -> float | None:
         return None
 
     sessions = {
-        row["correlation_id"]
+        row["payload"]["session_id"]
         for row in data["events"]
-        if row["event_type"] == "app_screen" and row["correlation_id"]
+        if row["event_type"] == "app_screen" and row["payload"].get("session_id")
     }
 
     return len(sessions) / months
@@ -1899,7 +1994,7 @@ def build_report(raw_dir: Path, stories: int = 6) -> dict:
             "path": str(raw_dir),
             "clients": len(data["truth_clients"]),
             "events": len(data["events"]),
-            "profile_versions": len(data["profile"]),
+            "profile_rows": len(data["profile"]),
             "history_start": data["manifest"]["history_start"],
             "history_end": data["manifest"]["history_end"],
             "seed": data["manifest"]["seed"],
@@ -1911,6 +2006,7 @@ def build_report(raw_dir: Path, stories: int = 6) -> dict:
     data["windows"] = _windows(data)
 
     report["activity"] = _activity(data)
+    report["mode_bands"] = _mode_bands(data)
     report["absence"] = _absence(data)
     report["long_tails"] = _long_tails(data)
     report["repeatability"] = _repeatability(data)
@@ -1956,7 +2052,7 @@ def render_markdown(report: dict) -> str:
             [
                 ["клиентов", dataset["clients"]],
                 ["событий", dataset["events"]],
-                ["версий профиля", dataset["profile_versions"]],
+                ["строк профиля", dataset["profile_rows"]],
                 ["окно", f"{dataset['history_start']} .. {dataset['history_end']}"],
                 ["seed", dataset["seed"]],
                 ["размер сообщества", dataset["community_size"]],
@@ -2048,6 +2144,47 @@ def render_markdown(report: dict) -> str:
     out.append("")
     out.append(_table([[name, count] for name, count in activity["events_by_source"].items()],
                       ["источник", "событий"]))
+
+    bands = report["mode_bands"]
+
+    out.append("")
+    out.append("## Объём событий по режимам активности")
+    out.append("")
+    out.append(
+        _table(
+            [
+                [
+                    mode,
+                    item["clients"],
+                    f"{item['band'][0]}–{item['band'][1]}",
+                    round(item["events_per_month"].get("p50", 0), 1),
+                    item["below"],
+                    item["above"],
+                    item["outside_share"],
+                ]
+                for mode, item in bands["by_mode"].items()
+            ],
+            ["режим", "клиентов", "полоса", "медиана", "ниже", "выше", "доля вне"],
+        )
+    )
+    out.append("")
+    out.append(
+        f"Вне своей полосы: {bands['clients_outside']} клиентов "
+        f"({bands['outside_share']}). {bands['rule']}."
+    )
+
+    if bands["examples"]:
+        out.append("")
+        out.append(
+            _table(
+                [
+                    [item["client_id"], item["mode"], item["per_month"],
+                     f"{item['band'][0]}–{item['band'][1]}", item["side"]]
+                    for item in bands["examples"]
+                ],
+                ["клиент", "режим", "событий в месяц", "полоса", "сторона"],
+            )
+        )
 
     tails = report["long_tails"]
 
@@ -2254,8 +2391,8 @@ def render_markdown(report: dict) -> str:
     out.append("")
     out.append("## Дефекты источников")
     out.append("")
-    out.append(f"Дублей: {defects['duplicates']}, исправлений: {defects['corrections']}, "
-               f"тестовых аккаунтов: {defects['test_accounts']}.")
+    out.append(f"Повторов event_id: {defects['repeated_event_ids']} "
+               "(должно быть 0: запись приходит в выгрузку один раз).")
     out.append("")
     out.append(_table([[name, count] for name, count in defects["coverage_status"].items()],
                       ["статус покрытия", "строк"]))
@@ -2417,7 +2554,7 @@ def render_markdown(report: dict) -> str:
             [
                 ["внутренних переводов", finance["internal_transfers"]],
                 ["из них парных", finance["internal_transfers_paired"]],
-                ["исправленных записей", finance["corrected_events"]],
+                ["повторов event_id", finance["repeated_event_ids"]],
                 ["отклонённых операций", finance["declined_operations"]],
                 ["строк потеряно наблюдением", finance["unobserved_rows"]],
             ],

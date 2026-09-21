@@ -69,7 +69,6 @@ def _profile_ref(profile: dict, key: str) -> dict:
     return {
         "kind": "profile",
         "client_id": profile["client_id"],
-        "profile_version": profile["profile_version"],
         "key": key,
     }
 

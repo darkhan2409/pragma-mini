@@ -47,6 +47,32 @@ def _pilot_allows(persona: Persona, view: ProductView, ts: datetime) -> bool:
     return stable_unit("pilot", view.code, persona.client_ordinal) < share
 
 
+# Ключи eligibility, которые здесь действительно проверяются.
+#
+# Список нужен не для красоты: незнакомый ключ раньше просто
+# игнорировался, и продукт выдавался тому, кому правило его
+# запрещало. Молчать об условии хуже, чем упасть на нём.
+SUPPORTED_ELIGIBILITY: frozenset[str] = frozenset(
+    {
+        "min_age",
+        "max_age",
+        "requires_app",
+        "requires_pension",
+        "requires_children",
+        "requires_loan",
+        "min_assets",
+        "min_existing_loans",
+        "income_months",
+        "min_amount",
+        "regions",
+    }
+)
+
+
+class EligibilityError(Exception):
+    """Каталог требует условия, которого генератор не проверяет."""
+
+
 def eligible(
     persona: Persona,
     view: ProductView,
@@ -56,11 +82,19 @@ def eligible(
     held_families: dict,
     assets: int,
     has_app: bool,
-    has_loan: bool,
+    open_loans: int,
     active_contracts: int,
+    income_months: int,
+    amount: int | None = None,
 ) -> bool:
     """
     Доступен ли продукт клиенту на эту дату.
+
+    income_months — стаж действующего подтверждаемого дохода в
+    месяцах; его считает сам клиент по своим потокам дохода.
+
+    amount — сумма будущего договора, если она уже выбрана. Без
+    неё условие min_amount проверить нечем, и оно не проверяется.
     """
 
     settings = params_module.active().products
@@ -77,6 +111,13 @@ def eligible(
 
     eligibility = version.eligibility or {}
 
+    unknown = sorted(set(eligibility) - SUPPORTED_ELIGIBILITY)
+
+    if unknown:
+        raise EligibilityError(
+            f"{view.code}: условие {unknown} объявлено в каталоге, но не проверяется"
+        )
+
     if age < int(eligibility.get("min_age", 0)):
         return False
 
@@ -92,13 +133,28 @@ def eligible(
     if eligibility.get("requires_children") and persona.children <= 0:
         return False
 
-    if eligibility.get("requires_loan") and not has_loan:
+    if eligibility.get("requires_loan") and open_loans <= 0:
         return False
 
     if eligibility.get("min_assets") and assets < int(eligibility["min_assets"]):
         return False
 
-    if eligibility.get("min_existing_loans") and not has_loan:
+    # Рефинансируют НЕСКОЛЬКО кредитов в один. Раньше здесь
+    # стояла та же проверка, что и у requires_loan, и человек с
+    # единственным кредитом получал рефинансирование — то есть
+    # ровно то, чего условие не разрешает.
+    if open_loans < int(eligibility.get("min_existing_loans", 0)):
+        return False
+
+    # Стаж подтверждаемого дохода. Раньше вместо него стоял срок
+    # отношений с банком, и это разные вещи: клиент мог держать
+    # здесь счёт пять лет, а работу найти вчера.
+    if income_months < int(eligibility.get("income_months", 0)):
+        return False
+
+    # Минимальная сумма договора: продукт с порогом не открывают
+    # на сумму ниже порога.
+    if amount is not None and amount < int(eligibility.get("min_amount", 0)):
         return False
 
     regions = eligibility.get("regions")
@@ -195,8 +251,9 @@ def candidates(
     held_families: dict,
     assets: int,
     has_app: bool,
-    has_loan: bool,
+    open_loans: int,
     active_contracts: int,
+    income_months: int,
     stress: float = 0.0,
 ) -> tuple:
     """
@@ -222,7 +279,7 @@ def candidates(
 
         if not eligible(
             persona, view, version, ts, held_codes, held_families,
-            assets, has_app, has_loan, active_contracts,
+            assets, has_app, open_loans, active_contracts, income_months,
         ):
             continue
 

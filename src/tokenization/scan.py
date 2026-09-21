@@ -252,9 +252,8 @@ class FitStatistics:
     clients: int = 0
     events: int = 0
     values: int = 0
-    profile_versions: int = 0
     clients_without_profile: int = 0
-    day_precision_events: int = 0
+    profiles: int = 0
     limitations: dict[str, int] = field(default_factory=dict)
 
     content = None
@@ -389,12 +388,9 @@ def scan(
 
             stats.event_types[event_type] = stats.event_types.get(event_type, 0) + 1
 
-            if not event.hour_known:
-                stats.day_precision_events += 1
-
             values = event.model_values()
 
-            unit_prefix = f"{client_id}\x1f{event.event_id}\x1f{event.event_version}\x1f"
+            unit_prefix = f"{client_id}\x1f{event.event_id}\x1f"
 
             for key, value in sorted(values.items()):
 
@@ -409,7 +405,6 @@ def scan(
                         "unit": "event",
                         "client_id": client_id,
                         "event_id": event.event_id,
-                        "event_version": event.event_version,
                         "key": key,
                         "type": value_type(value),
                         "value": value_text(value),
@@ -463,14 +458,12 @@ def scan(
 
         # --- профиль ---
 
-        version = (history.profile_meta or {}).get("profile_version")
-
         if not history.profile:
             stats.clients_without_profile += 1
         else:
-            stats.profile_versions += 1
+            stats.profiles += 1
 
-            prefix = f"{client_id}\x1f{version}\x1f"
+            prefix = f"{client_id}\x1f"
 
             for key, value in sorted(history.profile.items()):
 
@@ -492,7 +485,6 @@ def scan(
                     {
                         "unit": "profile",
                         "client_id": client_id,
-                        "profile_version": version,
                         "key": key,
                         "type": value_type(value),
                         "value": value_text(value),

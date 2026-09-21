@@ -49,19 +49,18 @@ def render_contract_md(report: dict) -> str:
                 ["клиентов", corpus["clients"]],
                 ["событий", corpus["events"]],
                 ["значений под ключами", corpus["values"]],
-                ["действующих анкет (по одной на клиента)", corpus["profiles_as_of"]],
+                ["анкет (по одной на клиента)", corpus["profiles"]],
                 ["клиентов без профиля", corpus["clients_without_profile"]],
-                ["событий с дневной точностью времени", corpus["day_precision_events"]],
             ],
             ["что", "сколько"],
         )
     )
 
-    declared = report["declared_by_split"]
+    declared = report["declared_by_corpus"]
 
     out.append(
         f"\nРазделение объявило {declared['events_rows']} видимых строк: прочитано столько же. "
-        f"Версий профиля к fit_end известно {declared['source_profile_version_rows']}, но признаком клиента "
+        f"Анкет к fit_end известно {declared['profile_rows']}, и признаком клиента "
         f"становится одна действующая на каждого, а прежние значения приходят событиями изменения "
         f"профиля. Контрольная сумма содержимого разделения {declared['content_sha256'][:16]}, "
         f"отпечаток смыслового содержимого fit-корпуса {report['fit_content_sha256'][:16]}.\n"
@@ -574,7 +573,6 @@ def render_tokenization_md(report: dict) -> str:
                 ["представлений профиля", counts["profiles"]],
                 ["клиентов без профиля", counts["clients_without_profile"]],
                 ["клиентов без событий на срезе", counts["silent_clients"]],
-                ["событий с дневной точностью", counts["day_precision_events"]],
             ],
             ["что", "сколько"],
         )
@@ -678,9 +676,8 @@ def render_golden_md(examples: list[dict]) -> str:
         )
 
         out.append(
-            f"Срез {example['cutoff'][:10]}, запись {example['event_id']} версии "
-            f"{example['event_version']}, токенов {example['n_tokens']}, "
-            f"час наблюдался: {'да' if example['hour_known'] else 'нет'}.\n\n"
+            f"Срез {example['cutoff'][:10]}, запись {example['event_id']}, "
+            f"токенов {example['n_tokens']}.\n\n"
         )
 
         out.append(
@@ -735,10 +732,10 @@ def _source(item: dict) -> str:
     kind = item.get("kind")
 
     if kind == "event":
-        return f"событие {item.get('event_id', '?')} v{item.get('event_version', '?')}.{item.get('key')}"
+        return f"событие {item.get('event_id', '?')}.{item.get('key')}"
 
     if kind == "profile":
-        return f"профиль v{item.get('profile_version')}.{item.get('key')}"
+        return f"профиль.{item.get('key')}"
 
     if kind == "entity":
         return f"сущность {item.get('ref')}.{item.get('key')}"
@@ -868,8 +865,8 @@ def render_compatibility_md(report: dict, tokenization: dict | None = None) -> s
             "[MISSING], [UNK], [INVALID] и [EMPTY] в слоте значения маскированию не подлежат",
             "значение и его производное нельзя маскировать по отдельности: список слагаемых лежит "
             "в derived_from каждого расчётного значения",
-            "календарь приходит отдельным числовым каналом; у события с дневной точностью час не "
-            "наблюдался, и признак hour_known обязан доехать до Masker",
+            "календарь приходит отдельным числовым каналом; время события точное, "
+            "и час суток у записи наблюдался всегда",
             "ссылки и причины отсутствия это метаданные: в embedding они не входят",
             "сохранённая токенизация это ещё не обучающий датасет: расписание срезов, доступную "
             "историю и периоды целей назначает отдельный построитель",

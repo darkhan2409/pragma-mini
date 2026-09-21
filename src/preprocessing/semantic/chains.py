@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from . import time as time_module
 
 
 # ============================================================
@@ -15,8 +14,9 @@ from . import time as time_module
 # незавершённой: у заявки без решения исход in_progress, и
 # придумывать ему конец нельзя.
 #
-# Связи берутся из служебных полей слоя — correlation_id и
-# cause_event_id, — но наружу они не выходят. В признаки идут
+# Связи берутся из деловых ключей payload — cause_event_id и
+# идентификаторов заявки, договора, обращения, сессии и
+# перевода, — но наружу они не выходят. В признаки идут
 # смысловые следствия: тип связанного события, вид связи, сколько
 # прошло между ними и та же ли это точка.
 #
@@ -25,38 +25,26 @@ from . import time as time_module
 # ============================================================
 
 
-CHAINS_VERSION = "1.3.0"
+CHAINS_VERSION = "2.0.0"
 
 IN_PROGRESS = "in_progress"
 
-TIME_ORDER_AMBIGUOUS = "time_order_ambiguous"
-
-# Разрешение объявленной точности в сутках: внутри него источник
-# порядок двух записей не различает.
-PRECISION_DAYS: dict[str, float] = {
-    "second": 0.0,
-    "minute": 1.0 / 1440.0,
-    "day": 1.0,
+# Вид цепочки задаёт деловой ключ payload, по которому она
+# собрана. Метки связи в конверте больше нет, и догадываться по
+# типу события не нужно: одна и та же покупка честно входит и в
+# цепочку договора, и в цепочку сессии.
+KIND_OF_FIELD: dict[str, str] = {
+    "application_id": "application",
+    "offer_id": "application",
+    "contract_id": "contract",
+    "case_id": "case",
+    "session_id": "session",
+    "transfer_id": "transfer",
 }
 
-DATE_ONLY = time_module.DATE_ONLY
-
-# Вид цепочки задаёт метка связи первого шага, а не догадка по
-# типу события: одна и та же покупка может быть шагом сессии и
-# шагом возврата.
-KIND_OF_LINK: dict[str, str] = {
-    "offer": "application",
-    "application": "application",
-    "contract": "contract",
-    "schedule": "contract",
-    "case": "case",
-    "fraud_episode": "fraud",
-    "transfer": "transfer",
-    "session": "session",
-    "refund": "operation",
-    "reversal": "operation",
-    "chargeback": "operation",
-}
+# Порядок обхода ключей фиксирован: по нему собираются цепочки,
+# и от него зависит порядок строк в отчёте.
+CHAIN_FIELDS: tuple[str, ...] = tuple(KIND_OF_FIELD)
 
 # Шаг, который закрывает цепочку своего вида. Всё остальное
 # оставляет её незавершённой.
@@ -149,108 +137,54 @@ class ChainsError(ValueError):
     """
 
 
-def _precision(row: dict) -> str:
-    """
-    Объявленная точность записи по общему правилу слоя.
-    """
-
-    try:
-        return time_module.effective_precision(row)
-    except time_module.PrecisionError as error:
-        raise ChainsError(f"{error}: судить о порядке событий по ней нельзя") from error
-
-
-def _known_days(row: dict, cause: dict) -> float:
-    """
-    Сутки между причиной и следствием в точности пары: оба момента
-    усечены до более грубой из двух объявленных точностей. У
-    дневной записи источник знает только дату, и дробные сутки
-    между ней и причиной были бы выдумкой.
-    """
-
-    precision = time_module.coarser(_precision(row), _precision(cause))
-
-    later = time_module.floor_to_precision(row["event_time"], precision)
-    earlier = time_module.floor_to_precision(cause["event_time"], precision)
-
-    return (later - earlier).total_seconds() / 86400.0
-
-
-def _resolution(row: dict) -> float:
-    """
-    Насколько грубо источник знает время этой записи, в сутках.
-
-    Дневное качество отметки в payload значит то же, что дневная
-    точность источника: час и минута не наблюдались. Правило одно
-    на весь слой — time.effective_precision.
-    """
-
-    return PRECISION_DAYS[_precision(row)]
-
-
 def _interval(row: dict, cause: dict) -> tuple[float | None, float, str | None]:
     """
-    Интервал между причиной и следствием как признак модели, само
-    наблюдение и причина, если признака нет.
+    Интервал между причиной и следствием как признак модели и
+    само наблюдение.
 
-    Отрицательный интервал это не признак: причина не может
-    произойти после следствия. Объяснить его может только
-    объявленная точность — тогда порядок внутри её разрешения
-    неизвестен, и признак не передаётся. Если обе записи точны,
-    это противоречие данных, а не особенность времени.
+    Время события точное, поэтому отрицательный интервал больше
+    ничем не объясняется: причина не может произойти после
+    следствия, и это противоречие данных.
     """
 
     observed = (row["event_time"] - cause["event_time"]).total_seconds() / 86400.0
 
     if observed >= 0:
-        # Признак — в объявленной точности пары; наблюдение
-        # остаётся сырым: оно объясняет признак, а не подменяет его.
-        return _known_days(row, cause), observed, None
-
-    tolerance = max(_resolution(row), _resolution(cause))
-
-    if tolerance > 0.0 and -observed <= tolerance:
-        return None, observed, TIME_ORDER_AMBIGUOUS
+        return observed, observed, None
 
     raise ChainsError(
         f"причина {cause['event_type']} записана позже следствия {row['event_type']} "
-        f"на {abs(observed):.4f} суток, а объявленная точность различает "
-        f"{tolerance:.4f} суток: порядок противоречит данным"
+        f"на {abs(observed):.4f} суток: время событий точное, и порядок противоречит данным"
     )
-
-
-def _kind_of(link_type: str | None, event_type: str) -> str:
-
-    kind = KIND_OF_LINK.get(link_type or "")
-
-    if kind is not None:
-        return kind
-
-    if event_type in TERMINAL_TYPES["operation"]:
-        return "operation"
-
-    return "other"
 
 
 def chains(rows: list[dict]) -> list[Chain]:
     """
-    Цепочки по correlation_id среди видимых событий.
+    Цепочки по деловым ключам payload среди видимых событий.
+
+    Одна запись может войти в несколько цепочек: платёж из
+    приложения принадлежит и договору, и сессии. Это два разреза
+    одной ленты, а не двойной счёт.
     """
 
-    grouped: dict[str, list[dict]] = {}
+    grouped: dict[tuple[str, str], list[dict]] = {}
 
     for row in rows:
 
-        link = row.get("correlation_id")
+        for field_name in CHAIN_FIELDS:
 
-        if link is None:
-            continue
+            link = row.get(field_name)
 
-        grouped.setdefault(link, []).append(row)
+            if link is None:
+                continue
+
+            grouped.setdefault((field_name, link), []).append(row)
 
     out: list[Chain] = []
 
-    for _link, steps in sorted(grouped.items(), key=lambda item: item[1][0]["event_time"]):
+    for (field_name, _link), steps in sorted(
+        grouped.items(), key=lambda item: (item[1][0]["event_time"], item[0])
+    ):
 
         # Цепочка из одного шага это НАЧАВШАЯСЯ цепочка, а не
         # отсутствие цепочки: заявка без видимого решения и
@@ -261,7 +195,7 @@ def chains(rows: list[dict]) -> list[Chain]:
 
         first, last = steps[0], steps[-1]
 
-        kind = _kind_of(first.get("link_type"), first["event_type"])
+        kind = KIND_OF_FIELD[field_name]
 
         terminal = TERMINAL_TYPES.get(kind, frozenset())
 
@@ -358,11 +292,7 @@ def chain_summary(items: list[Chain]) -> dict:
 
 __all__ = [
     "CHAINS_VERSION",
-    "DATE_ONLY",
-    "KIND_OF_LINK",
     "IN_PROGRESS",
-    "PRECISION_DAYS",
-    "TIME_ORDER_AMBIGUOUS",
     "ChainsError",
     "RELATION_OF_TYPE",
     "TERMINAL_TYPES",

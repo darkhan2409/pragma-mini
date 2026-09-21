@@ -23,7 +23,20 @@ LIFE_STAGES = (
 
 HCB_ROLES = ("primary", "secondary", "credit_only", "deposit_only", "episodic")
 
-ACTIVITY_MODES = ("rare", "moderate", "regular", "high", "extreme")
+# Режим активности клиента. Он один задаёт, сколько следов
+# человек оставляет в банке за месяц:
+#
+#   silent    почти ничего: зарплата и пара обязательных списаний
+#   rare      редкие покупки, приложение открывается изредка
+#   regular   обычный клиент: карта, приложение, платежи
+#   high      банк основной, оборот идёт через него
+#   extreme   карта и приложение под рукой каждый день
+#
+# Объявленные полосы событий на клиента в месяц лежат в
+# calibration.EVENTS_PER_MONTH_BY_MODE и проверяются отчётом
+# реализма ПОСЛЕ генерации: клиент, выпавший из своей полосы,
+# попадает в отчёт, а лента его не обрезается.
+ACTIVITY_MODES = ("silent", "rare", "regular", "high", "extreme")
 
 
 @dataclass(frozen=True)
@@ -238,22 +251,22 @@ class PopulationParams:
 
     activity_mode_weights: dict = field(
         default_factory=lambda: {
+            "silent": 0.12,
             "rare": 0.20,
-            "moderate": 0.24,
-            "regular": 0.345,
-            "high": 0.19,
-            "extreme": 0.025,
+            "regular": 0.38,
+            "high": 0.24,
+            "extreme": 0.06,
         }
     )
 
     # Режим активности коррелирует с ролью банка.
     activity_mode_role_factor: dict = field(
         default_factory=lambda: {
-            "primary": {"regular": 1.5, "high": 1.9, "extreme": 2.2, "rare": 0.35},
-            "secondary": {"moderate": 1.2, "regular": 1.1, "rare": 0.8},
-            "credit_only": {"rare": 1.8, "moderate": 1.2, "high": 0.5, "extreme": 0.3},
-            "deposit_only": {"rare": 2.2, "moderate": 1.0, "high": 0.3, "extreme": 0.15},
-            "episodic": {"rare": 2.6, "moderate": 0.8, "regular": 0.3, "high": 0.15, "extreme": 0.05},
+            "primary": {"regular": 1.5, "high": 1.9, "extreme": 2.2, "rare": 0.35, "silent": 0.15},
+            "secondary": {"regular": 1.1, "rare": 0.9, "silent": 0.7},
+            "credit_only": {"silent": 1.6, "rare": 1.8, "high": 0.5, "extreme": 0.3},
+            "deposit_only": {"silent": 2.4, "rare": 2.2, "high": 0.3, "extreme": 0.15},
+            "episodic": {"silent": 2.8, "rare": 2.6, "regular": 0.3, "high": 0.15, "extreme": 0.05},
         }
     )
 
@@ -270,4 +283,3 @@ class PopulationParams:
     # Доля тех, кто зарегистрировался и не начал пользоваться.
     registered_and_vanished_share: float = 0.14
 
-    test_account_share: float = 0.005

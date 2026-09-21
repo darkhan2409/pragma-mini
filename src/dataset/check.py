@@ -401,7 +401,7 @@ def _recompute(dataset: Dataset, inputs: DatasetInputs, count: int) -> list[dict
                 "key_ids", "value_ids", "positions", "event_starts", "event_lengths",
                 "value_event", "value_start", "value_length", "value_key_id",
                 "profile_key_ids", "profile_value_ids", "profile_positions",
-                "coverage_at_cutoff", "event_eligible", "hour_known",
+                "coverage_at_cutoff", "event_eligible",
             )
         ) and fresh.sample_id == stored.sample_id
 

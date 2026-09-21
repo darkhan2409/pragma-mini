@@ -71,7 +71,6 @@ class Sample:
 
     # --- события: каналы ---
     calendar: np.ndarray
-    hour_known: np.ndarray
     hours_to_cutoff: np.ndarray
     event_eligible: np.ndarray
 
@@ -89,8 +88,6 @@ class Sample:
     profile_value_length: np.ndarray
     profile_value_key_id: np.ndarray
     profile_state: str
-    profile_version: int | None
-    valid_from: datetime | None
     has_profile: bool
 
     # --- клиент на срез ---
@@ -153,7 +150,7 @@ class Sample:
         if self.calendar.size != self.n_events * 6:
             raise SampleError(f"{self.sample_id}: календарь не по шесть чисел на событие")
 
-        for name in ("hour_known", "hours_to_cutoff", "event_eligible"):
+        for name in ("hours_to_cutoff", "event_eligible"):
             if getattr(self, name).size != self.n_events:
                 raise SampleError(f"{self.sample_id}: канал {name} не по одному значению на событие")
 
@@ -336,7 +333,6 @@ def build_sample(
     event_starts: list[int] = []
     event_lengths: list[int] = []
     calendar: list[float] = []
-    hour_known: list[bool] = []
     to_cutoff: list[float] = []
     event_eligible: list[bool] = []
 
@@ -372,8 +368,7 @@ def build_sample(
             )
 
         calendar.extend(item.calendar)
-        hour_known.append(item.hour_known)
-        to_cutoff.append(hours_to_cutoff(cutoff, item.event_time, item.time_precision))
+        to_cutoff.append(hours_to_cutoff(cutoff, item.event_time))
         event_eligible.append(flags[position])
 
     profile = encoded.profile
@@ -386,7 +381,6 @@ def build_sample(
         kept=selection.kept,
         value_offsets=value_offsets,
         profile=profile,
-        profile_version=meta.get("profile_version"),
         cause_of=encoded.cause_of,
     )
 
@@ -405,7 +399,6 @@ def build_sample(
         event_starts=_ints(event_starts),
         event_lengths=_ints(event_lengths),
         calendar=np.asarray(calendar, dtype=np.float32),
-        hour_known=np.asarray(hour_known, dtype=bool),
         hours_to_cutoff=np.asarray(to_cutoff, dtype=np.float64),
         event_eligible=np.asarray(event_eligible, dtype=bool),
         value_event=_ints(value_event),
@@ -421,8 +414,6 @@ def build_sample(
             [profile.key_ids[start] for start in profile.value_starts]
         ),
         profile_state=meta.get("state", ""),
-        profile_version=meta.get("profile_version"),
-        valid_from=meta.get("valid_from"),
         has_profile=encoded.has_profile,
         coverage_at_cutoff=np.asarray(coverage_codes(encoded.coverage, sources), dtype=np.int8),
         history_age_days=age,
@@ -499,13 +490,10 @@ def _service_rows(encoded: EncodedHistory, selection: Selection, flags: list[boo
                 "selection_reason": reason_of.get(position),
                 "exclusion_reason": excluded_of.get(position),
                 "event_id": item.event_id,
-                "event_version": item.event_version,
                 "stable_event_index": item.stable_event_index,
                 "event_time": item.event_time,
                 "source": item.source,
                 "event_type": item.event_type,
-                "time_precision": item.time_precision,
-                "hour_known": item.hour_known,
                 "n_values": item.n_values,
                 "n_tokens": item.n_tokens,
                 "eligible": flags[position],
@@ -550,7 +538,6 @@ def sample_from_row(row: dict) -> Sample:
         event_starts=_ints(row["event_starts"]),
         event_lengths=_ints(row["event_lengths"]),
         calendar=np.asarray(row["calendar"], dtype=np.float32),
-        hour_known=np.asarray(row["hour_known"], dtype=bool),
         hours_to_cutoff=np.asarray(row["hours_to_cutoff"], dtype=np.float64),
         event_eligible=np.asarray(row["event_eligible"], dtype=bool),
         value_event=_ints(row["value_event"]),
@@ -564,8 +551,6 @@ def sample_from_row(row: dict) -> Sample:
         profile_value_length=_ints(row["profile_value_length"]),
         profile_value_key_id=_ints(row["profile_value_key_id"]),
         profile_state=row["profile_state"],
-        profile_version=row["profile_version"],
-        valid_from=row["valid_from"],
         has_profile=bool(row["has_profile"]),
         coverage_at_cutoff=np.asarray(row["coverage_at_cutoff"], dtype=np.int8),
         history_age_days=row["history_age_days"],

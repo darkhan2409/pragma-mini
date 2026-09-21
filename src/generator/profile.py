@@ -6,15 +6,16 @@ from .config import PROFILE_FIELDS
 
 
 # ============================================================
-# ВЕРСИОННЫЙ ПРОФИЛЬ
+# ПРОФИЛЬ
 # ============================================================
 #
-# Профиль это состояние с историей: строка на версию, с
-# границами действия, временем записи, источником значения,
-# признаком подтверждённости и причиной изменения.
+# Одна строка на клиента: анкета такой, какой она стала к
+# границе выгрузки. Версий, границ действия и признаков записи
+# у профиля нет.
 #
-# Месячные снимки генератор не пишет: они строятся отчётом
-# калибровки из версий по любой дате.
+# История изменений анкеты не пропала — она живёт событиями
+# profile_change в ленте, где у каждого изменения есть своё
+# точное время, старое и новое значение.
 # ============================================================
 
 
@@ -44,54 +45,9 @@ PROFILE_FIELD_TYPES: dict[str, pa.DataType] = {
 
 
 PROFILE_SCHEMA = pa.schema(
-    [
-        ("client_id", pa.string()),
-        ("profile_version", pa.int32()),
-        ("valid_from", pa.timestamp("us")),
-        ("valid_to", pa.timestamp("us")),
-        ("change_source", pa.string()),
-        ("confirmed", pa.bool_()),
-        ("change_reason", pa.string()),
-    ]
+    [("client_id", pa.string())]
     + [(name, PROFILE_FIELD_TYPES[name]) for name in PROFILE_FIELDS]
 )
 
 
-def as_of(versions: list, ts) -> dict | None:
-    """
-    Профиль на дату: последняя версия, которая уже действовала
-    к моменту `ts`.
-
-    `valid_to` здесь намеренно НЕ фильтрует: смену версии
-    выражает следующая строка, и как только её `valid_from`
-    наступил, она и окажется последней. Закрывать предыдущую по
-    `valid_to` незачем, а на границе это оставило бы дыру.
-    """
-
-    chosen = None
-
-    for row in versions:
-
-        if row["valid_from"] > ts:
-            continue
-
-        if chosen is None or (
-            (row["valid_from"], row["profile_version"])
-            > (chosen["valid_from"], chosen["profile_version"])
-        ):
-            chosen = row
-
-    return chosen
-
-
-def known_at(versions: list, eval_ts) -> dict | None:
-    """
-    Профиль, каким его видел бы препроцессинг на `eval_ts`.
-    Времени поступления у выгрузки нет, поэтому это то же самое,
-    что версия, действовавшая на `eval_ts`.
-    """
-
-    return as_of(versions, eval_ts)
-
-
-__all__ = ["PROFILE_FIELD_TYPES", "PROFILE_SCHEMA", "as_of", "known_at"]
+__all__ = ["PROFILE_FIELD_TYPES", "PROFILE_SCHEMA"]

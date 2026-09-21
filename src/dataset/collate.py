@@ -78,7 +78,6 @@ class Batch:
 
     # --- каналы ---
     calendar: np.ndarray = field(default_factory=lambda: np.zeros((0, 6), dtype=np.float32))
-    hour_known: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool))
     hours_to_cutoff: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float64))
     coverage_at_cutoff: np.ndarray = field(default_factory=lambda: np.zeros((0, 0), dtype=np.int8))
     history_age_days: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float64))
@@ -173,7 +172,6 @@ def collate(samples: list[Sample]) -> Batch:
     eligible = np.zeros(rows, dtype=bool)
 
     calendar = np.zeros((rows, 6), dtype=np.float32)
-    hour_known = np.zeros(rows, dtype=bool)
     to_cutoff = np.zeros(rows, dtype=np.float64)
 
     history_width = int(n_events.max()) if count else 0
@@ -213,7 +211,6 @@ def collate(samples: list[Sample]) -> Batch:
 
             eligible[span] = sample.event_eligible
             calendar[span] = sample.calendar.reshape(sample.n_events, 6)
-            hour_known[span] = sample.hour_known
             to_cutoff[span] = sample.hours_to_cutoff
 
         # Адрес значения переезжает в координаты batch: номер
@@ -295,7 +292,6 @@ def collate(samples: list[Sample]) -> Batch:
         history_mask=history_mask,
         history_rows=history_rows,
         calendar=calendar,
-        hour_known=hour_known,
         hours_to_cutoff=to_cutoff,
         coverage_at_cutoff=_stack([item.coverage_at_cutoff for item in samples], np.int8),
         history_age_days=age,

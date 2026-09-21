@@ -23,7 +23,9 @@ from ..history import SourceState
 #
 # Пустой месяц САМ ПО СЕБЕ не означает неактивность. Вывод
 # «действий не было» требует, чтобы применимые источники в этом
-# месяце наблюдались; одного профиля для этого мало.
+# месяце наблюдались; одного профиля для этого мало. Месяц, в
+# котором у источника был день сбоя, покрытым не считается:
+# молчание витрины это не молчание человека.
 #
 # Считается только до cutoff. Будущая дата возвращения и итоговая
 # длительность паузы не рассчитываются: их знание лежит за
@@ -43,7 +45,7 @@ MONTH_STATES: tuple[str, ...] = (
     INSUFFICIENT_COVERAGE,
 )
 
-CLIENT_INITIATOR = "client"
+from ..projection import CLIENT_ACTION_EVENT_TYPES
 
 # Источники, которые вообще способны записать действие клиента.
 # Доказать молчание можно только по ним: витрина договоров
@@ -138,9 +140,16 @@ def _covered(coverage: list[SourceState], base_sources: tuple[str, ...], year: i
 
     Требуются все ПРИМЕНИМЫЕ источники, записывающие действия
     клиента. Если применимых нет вовсе, доказать молчание нечем.
+
+    День сбоя внутри месяца снимает покрытие целиком. Иначе
+    молчание клиента и молчание витрины стали бы неотличимы: в
+    месяце со сбоем отсутствие событий доказывает не бездействие
+    человека, а потерю наблюдения.
     """
 
     start = datetime(year, month, 1)
+
+    prefix = f"{year:04d}-{month:02d}"
 
     states = {item.source: item for item in coverage}
 
@@ -173,6 +182,9 @@ def _covered(coverage: list[SourceState], base_sources: tuple[str, ...], year: i
         if item.last_available_at is not None and item.last_available_at < last_day:
             return False
 
+        if any(day.startswith(prefix) for day in item.outage_days):
+            return False
+
     return True
 
 
@@ -203,7 +215,7 @@ def activity_months(
     for row in rows:
         key = _month_key(row["event_time"])
         events[key] = events.get(key, 0) + 1
-        if row.get("change_initiator") == CLIENT_INITIATOR:
+        if row["event_type"] in CLIENT_ACTION_EVENT_TYPES:
             actions[key] = actions.get(key, 0) + 1
 
     months = _months_before(observed_start, cutoff)
@@ -293,7 +305,6 @@ def _current_pause(months: list[ActivityMonth]) -> int | None:
 
 __all__ = [
     "ACTION_SOURCES",
-    "CLIENT_INITIATOR",
     "HAS_CLIENT_ACTION",
     "INSUFFICIENT_COVERAGE",
     "MONTH_STATES",

@@ -25,15 +25,12 @@ from .links import build_link_report, scan_entities
 from .registry import build_registry, registry_as_dict, registry_digest
 from .schema import (
     CLIENT_INDEX_SCHEMA,
-    DEDUPE_LOG_SCHEMA,
+    REPEATS_SCHEMA,
     DERIVED_COLUMNS,
     MENTIONS_SCHEMA,
     REJECTS_SCHEMA,
     SCHEMA_VERSION,
     TRANSFERS_SCHEMA,
-    VERSION_ROLE_CONFLICT,
-    VERSION_ROLE_CORRECTION,
-    VERSION_ROLE_REDELIVERY,
     coverage_schema,
     payload_columns,
 )
@@ -58,7 +55,7 @@ from .sidecars import build_coverage, build_profile
 
 
 STAGE = "canonical"
-STAGE_VERSION = "4.5.0"
+STAGE_VERSION = "5.0.0"
 
 STATUS_OK = "ok"
 STATUS_ROW_COUNT_MISMATCH = "row_count_mismatch"
@@ -69,7 +66,7 @@ COVERAGE_FILE = "coverage.parquet"
 CLIENT_INDEX_FILE = "client_index.parquet"
 MENTIONS_FILE = "entities/mentions.parquet"
 TRANSFERS_FILE = "entities/transfers.parquet"
-DEDUPE_FILE = "dedupe_log.parquet"
+REPEATS_FILE = "repeated_ids.parquet"
 REJECTS_FILE = "rejects.parquet"
 REGISTRY_FILE = "field_registry.json"
 REPORT_JSON_FILE = "canonical_report.json"
@@ -167,7 +164,6 @@ def build_group(
     transfers: list[dict] = []
 
     counts: Counter = Counter()
-    roles: Counter = Counter()
     flags: Counter = Counter()
 
     row_start = 0
@@ -202,13 +198,10 @@ def build_group(
         for key, value in result.counts.items():
             counts[key] += value
 
-        roles.update(result.table.column("version_role").to_pylist())
-
         for name in (
-            "is_exact_duplicate",
+            "is_repeated_event_id",
             "before_window",
             "at_or_after_extract",
-            "time_finer_than_precision",
             "ambiguous_local_time",
             "balance_chain_gap",
         ):
@@ -239,9 +232,9 @@ def build_group(
     write_table(out_dir / TRANSFERS_FILE, transfers_table, TRANSFERS_SCHEMA)
 
     write_table(
-        out_dir / DEDUPE_FILE,
-        pa.Table.from_pylist(dedupe, schema=DEDUPE_LOG_SCHEMA) if dedupe else DEDUPE_LOG_SCHEMA.empty_table(),
-        DEDUPE_LOG_SCHEMA,
+        out_dir / REPEATS_FILE,
+        pa.Table.from_pylist(dedupe, schema=REPEATS_SCHEMA) if dedupe else REPEATS_SCHEMA.empty_table(),
+        REPEATS_SCHEMA,
     )
 
     write_table(
@@ -253,16 +246,6 @@ def build_group(
     # Клиенты без событий тоже в индексе: отсутствие событий это
     # наблюдение, а не повод исчезнуть.
     with_events = {item["client_id"] for item in clients}
-
-    # Признак тестового счёта у такого клиента брать неоткуда,
-    # кроме покрытия: в ленте у него строк нет. Проставленный
-    # False означал бы «это настоящий клиент», и тестовые счета
-    # без событий попадали бы в обучение.
-    test_accounts = {
-        row["client_id"]
-        for row in coverage_table.select(["client_id", "coverage_reason"]).to_pylist()
-        if row["coverage_reason"] == "test_account"
-    }
 
     for client_id, index in sorted(client_index.items(), key=lambda item: item[1]):
         if client_id not in with_events:
@@ -277,7 +260,6 @@ def build_group(
                     "spans_row_groups": False,
                     "event_time_min": None,
                     "event_time_max": None,
-                    "is_test_account": client_id in test_accounts,
                 }
             )
 
@@ -333,20 +315,16 @@ def build_group(
             "coverage": coverage_table.num_rows,
             "mentions": mentions_rows,
             "transfer_sides": transfers_table.num_rows,
-            "dedupe_log": len(dedupe),
+            "repeated_ids": len(dedupe),
             "rejects": len(rejects),
             "clients": len(clients),
             "clients_without_events": sum(1 for item in clients if not item["row_count"]),
         },
-        "versions": {
-            "roles": dict(sorted(roles.items())),
-            "corrections": roles.get(VERSION_ROLE_CORRECTION, 0),
-            "redeliveries": roles.get(VERSION_ROLE_REDELIVERY, 0),
-            "conflicts": roles.get(VERSION_ROLE_CONFLICT, 0),
+        "repeats": {
+            "rows": len(dedupe),
             "rule": (
-                "сравнение идёт только внутри одного event_id; повторная доставка это та же версия с тем же "
-                "содержимым, конфликт это та же версия с другим содержимым, разные события с похожими полями "
-                "дублями не считаются"
+                "event_id приходит в выгрузку ровно один раз; повтор это поломка контракта, "
+                "строка сохраняется с пометкой и в цепочку остатков не входит"
             ),
         },
         "flags": dict(sorted(flags.items())),
@@ -381,7 +359,7 @@ def build_group(
         out_dir / CLIENT_INDEX_FILE,
         out_dir / MENTIONS_FILE,
         out_dir / TRANSFERS_FILE,
-        out_dir / DEDUPE_FILE,
+        out_dir / REPEATS_FILE,
         out_dir / REJECTS_FILE,
         out_dir / REGISTRY_FILE,
     ]
@@ -424,7 +402,7 @@ def render_canonical_md(report: dict) -> str:
                 ["строки покрытия", rows["coverage"]],
                 ["упоминания сущностей", rows["mentions"]],
                 ["стороны переводов", rows["transfer_sides"]],
-                ["журнал дублей и конфликтов", rows["dedupe_log"]],
+                ["повторов event_id", rows["repeated_ids"]],
                 ["неразобранные строки", rows["rejects"]],
                 ["клиентов", rows["clients"]],
                 ["из них без событий", rows["clients_without_events"]],
@@ -434,16 +412,12 @@ def render_canonical_md(report: dict) -> str:
     )
     out.append(f"\n{rows['rule']}.\n")
 
-    versions = report["versions"]
+    repeats = report["repeats"]
 
-    out.append("\n## Версии, дубли и конфликты\n")
+    out.append("\n## Повторы идентификаторов\n")
     out.append(
-        _md_table(
-            [[name, count] for name, count in versions["roles"].items()],
-            ["роль строки", "строк"],
-        )
+        f"\nСтрок с повторным event_id: {repeats['rows']}. {repeats['rule']}.\n"
     )
-    out.append(f"\n{versions['rule']}.\n")
 
     out.append("\n## Наблюдаемость\n")
     out.append(
@@ -500,10 +474,6 @@ def render_canonical_md(report: dict) -> str:
                     ["не разрешено", causes["unresolved"] or "—"],
                     ["у другого клиента", causes["cross_client"]],
                     ["причина позже следствия", causes["cause_after_effect"]],
-                    [
-                        "из них у причины потеряно время",
-                        causes["cause_after_effect_with_coarse_cause"],
-                    ],
                 ],
                 ["показатель", "значение"],
             )
@@ -554,12 +524,12 @@ def render_canonical_md(report: dict) -> str:
             _md_table(
                 [
                     [
-                        link_type,
+                        field_name,
                         item["chains"],
                         ", ".join(f"{size}:{count}" for size, count in item["sizes"].items()),
                         ", ".join(f"{k}={v}" for k, v in item["event_types"].items()),
                     ]
-                    for link_type, item in chains["by_link_type"].items()
+                    for field_name, item in chains["by_field"].items()
                 ],
                 ["связь", "цепочек", "размеры", "типы событий"],
             )
@@ -616,7 +586,7 @@ __all__ = [
     "REPORT_MD_FILE",
     "locate_clients",
     "COVERAGE_FILE",
-    "DEDUPE_FILE",
+    "REPEATS_FILE",
     "EVENTS_FILE",
     "MENTIONS_FILE",
     "PROFILE_FILE",

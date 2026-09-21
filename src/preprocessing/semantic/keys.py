@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..canonical.registry import UNITS
-from ..projection import ENTITY_REFS, EVENT_TYPE_FIELD, INITIATOR_FIELD, SEMANTIC_PAYLOAD_FIELDS
+from ..projection import ENTITY_REFS, EVENT_TYPE_FIELD, SEMANTIC_PAYLOAD_FIELDS
 
 
 # ============================================================
@@ -36,7 +36,7 @@ from ..projection import ENTITY_REFS, EVENT_TYPE_FIELD, INITIATOR_FIELD, SEMANTI
 # ============================================================
 
 
-KEYS_VERSION = "1.3.0"
+KEYS_VERSION = "2.0.0"
 
 # Вид значения. Их ровно три. Служебные поля сюда не попадают
 # вовсе: их отсеяла модельная проекция.
@@ -228,7 +228,6 @@ BY_SOURCE_KEYS: dict[str, dict[str, SemanticKey]] = {
 
 ENVELOPE_KEYS: dict[str, SemanticKey] = {
     EVENT_TYPE_FIELD: _k("event_type", CATEGORICAL, "что произошло"),
-    INITIATOR_FIELD: _k("initiator", CATEGORICAL, "кто действовал: клиент, сотрудник, система, внешний источник"),
 }
 
 # Локальные ссылки: смысла значения не несут, но связывают события

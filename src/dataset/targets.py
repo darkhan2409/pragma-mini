@@ -10,7 +10,7 @@ from src.preprocessing.history import (
 )
 from src.preprocessing.semantic.time import interval_hours
 from src.preprocessing.settings import GroupWindow
-from src.preprocessing.split import mlm_target_eligible
+from src.preprocessing.corpus import mlm_target_eligible
 
 
 # ============================================================
@@ -78,7 +78,7 @@ def eligible(event_time: datetime, window: GroupWindow) -> bool:
     return mlm_target_eligible(event_time, window)
 
 
-def hours_to_cutoff(cutoff: datetime, event_time: datetime, precision: str) -> float:
+def hours_to_cutoff(cutoff: datetime, event_time: datetime) -> float:
     """
     Сколько часов от события до среза в объявленной точности
     события.
@@ -89,7 +89,7 @@ def hours_to_cutoff(cutoff: datetime, event_time: datetime, precision: str) -> f
     """
 
     # Сам срез назначает человек, и он точен до секунды.
-    return interval_hours(cutoff, "second", event_time, precision)
+    return interval_hours(cutoff, event_time)
 
 
 def history_age_days(relationship, cutoff: datetime) -> tuple[float | None, str | None]:

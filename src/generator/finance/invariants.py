@@ -158,170 +158,40 @@ def _pending_by_account(unobserved) -> dict[str, list[tuple]]:
 
 def authoritative(events: list) -> list:
     """
-    Для проверок берётся ПОСЛЕДНЯЯ версия каждой записи.
+    Лента клиента в порядке выгрузки.
 
-    Именно её читает любой потребитель данных: исправление
-    отменяет то, что банк записал сначала. Проверять первую
-    версию нельзя — она и есть та ошибка витрины, ради которой
-    исправление появилось.
-
-    Повторная доставка не считается отдельной записью: новых
-    денег дубль не создаёт.
+    Версий у записи больше нет: каждая строка сразу окончательна,
+    и порядок задаёт время события, а при равенстве — место в
+    ленте.
     """
 
-    latest: dict[str, dict] = {}
-    position: dict[str, int] = {}
+    # Место в ленте берётся перечислением, а не поиском: index()
+    # искал бы каждую строку заново и на ленте клиента давал бы
+    # квадрат, а на одинаковых словарях ещё и неверный ответ.
+    return [
+        event
+        for _, event in sorted(
+            ((order, event) for order, event in enumerate(events)),
+            key=lambda item: (item[1]["event_time"], item[0]),
+        )
+    ]
 
-    for order, event in enumerate(events):
 
+def repeated_event_ids(events: list) -> list:
+    """
+    Идентификаторы, встретившиеся в выгрузке больше одного раза.
+
+    Это поломка, а не дефект наблюдаемости: запись приходит
+    ровно один раз.
+    """
+
+    seen: dict[str, int] = {}
+
+    for event in events:
         key = event["event_id"]
+        seen[key] = seen.get(key, 0) + 1
 
-        known = latest.get(key)
-
-        if known is None or event["event_version"] > known["event_version"]:
-            latest[key] = event
-
-        # Место в ленте принадлежит ПЕРВОЙ версии: исправление
-        # уточняет запись, но не переносит событие во времени.
-        # Место это позиция строки в ленте клиента; отдельного
-        # номера записи в выгрузке нет.
-        if key not in position or order < position[key]:
-            position[key] = order
-
-    return sorted(
-        latest.values(),
-        key=lambda item: (item["event_time"], position[item["event_id"]]),
-    )
-
-
-def versions_by_event(events: list) -> dict:
-    """
-    Все версии каждой записи по возрастанию версии.
-    """
-
-    grouped: dict[str, list] = {}
-
-    for order, event in enumerate(events):
-        grouped.setdefault(event["event_id"], []).append((order, event))
-
-    for key, rows in grouped.items():
-        rows.sort(key=lambda item: (item[1]["event_version"], item[0]))
-        grouped[key] = [event for _, event in rows]
-
-    return grouped
-
-
-# Поля, которые исправление витрины имеет право поменять.
-# Всё остальное обязано совпасть во всех версиях записи.
-CORRECTABLE_FIELDS = frozenset(
-    {
-        "merchant_name",
-        "mcc",
-        "merchant_city",
-        "amount",
-        "amount_or_limit",
-        "rate",
-        "term",
-        "amount_due",
-        "principal_outstanding",
-        "new_value",
-        "approved_amount",
-        "approved_term",
-    }
-)
-
-# Поля, которые исправление не трогает никогда: на них держится
-# денежная связность ленты.
-PROTECTED_FIELDS = (
-    "account_id",
-    "card_id",
-    "contract_id",
-    "direction",
-    "status",
-    "balance_after",
-    "cause_event_id",
-    "counterparty",
-)
-
-
-def check_corrections(events: list) -> list:
-    """
-    Исправление меняет объявленные поля и ничего больше.
-
-    Без этой проверки механизм исправлений мог бы незаметно
-    переписать счёт, направление или остаток, и итоговая версия
-    ленты перестала бы сходиться с проводками.
-    """
-
-    if not events:
-        return []
-
-    client_id = events[0]["client_id"]
-
-    # Место записи в ленте это позиция строки: отдельного номера
-    # записи в выгрузке нет.
-    position = {id(event): order for order, event in enumerate(events)}
-
-    problems: list[Violation] = []
-
-    for event_id, rows in versions_by_event(events).items():
-
-        versions = sorted({row["event_version"] for row in rows})
-
-        if versions[0] != 1:
-            problems.append(
-                Violation("correction_without_original", client_id,
-                          f"{event_id}: первая версия {versions[0]}")
-            )
-
-        if versions != list(range(1, len(versions) + 1)):
-            problems.append(
-                Violation("correction_version_gap", client_id,
-                          f"{event_id}: версии {versions}")
-            )
-
-        first = rows[0]
-
-        for row in rows[1:]:
-
-            if row["event_version"] == first["event_version"]:
-                # Дубль: та же версия, та же запись целиком.
-                continue
-
-            if position[id(row)] <= position[id(first)]:
-                problems.append(
-                    Violation("correction_not_later", client_id,
-                              f"{event_id}: исправление стоит в ленте не позже оригинала")
-                )
-
-            if row["event_type"] != first["event_type"]:
-                problems.append(
-                    Violation("correction_changed_type", client_id, event_id)
-                )
-
-            for field in PROTECTED_FIELDS:
-                if row["payload"].get(field) != first["payload"].get(field):
-                    problems.append(
-                        Violation("correction_touched_protected_field", client_id,
-                                  f"{event_id}: {field}")
-                    )
-
-            changed = {
-                name
-                for name in set(row["payload"]) | set(first["payload"])
-                if row["payload"].get(name) != first["payload"].get(name)
-            }
-
-            unexpected = changed - CORRECTABLE_FIELDS
-
-            if unexpected:
-                problems.append(
-                    Violation("correction_changed_unlisted_field", client_id,
-                              f"{event_id}: {sorted(unexpected)}")
-                )
-
-    return problems
-
+    return sorted(key for key, count in seen.items() if count > 1)
 
 def check_client(events: list, unobserved=()) -> list:
     """
@@ -440,7 +310,7 @@ def check_client(events: list, unobserved=()) -> list:
         if event["payload"].get("status") != "approved":
             continue
 
-        transfer_id = event.get("correlation_id")
+        transfer_id = event["payload"].get("transfer_id")
 
         if not transfer_id:
             fail("transfer_has_id", f"{kind} {event['event_id']} без transfer_id")
@@ -625,7 +495,11 @@ def check_money_conservation(events: list, unobserved=()) -> list:
         kind = event["event_type"]
         payload = event["payload"]
 
-        if kind not in MONEY_EVENTS or payload.get("status") != "approved":
+        # У снимка остатка статуса нет: он ничего не проводил.
+        if kind not in MONEY_EVENTS:
+            continue
+
+        if kind != "balance_snapshot" and payload.get("status") != "approved":
             continue
 
         account = payload.get("account_id")
@@ -693,25 +567,24 @@ def check_all(events_by_client: dict, unobserved_by_client: dict | None = None) 
         rows = lost.get(client_id, ())
         problems.extend(check_client(events, rows))
         problems.extend(check_money_conservation(events, rows))
-        problems.extend(check_corrections(events))
+
+        for event_id in repeated_event_ids(events):
+            problems.append(Violation("repeated_event_id", client_id, event_id))
 
     return problems
 
 
 __all__ = [
-    "CORRECTABLE_FIELDS",
     "UNOBSERVED_KIND",
     "CREDIT_EVENTS",
     "DEBIT_EVENTS",
     "MONEY_EVENTS",
-    "PROTECTED_FIELDS",
     "REVERSING_EVENTS",
     "Violation",
     "authoritative",
     "check_all",
     "check_client",
-    "check_corrections",
     "check_money_conservation",
+    "repeated_event_ids",
     "unobserved_rows",
-    "versions_by_event",
 ]

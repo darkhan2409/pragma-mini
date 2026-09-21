@@ -4,7 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
 from .. import params as params_module
-from ..config import HISTORY_END, HISTORY_START
+from .. import config
 from ..rng import NS_INCOME, keyed_rng, stable_hash
 from . import calendar as cal
 from .persona import Persona
@@ -24,6 +24,14 @@ from .stress import level_at
 # Часть дохода не видна этому банку: она приземляется на счёт
 # другого банка или приходит наличными.
 # ============================================================
+
+
+# Доход, который банк согласится подтвердить справкой или
+# оборотом. Пособие, выходное пособие и помощь семьи стажем не
+# считаются: они временные по своей природе.
+CONFIRMABLE_KINDS: frozenset[str] = frozenset(
+    {"salary", "pension", "business", "freelance", "rent"}
+)
 
 
 @dataclass(frozen=True)
@@ -99,7 +107,7 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
             payday=persona.salary_day,
             landing=_landing(persona, primary_kind, rng),
             base_amount=persona.true_income,
-            valid_from=min(HISTORY_START, persona.relationship_start),
+            valid_from=min(config.HISTORY_START, persona.relationship_start),
             valid_to=None,
         )
     ]
@@ -120,7 +128,7 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
                 payday=int(rng.integers(1, 29)),
                 landing=_landing(persona, second_kind, rng),
                 base_amount=int(persona.true_income * share),
-                valid_from=HISTORY_START,
+                valid_from=config.HISTORY_START,
                 valid_to=None,
             )
         )
@@ -203,7 +211,7 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
         else:
             restart = event.ts + timedelta(days=int(event.payload.get("gap_days", 0)))
 
-        if restart >= HISTORY_END:
+        if restart >= config.HISTORY_END:
             continue
 
         factor = float(event.payload.get("income_factor", item_rng.uniform(0.85, 1.35)))
@@ -247,7 +255,7 @@ def _amount_at(
 
     # Индексация считается от начала окна: доход до наблюдения
     # уже учтён в базовой сумме, и накручивать его нельзя.
-    anchor = max(stream.valid_from, HISTORY_START)
+    anchor = max(stream.valid_from, config.HISTORY_START)
 
     months = max(0, cal.month_index(ts) - cal.month_index(anchor))
 
@@ -296,17 +304,14 @@ def payouts(persona: Persona, streams: tuple, stress_episodes: tuple) -> tuple:
 
     settings = params_module.active().income
 
-    if persona.is_test_account:
-        return ()
-
     discipline_of_payer = 0.5 + 0.5 * persona.trait("financial_discipline")
 
     result: list[Payout] = []
 
     for stream in streams:
 
-        start = max(stream.valid_from, HISTORY_START)
-        stop = min(stream.valid_to or HISTORY_END, HISTORY_END)
+        start = max(stream.valid_from, config.HISTORY_START)
+        stop = min(stream.valid_to or config.HISTORY_END, config.HISTORY_END)
 
         if stop <= start:
             continue
@@ -545,7 +550,7 @@ def vacation_payouts(persona: Persona, streams: tuple, events: tuple) -> tuple:
 
         ts = event.ts - timedelta(days=int(rng.integers(1, 5)))
 
-        if not (HISTORY_START <= ts < HISTORY_END) or not salary.active_at(ts):
+        if not (config.HISTORY_START <= ts < config.HISTORY_END) or not salary.active_at(ts):
             continue
 
         amount = int(salary.base_amount * rng.uniform(*settings.vacation_pay_of_income))

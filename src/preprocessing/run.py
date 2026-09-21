@@ -425,7 +425,7 @@ def run_canonical(args) -> int:
             "passport_status": passport.get("status"),
             "diagnostic_mode": bool(args.allow_contract_mismatch and passport.get("status") == "contract_mismatch"),
             "rows": report["rows"]["canonical_events"],
-            "conflicts": report["versions"]["conflicts"],
+            "repeated_ids": report["repeats"]["rows"],
             "rejects": report["rows"]["rejects"],
             "config_sha256": fingerprint["config_sha256"],
             "registry_digest": report["registry"]["digest"],
@@ -437,13 +437,11 @@ def run_canonical(args) -> int:
         update_manifest(out_root, STAGE, group, entry)
 
         rows = report["rows"]
-        versions = report["versions"]
 
         print(f"[{STAGE}] группа {label}: статус {report['status']} → {md_path}")
         print(
             f"    строк RAW {rows['raw_events']} → canonical {rows['canonical_events']}, "
-            f"исправлений {versions['corrections']}, повторных доставок {versions['redeliveries']}, "
-            f"конфликтов {versions['conflicts']}, неразобранных {rows['rejects']}"
+            f"повторов event_id {rows['repeated_ids']}, неразобранных {rows['rejects']}"
         )
         print(
             f"    упоминаний сущностей {rows['mentions']}, сторон переводов {rows['transfer_sides']}, "
@@ -688,17 +686,17 @@ def run_history(args) -> int:
 # ============================================================
 
 
-def run_split(args) -> int:
+def run_corpus(args) -> int:
 
     from .canonical.build import STAGE as CANONICAL_STAGE
     from .history import STAGE_VERSION as HISTORY_VERSION
-    from .split import (
+    from .corpus import (
         STAGE,
         STAGE_VERSION,
         STATUS_BLOCKED,
         STATUS_BLOCKED_BY_INPUT,
         GroupInput,
-        build_split,
+        build_corpus,
     )
 
     config = PreprocessingConfig.load(Path(args.config) if args.config else None)
@@ -740,11 +738,11 @@ def run_split(args) -> int:
         print(f"[{STAGE}] входы и выходы не изменились, этап пропущен (статус {status})")
         if restore_manifest_entry(out_root, STAGE, None, stored):
             print(f"    запись этапа восстановлена в {MANIFEST_FILE}")
-        return split_exit_code(status, args.allow_input_mismatch)
+        return corpus_exit_code(status, args.allow_input_mismatch)
 
     clean_directory(target)
 
-    result = build_split(sources, config, target)
+    result = build_corpus(sources, config, target)
 
     report = result.report
 
@@ -771,12 +769,12 @@ def run_split(args) -> int:
     save_fingerprint(marker, fingerprint)
     update_manifest(out_root, STAGE, None, entry)
 
-    print(f"[{STAGE}] статус {report['status']} → {target / 'split_report.md'}")
+    print(f"[{STAGE}] статус {report['status']} → {target / 'corpus_report.md'}")
 
     for name, item in sorted(report["groups"].items()):
         print(
-            f"    {name}: клиентов {item['clients_working']} из {item['clients_total']} "
-            f"(исключено {item['excluded']['test_account']}), видно событий {item['visible_events']} "
+            f"    {name}: клиентов {item['clients_working']}, "
+            f"видно событий {item['visible_events']} "
             f"на {item['window']['final_cutoff'][:10]}, в периоде целей {item['eligible_events']}"
         )
 
@@ -804,12 +802,12 @@ def run_split(args) -> int:
             f"статус в отчёте останется {STATUS_BLOCKED_BY_INPUT}."
         )
 
-    return split_exit_code(report["status"], args.allow_input_mismatch)
+    return corpus_exit_code(report["status"], args.allow_input_mismatch)
 
 
-def split_exit_code(status: str, allow_input_mismatch: bool) -> int:
+def corpus_exit_code(status: str, allow_input_mismatch: bool) -> int:
 
-    from .split import STATUS_BLOCKED, STATUS_BLOCKED_BY_INPUT
+    from .corpus import STATUS_BLOCKED, STATUS_BLOCKED_BY_INPUT
 
     if status == STATUS_BLOCKED:
         return EXIT_BLOCKED
@@ -1016,19 +1014,19 @@ def build_parser() -> argparse.ArgumentParser:
     history.add_argument("--force", action="store_true", help="пересчитать, даже если отпечаток совпал")
     history.set_defaults(handler=run_history)
 
-    split = subparsers.add_parser("split", help="этап 4: разделение train / validation / test")
+    corpus = subparsers.add_parser("corpus", help="этап 4: реестр групп и разрешённый корпус train")
 
-    split.add_argument("--raw-root", type=Path, required=True, help="корень с подкаталогами train/val/test")
-    split.add_argument("--name", default=None, help="имя набора в data/processed")
-    split.add_argument("--out", type=Path, default=None, help="каталог вывода вместо data/processed/<name>")
-    split.add_argument("--config", type=Path, default=None, help="JSON с переопределениями конфига")
-    split.add_argument("--force", action="store_true", help="пересчитать, даже если отпечаток совпал")
-    split.add_argument(
+    corpus.add_argument("--raw-root", type=Path, required=True, help="корень с подкаталогами train/val/test")
+    corpus.add_argument("--name", default=None, help="имя набора в data/processed")
+    corpus.add_argument("--out", type=Path, default=None, help="каталог вывода вместо data/processed/<name>")
+    corpus.add_argument("--config", type=Path, default=None, help="JSON с переопределениями конфига")
+    corpus.add_argument("--force", action="store_true", help="пересчитать, даже если отпечаток совпал")
+    corpus.add_argument(
         "--allow-input-mismatch",
         action="store_true",
         help="режим диагностики: не считать общий мир или повторный seed поводом для ненулевого кода возврата",
     )
-    split.set_defaults(handler=run_split, raw=None, group=None)
+    corpus.set_defaults(handler=run_corpus, raw=None, group=None)
 
     semantic = subparsers.add_parser("semantic", help="этап 5: смысловой слой")
 

@@ -203,21 +203,9 @@ def render(data: dict, limit: int | None, since: datetime | None,
             month = current
             out.append(f"  ── {month} ──")
 
-        marks = []
-
-        if row["event_version"] > 1:
-            marks.append(f"v{row['event_version']}")
-
-        if row["is_test_account"]:
-            marks.append("test")
-
-        if row["time_precision"] != "second":
-            marks.append(row["time_precision"])
-
         out.append(
             f"  {row['event_time'].strftime('%d.%m %H:%M')}  "
             f"{row['event_type']:<24} {_describe(row)}"
-            + (f"   [{' '.join(marks)}]" if marks else "")
         )
 
         if full_payload:
@@ -229,11 +217,9 @@ def render(data: dict, limit: int | None, since: datetime | None,
 
     if data["profile"]:
         out.append("ПРОФИЛЬ")
-        for row in sorted(data["profile"], key=lambda item: item["valid_from"]):
+        for row in data["profile"]:
             out.append(
-                f"  v{row['profile_version']} с {row['valid_from'].strftime('%Y-%m-%d')} "
-                f"({row['change_reason'] or 'начальный'}): "
-                f"возраст {row.get('age')}, город {row.get('city')}, "
+                f"  возраст {row.get('age')}, город {row.get('city')}, "
                 f"доход {_money(row.get('declared_income'))}"
             )
         out.append("")

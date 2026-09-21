@@ -7,8 +7,8 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 from ..calendar import calendar_features
-from ..history import CanonicalStore, ClientHistory, history_as_of, product_key, profile_as_of
-from ..projection import ENTITY_REFS, EVENT_TYPE_FIELD, INITIATOR_FIELD, LocalRefs, model_event
+from ..history import CanonicalStore, ClientHistory, history_as_of, product_key
+from ..projection import ENTITY_REFS, EVENT_TYPE_FIELD, LocalRefs, model_event
 from ..settings import BASE_SOURCES
 from . import activity as activity_module
 from . import chains as chains_module
@@ -52,21 +52,7 @@ from .merchants import MerchantCatalog
 # ============================================================
 
 
-SEMANTIC_VERSION = "1.4.0"
-
-
-def hour_known(row: dict) -> bool:
-    """
-    Наблюдался ли час этого события.
-
-    Признак внутренний: токеном он не становится. Но час суток у
-    записи дневной точности НЕ наблюдался — он подставлен
-    выгрузкой. Модельные входы обязаны это знать, иначе
-    полуночный пик дневных строк будет прочитан как поведение.
-    """
-
-    # Правило точности одно на весь слой: time.effective_precision.
-    return time_module.effective_precision(row) != "day"
+SEMANTIC_VERSION = "2.0.0"
 
 
 @dataclass
@@ -79,7 +65,7 @@ class SemanticEvent:
     приложить к своему событию. В values он не попадает и границу
     модели не пересекает.
 
-    event_id и event_version тоже внутренние и тоже не становятся
+    event_id тоже внутренний и тоже не становится
     значениями. Они названы отдельно от порядкового номера,
     потому что номер устойчив только внутри одной истории: он
     зависит от состава видимых событий, а трассировка к исходной
@@ -91,14 +77,12 @@ class SemanticEvent:
     source: str
     stable_event_index: int
     event_id: str
-    event_version: int
     values: dict[str, object]
     calendar: tuple[float, ...]
     timing: time_module.EventTiming
     derived: list[formulas_module.Derived] = field(default_factory=list)
     # Наблюдался ли час события. Признак достоверности времени, а
     # не значение: в model_values он не входит.
-    hour_known: bool = True
 
     def as_dict(self) -> dict:
         return {
@@ -107,11 +91,9 @@ class SemanticEvent:
             "source": self.source,
             "stable_event_index": self.stable_event_index,
             "event_id": self.event_id,
-            "event_version": self.event_version,
             "values": dict(self.values),
             "calendar": list(self.calendar),
             "timing": self.timing.as_dict(),
-            "hour_known": self.hour_known,
             "derived": [item.as_dict() for item in self.derived],
         }
 
@@ -190,8 +172,6 @@ def _semantic_values(row: dict, source: str, refs: LocalRefs) -> tuple[dict[str,
             values[ENVELOPE_KEYS[EVENT_TYPE_FIELD].key] = value
             continue
 
-        if name == INITIATOR_FIELD:
-            values[ENVELOPE_KEYS[INITIATOR_FIELD].key] = value
             continue
 
         if name in reference_names:
@@ -421,19 +401,6 @@ def semantic_as_of(
         if relation is not None:
             values_per_event[index].update(_relation_values(relation))
 
-    # Причина, записанная позже следствия, это не ошибка расчёта, а
-    # свойство выгрузки: источник объявил время грубее их разницы.
-    # Связь остаётся, длительность не передаётся, и молчать об этом
-    # нельзя.
-    ambiguous = sum(1 for item in relations if item.reason == chains_module.TIME_ORDER_AMBIGUOUS)
-
-    if ambiguous:
-        limitations.append(
-            f"порядок причины и следствия неизвестен в {ambiguous} связях "
-            f"({chains_module.TIME_ORDER_AMBIGUOUS}): объявленная точность источника грубее "
-            "их разницы, поэтому days_since_related_event не передаётся"
-        )
-
     # --- время, формулы, календарь ---
 
     observed_start = history.relationship.observed_start
@@ -448,21 +415,20 @@ def semantic_as_of(
     past_amounts: dict[str, list[float]] = {}
     limits: dict[str, dict] = {}
 
-    # Версии профиля в порядке вступления в силу: доход операции
-    # берётся из той, что действовала В ЕЁ МОМЕНТ.
-    versions = sorted(
-        store.profile_rows(history.client_id),
-        key=lambda item: (item["valid_from"], item["profile_version"]),
-    )
-
-    cursor = 0
-    acting_profile = None
+    # ОГРАНИЧЕНИЕ, которое надо знать читателю признаков.
+    #
+    # Анкета клиента теперь одна на всю историю — итоговая, на
+    # границу выгрузки. Доход операции двухлетней давности
+    # делится на СЕГОДНЯШНИЙ доход, потому что вчерашнего в
+    # данных больше нет. Раньше здесь скользил курсор версий и
+    # брал ту, что действовала в момент операции.
+    #
+    # На конечном срезе группы это честно: итоговая анкета и
+    # есть анкета на срез. На более раннем срезе было бы знание
+    # из будущего, и потому датасет ранние срезы запрещает.
+    acting_profile = history.profile
 
     for index, row in enumerate(resolved):
-
-        while cursor < len(versions) and versions[cursor]["valid_from"] < row["event_time"]:
-            acting_profile = versions[cursor]
-            cursor += 1
 
         # Лимит берётся из того, что видно К ЭТОМУ моменту:
         # договор, открытый позже, к прошлой операции не
@@ -491,12 +457,10 @@ def semantic_as_of(
                 source=row["source"],
                 stable_event_index=row["stable_event_index"],
                 event_id=row["event_id"],
-                event_version=row["event_version"],
                 values=values_per_event[index],
                 calendar=tuple(float(value) for value in calendars[index]) if len(calendars) else (),
                 timing=timings[index],
                 derived=derived,
-                hour_known=hour_known(row),
             )
         )
 

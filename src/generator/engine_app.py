@@ -4,11 +4,8 @@ from datetime import datetime, timedelta
 
 from .behaviour import communications as comm_module
 from .behaviour import outcomes as outcome_module
+from . import config
 from .config import (
-    HISTORY_END,
-    INITIATOR_BANK,
-    INITIATOR_CLIENT,
-    INITIATOR_SYSTEM,
     SOURCE_AVAILABILITY,
 )
 from .engine import _HANDLERS, _emit_money, _touch_client
@@ -16,9 +13,10 @@ from .finance import deposits as deposit_rules
 from .finance import loans as loan_rules
 from .finance.entities import CARD_BLOCKED, Offer
 from .finance.ledger import COUNTERPART_GOVERNMENT
+from .world.dictionaries import MCC_TRANSFER
 from .life import stress as stress_module
 from .rng import COMPONENT_OUTCOME, NS_SESSION, event_rng, stable_hash
-from .simulate import ClientState
+from .simulate import ClientState, _transfer_id, in_window
 from .world.dictionaries import (
     BANNER_OFFERS,
     BANNER_OFFER_FAMILY,
@@ -53,9 +51,12 @@ def _on_session(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     authorized = False
 
+    # Что уже показано за это посещение приложения.
+    shown_offers: set = set()
+
     for position, step in enumerate(session.steps):
 
-        if step.ts >= HISTORY_END:
+        if step.ts >= config.HISTORY_END:
             break
 
         rng = event_rng(
@@ -81,15 +82,14 @@ def _on_session(sim, state: ClientState, ts: datetime, payload: dict) -> None:
                         "product_id": None,
                         "funnel_stage": None,
                         "reject_reason": None,
+                        "session_id": session.session_id,
+                        "application_id": None,
                     },
-                    initiator=INITIATOR_CLIENT,
-                    correlation_id=session.session_id,
-                    link_type="session",
                 )
             )
 
             if step.offers:
-                _show_banners(state, step.ts, session, rng)
+                _show_banners(state, step.ts, session, rng, shown_offers)
 
             continue
 
@@ -102,6 +102,14 @@ def _on_session(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         target_loan = None
         target_card = None
         target_deposit = None
+        transfer_amount = 0
+        transfer_pair = None
+        deposit_amount = 0
+
+        # Момент денежного следствия выбирается ЗАРАНЕЕ: только
+        # так можно проверить, что оно поместится в окно, ещё до
+        # того как операция объявлена успешной.
+        money_ts = step.ts + timedelta(seconds=int(rng.integers(5, 60)))
 
         if operation in ("login", "biometry_login"):
             feasible = True
@@ -115,6 +123,10 @@ def _on_session(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             elif not state.ledger.payment_sources(step.ts, target_bill["amount"]):
                 feasible = False
                 insufficient = True
+            elif not in_window(money_ts):
+                # Списание выпадает за конец выгрузки: показывать
+                # успех нечем.
+                feasible = False
 
         if operation == "card_unblock":
             target_card = next(
@@ -134,14 +146,74 @@ def _on_session(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             )
             if target_loan is None:
                 feasible = False
+            elif (
+                state.ledger.payment_capacity(step.ts) <= 0
+                and state.ledger.hidden_funds() <= 0
+            ):
+                # Платить нечем ни со счёта, ни из запаса: успех
+                # операции остался бы без денежного следствия.
+                feasible = False
+                insufficient = True
 
         if operation == "deposit_topup":
             target_deposit = next(
-                (item for item in state.deposits.values() if not item.closed and item.topup_allowed),
+                (
+                    item
+                    for item in state.deposits.values()
+                    if not item.closed
+                    and item.topup_allowed
+                    and deposit_rules.can_topup(item, step.ts)
+                ),
                 None,
             )
             if target_deposit is None:
                 feasible = False
+            else:
+                # Пополнение это тот же перевод себе: две стороны,
+                # вторая секундой позже. Проверяется и она.
+                deposit_amount = _topup_amount(state, step.ts, rng)
+                sources = [
+                    item
+                    for item in state.ledger.payment_sources(step.ts, deposit_amount)
+                    if item.account_id != target_deposit.account_id
+                ]
+                if not sources or not in_window(step.ts + timedelta(seconds=1)):
+                    feasible = False
+                    insufficient = not sources
+
+        # --- перевод ---
+        #
+        # У успешного перевода обязана быть сумма и настоящее
+        # денежное событие. Поэтому сумма выбирается ДО розыгрыша
+        # исхода, а невозможность перевода делает его невыполнимым,
+        # а не «успешным, но без денег».
+        if operation in TRANSFER_OPERATIONS:
+
+            transfer_amount = _transfer_amount(state, step.ts, rng)
+
+            if transfer_amount <= 0:
+                feasible = False
+            elif not state.ledger.payment_sources(step.ts, transfer_amount):
+                feasible = False
+                insufficient = True
+
+            # Зачисление второй ноги датируется секундой позже. На
+            # самом краю окна её уже не записать, и операция не
+            # должна показывать успех: денег за ним не будет.
+            if not in_window(step.ts + timedelta(seconds=1)):
+                feasible = False
+
+            if operation == "transfer_own" and feasible:
+
+                transfer_pair = _own_pair(state, step.ts, transfer_amount)
+
+                # Своих счетов может не быть двух, а на том, что
+                # есть, может не хватать денег. Раньше пара
+                # бралась первыми двумя видимыми счетами подряд,
+                # и перевод уходил со счёта без нужной суммы —
+                # хоть с кредита, хоть со вклада.
+                if transfer_pair is None:
+                    feasible = False
 
         card_blocked = any(item.is_blocked_at(step.ts) for item in state.cards.values())
 
@@ -167,13 +239,15 @@ def _on_session(sim, state: ClientState, ts: datetime, payload: dict) -> None:
                     "domain": step.domain,
                     "operation": operation,
                     "status": status,
-                    "amount": target_bill["amount"] if target_bill else None,
+                    "amount": (
+                        target_bill["amount"] if target_bill
+                        else (transfer_amount if operation in TRANSFER_OPERATIONS else None)
+                    ),
                     "error_code": str(rng.choice(list(ERROR_CODES))) if status == "failed" else None,
                     "device_new": session.device_new,
+                    "session_id": session.session_id,
+                    "contract_id": None,
                 },
-                initiator=INITIATOR_CLIENT,
-                correlation_id=session.session_id,
-                link_type="session",
             )
         )
 
@@ -190,21 +264,39 @@ def _on_session(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             continue
 
         if target_bill is not None:
-            _pay_bill_in_app(state, step.ts, target_bill, session, rng)
+            _pay_bill_in_app(state, step.ts, target_bill, session, rng, money_ts)
 
         if target_card is not None:
-            unblock_card(state, step.ts, target_card, INITIATOR_CLIENT, "client_request")
+            unblock_card(state, step.ts, target_card, "client_request")
 
         if target_loan is not None:
             from .engine_credit import repay_loan
 
-            repay_loan(state, step.ts, target_loan, loan_rules.arrears_amount(target_loan), "app")
+            repay_loan(
+                state,
+                step.ts,
+                target_loan,
+                loan_rules.arrears_amount(target_loan),
+                "app",
+                session_id=session.session_id,
+            )
 
         if target_deposit is not None:
-            _topup_deposit(state, step.ts, target_deposit, rng)
+            _topup_deposit(state, step.ts, target_deposit, deposit_amount, session)
+
+        if operation in TRANSFER_OPERATIONS:
+            _transfer_in_app(state, step.ts, operation, transfer_amount, transfer_pair, session)
 
 
-def _show_banners(state: ClientState, ts: datetime, session, rng) -> None:
+def _show_banners(state: ClientState, ts: datetime, session, rng, shown_offers: set) -> None:
+    """
+    Баннеры на экране.
+
+    shown_offers копит уже показанное В ЭТОЙ СЕССИИ. Один и тот
+    же оффер в одном и том же слоте не показывают дважды за одно
+    посещение: в ленте это выглядело двумя одинаковыми строками,
+    у которых совпадало всё вплоть до секунды.
+    """
 
     if ts < BANNERS_AVAILABLE_FROM:
         return
@@ -221,6 +313,11 @@ def _show_banners(state: ClientState, ts: datetime, session, rng) -> None:
         slot = str(rng.choice(list(BANNER_SLOTS), p=list(BANNER_SLOT_WEIGHTS)))
         offer = str(rng.choice(list(BANNER_OFFERS)))
 
+        if (slot, offer) in shown_offers:
+            continue
+
+        shown_offers.add((slot, offer))
+
         family = BANNER_OFFER_FAMILY.get(offer)
 
         offer_id = None
@@ -230,7 +327,9 @@ def _show_banners(state: ClientState, ts: datetime, session, rng) -> None:
             offer_id = f"off_{stable_hash('banner', state.client_id, ts.toordinal(), index) % 10 ** 12:012d}"
             campaign = comm_module.campaign_for_family(family)
 
-        shown_at = ts + timedelta(seconds=int(rng.integers(0, 4)))
+        # Секунда своя у каждого баннера экрана: два показа в одно
+        # и то же мгновение неразличимы в ленте.
+        shown_at = ts + timedelta(seconds=index * 2 + int(rng.integers(0, 2)))
 
         body = {
             "slot": slot,
@@ -238,6 +337,8 @@ def _show_banners(state: ClientState, ts: datetime, session, rng) -> None:
             "offer_id": offer_id,
             "product_id": None,
             "campaign_code": campaign,
+            "session_id": session.session_id,
+            "cause_event_id": None,
         }
 
         shown = state.emit(
@@ -245,9 +346,6 @@ def _show_banners(state: ClientState, ts: datetime, session, rng) -> None:
                 "banner_shown",
                 shown_at,
                 body,
-                initiator=INITIATOR_BANK,
-                correlation_id=session.session_id,
-                link_type="session",
             )
         )
 
@@ -269,10 +367,7 @@ def _show_banners(state: ClientState, ts: datetime, session, rng) -> None:
             state.factory.make(
                 "banner_clicked",
                 shown_at + timedelta(seconds=int(rng.integers(2, 25))),
-                body,
-                initiator=INITIATOR_CLIENT,
-                correlation_id=shown.event_id,
-                link_type="offer",
+                dict(body, cause_event_id=shown.event_id),
             )
         )
 
@@ -291,9 +386,23 @@ def _show_banners(state: ClientState, ts: datetime, session, rng) -> None:
             )
 
 
-def _pay_bill_in_app(state: ClientState, ts: datetime, bill: dict, session, rng) -> None:
+def _pay_bill_in_app(
+    state: ClientState, ts: datetime, bill: dict, session, rng, moment: datetime
+) -> None:
+    """
+    Оплата счёта внутри сессии.
 
-    sources = state.ledger.payment_sources(ts, bill["amount"])
+    moment — момент самого списания, выбранный ДО розыгрыша
+    исхода операции. Раньше он разыгрывался здесь, и на краю
+    окна выгрузки списание выпадало за HISTORY_END: операция
+    показывала успех, денег за ним не было, а счёт всё равно
+    уходил из open_bills.
+    """
+
+    if not in_window(moment):
+        return
+
+    sources = state.ledger.payment_sources(moment, bill["amount"])
 
     if not sources:
         return
@@ -303,39 +412,52 @@ def _pay_bill_in_app(state: ClientState, ts: datetime, bill: dict, session, rng)
     body = dict(bill["body"])
     body["channel"] = "app"
 
-    card = state.usable_card(account.account_id, ts)
+    card = state.usable_card(account.account_id, moment)
     body["card_id"] = card.card_id if card else None
+    body["session_id"] = session.session_id
 
     counterpart = (
         f"merchant:{body.get('outlet_id')}" if body.get("outlet_id") else COUNTERPART_GOVERNMENT
     )
 
-    _emit_money(
+    paid = _emit_money(
         state,
-        ts + timedelta(seconds=int(rng.integers(5, 60))),
+        moment,
         "bill_payment",
         account.account_id,
         bill["amount"],
         "debit",
         counterpart,
         body,
-        INITIATOR_CLIENT,
-        correlation_id=session.session_id,
-        link_type="session",
     )
+
+    # Отклонённый платёж счёт не закрывает.
+    if paid.payload.get("status") != "approved":
+        return
 
     if bill in state.open_bills:
         state.open_bills.remove(bill)
 
 
-def _topup_deposit(state: ClientState, ts: datetime, deposit, rng) -> None:
+def _topup_amount(state: ClientState, ts: datetime, rng) -> int:
+    """
+    Сколько клиент кладёт на вклад.
 
-    # Условия продукта проверяются здесь, а не только при выборе
-    # цели: пополнять можно между открытием и окончанием срока.
-    if not deposit_rules.can_topup(deposit, ts):
-        return
+    Сумма разыгрывается ОТДЕЛЬНО от исполнения, чтобы её можно
+    было проверить на выполнимость до розыгрыша исхода операции.
+    """
 
-    amount = int(round(max(5_000, state.persona.true_income * rng.uniform(0.05, 0.35)) / 1_000) * 1_000)
+    return int(round(max(5_000, state.persona.true_income * rng.uniform(0.05, 0.35)) / 1_000) * 1_000)
+
+
+def _topup_deposit(state: ClientState, ts: datetime, deposit, amount: int, session) -> None:
+    """
+    Пополнение вклада из сессии приложения.
+
+    Всё, что могло помешать — условия продукта, деньги на счёте,
+    граница окна — проверено до того, как операция объявлена
+    успешной. Здесь остаётся только движение денег.
+    """
 
     sources = [
         item
@@ -346,7 +468,7 @@ def _topup_deposit(state: ClientState, ts: datetime, deposit, rng) -> None:
     if not sources:
         return
 
-    _own_transfer(
+    moved = _own_transfer(
         state,
         ts,
         "deposit_topup",
@@ -355,9 +477,182 @@ def _topup_deposit(state: ClientState, ts: datetime, deposit, rng) -> None:
         amount,
         deposit.contract_id,
         "deposit_topup",
+        session_id=session.session_id,
     )
 
+    if not moved:
+        return
+
     deposit.principal += amount
+
+
+# Операции приложения, за которыми обязаны стоять живые деньги.
+TRANSFER_OPERATIONS = frozenset(
+    {"transfer_phone", "transfer_card", "transfer_own", "transfer_template"}
+)
+
+
+# Счета, между которыми клиент переводит сам. Вклад и кредит
+# сюда не входят: пополнение вклада и платёж по кредиту это
+# отдельные операции со своими условиями, а не «перевод себе».
+OWN_TRANSFER_KINDS = frozenset({"current", "card"})
+
+
+# «Договор второй ноги не задан» отличается от «договора нет».
+# Без этого различия None у счёта-получателя молча подставлял бы
+# договор плательщика — ту самую ошибку, из-за которой обе ноги
+# ссылались на один договор.
+_SAME_CONTRACT = object()
+
+
+def _own_pair(state: ClientState, ts: datetime, amount: int):
+    """
+    Счёт списания и счёт зачисления для перевода себе.
+
+    Списание идёт с того счёта, на котором сумма ЕСТЬ, а не с
+    первого попавшегося. Если подходящей пары нет, перевода не
+    будет вовсе.
+    """
+
+    sources = [
+        account
+        for account in state.ledger.payment_sources(ts, amount)
+        if account.kind in OWN_TRANSFER_KINDS
+    ]
+
+    if not sources:
+        return None
+
+    source = sources[0]
+
+    target = next(
+        (
+            account
+            for account in state.ledger.visible_accounts(ts)
+            if account.kind in OWN_TRANSFER_KINDS and account.account_id != source.account_id
+        ),
+        None,
+    )
+
+    return None if target is None else (source, target)
+
+
+def _second_of_day(ts: datetime) -> int:
+    return ts.hour * 3600 + ts.minute * 60 + ts.second
+
+
+def _transfer_amount(state: ClientState, ts: datetime, rng) -> int:
+    """
+    Сколько клиент переводит из приложения.
+
+    Желание считается от дохода: перевод в тысячу тенге у
+    человека с зарплатой в миллион выглядел бы так же, как у
+    человека с зарплатой в сто тысяч.
+
+    Но человек не отправляет того, чего у него нет, и желание
+    упирается в остаток счёта. Без этого предела почти каждый
+    перевод в приложении оказывался невыполнимым: на счёте
+    лежала тысяча, а в форму подставлялись двадцать две.
+
+    Попытка отправить больше, чем есть, остаётся — её доля та
+    же, что у остальных отказов. Она и даёт честную нехватку
+    средств вместо сплошной.
+    """
+
+    from . import params as params_module
+
+    income = max(50_000, int(state.persona.true_income))
+
+    wish = max(1_000, int(income * float(rng.uniform(0.02, 0.35)) / 1_000) * 1_000)
+
+    if rng.random() < params_module.active().activity.decline_attempt_share:
+        return wish
+
+    capacity = int(state.ledger.payment_capacity(ts) / 1_000) * 1_000
+
+    # Денег нет вовсе: попытка всё равно делается и упирается в
+    # нехватку — это и есть наблюдаемый отказ, а не молчание.
+    return wish if capacity < 1_000 else min(wish, capacity)
+
+
+def _transfer_in_app(
+    state: ClientState,
+    ts: datetime,
+    operation: str,
+    amount: int,
+    pair,
+    session,
+) -> None:
+    """
+    Денежное событие успешного перевода из приложения.
+
+    Перевод между своими счетами двигает деньги внутри клиента и
+    записывается парой сторон. Перевод по телефону, карте или
+    шаблону уходит наружу одной ногой: встречная сторона живёт у
+    другого человека и наблюдается его собственной выгрузкой,
+    если он клиент этого банка.
+    """
+
+    if operation == "transfer_own":
+
+        if pair is None:
+            return
+
+        source, target = pair
+
+        # Перевод между своими счетами наблюдается парой сторон
+        # с отметкой own_account: деньги не покидают клиента.
+        #
+        # Стороны РАЗНЫЕ: со счёта списали (transfer_out), на счёт
+        # зачислили (transfer_in). Один тип на обе ноги делал из
+        # прихода второй расход, и канонический слой видел два
+        # списания вместо перевода.
+        #
+        # Договор у каждой ноги свой: списание относится к
+        # договору счёта-плательщика, зачисление — к договору
+        # счёта-получателя.
+        _own_transfer(
+            state, ts, "transfer_out",
+            source.account_id, target.account_id, amount,
+            source.contract_id, "own_transfer",
+            credit_event_type="transfer_in",
+            credit_contract_id=target.contract_id,
+            transfer_id=_transfer_id(
+                state.client_id, ts, _second_of_day(ts), scope=f"app:{session.session_id}"
+            ),
+            session_id=session.session_id,
+        )
+
+        return
+
+    from .engine import graph_counterpart_name
+
+    sources = state.ledger.payment_sources(ts, amount)
+
+    if not sources:
+        return
+
+    account = sources[0]
+
+    # Вторая нога живёт у другого человека и наблюдается его
+    # собственной выгрузкой. transfer_id всё равно нужен: по нему
+    # канонический слой узнаёт сторону перевода, а без него
+    # списание выглядит покупкой без мерчанта.
+    _emit_money(
+        state, ts, "transfer_out", account.account_id, amount, "debit",
+        state.ledger.other_bank_id,
+        {
+            "channel": "app",
+            "counterparty": graph_counterpart_name(state),
+            "mcc": MCC_TRANSFER,
+            "merchant_country": "KZ",
+            "reason": "transfer",
+            "session_id": session.session_id,
+            "transfer_id": _transfer_id(
+                state.client_id, ts, _second_of_day(ts), scope=f"app:{session.session_id}"
+            ),
+        },
+    )
 
 
 def _own_transfer(
@@ -369,7 +664,11 @@ def _own_transfer(
     amount: int,
     contract_id: str,
     reason: str,
-) -> None:
+    credit_event_type: str | None = None,
+    credit_contract_id=_SAME_CONTRACT,
+    transfer_id: str | None = None,
+    session_id: str | None = None,
+) -> bool:
     """
     Перевод между своими счетами: две стороны с одинаковой
     суммой и отметкой own_account, чтобы деньги не выглядели
@@ -377,40 +676,74 @@ def _own_transfer(
 
     Проводка одна: её делает первая нога, вторая только записывает
     событие с остатком. Иначе деньги двигались бы дважды.
+
+    Пополнение вклада и снятие с него — ОДНА операция договора
+    вклада, поэтому у обеих ног там один тип и один договор.
+    Перевод себе — две разные стороны: для этого и нужны
+    credit_event_type и credit_contract_id.
+
+    Возвращает, состоялся ли перевод. Ложь значит, что вторая
+    нога не поместилась в окно выгрузки: зачисление датируется
+    секундой позже списания, и на самом краю окна его уже некуда
+    записать. Половина перевода хуже, чем его отсутствие —
+    деньги ушли бы со счёта и не пришли ни на какой другой.
+    Вызывающий обязан свериться с ответом: остаток вклада,
+    статус договора и прочее состояние меняются только при
+    состоявшемся переводе.
     """
 
+    credit_ts = ts + timedelta(seconds=1)
+
+    if not in_window(ts) or not in_window(credit_ts):
+        return False
+
+    # Денег на счёте списания нет — перевода не будет вовсе.
+    # Отказ первой ноги оставил бы зачисление без списания:
+    # деньги появились бы из ниоткуда.
+    source = state.ledger.get(source_id)
+
+    if source is None or source.available < int(amount):
+        return False
+
+    # Канал списания зависит от того, была ли сессия. Пополнение
+    # вклада из приложения — app с session_id; то же пополнение
+    # при открытии договора или списание по графику сессии не
+    # принадлежит, и каналом app называться не может.
     debit = _emit_money(
         state, ts, event_type, source_id, amount, "debit", target_id,
         {
-            "channel": "app",
+            "channel": "app" if session_id else "ecom",
             "contract_id": contract_id,
             "counterparty": "own_account",
             "reason": reason,
             "merchant_country": "KZ",
+            "transfer_id": transfer_id,
+            "session_id": session_id,
         },
-        INITIATOR_CLIENT,
-        correlation_id=contract_id,
-        link_type="contract",
     )
 
     _emit_money(
-        state, ts + timedelta(seconds=1), event_type, target_id, amount, "credit", source_id,
+        state, credit_ts, credit_event_type or event_type,
+        target_id, amount, "credit", source_id,
         {
             "channel": "system",
-            "contract_id": contract_id,
+            "contract_id": (
+                contract_id if credit_contract_id is _SAME_CONTRACT else credit_contract_id
+            ),
             "counterparty": "own_account",
             "cause_event_id": debit.event_id,
             "reason": reason,
             "merchant_country": "KZ",
+            "transfer_id": transfer_id,
+            "session_id": session_id,
         },
-        INITIATOR_SYSTEM,
-        correlation_id=contract_id,
-        link_type="contract",
         post=False,
     )
 
+    return True
 
-def unblock_card(state: ClientState, ts: datetime, card, initiator: str, reason: str) -> None:
+
+def unblock_card(state: ClientState, ts: datetime, card, reason: str) -> None:
 
     from .finance import cards as card_rules
 
@@ -422,27 +755,11 @@ def unblock_card(state: ClientState, ts: datetime, card, initiator: str, reason:
 
     card_rules.unblock(card, ts)
 
-    contract = state.contracts.get(card.contract_id)
-
     state.emit(
         state.factory.make(
             "card_unblocked",
             ts,
-            {
-                "product_id": contract.product_id if contract else None,
-                "product_code": card.product_code,
-                "product_version": contract.product_version if contract else 1,
-                "tariff_version": contract.tariff_version if contract else 1,
-                "product_family": contract.product_family if contract else "debit_card",
-                "contract_id": card.contract_id,
-                "account_id": card.account_id,
-                "card_id": card.card_id,
-                "reason": reason,
-                "timestamp_quality": "exact",
-            },
-            initiator=initiator,
-            correlation_id=card.contract_id,
-            link_type="contract",
+            dict(state.card_facts(card), reason=reason),
         )
     )
 
@@ -474,9 +791,6 @@ def _on_communication(sim, state: ClientState, ts: datetime, payload: dict) -> N
                 "purpose": contact.purpose,
                 "delivered": contact.delivered,
             },
-            initiator=INITIATOR_BANK,
-            correlation_id=contact.offer_id,
-            link_type="offer" if contact.offer_id else None,
         )
     )
 
@@ -511,7 +825,7 @@ def _on_block_expired(sim, state: ClientState, ts: datetime, payload: dict) -> N
     if card is None or card.status != CARD_BLOCKED:
         return
 
-    unblock_card(state, ts, card, "bank_employee", "block_expired")
+    unblock_card(state, ts, card, "block_expired")
 
 
 _HANDLERS["card_block_expired"] = _on_block_expired

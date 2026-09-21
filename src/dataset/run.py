@@ -248,7 +248,7 @@ def run_build(args) -> int:
         if item["comparable"] and not item["agree"]:
             print(
                 f"    расхождение целей в {group}: у набора {item['dataset']}, "
-                f"у разделения {item['split_manifest']}"
+                f"у разделения {item['corpus_manifest']}"
             )
 
     print(f"    готовность {result.report['readiness']['status']}")

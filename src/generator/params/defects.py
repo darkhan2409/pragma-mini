@@ -31,37 +31,6 @@ class DefectParams:
     # задержки, опоздания и порядок доставки не моделируются.
 
     # Дубли одной и той же записи.
-    duplicate_share: dict = field(
-        default_factory=lambda: {
-            "transactions": 0.004,
-            "app_screens": 0.012,
-            "app_operations": 0.006,
-            "banners": 0.008,
-            "communications": 0.003,
-        }
-    )
-
-    # Исправление ранее записанного события.
-    correction_share: dict = field(
-        default_factory=lambda: {
-            "transactions": 0.006,
-            "product_events": 0.012,
-            "loans": 0.008,
-            "profile": 0.02,
-            "applications": 0.006,
-        }
-    )
-
-    correction_fields: dict = field(
-        default_factory=lambda: {
-            "transactions": ("merchant_name", "mcc", "merchant_city", "amount"),
-            "product_events": ("amount_or_limit", "rate", "term"),
-            "loans": ("amount_due", "principal_outstanding"),
-            "profile": ("new_value",),
-            "applications": ("approved_amount", "approved_term"),
-        }
-    )
-
     # Отмена уже проведённой операции.
     reversal_share: float = 0.0035
     reversal_delay_hours: tuple = (1, 96)
@@ -110,29 +79,6 @@ class DefectParams:
          "reason": "not_collected"},
     )
 
-    # Точность времени у части записей источника хуже обычной.
-    # Витрина договоров теряет время у части записей. Это
-    # применяется при рождении события, где известна его
-    # причина, а не постфактум: иначе договор оказался бы
-    # раньше решения по заявке.
-    date_only_share: dict = field(
-        default_factory=lambda: {
-            "debit_card": 0.02,
-            "credit_card": 0.05,
-            "cash_loan": 0.88,
-            "refinance": 0.88,
-            "installment": 0.72,
-            "deposit": 0.94,
-            "deposit_certificate": 0.35,
-            "bonds": 0.30,
-            "insurance": 0.97,
-            "service": 0.10,
-        }
-    )
-
-    coarse_precision_share: dict = field(default_factory=dict)
-
     # Доступность источника клиенту.
-    app_adoption_share: float = 0.84
+    app_adoption_share: float = 0.93
     consent_share: float = 0.92
-    app_adoption_digital_factor: float = 0.55

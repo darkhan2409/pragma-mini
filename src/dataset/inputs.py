@@ -9,8 +9,8 @@ from src.preprocessing.semantic.keys import KEYS_VERSION
 from src.preprocessing.semantic.as_of import SEMANTIC_VERSION
 from src.preprocessing.projection import PROJECTION_VERSION
 from src.preprocessing.settings import GroupWindow
-from src.preprocessing.split import SPLIT_MANIFEST_FILE
-from src.preprocessing.split import STAGE as SPLIT_STAGE
+from src.preprocessing.corpus import CORPUS_MANIFEST_FILE
+from src.preprocessing.corpus import STAGE as CORPUS_STAGE
 from src.tokenization.contract import CONFIG_FILE, FIT_MANIFEST_FILE
 from src.tokenization.corpus import CorpusError, GroupCorpus
 from src.tokenization.layout import FrozenArtifacts, LayoutError
@@ -102,7 +102,7 @@ class DatasetInputs:
 
     artifacts: FrozenArtifacts
     tokenizer_config: object
-    split_manifest: dict
+    corpus_manifest: dict
     groups: dict[str, GroupInputs]
     processed_dir: Path
     raw_root: Path
@@ -138,7 +138,7 @@ class DatasetInputs:
             "versions": self.versions,
             "groups": {
                 name: {
-                    "clients_sha256": self.split_manifest["groups"][name]["clients_sha256"],
+                    "clients_sha256": self.corpus_manifest["groups"][name]["clients_sha256"],
                     "cutoffs": [item.isoformat() for item in group.cutoffs],
                 }
                 for name, group in sorted(self.groups.items())
@@ -211,7 +211,7 @@ class DatasetInputs:
 
         # --- разделение ---
 
-        manifest_path = processed / SPLIT_STAGE / SPLIT_MANIFEST_FILE
+        manifest_path = processed / CORPUS_STAGE / CORPUS_MANIFEST_FILE
 
         if not manifest_path.exists():
             raise InputsError(
@@ -224,10 +224,10 @@ class DatasetInputs:
         if not manifest.get("usable", False):
             raise InputsError(
                 "разделение объявлено непригодным: собирать примеры по нему нельзя. "
-                "Причины перечислены в split_manifest.json"
+                "Причины перечислены в corpus_manifest.json"
             )
 
-        split_sha256 = sha256_file(manifest_path)
+        corpus_sha256 = sha256_file(manifest_path)
 
         # Словарь замораживался на конкретном разделении, и оно
         # записано в его манифесте входов. Другое разделение
@@ -235,9 +235,9 @@ class DatasetInputs:
         # чужого train.
         fit_manifest = read_json(target / FIT_MANIFEST_FILE)
 
-        declared_split = (fit_manifest.get("input_files") or {}).get(SPLIT_MANIFEST_FILE)
+        declared_corpus = (fit_manifest.get("input_files") or {}).get(CORPUS_MANIFEST_FILE)
 
-        if declared_split is not None and declared_split != split_sha256:
+        if declared_corpus is not None and declared_corpus != corpus_sha256:
             raise InputsError(
                 "словарь заморожен на другом разделении: состав групп и окна целей с тех пор "
                 "изменились. Соберите словарь заново либо возьмите то разделение, на котором "
@@ -249,7 +249,7 @@ class DatasetInputs:
         # --- группы ---
 
         groups: dict[str, GroupInputs] = {}
-        inputs_sha256: dict[str, str] = {SPLIT_MANIFEST_FILE: split_sha256}
+        inputs_sha256: dict[str, str] = {CORPUS_MANIFEST_FILE: corpus_sha256}
 
         for group in config.groups:
 
@@ -292,7 +292,7 @@ class DatasetInputs:
         return DatasetInputs(
             artifacts=artifacts,
             tokenizer_config=tokenizer_config,
-            split_manifest=manifest,
+            corpus_manifest=manifest,
             groups=groups,
             processed_dir=processed,
             raw_root=raw,

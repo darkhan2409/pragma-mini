@@ -18,10 +18,6 @@ from .schema import (
     PAYLOAD_NULL,
     PAYLOAD_OK,
     PAYLOAD_UNPARSEABLE,
-    VERSION_ROLE_CONFLICT,
-    VERSION_ROLE_CORRECTION,
-    VERSION_ROLE_ORIGINAL,
-    VERSION_ROLE_REDELIVERY,
     events_schema,
     payload_columns,
 )
@@ -58,15 +54,13 @@ class CanonicalError(ValueError):
 # Структурно обязательные поля конверта. Паспорт блокирует
 # выгрузку с пустым значением здесь, но canonical не полагается
 # на то, что его запускали: проверка повторяется до сортировки,
-# индексов, версий и связей.
+# индексов и связей.
 REQUIRED_ENVELOPE_FIELDS: tuple[str, ...] = (
     "event_id",
     "client_id",
     "event_type",
     "source",
     "event_time",
-    "event_version",
-    "is_test_account",
 )
 
 
@@ -94,22 +88,10 @@ def require_envelope(batch: pa.Table) -> None:
 
 
 # Поля конверта, которые в сравнение содержимого входят.
-#
-# Список позитивный. link_type входит: он несёт ВИД ДЕЛОВОЙ
-# СВЯЗИ и у копии записи обязан совпадать. Метки доставки в
-# контракте нет вовсе, поэтому технический дубль по этому полю
-# от оригинала не отличается, а вот две строки одной версии с
-# разным видом связи это настоящий конфликт.
 CONTENT_ENVELOPE: tuple[str, ...] = (
     "event_type",
     "source",
     "event_time",
-    "effective_at",
-    "time_precision",
-    "change_initiator",
-    "correlation_id",
-    "link_type",
-    "is_test_account",
 )
 
 # Тип события, чья сумма это сам остаток, а не движение по счёту.
@@ -120,13 +102,6 @@ TEXT_NORMALIZATION = {
     "version": "1.0.0",
     "rule": "Unicode NFKC, схлопывание пробелов, единый регистр casefold; исходное значение сохраняется рядом",
 }
-
-PRECISION_RESOLUTION: dict[str, int] = {
-    "second": 1_000_000,
-    "minute": 60_000_000,
-    "day": 86_400_000_000,
-}
-
 
 def normalize_text(value: str | None) -> str | None:
     """
@@ -371,118 +346,66 @@ def parse_batch(manifest: RawManifest, batch: pa.Table, payload_names: list[str]
 
 
 @dataclass
-class VersionVerdict:
-    version_role: list[str]
-    is_exact_duplicate: np.ndarray
-    same_version_row: np.ndarray
+class DuplicateVerdict:
+    """
+    Повторы event_id в выгрузке.
+
+    Запись приходит ровно один раз, поэтому повтор — поломка
+    контракта, а не техническая доставка. Строка сохраняется,
+    но помечается, и этап её пересчитывает в отчёт.
+    """
+
+    repeated: np.ndarray
+    first_row: np.ndarray
     log: list[dict]
 
 
-def resolve_versions(batch: pa.Table, payload: pa.Table, payload_names: list[str]) -> VersionVerdict:
+def find_repeated_ids(batch: pa.Table) -> DuplicateVerdict:
     """
-    Разделяет четыре случая: исходная запись, исправление,
-    техническая повторная доставка и конфликт.
+    Находит строки, чей event_id уже встречался в этой группе.
 
-    Повторная доставка это та же версия с тем же содержимым;
-    конфликт это та же версия с другим содержимым. Разные
-    события с одинаковыми полями дублями не считаются никогда:
-    сравнение идёт только внутри одного event_id.
+    Первая строка идентификатора остаётся действующей, каждая
+    следующая помечается повтором и попадает в журнал.
     """
 
     rows = batch.num_rows
 
     event_id = np.asarray(batch.column("event_id").to_pylist(), dtype=object)
-    version = np.asarray(batch.column("event_version").to_pylist(), dtype=np.int64)
     raw_row = np.asarray(batch.column("raw_row").to_pylist(), dtype=np.int64)
     client_id = np.asarray(batch.column("client_id").to_pylist(), dtype=object)
 
-    role = [VERSION_ROLE_ORIGINAL] * rows
-    duplicate = np.zeros(rows, dtype=bool)
-    same_version = np.full(rows, -1, dtype=np.int64)
+    repeated = np.zeros(rows, dtype=bool)
+    first_row = np.full(rows, -1, dtype=np.int64)
+
+    seen: dict[object, int] = {}
     log: list[dict] = []
 
-    groups: dict[object, list[int]] = defaultdict(list)
-    for index in range(rows):
-        groups[event_id[index]].append(index)
+    order = np.argsort(raw_row, kind="stable")
 
-    multi = {key: items for key, items in groups.items() if len(items) > 1}
+    for index in order:
 
-    if not multi:
-        return VersionVerdict(role, duplicate, same_version, log)
+        key = event_id[index]
 
-    # Содержимое строк, участвующих в сравнении, снимается одним
-    # проходом: так Python видит только те строки, где это нужно.
-    wanted = np.array(sorted(index for items in multi.values() for index in items), dtype=np.int64)
+        known = seen.get(key)
 
-    content_columns = [name for name in CONTENT_ENVELOPE if name in batch.column_names]
+        if known is None:
+            seen[key] = int(index)
+            continue
 
-    envelope_rows = batch.select(content_columns).take(pa.array(wanted)).to_pylist()
-    payload_rows = payload.take(pa.array(wanted)).to_pylist()
+        repeated[index] = True
+        first_row[index] = int(raw_row[known])
 
-    content: dict[int, dict] = {}
-    for position, index in enumerate(wanted):
-        merged = dict(envelope_rows[position])
-        merged.update({name: value for name, value in payload_rows[position].items() if value is not None})
-        content[int(index)] = merged
+        log.append(
+            {
+                "event_id": str(key),
+                "client_id": str(client_id[index]),
+                "raw_row": int(raw_row[index]),
+                "first_raw_row": int(raw_row[known]),
+                "reason": "event_id встретился в выгрузке повторно",
+            }
+        )
 
-    for key, items in multi.items():
-
-        # Порядок внутри события: версия, затем место в ленте.
-        items = sorted(items, key=lambda index: (version[index], raw_row[index]))
-
-        lowest = version[items[0]]
-
-        carriers: dict[int, int] = {}
-
-        for index in items:
-            carriers.setdefault(int(version[index]), index)
-
-        for index in items:
-
-            carrier = carriers[int(version[index])]
-
-            if index == carrier:
-                role[index] = VERSION_ROLE_ORIGINAL if version[index] == lowest else VERSION_ROLE_CORRECTION
-                continue
-
-            same_version[index] = raw_row[carrier]
-
-            differing = [
-                name
-                for name, value in content[index].items()
-                if content[carrier].get(name) != value
-            ]
-            differing += [
-                name
-                for name in content[carrier]
-                if name not in content[index]
-            ]
-
-            if differing:
-                role[index] = VERSION_ROLE_CONFLICT
-                verdict = VERSION_ROLE_CONFLICT
-                reason = "та же версия с другим содержимым"
-            else:
-                role[index] = VERSION_ROLE_REDELIVERY
-                duplicate[index] = True
-                verdict = VERSION_ROLE_REDELIVERY
-                reason = "повторная доставка той же версии с тем же содержимым"
-
-            log.append(
-                {
-                    "event_id": str(key),
-                    "client_id": str(client_id[index]),
-                    "event_version": int(version[index]),
-                    "verdict": verdict,
-                    "raw_row": int(raw_row[index]),
-                    "same_version_row": int(raw_row[carrier]),
-                    "first_raw_row": int(raw_row[carrier]),
-                    "differing_fields": sorted(set(differing)) or None,
-                    "reason": reason,
-                }
-            )
-
-    return VersionVerdict(role, duplicate, same_version, log)
+    return DuplicateVerdict(repeated, first_row, log)
 
 
 # ============================================================
@@ -509,8 +432,7 @@ def balance_chain_gaps(
     event_id,
     event_type,
     event_time,
-    version,
-    same_version_row,
+    repeated,
     stable_index,
     raw_row,
     account_id,
@@ -522,9 +444,9 @@ def balance_chain_gaps(
     """
     Отмечает строки, чей остаток не продолжает предыдущий.
 
-    Участвуют только действующие версии одобренных денежных строк
-    с известным счётом и остатком: у повторной доставки и у
-    проигравшей версии собственных денег нет.
+    Участвуют только одобренные денежные строки с известным
+    счётом и остатком. Повтор идентификатора пропускается: своих
+    денег у него нет, это та же запись ещё раз.
     """
 
     rows = len(event_id)
@@ -534,13 +456,6 @@ def balance_chain_gaps(
     if not rows:
         return gap
 
-    highest: dict[object, int] = {}
-
-    for index in range(rows):
-        key = event_id[index]
-        if key not in highest or version[index] > highest[key]:
-            highest[key] = version[index]
-
     for lo, hi in runs:
 
         order = sorted(range(lo, hi), key=lambda index: (stable_index[index], raw_row[index]))
@@ -549,10 +464,17 @@ def balance_chain_gaps(
 
         for index in order:
 
-            if version[index] != highest[event_id[index]] or same_version_row[index] >= 0:
+            if repeated[index]:
                 continue
 
-            if status[index] != "approved":
+            # Снимок остатка статуса не несёт: он не операция, а
+            # сообщение о том, сколько на счёте лежит. Из цепочки
+            # остатков его выбрасывать нельзя — именно он её и
+            # подтверждает.
+            if (
+                status[index] != "approved"
+                and event_type[index] not in SNAPSHOT_EVENT_TYPES
+            ):
                 continue
 
             if account_id[index] is None or balance_after[index] is None:
@@ -629,7 +551,7 @@ def build_batch(
 
     parsed = parse_batch(manifest, batch, payload_names)
 
-    verdict = resolve_versions(batch, parsed.table, payload_names)
+    verdict = find_repeated_ids(batch)
 
     client_id = np.asarray(batch.column("client_id").to_pylist(), dtype=object)
     runs = _client_runs(client_id)
@@ -640,9 +562,7 @@ def build_batch(
     clients: list[dict] = []
 
     event_time = batch.column("event_time").to_numpy(zero_copy_only=False).astype("datetime64[us]")
-    version = np.asarray(batch.column("event_version").to_pylist(), dtype=np.int64)
     raw_row = np.asarray(batch.column("raw_row").to_pylist(), dtype=np.int64)
-    test_account = np.asarray(batch.column("is_test_account").to_pylist(), dtype=bool)
     event_id = np.asarray(batch.column("event_id").to_pylist(), dtype=object)
 
     # Причинный порядок внутри одной секунды задаёт приоритет типа
@@ -697,7 +617,6 @@ def build_batch(
                 "spans_row_groups": None,
                 "event_time_min": event_time[lo:hi].min().astype("datetime64[us]").astype(datetime),
                 "event_time_max": event_time[lo:hi].max().astype("datetime64[us]").astype(datetime),
-                "is_test_account": bool(test_account[lo:hi].any()),
             }
         )
 
@@ -708,16 +627,6 @@ def build_batch(
 
     before_window = event_time < history_start
     after_extract = event_time >= extract_time
-
-    # --- точность времени ---
-
-    precision = np.asarray(batch.column("time_precision").to_pylist(), dtype=object)
-
-    finer = np.zeros(rows, dtype=bool)
-    for name, resolution in PRECISION_RESOLUTION.items():
-        mask = precision == name
-        if mask.any():
-            finer[mask] = (event_time[mask].astype(np.int64) % resolution) != 0
 
     # --- неоднозначное местное время ---
 
@@ -739,8 +648,7 @@ def build_batch(
         event_id,
         event_type,
         event_time,
-        version,
-        verdict.same_version_row,
+        verdict.repeated,
         stable_index,
         raw_row,
         payload_column("account_id"),
@@ -793,15 +701,9 @@ def build_batch(
     derived = {
         "client_idx": pa.array(client_idx),
         "stable_event_index": pa.array(stable_index),
-        "version_role": pa.array(verdict.version_role, pa.string()),
-        "is_exact_duplicate": pa.array(verdict.is_exact_duplicate),
-        "same_version_row": pa.array(
-            np.where(verdict.same_version_row < 0, np.int64(0), verdict.same_version_row),
-            mask=verdict.same_version_row < 0,
-        ),
+        "is_repeated_event_id": pa.array(verdict.repeated),
         "before_window": pa.array(before_window),
         "at_or_after_extract": pa.array(after_extract),
-        "time_finer_than_precision": pa.array(finer),
         "ambiguous_local_time": pa.array(ambiguous),
         "balance_chain_gap": pa.array(chain_gap),
         "payload_status": pa.array(parsed.status, pa.string()),
@@ -836,10 +738,8 @@ def canonical_schema(manifest: RawManifest) -> pa.Schema:
 
 
 __all__ = [
-    "CONTENT_ENVELOPE",
     "SNAPSHOT_EVENT_TYPES",
     "CanonicalError",
-    "PRECISION_RESOLUTION",
     "TEXT_NORMALIZATION",
     "BatchResult",
     "balance_chain_gaps",
@@ -848,5 +748,4 @@ __all__ = [
     "iter_client_batches",
     "normalize_text",
     "parse_batch",
-    "resolve_versions",
 ]

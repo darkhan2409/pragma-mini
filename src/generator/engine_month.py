@@ -4,11 +4,10 @@ import json
 from datetime import datetime, timedelta
 
 from . import params as params_module
+from . import config
 from .config import (
+    CLIENT_ACTION_EVENT_TYPES,
     EVENT_TYPE_PRIORITY,
-    HISTORY_END,
-    INITIATOR_CLIENT,
-    INITIATOR_SYSTEM,
     PROFILE_FIELDS,
 )
 from .engine import _HANDLERS, _emit_money
@@ -73,7 +72,7 @@ def _expire_cards(sim, state: ClientState, day: datetime) -> None:
 
         moment = day.replace(hour=12, minute=int(stable_hash(card.card_id) % 60))
 
-        if moment >= HISTORY_END:
+        if moment >= config.HISTORY_END:
             continue
 
         _reissue_card(state, card, moment, reason="expiry")
@@ -144,7 +143,6 @@ def _withdraw_consent(state: ClientState, day: datetime) -> None:
                 "change_source": "client",
                 "confirmed": True,
             },
-            initiator=INITIATOR_CLIENT,
         )
     )
 
@@ -195,9 +193,6 @@ def _card_statement(sim, state: ClientState, day: datetime, month: datetime) -> 
                     "reason": "periodic_contract_rule",
                     "merchant_country": "KZ",
                 },
-                INITIATOR_SYSTEM,
-                correlation_id=contract_id,
-                link_type="contract",
             )
 
         payment = card_rules.minimum_payment(credit, month_index)
@@ -222,9 +217,6 @@ def _card_statement(sim, state: ClientState, day: datetime, month: datetime) -> 
                     "cause_event_id": None,
                     "reason": "card_statement",
                 },
-                initiator=INITIATOR_SYSTEM,
-                correlation_id=contract_id,
-                link_type="schedule",
             )
         )
 
@@ -309,7 +301,8 @@ def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_ev
         "debit",
         credit.account_id,
         {
-            "channel": "app",
+            # Списание по выписке делает сам банк, а не клиент.
+            "channel": "system",
             "contract_id": contract_id,
             "counterparty": "own_account",
             "cause_event_id": due_event.event_id,
@@ -317,9 +310,6 @@ def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_ev
             "mcc": MCC_TRANSFER,
             "merchant_country": "KZ",
         },
-        INITIATOR_CLIENT,
-        correlation_id=contract_id,
-        link_type="schedule",
     )
 
     _emit_money(
@@ -338,9 +328,6 @@ def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_ev
             "mcc": MCC_TRANSFER,
             "merchant_country": "KZ",
         },
-        INITIATOR_SYSTEM,
-        correlation_id=contract_id,
-        link_type="schedule",
         post=False,
     )
 
@@ -361,9 +348,6 @@ def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_ev
                 "cause_event_id": due_event.event_id,
                 "reason": "payment",
             },
-            initiator=INITIATOR_CLIENT,
-            correlation_id=contract_id,
-            link_type="schedule",
         )
     )
 
@@ -394,9 +378,6 @@ def _card_missed(state: ClientState, day, credit, contract_id, payment, due_even
                 "cause_event_id": due_event.event_id,
                 "reason": "missed",
             },
-            initiator=INITIATOR_SYSTEM,
-            correlation_id=contract_id,
-            link_type="schedule",
         )
     )
 
@@ -422,9 +403,6 @@ def _card_missed(state: ClientState, day, credit, contract_id, payment, due_even
                     "cause_event_id": None,
                     "reason": "delinquency",
                 },
-                initiator=INITIATOR_SYSTEM,
-                correlation_id=contract_id,
-                link_type="schedule",
             )
         )
 
@@ -451,9 +429,6 @@ def _card_arrears_cleared(state: ClientState, day, credit, contract_id) -> None:
                 "cause_event_id": None,
                 "reason": "arrears_cleared",
             },
-            initiator=INITIATOR_SYSTEM,
-            correlation_id=contract_id,
-            link_type="schedule",
         )
     )
 
@@ -493,7 +468,7 @@ def _sweep_bills(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
             _emit_money(
                 state, moment, "bill_payment", sources[0].account_id, bill["amount"], "debit",
-                COUNTERPART_GOVERNMENT, body, INITIATOR_CLIENT,
+                COUNTERPART_GOVERNMENT, body,
             )
         else:
             # Оплачено вне наблюдаемого контура.
@@ -550,9 +525,6 @@ def month_end(sim, state: ClientState, day: datetime) -> None:
                 "reason": "periodic_contract_rule",
                 "merchant_country": "KZ",
             },
-            INITIATOR_SYSTEM,
-            correlation_id=contract.contract_id,
-            link_type="contract",
         )
 
     # --- кешбэк за месяц ---
@@ -572,9 +544,6 @@ def month_end(sim, state: ClientState, day: datetime) -> None:
                 "reason": "periodic_contract_rule",
                 "merchant_country": "KZ",
             },
-            INITIATOR_SYSTEM,
-            correlation_id=contract_id,
-            link_type="contract",
         )
 
     state.pending_cashback = {}
@@ -603,25 +572,18 @@ def month_end(sim, state: ClientState, day: datetime) -> None:
         if account.account_id not in moved and snapshot_rng.random() >= threshold:
             continue
 
+        # Снимок сообщает остаток, а не проводит деньги: ни
+        # суммы, ни направления, ни статуса у него нет.
         state.emit(
             state.factory.make(
                 "balance_snapshot",
                 ts.replace(minute=55),
                 {
-                    "amount": abs(account.balance),
-                    "direction": "credit" if account.balance >= 0 else "debit",
-                    "status": "approved",
                     "account_id": account.account_id,
-                    "contract_id": account.contract_id,
                     "balance_after": account.balance,
+                    "currency": account.currency,
                     "accrual_period": month.strftime("%Y-%m"),
-                    "reason": "periodic_contract_rule",
-                    "channel": "system",
-                    "merchant_country": "KZ",
                 },
-                initiator=INITIATOR_SYSTEM,
-                correlation_id=account.contract_id,
-                link_type="contract",
             )
         )
 
@@ -675,9 +637,6 @@ def _credit_deposit_interest(state: ClientState, ts: datetime, deposit, month: d
             "reason": "periodic_contract_rule",
             "merchant_country": "KZ",
         },
-        INITIATOR_SYSTEM,
-        correlation_id=deposit.contract_id,
-        link_type="contract",
     )
 
     deposit.accrued += interest
@@ -758,11 +717,7 @@ def _close_deposit(state: ClientState, ts: datetime, deposit, early: bool = Fals
                     "term": contract.term,
                     "rate": contract.rate,
                     "reason": "rollover",
-                    "timestamp_quality": "exact",
                 },
-                initiator=INITIATOR_SYSTEM,
-                correlation_id=contract.contract_id,
-                link_type="contract",
             )
         )
 
@@ -793,9 +748,6 @@ def _close_deposit(state: ClientState, ts: datetime, deposit, early: bool = Fals
                     "reason": "early_closure",
                     "merchant_country": "KZ",
                 },
-                INITIATOR_SYSTEM,
-                correlation_id=deposit.contract_id,
-                link_type="contract",
             )
 
             ts = ts + timedelta(seconds=2)
@@ -806,10 +758,14 @@ def _close_deposit(state: ClientState, ts: datetime, deposit, early: bool = Fals
 
         from .engine_app import _own_transfer
 
-        _own_transfer(
+        # Не получилось перевести остаток — вклад не закрывается.
+        # Закрытый договор с деньгами внутри и без выплаты был бы
+        # и потерей денег, и неверным состоянием.
+        if not _own_transfer(
             state, ts, "deposit_withdrawal", account.account_id, target.account_id,
             account.balance, deposit.contract_id, reason,
-        )
+        ):
+            return
 
     deposit.closed = True
 
@@ -833,7 +789,7 @@ def _update_state(state: ClientState, day: datetime) -> None:
     current = [
         event
         for event in state.events
-        if event.change_initiator == INITIATOR_CLIENT and event.event_time >= month
+        if event.event_type in CLIENT_ACTION_EVENT_TYPES and event.event_time >= month
     ]
 
     previous_month = cal.month_start(month - timedelta(days=1))
@@ -841,7 +797,7 @@ def _update_state(state: ClientState, day: datetime) -> None:
     previous = [
         event
         for event in state.events
-        if event.change_initiator == INITIATOR_CLIENT
+        if event.event_type in CLIENT_ACTION_EVENT_TYPES
         and previous_month <= event.event_time < month
     ]
 
@@ -881,18 +837,18 @@ def _update_profile(
     state: ClientState,
     day: datetime,
     moment: datetime | None = None,
-    reason: str = "monthly_recalculation",
 ) -> None:
     """
-    Версия профиля на момент её расчёта.
+    Пересчёт анкеты клиента.
+
+    Версий профиль больше не хранит: в выгрузку уходит одна
+    итоговая строка на границу окна. Но пересчитывать значения
+    по-прежнему надо — на них держатся события profile_change,
+    которые и рассказывают историю изменений.
 
     Профиль считается ПОСЛЕ операций дня: начислений, выписок и
-    закрытий. Датировать его началом дня нельзя — тогда утренняя
-    строка знает вечерний остаток и вечернюю утилизацию лимита,
-    а это утечка внутри дня.
-
-    Версии раньше регистрации не бывает: у человека, который ещё
-    не клиент, банк профиля не ведёт.
+    закрытий. Раньше регистрации его не бывает: у человека,
+    который ещё не клиент, банк анкеты не ведёт.
     """
 
     persona = state.persona
@@ -938,29 +894,8 @@ def _update_profile(
         }
     )
 
-    if values == state.profile_values and state.profile_versions:
-        return
-
-    version = len(state.profile_versions) + 1
-
-    if state.profile_versions:
-        state.profile_versions[-1]["valid_to"] = moment
-
-    row = {
-        "client_id": state.client_id,
-        "profile_version": version,
-        "valid_from": moment,
-        "valid_to": None,
-        "change_source": "system",
-        "confirmed": True,
-        "change_reason": reason,
-    }
-
-    row.update({name: values.get(name) for name in PROFILE_FIELDS})
-
-    state.profile_versions.append(row)
-
     state.profile_values = values
+    state.profile_known = True
 
 
 # ============================================================
@@ -971,7 +906,7 @@ def _update_profile(
 def finish(sim) -> CommunityResult:
 
     events: list = []
-    profile_versions: list = []
+    profile_rows: list = []
     coverage_rows: list = []
     truth_clients: list = []
     truth_events: list = []
@@ -986,14 +921,9 @@ def finish(sim) -> CommunityResult:
         # счёта, а не пересчёт по тому, что доехало до витрины.
         assign_balances(state, sorted(state.events, key=_tape_order))
 
-        observed, corrections, lost = defect_module.apply(state.events, ordinal)
+        observed, lost = defect_module.apply(state.events, ordinal)
 
         observed.sort(key=_tape_order)
-
-        # Ошибка витрины вносится последней: остатки уже
-        # посчитаны по настоящим суммам, и опечатка остаётся
-        # только в той версии, которую банк потом исправил.
-        defect_module.apply_first_version_errors(observed, corrections)
 
         # Потерянная наблюдением строка остаётся в скрытой истине:
         # по ней двигались деньги, и разрыв цепочки остатков в
@@ -1020,7 +950,13 @@ def finish(sim) -> CommunityResult:
         for event in observed:
             events.append(_row(event))
 
-        profile_versions.extend(state.profile_versions)
+        # Одна итоговая строка на клиента: анкета такой, какой
+        # она стала к границе выгрузки. Клиент, о котором банк
+        # ещё ничего не посчитал, строки не получает вовсе.
+        if state.profile_known:
+            row = {"client_id": state.client_id}
+            row.update({name: state.profile_values.get(name) for name in PROFILE_FIELDS})
+            profile_rows.append(row)
 
         for row in coverage_module.coverage_rows(
             state.persona, state.opening_state, state.closed_at
@@ -1035,12 +971,22 @@ def finish(sim) -> CommunityResult:
                     "coverage_status": row.coverage_status,
                     "coverage_reason": row.coverage_reason,
                     "opening_state": row.opening_state,
+                    "outage_days": row.outage_days,
                 }
             )
 
         truth_clients.append(_truth_client(state, sim.graph.households.get(ordinal)))
-        truth_events.extend(state.truth)
-        truth_events.extend(_truth_plan(state))
+
+        # Правда о клиенте идёт по времени, как и его лента.
+        # Заметки копились по ходу прогона, а план дописывался в
+        # конце, поэтому склейка шла не по времени, и читать файл
+        # приходилось с сортировкой на своей стороне.
+        truth_events.extend(
+            sorted(
+                [*state.truth, *_truth_plan(state)],
+                key=lambda row: (row["ts"], row["kind"], row["key"]),
+            )
+        )
 
     for relation in sim.graph.relationships:
 
@@ -1069,7 +1015,7 @@ def finish(sim) -> CommunityResult:
 
     return CommunityResult(
         events=events,
-        profile_versions=profile_versions,
+        profile_rows=profile_rows,
         coverage=coverage_rows,
         truth_clients=truth_clients,
         truth_events=truth_events,
@@ -1085,7 +1031,6 @@ def _tape_order(event) -> tuple:
     return (
         event.event_time,
         EVENT_TYPE_PRIORITY.get(event.event_type, 99),
-        event.event_version,
         event.event_id,
     )
 
@@ -1129,14 +1074,13 @@ def assign_balances(state: ClientState, tape: list) -> None:
         if account_id is None or account_id not in balances:
             continue
 
-        if payload.get("status") != "approved":
+        # Снимок идёт первым: статуса у него нет, и общий фильтр
+        # одобренных операций выбросил бы его целиком.
+        if event.event_type == "balance_snapshot":
+            payload["balance_after"] = balances[account_id]
             continue
 
-        if event.event_type == "balance_snapshot":
-            value = balances[account_id]
-            payload["balance_after"] = value
-            payload["amount"] = abs(value)
-            payload["direction"] = "credit" if value >= 0 else "debit"
+        if payload.get("status") != "approved":
             continue
 
         amount = int(payload.get("amount") or 0)
@@ -1156,13 +1100,6 @@ def _row(event) -> dict:
         "event_type": event.event_type,
         "source": event.source,
         "event_time": event.event_time,
-        "effective_at": event.effective_at,
-        "time_precision": event.time_precision,
-        "event_version": event.event_version,
-        "change_initiator": event.change_initiator,
-        "correlation_id": event.correlation_id,
-        "link_type": event.link_type,
-        "is_test_account": event.is_test_account,
         "payload": json.dumps(event.payload, ensure_ascii=False, separators=(",", ":"), default=str),
     }
 
@@ -1183,7 +1120,6 @@ def _truth_client(state: ClientState, household_id: str | None = None) -> dict:
         "settlement_type": persona.settlement_type,
         "true_income": persona.true_income,
         "visible_share": persona.visible_share,
-        "is_test_account": persona.is_test_account,
         "registered_in_window": persona.registered_in_window,
         "vanished_after_registration": persona.vanished_after_registration,
         "night_segment": persona.night_segment,
@@ -1196,7 +1132,7 @@ def _truth_client(state: ClientState, household_id: str | None = None) -> dict:
     for name, value in persona.traits.base.items():
         row[f"trait_{name}"] = round(float(value), 4)
 
-    final = state.traits.at(HISTORY_END - timedelta(days=1)) if state.traits else persona.traits.base
+    final = state.traits.at(config.HISTORY_END - timedelta(days=1)) if state.traits else persona.traits.base
 
     for name, value in final.items():
         row[f"trait_final_{name}"] = round(float(value), 4)

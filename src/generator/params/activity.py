@@ -17,24 +17,34 @@ from dataclasses import dataclass, field
 class ActivityParams:
 
     # Покупок в день по режиму активности.
+    #
+    # Это ПОПЫТКИ, а не наблюдаемые события: часть их уходит мимо
+    # банка (hidden_purchase_share), поэтому в выгрузке покупок
+    # заметно меньше.
     purchases_per_day: dict = field(
         default_factory=lambda: {
-            "rare": 0.14,
-            "moderate": 1.70,
-            "regular": 3.10,
-            "high": 4.60,
-            "extreme": 6.00,
+            "silent": 0.10,
+            "rare": 1.20,
+            "regular": 4.60,
+            "high": 8.00,
+            "extreme": 15.00,
         }
     )
 
     # Сессий приложения в день.
+    #
+    # Прежние значения давали «регулярному» клиенту 1,4 сессии в
+    # месяц: приложение стояло почти у всех, а следов в данных
+    # почти не было. Теперь после onboarding клиент заходит в
+    # него регулярно — от раза в две недели у молчунов до
+    # нескольких раз в день у самых активных.
     sessions_per_day: dict = field(
         default_factory=lambda: {
-            "rare": 0.005,
-            "moderate": 0.018,
-            "regular": 0.046,
-            "high": 0.110,
-            "extreme": 0.250,
+            "silent": 0.04,
+            "rare": 0.15,
+            "regular": 0.55,
+            "high": 1.30,
+            "extreme": 3.20,
         }
     )
 
@@ -101,6 +111,13 @@ class ActivityParams:
     # Согласие на рассылку отзывают.
     consent_withdrawal_per_year: float = 0.06
 
+    # Сколько сообщений банк отправляет клиенту в месяц ДО
+    # затуханий по усталости, согласию и состоянию клиента.
+    # Значение пришпилено к измеренному якорю отчёта банка
+    # (communications_per_client_month = 3.8): после затуханий
+    # наблюдаемая частота выходит примерно на него.
+    communications_base_per_month: float = 7.4
+
     # Оплата по QR: в Казахстане это основной способ платить в
     # рознице, и раздел приложения для неё уже существовал.
     qr_share_of_pos: float = 0.22
@@ -162,11 +179,11 @@ class ActivityParams:
     # Внешние переводы и наличные.
     transfers_per_month: dict = field(
         default_factory=lambda: {
-            "rare": 0.3,
-            "moderate": 1.1,
-            "regular": 2.4,
-            "high": 4.5,
-            "extreme": 7.5,
+            "silent": 0.2,
+            "rare": 1.0,
+            "regular": 4.0,
+            "high": 8.0,
+            "extreme": 14.0,
         }
     )
 
@@ -175,11 +192,11 @@ class ActivityParams:
 
     cash_withdrawals_per_month: dict = field(
         default_factory=lambda: {
-            "rare": 0.5,
-            "moderate": 1.1,
-            "regular": 1.6,
-            "high": 2.1,
-            "extreme": 2.8,
+            "silent": 0.4,
+            "rare": 1.0,
+            "regular": 2.2,
+            "high": 3.0,
+            "extreme": 4.0,
         }
     )
 

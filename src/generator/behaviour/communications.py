@@ -63,8 +63,17 @@ def daily_rate(persona: Persona, ts: datetime, consented: bool, fatigue: int,
     if not consented:
         return 0.0
 
-    # Реальный якорь: около 3.8 отправок на клиента в месяц.
-    rate = 7.4 / 30.0
+    # Частота вынесена в параметры, но значение пришпилено к
+    # ИЗМЕРЕННОМУ якорю банка: около 3.8 отправок на клиента в
+    # месяц (calibration.communications_per_client_month, отчёт
+    # банка, уверенность high).
+    #
+    # Поднимать её ради объёма нельзя: это единственная из пяти
+    # частот, у которой есть настоящее измерение, а не гипотеза.
+    # Клиент и так получит больше сообщений — просто потому, что
+    # у него станет больше договоров и платежей, на которые банк
+    # отвечает сервисными уведомлениями.
+    rate = params_module.active().activity.communications_base_per_month / 30.0
 
     # Молчащему клиенту банк пишет заметно реже: остаются
     # только сервисные сообщения и возврат в игру.
@@ -229,6 +238,82 @@ def _clicked(persona: Persona, campaign, channel: str, ts: datetime, stress: flo
     return rng.random() < min(0.80, probability)
 
 
+# Шаблоны с условием на аудиторию.
+#
+# Кампания выбирается по семейству продукта, а текст внутри неё —
+# по весу позиции, и этого мало: «поднимем лимит вашей карты»
+# уходило человеку без кредитной карты, а пенсионный вклад —
+# тридцатилетнему. Здесь перечислено, кому такой текст уместен;
+# всё остальное внутри кампании пишется кому угодно.
+#
+# Проверка положительная: шаблона нет в таблице — значит условий
+# у него нет. Так новый текст не становится молча запрещённым.
+TEMPLATE_AUDIENCE: dict[str, str] = {
+    # Повышение лимита обсуждают с тем, у кого лимит есть.
+    "CC_LIMIT_UP": "credit_card",
+    # Пенсионный вклад и пенсионная карта — пенсионерам.
+    "DEP_PENSION": "pensioner",
+    # Рефинансирование чужого долга предлагают тому, у кого есть
+    # действующий кредит.
+    "REFIN_BASE": "loan",
+    "REFIN_LOWER_PAYMENT": "loan",
+    # Досрочное закрытие и продление вклада — владельцам вклада.
+    "CERT_FLEX": "deposit",
+    # Кешбэк по категории имеет смысл при действующей карте.
+    "CB_CATEGORY_FOOD": "card",
+    "CB_CATEGORY_FUEL": "card",
+    "CB_PARTNER": "card",
+}
+
+
+def _audience_allows(rule: str, persona: Persona, ts: datetime, owned_families: frozenset) -> bool:
+    """
+    Подходит ли клиент под условие шаблона.
+    """
+
+    if rule == "pensioner":
+        return persona.is_pensioner_at(ts)
+
+    if rule == "credit_card":
+        return "credit_card" in owned_families
+
+    if rule == "deposit":
+        return bool({"deposit", "deposit_certificate"} & owned_families)
+
+    if rule == "card":
+        return bool({"credit_card", "debit_card"} & owned_families)
+
+    if rule == "loan":
+        return bool({"cash_loan", "installment", "refinance"} & owned_families)
+
+    return True
+
+
+def _template_for(campaign, persona, ts, owned_families, rng) -> str | None:
+    """
+    Текст кампании, уместный этому клиенту.
+
+    Если ни один текст кампании ему не подходит, письма не будет
+    вовсе: лучше промолчать, чем отправить предложение, которое
+    человеку не о чем читать.
+    """
+
+    allowed = [
+        name
+        for name in campaign.templates
+        if _audience_allows(TEMPLATE_AUDIENCE.get(name, ""), persona, ts, owned_families)
+    ]
+
+    if not allowed:
+        return None
+
+    weights = [1.0 / ((position + 1) ** 1.4) for position in range(len(allowed))]
+
+    total = sum(weights)
+
+    return str(rng.choice(list(allowed), p=[value / total for value in weights]))
+
+
 def contacts_for_day(
     persona: Persona,
     day: datetime,
@@ -288,8 +373,11 @@ def contacts_for_day(
             # девяностом дне просрочки.
             template = _collection_template(dpd, days_to_due)
         else:
-            template = str(rng.choice(list(campaign.templates),
-                                      p=[1.0 / ((position + 1) ** 1.4) for position in range(len(campaign.templates))]))
+            template = _template_for(campaign, persona, day, owned_families, rng)
+
+            # Подходящего текста нет — банк не пишет вовсе.
+            if template is None:
+                continue
 
         hour = int(time_rng.choice(list(SEND_HOURS), p=list(SEND_WEIGHTS)))
 
