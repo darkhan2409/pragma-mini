@@ -24,6 +24,7 @@ mini-pragma-report = "src.generator.report.realism:main"
 mini-pragma-show = "src.generator.report.show:main"
 mini-pragma-preprocess = "src.preprocessing.run:main"
 mini-pragma-tokenize = "src.tokenization.run:main"
+mini-pragma-dataset = "src.dataset.run:main"
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -44,7 +45,7 @@ packages = [
     "src.preprocessing.canonical",
     "src.preprocessing.semantic",
     "src.tokenization",
-    "src.model",
+    "src.dataset",
 ]
 
 [tool.pytest.ini_options]

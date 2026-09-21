@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -975,11 +974,16 @@ def test_ratios_use_income_and_limit_of_that_moment(tmp_path):
 # ============================================================
 
 
-def test_stage_writes_registry_and_reads_nothing_forbidden(tmp_path, capsys):
+def test_stage_writes_registry_report_and_examples(tmp_path, capsys):
     """
     Этап пишет реестр, отчёт, пример и две диагностические
-    таблицы с явным срезом в имени, не читая ни truth, ни
-    токенизатор, ни модель.
+    таблицы с явным срезом в имени.
+
+    Прежде тест сверял ещё и то, что семантика не подтянула
+    токенизатор или модель. Проверка снята вместе с этими
+    пакетами: провалиться она больше не может, а проверка,
+    которая не может провалиться, только притворяется
+    проверкой.
     """
 
     mini = MiniRaw(tmp_path / "raw", history_start=FULL_HORIZON)
@@ -992,9 +996,6 @@ def test_stage_writes_registry_and_reads_nothing_forbidden(tmp_path, capsys):
     assert _cli("passport", "--raw", str(raw_dir), "--group", "train", "--out", str(out)) == EXIT_OK
     assert _cli("canonical", "--raw", str(raw_dir), "--group", "train", "--out", str(out)) == EXIT_OK
 
-    forbidden = {"src.tokenizer", "src.model"}
-    before = {name for name in sys.modules if name in forbidden}
-
     capsys.readouterr()
 
     assert (
@@ -1002,8 +1003,6 @@ def test_stage_writes_registry_and_reads_nothing_forbidden(tmp_path, capsys):
              "--raw", str(raw_dir), "--cutoff", "2023-04-01T00:00:00")
         == EXIT_OK
     )
-
-    assert {name for name in sys.modules if name in forbidden} == before
 
     target = out / "semantic" / "train"
 

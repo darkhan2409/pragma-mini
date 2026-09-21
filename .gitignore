@@ -8,6 +8,7 @@ __pycache__/
 data/raw/
 data/processed/
 data/tokenized/
+data/datasets/
 data/artifacts/
 data/runs/
 
