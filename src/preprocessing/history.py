@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -48,16 +49,13 @@ from .canonical.entities import ENTITY_FIELDS, TRANSFER_SIDES, TRANSITIONS
 
 
 STAGE = "history"
-STAGE_VERSION = "4.4.0"
+STAGE_VERSION = "5.0.0"
 
 # Колонки canonical, которые НЕ выдаются как знание клиента.
 #
-# В видимом наборе повторных доставок нет, поэтому оба флага
-# там всегда пусты и только сбивали бы с толку.
-INTERNAL_COLUMNS: tuple[str, ...] = (
-    "is_exact_duplicate",
-    "same_version_row",
-)
+# В видимом наборе повторов идентификатора нет, поэтому флаг
+# там всегда пуст и только сбивал бы с толку.
+INTERNAL_COLUMNS: tuple[str, ...] = ("is_repeated_event_id",)
 
 # Состояние сущности после перехода. Переходы обслуживания
 # (платежи, просрочка, смена условий) состояния не меняют и
@@ -86,12 +84,19 @@ COVERAGE_AVAILABLE = "available"
 
 # Недатированные причины: они описывают выгрузку целиком и не
 # могут быть отнесены к конкретной дате.
+#
+# source_outage сюда больше не входит: покрытие называет дни
+# сбоя поимённо, и причина стала датированной.
 UNDATED_REASONS: frozenset[str] = frozenset(
-    {"no_consent", "client_not_onboarded", "test_account", "source_outage"}
+    {"no_consent", "client_not_onboarded"}
 )
 
 PAIR_VISIBLE = "counterpart_visible"
 PAIR_NOT_VISIBLE = "counterpart_not_visible"
+# Обе стороны у одного человека: перевод между своими счетами.
+# Встречная сторона видна целиком, и звать её «невидимой» было
+# просто неверно — она лежит в той же ленте.
+PAIR_OWN = "own_account_both_sides"
 
 
 class HistoryError(ValueError):
@@ -119,6 +124,10 @@ class SourceState:
     # означают, что источник к этому клиенту НЕПРИМЕНИМ, а не
     # что он молчал.
     reason: str | None = None
+    # Дни, в которые источник не донёс строки до витрины. Причина
+    # source_outage без них была бессодержательной: «сбой был»
+    # без ответа на вопрос когда.
+    outage_days: tuple[str, ...] = ()
 
     def as_dict(self) -> dict:
         return {
@@ -128,6 +137,7 @@ class SourceState:
             "first_seen": self.first_seen,
             "last_available_at": self.last_available_at,
             "reason": self.reason,
+            "outage_days": list(self.outage_days),
         }
 
 
@@ -141,7 +151,6 @@ class EntityState:
     first_mention: datetime | None
     last_transition: str | None
     last_transition_at: datetime | None
-    pending: tuple[tuple[str, datetime], ...] = ()
 
     def as_dict(self) -> dict:
         return {
@@ -153,7 +162,6 @@ class EntityState:
             "first_mention": self.first_mention,
             "last_transition": self.last_transition,
             "last_transition_at": self.last_transition_at,
-            "pending": [{"transition": name, "effective_at": moment} for name, moment in self.pending],
         }
 
 
@@ -364,7 +372,7 @@ class CanonicalStore:
         переводов группы: линейный проход по общему списку на
         каждого клиента давал квадратичную стоимость этапа.
 
-        Сторона узнаётся по ТИПУ СОБЫТИЯ и непустому correlation_id,
+        Сторона узнаётся по ТИПУ СОБЫТИЯ и непустому transfer_id,
         тем же правилом, что и таблица переводов canonical
         (TRANSFER_SIDES). Метка связи описывает связь, а не вид
         операции: комиссия, привязанная к переводу той же меткой,
@@ -377,16 +385,19 @@ class CanonicalStore:
         if self._transfers is None:
 
             columns = [
-                "correlation_id",
+                "transfer_id",
                 "client_id",
                 "event_id",
                 "event_type",
                 "event_time",
-                "event_version",
-                "is_exact_duplicate",
+                "is_repeated_event_id",
                 "raw_row",
                 "amount",
                 "direction",
+                # Счёт нужен, чтобы отличить встречную сторону от
+                # другой записи с тем же ключом: у настоящей пары
+                # счета РАЗНЫЕ.
+                "account_id",
             ]
 
             sides = pa.array(sorted(TRANSFER_SIDES))
@@ -400,13 +411,13 @@ class CanonicalStore:
                 chunk = chunk.filter(
                     pc.and_(
                         pc.is_in(chunk.column("event_type"), value_set=sides),
-                        pc.is_valid(chunk.column("correlation_id")),
+                        pc.is_valid(chunk.column("transfer_id")),
                     )
                 )
 
                 for row in chunk.to_pylist():
                     by_client.setdefault(row["client_id"], []).append(row)
-                    by_transfer.setdefault(row["correlation_id"], []).append(row)
+                    by_transfer.setdefault(row["transfer_id"], []).append(row)
 
             self._transfers = (by_client, by_transfer)
 
@@ -439,20 +450,18 @@ def visible_events(table: pa.Table, cutoff: datetime) -> tuple[pa.Table, dict[st
     Строки, известные банку строго до cutoff, по одной на событие.
 
     Известность записи совпадает с её событием: произошло до
-    cutoff — известно. Среди версий события действует наибольшая.
+    cutoff — известно. Версий у записи нет, она сразу
+    окончательна.
 
-    Возвращает видимый набор в бизнес-порядке, счётчики отброшенных
-    строк по причинам и список конфликтов, если у события на одну
-    версию есть два разных содержимых.
+    Возвращает видимый набор в бизнес-порядке и счётчики
+    отброшенных строк по причинам.
     """
 
     counts = {
         "rows": table.num_rows,
         "visible": 0,
         "event_not_happened": 0,
-        "duplicate": 0,
-        "superseded": 0,
-        "conflict_dropped": 0,
+        "repeated": 0,
     }
 
     if table.num_rows == 0:
@@ -461,67 +470,23 @@ def visible_events(table: pa.Table, cutoff: datetime) -> tuple[pa.Table, dict[st
     moment = np.datetime64(cutoff, "us")
 
     event_time = _as_datetime64(table.column("event_time"))
-    duplicate = np.asarray(table.column("is_exact_duplicate").to_pylist(), dtype=bool)
+    repeated = np.asarray(table.column("is_repeated_event_id").to_pylist(), dtype=bool)
 
     happened = event_time < moment
 
     counts["event_not_happened"] = int((~happened).sum())
-    counts["duplicate"] = int((happened & duplicate).sum())
+    counts["repeated"] = int((happened & repeated).sum())
 
-    indices = np.flatnonzero(happened & ~duplicate)
+    indices = np.flatnonzero(happened & ~repeated)
 
     if indices.size == 0:
         return _client_view(table.slice(0, 0)), counts, []
 
-    # У события действует наибольшая версия. Две строки одной
-    # наибольшей версии с разным содержимым — конфликт: берётся
-    # стоящая в ленте первой, остальные перечисляются как
-    # ограничение.
-    event_id = np.asarray(table.column("event_id").to_pylist(), dtype=object)
-    version = np.asarray(table.column("event_version").to_pylist(), dtype=np.int64)
-    raw_row = np.asarray(table.column("raw_row").to_pylist(), dtype=np.int64)
+    selected = indices.astype(np.int64)
 
-    chosen: dict[object, int] = {}
-    conflicts: list[dict] = []
-    superseded = 0
-
-    for index in indices:
-
-        key = event_id[index]
-        current = chosen.get(key)
-
-        if current is None:
-            chosen[key] = int(index)
-            continue
-
-        if version[index] != version[current]:
-            # Младшая версия перекрыта старшей.
-            superseded += 1
-            if version[index] > version[current]:
-                chosen[key] = int(index)
-            continue
-
-        earlier = raw_row[index] < raw_row[current]
-        winner = int(index) if earlier else current
-        loser = current if earlier else int(index)
-        chosen[key] = winner
-
-        conflicts.append(
-            {
-                "event_id": str(key),
-                "kept_raw_row": int(raw_row[winner]),
-                "dropped_raw_row": int(raw_row[loser]),
-                "reason": "та же версия с другим содержимым; взята стоящая в ленте первой",
-            }
-        )
-
-    counts["superseded"] = superseded
-    counts["conflict_dropped"] = len(conflicts)
-
-    selected = np.array(sorted(chosen.values()), dtype=np.int64)
 
     # Бизнес-порядок: устойчивый номер строки клиента уже задан
-    # временем бизнеса и местом первой версии.
+    # временем события и приоритетом его типа.
     stable = np.asarray(table.column("stable_event_index").to_pylist(), dtype=np.int64)
     selected = selected[np.argsort(stable[selected], kind="stable")]
 
@@ -529,7 +494,7 @@ def visible_events(table: pa.Table, cutoff: datetime) -> tuple[pa.Table, dict[st
 
     counts["visible"] = visible.num_rows
 
-    return _client_view(visible), counts, conflicts
+    return _client_view(visible), counts, []
 
 
 # ============================================================
@@ -537,34 +502,40 @@ def visible_events(table: pa.Table, cutoff: datetime) -> tuple[pa.Table, dict[st
 # ============================================================
 
 
-def profile_as_of(rows: list[dict], cutoff: datetime) -> tuple[dict | None, dict]:
+def profile_of(rows: list[dict]) -> tuple[dict | None, dict]:
     """
-    Последняя версия профиля, которая уже действовала к cutoff.
+    Анкета клиента: одна итоговая строка на границу выгрузки.
 
-    valid_to не фильтрует: смену версии выражает следующая строка,
-    и закрытие предыдущей по valid_to оставило бы дыру на границе.
+    Версий у профиля нет, поэтому выбирать нечего — строка либо
+    есть, либо банк клиента ещё не посчитал.
+
+    ВАЖНОЕ ОГРАНИЧЕНИЕ. Эта строка описывает состояние на конец
+    выгрузки, а не на cutoff. Она честна ровно на конечном срезе
+    группы; на любом более раннем срезе она была бы знанием из
+    будущего, и именно поэтому датасет ранние срезы запрещает.
     """
-
-    known = [row for row in rows if row["valid_from"] < cutoff]
 
     meta = {
-        "versions_total": len(rows),
-        "versions_known": len(known),
-        "rule": "valid_from < cutoff, последняя по (valid_from, profile_version); valid_to не фильтрует",
+        "rows": len(rows),
+        "rule": (
+            "одна итоговая строка на клиента на границу выгрузки; "
+            "версий и границ действия у профиля нет"
+        ),
     }
 
-    if not known:
-        meta["state"] = "no_version_known_yet"
+    if not rows:
+        meta["state"] = "absent"
         return None, meta
 
-    chosen = max(known, key=lambda row: (row["valid_from"], row["profile_version"]))
+    if len(rows) > 1:
+        raise HistoryError(
+            f"у клиента {rows[0].get('client_id')} {len(rows)} строк профиля: "
+            "контракт обещает ровно одну"
+        )
 
     meta["state"] = "known"
-    meta["profile_version"] = chosen["profile_version"]
-    meta["valid_from"] = chosen["valid_from"]
-    meta["age_days"] = (cutoff - chosen["valid_from"]).days
 
-    return chosen, meta
+    return rows[0], meta
 
 
 # ============================================================
@@ -572,14 +543,58 @@ def profile_as_of(rows: list[dict], cutoff: datetime) -> tuple[dict | None, dict
 # ============================================================
 
 
+def _outages_before(
+    value,
+    first_seen: datetime | None,
+    last_available: datetime | None,
+    cutoff: datetime,
+) -> tuple[str, ...]:
+    """
+    Дни сбоя, о которых на этот момент уже известно.
+
+    Отрезок закрыт с трёх сторон:
+
+      сбой будущего в состояние на дату не входит — на cutoff
+      банк его ещё не пережил;
+
+      сбой до первого наблюдения клиента ничего не отнял у того,
+      чего ещё не было;
+
+      сбой после конца покрытия — после ухода клиента или
+      закрытия источника — тоже ничего не отнял: наблюдать к
+      тому моменту было уже нечего.
+    """
+
+    if not value:
+        return ()
+
+    days = [str(item) for item in json.loads(value)]
+
+    floor = None if first_seen is None else first_seen.date().isoformat()
+
+    ceiling = cutoff.date().isoformat()
+
+    if last_available is not None:
+        ceiling = min(ceiling, last_available.date().isoformat())
+
+    return tuple(
+        day
+        for day in days
+        if day < ceiling and (floor is None or day >= floor)
+    )
+
+
 def coverage_as_of(rows: list[dict], cutoff: datetime) -> tuple[list[SourceState], list[str]]:
     """
     Состояние источника на дату по ДАТИРОВАННЫМ полям.
 
     Итоговые статусы выгрузки (partial, ended, none) и причины без
-    даты известности (no_consent, client_not_onboarded, outage) в
+    даты известности (no_consent, client_not_onboarded) в
     состояние не входят: они описывают весь период наблюдения, а не
     момент cutoff.
+
+    Дни сбоя датированы, поэтому они в состояние ВХОДЯТ — но
+    только те, что уже случились к cutoff.
     """
 
     states: list[SourceState] = []
@@ -611,6 +626,9 @@ def coverage_as_of(rows: list[dict], cutoff: datetime) -> tuple[list[SourceState
                 first_seen=first_seen,
                 last_available_at=last_available,
                 reason=row.get("coverage_reason"),
+                outage_days=_outages_before(
+                    row.get("outage_days"), first_seen, last_available, cutoff
+                ),
             )
         )
 
@@ -636,20 +654,20 @@ def entity_states_as_of(events: pa.Table, cutoff: datetime) -> list[EntityState]
     Состояния счетов, карт, договоров, заявок и обращений по
     известным переходам.
 
-    Переход вступает в силу по effective_at: заранее известное
-    будущее изменение состояния ещё не меняет.
+    Переход вступает в силу тем мгновением, которым записан:
+    отдельного момента вступления в силу у записи нет.
 
-    Порядок применения тоже по effective_at, а не по времени
-    записи. Блокировка, объявленная в феврале с первого апреля,
-    действует ПОЗЖЕ мартовской разблокировки, хотя записана
-    раньше неё. Считая по event_time, слой возвращал бы карту
-    действующей там, где она заблокирована.
+    ОГРАНИЧЕНИЕ. Прежний контракт различал «банк узнал» и
+    «изменение действует», и объявленная заранее блокировка
+    применялась позже уже состоявшейся разблокировки. Теперь
+    такое различие выразить нечем, и событие обязано рождаться
+    в тот момент, когда изменение действительно наступает.
     """
 
     if events.num_rows == 0:
         return []
 
-    columns = ["event_type", "event_time", "effective_at", "stable_event_index"] + [
+    columns = ["event_type", "event_time", "stable_event_index"] + [
         name for name in ENTITY_FIELDS if name in events.column_names
     ]
 
@@ -678,7 +696,6 @@ def entity_states_as_of(events: pa.Table, cutoff: datetime) -> list[EntityState]
                     "last_transition": None,
                     "last_transition_at": None,
                     "effective": [],
-                    "pending": [],
                 },
             )
 
@@ -687,12 +704,7 @@ def entity_states_as_of(events: pa.Table, cutoff: datetime) -> list[EntityState]
             if transition is None:
                 continue
 
-            effective = row["effective_at"] or row["event_time"]
-
-            if effective >= cutoff:
-                # Изменение известно, но ещё не действует.
-                item["pending"].append((transition, effective))
-                continue
+            effective = row["event_time"]
 
             item["effective"].append(
                 (
@@ -703,9 +715,10 @@ def entity_states_as_of(events: pa.Table, cutoff: datetime) -> list[EntityState]
                 )
             )
 
-    # Состояние собирается из вступивших переходов в порядке
-    # вступления в силу. Ничья по effective_at разрешается
-    # временем записи, затем местом в ленте.
+    # Состояние собирается из переходов в порядке времени
+    # события. Отдельного момента вступления в силу у записи
+    # нет: изменение действует с того мгновения, которым оно
+    # записано.
     for (kind, _entity_id), item in tracked.items():
 
         for effective, event_time, _index, transition in sorted(item["effective"]):
@@ -732,7 +745,6 @@ def entity_states_as_of(events: pa.Table, cutoff: datetime) -> list[EntityState]
             first_mention=item["first_mention"],
             last_transition=item["last_transition"],
             last_transition_at=item["last_transition_at"],
-            pending=tuple(item["pending"]),
         )
         for (kind, entity_id), item in sorted(tracked.items())
     ]
@@ -745,29 +757,54 @@ def entity_states_as_of(events: pa.Table, cutoff: datetime) -> list[EntityState]
 
 def _acting_sides(rows: list[dict], cutoff: datetime) -> dict[str, dict]:
     """
-    Действующая версия каждой стороны, произошедшей до cutoff.
+    Стороны перевода, произошедшие до cutoff.
 
-    Правило то же, что и в истории событий: наибольшая версия, при
-    равных версиях первая строка ленты. Иначе представление
-    переводов показывало бы сумму, которую история событий уже
-    считает исправленной.
+    Правило то же, что и в истории событий: повтор
+    идентификатора пропускается, из оставшихся берётся первая
+    строка ленты.
     """
 
     chosen: dict[str, dict] = {}
 
     for row in rows:
 
-        if row["is_exact_duplicate"] or row["event_time"] >= cutoff:
+        if row["is_repeated_event_id"] or row["event_time"] >= cutoff:
             continue
 
         known = chosen.get(row["event_id"])
 
-        if known is None or (row["event_version"], -row["raw_row"]) > (
-            known["event_version"], -known["raw_row"]
-        ):
+        if known is None or -row["raw_row"] > -known["raw_row"]:
             chosen[row["event_id"]] = row
 
     return chosen
+
+
+def _matching_side(row: dict, other: dict) -> bool:
+    """
+    Другая строка описывает ВСТРЕЧНУЮ сторону того же перевода.
+
+    Одного transfer_id недостаточно: сходиться должны сторона
+    (одна списывает, другая зачисляет), сумма и счёт. Списание и
+    зачисление одной и той же суммы на один и тот же счёт — это
+    не перевод, а две записи об одном.
+    """
+
+    if other["event_id"] == row["event_id"]:
+        return False
+
+    mine = TRANSFER_SIDES.get(row["event_type"])
+    theirs = TRANSFER_SIDES.get(other["event_type"])
+
+    if mine is None or theirs is None or mine == theirs:
+        return False
+
+    if row["amount"] is None or other["amount"] is None:
+        return False
+
+    if int(row["amount"]) != int(other["amount"]):
+        return False
+
+    return row.get("account_id") != other.get("account_id")
 
 
 def transfers_as_of(index: tuple[dict, dict], client_id: str, cutoff: datetime) -> list[TransferSide]:
@@ -779,7 +816,7 @@ def transfers_as_of(index: tuple[dict, dict], client_id: str, cutoff: datetime) 
     односторонний, и знать о контрагенте он не может.
 
     Стоимость по СВОИМ переводам: берутся стороны клиента, и
-    встречные ищутся по correlation_id каждой из них. Проход по
+    встречные ищутся по transfer_id каждой из них. Проход по
     всем переводам группы на каждого клиента давал квадратичную
     стоимость этапа.
     """
@@ -792,13 +829,41 @@ def transfers_as_of(index: tuple[dict, dict], client_id: str, cutoff: datetime) 
 
     for row in mine.values():
 
-        transfer_id = row["correlation_id"]
+        transfer_id = row["transfer_id"]
 
         counterparts = _acting_sides(by_transfer.get(transfer_id, ()), cutoff)
 
-        others = sorted(
-            {item["client_id"] for item in counterparts.values() if item["client_id"] != client_id}
+        # Встречная сторона это ДРУГАЯ СТРОКА того же перевода, а
+        # не обязательно строка другого человека. Перевод между
+        # своими счетами наблюдается целиком у одного клиента, и
+        # отбор «чей client_id отличается» терял его: обе ноги
+        # помечались как перевод без встречной стороны.
+        #
+        # Но одного общего ключа мало. Пара обязана СОЙТИСЬ ПО
+        # ФОРМЕ: противоположная сторона, та же сумма и другой
+        # счёт. Иначе стороной становилась бы любая строка с тем
+        # же transfer_id — например, вторая попытка перевода той
+        # же суммы или соседняя нога, случайно попавшая под тот
+        # же ключ.
+        holders = sorted(
+            {
+                item["client_id"]
+                for item in counterparts.values()
+                if _matching_side(row, item)
+            }
         )
+
+        outside = [name for name in holders if name != client_id]
+
+        if not holders:
+            pair_state = PAIR_NOT_VISIBLE
+            counterpart = None
+        elif not outside:
+            pair_state = PAIR_OWN
+            counterpart = client_id
+        else:
+            pair_state = PAIR_VISIBLE
+            counterpart = outside[0] if len(outside) == 1 else None
 
         out.append(
             TransferSide(
@@ -808,8 +873,8 @@ def transfers_as_of(index: tuple[dict, dict], client_id: str, cutoff: datetime) 
                 event_time=row["event_time"],
                 amount=row["amount"],
                 direction=row["direction"],
-                pair_state=PAIR_VISIBLE if others else PAIR_NOT_VISIBLE,
-                counterpart_client_id=others[0] if len(others) == 1 else None,
+                pair_state=pair_state,
+                counterpart_client_id=counterpart,
             )
         )
 
@@ -994,10 +1059,10 @@ def history_as_of(store: CanonicalStore, client: str | int, cutoff: datetime) ->
 
     table = store.client_events(client)
 
-    events, counts, conflicts = visible_events(table, cutoff)
+    events, counts, _ = visible_events(table, cutoff)
 
     profile_rows = store.profile_rows(client_id)
-    profile, profile_meta = profile_as_of(profile_rows, cutoff)
+    profile, profile_meta = profile_of(profile_rows)
 
     coverage_rows = store.coverage_rows(client_id)
     coverage, coverage_notes = coverage_as_of(coverage_rows, cutoff)
@@ -1010,18 +1075,6 @@ def history_as_of(store: CanonicalStore, client: str | int, cutoff: datetime) ->
     limitations = list(coverage_notes)
 
     limitations.extend(relationship.incomplete_reasons)
-
-    for item in conflicts:
-        limitations.append(
-            f"конфликт версий события {item['event_id']}: взята строка {item['kept_raw_row']}, "
-            f"отброшена {item['dropped_raw_row']}"
-        )
-
-    pending = [item for item in entities if item.pending]
-    if pending:
-        limitations.append(
-            f"известных, но ещё не вступивших в силу изменений: {sum(len(item.pending) for item in pending)}"
-        )
 
     without_opening = [item for item in entities if not item.opening_observed and item.kind in ("account", "card", "contract")]
     if without_opening:
@@ -1055,6 +1108,7 @@ __all__ = [
     "ENTITY_STATE",
     "INTERNAL_COLUMNS",
     "PAIR_NOT_VISIBLE",
+    "PAIR_OWN",
     "PAIR_VISIBLE",
     "STAGE",
     "STAGE_VERSION",
@@ -1071,7 +1125,7 @@ __all__ = [
     "history_as_of",
     "product_key",
     "products_as_of",
-    "profile_as_of",
+    "profile_of",
     "relationship_as_of",
     "transfers_as_of",
     "visible_events",

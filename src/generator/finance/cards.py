@@ -318,6 +318,14 @@ def apply_card_payment(state: "CardCreditState", amount: int, month_index: int) 
         remaining -= take
         paid += take
 
+    # Просрочка это состояние договора, а не счётчик обходов:
+    # закрытый долг обнуляет её сразу, здесь же. Иначе событие
+    # платежа несло бы вчерашнее число дней и противоречило бы
+    # соседним записям.
+    if state.outstanding <= 0:
+        state.dpd = 0
+        state.delinquency_marks = ()
+
     return paid
 
 

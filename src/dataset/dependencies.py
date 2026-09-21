@@ -28,10 +28,8 @@ from .encoding import EncodedEvent, EncodedRecord
 #   outside_context        событие видно банку, но в пример не
 #                          попало по отбору; тождество осталось
 #                          в служебной таблице
-#   profile                значение анкеты, действующей на срез
-#   profile_other_version  анкета другой версии: доход брался на
-#                          момент операции, а в примере лежит
-#                          анкета на срез
+#   profile                значение анкеты клиента; анкета одна,
+#                          и в примере лежит именно она
 #   external               справочник, сущность или прошлое
 #                          клиента целиком: позиционного адреса
 #                          у такого источника нет
@@ -55,16 +53,14 @@ from .encoding import EncodedEvent, EncodedRecord
 DEP_IN_CONTEXT = 0
 DEP_OUTSIDE_CONTEXT = 1
 DEP_PROFILE = 2
-DEP_PROFILE_OTHER_VERSION = 3
-DEP_EXTERNAL = 4
-DEP_SOURCE_VALUE_MISSING = 5
-DEP_CAUSE_EVENT = 6
+DEP_EXTERNAL = 3
+DEP_SOURCE_VALUE_MISSING = 4
+DEP_CAUSE_EVENT = 5
 
 DEP_STATUSES: tuple[str, ...] = (
     "in_context",
     "outside_context",
     "profile",
-    "profile_other_version",
     "external",
     "source_value_missing",
     "cause_event",
@@ -135,7 +131,6 @@ def resolve(
     kept: list[int],
     value_offsets: list[int],
     profile: EncodedRecord,
-    profile_version,
     cause_of: dict[tuple[str, int], str | None],
 ) -> Dependencies:
     """
@@ -153,7 +148,7 @@ def resolve(
     slot_of_position = {position: number for number, position in enumerate(kept)}
 
     position_of_identity = {
-        (item.event_id, item.event_version): position for position, item in enumerate(events)
+        item.event_id: position for position, item in enumerate(events)
     }
 
     position_of_event_id: dict[str, int] = {}
@@ -188,11 +183,11 @@ def resolve(
 
             for source in sources:
                 _add_source(out, target, key, source, events, slot_of_position,
-                            position_of_identity, value_offsets, profile, profile_version)
+                            position_of_identity, value_offsets, profile)
 
         # --- признаки связи ---
 
-        cause_id = cause_of.get((event.event_id, event.event_version))
+        cause_id = cause_of.get(event.event_id)
 
         if cause_id is None:
             continue
@@ -236,14 +231,13 @@ def _add_source(
     position_of_identity: dict[tuple, int],
     value_offsets: list[int],
     profile: EncodedRecord,
-    profile_version,
 ) -> None:
 
     kind = source.get("kind")
 
     if kind == "event":
 
-        identity = (source.get("event_id"), source.get("event_version"))
+        identity = source.get("event_id")
 
         position = position_of_identity.get(identity)
 
@@ -273,15 +267,8 @@ def _add_source(
 
     if kind == "profile":
 
-        # Доход берётся по версии анкеты, действовавшей в момент
-        # операции, а в примере лежит анкета на срез. Это разные
-        # версии, и прятать их вместе нельзя.
-        same = profile_version is not None and source.get("profile_version") == profile_version
-
-        if not same:
-            out.add(target, -1, -1, DEP_PROFILE_OTHER_VERSION, key)
-            return
-
+        # Анкета у клиента одна, и в примере лежит именно она:
+        # выбирать версию больше не из чего.
         local = _value_index(profile, source.get("key"))
 
         if local is None:
@@ -303,7 +290,6 @@ __all__ = [
     "DEP_IN_CONTEXT",
     "DEP_OUTSIDE_CONTEXT",
     "DEP_PROFILE",
-    "DEP_PROFILE_OTHER_VERSION",
     "DEP_SOURCE_VALUE_MISSING",
     "DEP_STATUSES",
     "NOT_TRACKED",

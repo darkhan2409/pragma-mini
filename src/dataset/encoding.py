@@ -57,13 +57,10 @@ class EncodedEvent:
     record: EncodedRecord
 
     event_id: str
-    event_version: int
     stable_event_index: int
     event_time: datetime
     source: str
     event_type: str | None
-    time_precision: str
-    hour_known: bool
     calendar: tuple[float, ...]
 
     refs: dict = field(default_factory=dict)
@@ -125,10 +122,10 @@ def causes_as_of(store, client_id: str, cutoff: datetime) -> dict[tuple[str, int
     if table.num_rows == 0:
         return {}
 
-    columns = table.select(["event_id", "event_version", "cause_event_id"]).to_pylist()
+    columns = table.select(["event_id", "cause_event_id"]).to_pylist()
 
     return {
-        (row["event_id"], row["event_version"]): row["cause_event_id"]
+        row["event_id"]: row["cause_event_id"]
         for row in columns
     }
 
@@ -184,13 +181,10 @@ def encode_history(
             EncodedEvent(
                 record=encode_event(artifacts, event, limit),
                 event_id=event.event_id,
-                event_version=event.event_version,
                 stable_event_index=event.stable_event_index,
                 event_time=event.event_time,
                 source=event.source,
                 event_type=event.values.get("event_type"),
-                time_precision=event.timing.time_precision,
-                hour_known=event.hour_known,
                 calendar=tuple(event.calendar),
                 refs=references(artifacts, event),
                 absent_reasons=absent_reasons(event, reason_of_event.get(event.stable_event_index)),

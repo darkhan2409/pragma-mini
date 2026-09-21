@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .. import params as params_module
-from ..config import HISTORY_END, HISTORY_START
+from .. import config
 from ..rng import NS_STRESS, keyed_rng
 from .persona import Persona
 
@@ -103,15 +103,12 @@ def plan_episodes(persona: Persona, events: tuple) -> tuple:
 
     settings = params_module.active().stress
 
-    if persona.is_test_account:
-        return ()
-
     discipline = persona.trait("financial_discipline")
     savings = persona.trait("savings_propensity")
 
     candidates = _trigger_events(persona, events)
 
-    span_days = (HISTORY_END - HISTORY_START).days
+    span_days = (config.HISTORY_END - config.HISTORY_START).days
     years = span_days / 365.25
 
     shock_rng = keyed_rng(NS_STRESS, persona.client_ordinal, 2)
@@ -121,7 +118,7 @@ def plan_episodes(persona: Persona, events: tuple) -> tuple:
     for index in range(shocks):
         item_rng = keyed_rng(NS_STRESS, persona.client_ordinal, 3, index)
         offset = item_rng.integers(0, span_days)
-        candidates.append(("random_shock", HISTORY_START + timedelta(days=int(offset))))
+        candidates.append(("random_shock", config.HISTORY_START + timedelta(days=int(offset))))
 
     candidates.sort(key=lambda item: item[1])
 

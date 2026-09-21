@@ -32,6 +32,12 @@ from .settings import GroupWindow, PreprocessingConfig
 #   что именно разрешено видеть будущему fit — train на fit_end,
 #   и контрольная сумма ровно этого содержимого.
 #
+# Группы генерируются по одной, и этап описывает те, что есть.
+# Без train он не запускается: разрешённый корпус собирается
+# только из неё. Отсутствие val или test — ограничение отчёта,
+# а не ошибка; независимость и общий мир при одной группе
+# сравнивать не с чем, и отчёт говорит это прямо.
+#
 # Что проверяется:
 #   популяции независимы: свой seed, ни одного общего client_id;
 #   мир общий: справочники продуктов, мерчантов и географии
@@ -54,13 +60,13 @@ from .settings import GroupWindow, PreprocessingConfig
 # ============================================================
 
 
-STAGE = "split"
-STAGE_VERSION = "3.5.0"
+STAGE = "corpus"
+STAGE_VERSION = "5.0.0"
 SCHEMA_VERSION = 1
 
-SPLIT_MANIFEST_FILE = "split_manifest.json"
+CORPUS_MANIFEST_FILE = "corpus_manifest.json"
 TRAIN_INDEX_FILE = "train_corpus_index.parquet"
-REPORT_MD_FILE = "split_report.md"
+REPORT_MD_FILE = "corpus_report.md"
 
 TRAIN_GROUP = "train"
 
@@ -68,32 +74,24 @@ STATUS_OK = "ok"
 STATUS_BLOCKED_BY_INPUT = "blocked_by_input"
 STATUS_BLOCKED = "blocked"
 
-EXCLUDED_TEST_ACCOUNT = "test_account"
-
 # Справочники, которые обязаны быть общими у трёх групп.
 WORLD_CATALOGS: tuple[str, ...] = ("products", "merchants", "geography")
 
 # Поля конверта, входящие в контрольную сумму содержимого.
-# is_test_account не входит: тестовые клиенты в рабочие группы не
-# попадают вовсе, и признак в них всегда пуст.
+# Это весь конверт, кроме payload: он идёт в сумму отдельно,
+# разобранными колонками.
 CHECKSUM_ENVELOPE: tuple[str, ...] = (
     "event_id",
     "client_id",
     "event_type",
     "source",
     "event_time",
-    "effective_at",
-    "time_precision",
-    "event_version",
-    "change_initiator",
-    "correlation_id",
-    "link_type",
 )
 
-# Поля версии профиля, которые в сумму НЕ входят: служебный
-# индекс, трассировка к RAW и valid_to. Закрытие версии выражает
-# следующая строка, а на cutoff её может ещё не быть.
-PROFILE_SKIP: frozenset[str] = frozenset({"client_idx", "raw_file", "raw_row_group", "raw_row", "valid_to"})
+# Поля профиля, которые в сумму НЕ входят: служебный индекс и
+# трассировка к RAW. Сам профиль это одна строка на клиента, и
+# в сумму она входит целиком.
+PROFILE_SKIP: frozenset[str] = frozenset({"client_idx", "raw_file", "raw_row_group", "raw_row"})
 
 # Колонки, которых в сумме нет: производные canonical и поля
 # конверта, не названные выше.
@@ -129,7 +127,7 @@ class GroupInput:
     diagnostic_mode: bool = False
 
 
-class SplitError(ValueError):
+class CorpusError(ValueError):
     """
     Корпус открывать нельзя: разделение непригодно, canonical
     пересобран после него либо клиент не входит в группу.
@@ -137,7 +135,7 @@ class SplitError(ValueError):
 
 
 @dataclass
-class SplitResult:
+class CorpusResult:
     report: dict
     outputs: list[Path] = field(default_factory=list)
 
@@ -190,6 +188,12 @@ def world_check(worlds: dict[str, dict]) -> dict:
 
     mismatches: list[str] = []
     notes: list[str] = []
+
+    if len(worlds) < 2:
+        notes.append(
+            "групп меньше двух: общий мир не с чем сравнивать, равенство справочников "
+            "не проверено и принято по умолчанию"
+        )
 
     def compare(label: str, values: dict[str, object]) -> None:
         if len({str(value) for value in values.values()}) > 1:
@@ -246,6 +250,7 @@ def population_check(clients: dict[str, list[str]], seeds: dict[str, int]) -> di
     repeated = sorted({value for value in values if values.count(value) > 1})
 
     return {
+        "compared": len(names) > 1,
         "seeds": dict(sorted(seeds.items())),
         "distinct_seeds": not repeated,
         "repeated_seeds": repeated,
@@ -284,14 +289,15 @@ def _event_rows(history: ClientHistory) -> list[dict]:
     return table.select(keep).to_pylist()
 
 
-def _profile_rows(store: CanonicalStore, client_id: str, cutoff: datetime) -> list[dict]:
+def _profile_rows(store: CanonicalStore, client_id: str) -> list[dict]:
     """
-    Все версии профиля, действовавшие к cutoff. В сумму входят
-    именно они, а не только последняя: правка старой версии
-    меняет знание банка о прошлом.
+    Профиль клиента: одна итоговая строка на границу выгрузки.
+
+    Версий у профиля нет, поэтому отбирать по cutoff нечего:
+    строка либо есть, либо клиента банк ещё не считал.
     """
 
-    rows = [row for row in store.profile_rows(client_id) if row["valid_from"] < cutoff]
+    rows = store.profile_rows(client_id)
 
     return [{name: value for name, value in row.items() if name not in PROFILE_SKIP} for row in rows]
 
@@ -357,7 +363,7 @@ def collect_visible(store: CanonicalStore, client_ids: list[str], window: GroupW
 
         stable_index.extend(history.events.column("stable_event_index").to_pylist())
 
-        profile_digest.extend(_profile_rows(store, client_id, cutoff))
+        profile_digest.extend(_profile_rows(store, client_id))
         coverage_digest.extend([item.as_dict() for item in history.coverage])
 
         if not rows:
@@ -392,7 +398,7 @@ def collect_visible(store: CanonicalStore, client_ids: list[str], window: GroupW
         "coverage_rows": coverage_digest.rows,
         "rule": (
             "по финальной очищенной истории событий до cutoff: конверт и payload видимых строк, "
-            "версии профиля с valid_from < cutoff, датированные факты покрытия; служебные индексы, "
+            "итоговую строку профиля, датированные факты покрытия; служебные индексы, "
             "флаги и итоговые статусы выгрузки не входят"
         ),
     }
@@ -472,7 +478,7 @@ class TrainCorpus:
         self._allowed = frozenset(self.client_ids)
 
     @staticmethod
-    def open(split_dir: Path, canonical_dir: Path, processed_dir: Path | None = None,
+    def open(corpus_dir: Path, canonical_dir: Path, processed_dir: Path | None = None,
              allow_unusable: bool = False, allow_short_horizon: bool = False,
              products: pa.Table | None = None) -> "TrainCorpus":
         """
@@ -491,12 +497,12 @@ class TrainCorpus:
         разрешение на группу выдаёт разделение.
         """
 
-        split_dir = Path(split_dir)
+        corpus_dir = Path(corpus_dir)
 
         # Каталог набора: рядом с ним лежат маркеры этапов.
-        processed = Path(processed_dir) if processed_dir is not None else split_dir.parent
+        processed = Path(processed_dir) if processed_dir is not None else corpus_dir.parent
 
-        manifest = json.loads((split_dir / SPLIT_MANIFEST_FILE).read_text(encoding="utf-8"))
+        manifest = json.loads((corpus_dir / CORPUS_MANIFEST_FILE).read_text(encoding="utf-8"))
 
         corpus = manifest.get("train_corpus")
 
@@ -504,7 +510,7 @@ class TrainCorpus:
 
             if not manifest.get("usable"):
                 reasons = manifest.get("errors") or manifest.get("input_dependencies") or []
-                raise SplitError(
+                raise CorpusError(
                     f"разделение со статусом {manifest.get('status')} непригодно для обучения: "
                     f"{'; '.join(reasons) or 'причина не названа'}. "
                     "Для диагностики откройте с allow_unusable=True"
@@ -513,7 +519,7 @@ class TrainCorpus:
             actual = canonical_fingerprint(processed)
 
             if actual is None or actual != manifest["groups"][TRAIN_GROUP]["canonical_fingerprint"]:
-                raise SplitError(
+                raise CorpusError(
                     "canonical группы train не тот, на котором построено разделение: "
                     "выполните этап split заново"
                 )
@@ -523,7 +529,7 @@ class TrainCorpus:
             changed = edited_canonical_files(processed, canonical_dir)
 
             if changed:
-                raise SplitError(
+                raise CorpusError(
                     "файлы canonical изменились после разделения ("
                     + ", ".join(changed[:5])
                     + "): выполните этапы canonical и split заново"
@@ -531,21 +537,21 @@ class TrainCorpus:
 
             if not allow_short_horizon and not manifest.get("contract_met", True):
                 reasons = (manifest.get("contract") or {}).get("reasons") or []
-                raise SplitError(
+                raise CorpusError(
                     "разделение технически исправно, но договорённый горизонт не выполнен: "
                     + ("; ".join(reasons) or "причина не названа")
                     + ". Откройте с allow_short_horizon=True, если это осознанное решение"
                 )
 
         if corpus is None:
-            raise SplitError("разрешённого train-корпуса в этом разделении нет")
+            raise CorpusError("разрешённого train-корпуса в этом разделении нет")
 
-        index_path = split_dir / TRAIN_INDEX_FILE
+        index_path = corpus_dir / TRAIN_INDEX_FILE
 
         index = pq.read_table(index_path)
 
         if index.num_rows != corpus["rows"]:
-            raise SplitError(
+            raise CorpusError(
                 f"индекс корпуса разошёлся с манифестом: строк в файле {index.num_rows}, "
                 f"в манифесте {corpus['rows']}. Выполните этап split заново"
             )
@@ -558,7 +564,7 @@ class TrainCorpus:
             expected = corpus.get("index_sha256")
 
             if not expected or sha256_file(index_path) != expected:
-                raise SplitError(
+                raise CorpusError(
                     "индекс корпуса изменён после разделения или построен прежней версией "
                     "этапа: выполните этап split заново"
                 )
@@ -581,7 +587,7 @@ class TrainCorpus:
         """
 
         if client_id not in self._allowed:
-            raise SplitError(
+            raise CorpusError(
                 f"клиент {client_id!r} не входит в разрешённую train-группу: "
                 "он исключён, принадлежит другой группе либо отсутствует в разделении"
             )
@@ -614,8 +620,8 @@ def group_summary(source: GroupInput, store: CanonicalStore, clients: list[dict]
     покрытие времени на её конечном cutoff.
     """
 
-    working = sorted(row["client_id"] for row in clients if not row["is_test_account"])
-    excluded = sorted(row["client_id"] for row in clients if row["is_test_account"])
+    working = sorted(row["client_id"] for row in clients)
+    excluded: list[str] = []
 
     times = visible.index.column("event_time").to_pylist()
 
@@ -632,7 +638,7 @@ def group_summary(source: GroupInput, store: CanonicalStore, clients: list[dict]
         "clients_working": len(working),
         "clients": working,
         "clients_sha256": sha256_bytes("\n".join(working).encode("utf-8")),
-        "excluded": {EXCLUDED_TEST_ACCOUNT: len(excluded)},
+        "excluded": {},
         "excluded_clients": excluded,
         "visible_events": visible.index.num_rows,
         "eligible_events": int(sum(visible.index.column("mlm_target_eligible").to_pylist())),
@@ -654,7 +660,7 @@ def group_summary(source: GroupInput, store: CanonicalStore, clients: list[dict]
 # ============================================================
 
 
-def build_split(sources: list[GroupInput], config: PreprocessingConfig, target: Path) -> SplitResult:
+def build_corpus(sources: list[GroupInput], config: PreprocessingConfig, target: Path) -> CorpusResult:
     """
     Закрепляет группы, проверяет их независимость и общий мир,
     собирает разрешённый train-интерфейс и пишет артефакты.
@@ -668,8 +674,25 @@ def build_split(sources: list[GroupInput], config: PreprocessingConfig, target: 
     input_dependencies: list[str] = []
     limitations: list[str] = []
 
-    for name in sorted(set(config.windows) - set(by_group)):
-        errors.append(f"группа {name} отсутствует: разделение описывает три независимые выгрузки")
+    # Группы генерируются по одной, поэтому отсутствие соседней
+    # не ошибка: разделение описывает то, что есть. Исключение
+    # одно — train: без него не из чего собрать разрешённый
+    # корпус, ради которого этап и существует.
+    missing = sorted(set(config.windows) - set(by_group))
+
+    if TRAIN_GROUP in missing:
+        errors.append(
+            f"группа {TRAIN_GROUP} отсутствует: без неё нет разрешённого корпуса, "
+            "а он единственный вход будущего fit"
+        )
+
+    for name in missing:
+        if name != TRAIN_GROUP:
+            limitations.append(
+                f"группа {name} отсутствует: разделение описывает только "
+                + ", ".join(sorted(by_group))
+                + "; оценка на ней невозможна, пока выгрузка не сделана"
+            )
 
     stores: dict[str, CanonicalStore] = {}
     clients: dict[str, list[dict]] = {}
@@ -726,7 +749,7 @@ def build_split(sources: list[GroupInput], config: PreprocessingConfig, target: 
         if source.diagnostic_mode:
             limitations.append(f"группа {name}: canonical собран в режиме диагностики (паспорт contract_mismatch)")
 
-        working = [row["client_id"] for row in clients[name] if not row["is_test_account"]]
+        working = [row["client_id"] for row in clients[name]]
 
         visible[name] = collect_visible(store, working, window)
 
@@ -801,6 +824,12 @@ def build_split(sources: list[GroupInput], config: PreprocessingConfig, target: 
         "usable": status == STATUS_OK,
         "contract": contract,
         "contract_met": not reasons,
+        "groups_present": sorted(by_group),
+        "groups_missing": missing,
+        "groups_rule": (
+            "группы генерируются по одной; отсутствие val или test это ограничение, "
+            "а не ошибка, и потребитель обязан называть группу явно"
+        ),
         "shared_world": world["shared_world"],
         "world": world,
         "population": population,
@@ -847,15 +876,15 @@ def build_split(sources: list[GroupInput], config: PreprocessingConfig, target: 
         outputs.append(index_path)
         report["train_corpus"]["index_sha256"] = sha256_file(index_path)
 
-    manifest_path = target / SPLIT_MANIFEST_FILE
+    manifest_path = target / CORPUS_MANIFEST_FILE
     write_json(manifest_path, report)
     outputs.append(manifest_path)
 
     md_path = target / REPORT_MD_FILE
-    write_text(md_path, render_split_md(report))
+    write_text(md_path, render_corpus_md(report))
     outputs.append(md_path)
 
-    return SplitResult(report=report, outputs=outputs)
+    return CorpusResult(report=report, outputs=outputs)
 
 
 # ============================================================
@@ -875,7 +904,7 @@ def _ordered(groups: dict) -> list[tuple[str, dict]]:
     return sorted(groups.items(), key=lambda item: (order.get(item[0], len(order)), item[0]))
 
 
-def render_split_md(report: dict) -> str:
+def render_corpus_md(report: dict) -> str:
 
     out: list[str] = []
 
@@ -905,7 +934,6 @@ def render_split_md(report: dict) -> str:
                     item["seed"],
                     item["clients_total"],
                     item["clients_working"],
-                    item["excluded"][EXCLUDED_TEST_ACCOUNT],
                     item["window"]["history_start"][:10],
                     item["raw_history_start"][:10],
                     item["window"]["final_cutoff"][:10],
@@ -918,7 +946,6 @@ def render_split_md(report: dict) -> str:
                 "seed",
                 "клиентов",
                 "рабочих",
-                "исключено",
                 "окно с",
                 "выгрузка с",
                 "cutoff",
@@ -1019,7 +1046,7 @@ def render_split_md(report: dict) -> str:
 __all__ = [
     "REPORT_MD_FILE",
     "SCHEMA_VERSION",
-    "SPLIT_MANIFEST_FILE",
+    "CORPUS_MANIFEST_FILE",
     "STAGE",
     "STAGE_VERSION",
     "STATUS_BLOCKED",
@@ -1029,17 +1056,17 @@ __all__ = [
     "TRAIN_INDEX_FILE",
     "TRAIN_INDEX_SCHEMA",
     "GroupInput",
-    "SplitError",
-    "SplitResult",
+    "CorpusError",
+    "CorpusResult",
     "TrainCorpus",
     "VisibleSet",
-    "build_split",
+    "build_corpus",
     "canonical_fingerprint",
     "catalog_digests",
     "collect_visible",
     "group_summary",
     "mlm_target_eligible",
     "population_check",
-    "render_split_md",
+    "render_corpus_md",
     "world_check",
 ]

@@ -216,7 +216,7 @@ def _check_scan(stats: FitStatistics, corpus: FitCorpus, schema: SemanticSchema)
     if stats.events != corpus.declared_rows:
         raise ContractError(
             f"событий прочитано {stats.events}, а разделение объявило {corpus.declared_rows}: "
-            "корпус и разделение разошлись, выполните этап split заново"
+            "корпус и реестр групп разошлись, выполните этап corpus заново"
         )
 
     if stats.clients != len(corpus.client_ids):
@@ -469,7 +469,7 @@ def _stage_versions(processed_dir: Path, group: str) -> dict:
         entry = stages.get(stage, {}).get(group, {})
         out[stage] = entry.get("stage_version")
 
-    out["split"] = stages.get("split", {}).get("stage_version")
+    out["corpus"] = stages.get("corpus", {}).get("stage_version")
 
     return out
 
@@ -539,7 +539,7 @@ def build_contract(
         *[f"{item['key']}: {item['decision']}" for item in accepted_limits],
         "справочник мерчантов не версионирован во времени: атрибуты точки берутся такими, "
         "какие они на момент выгрузки, и исключить будущее знание о точке нельзя",
-        *[f"разделение: {item}" for item in corpus.split_limitations],
+        *[f"реестр групп: {item}" for item in corpus.corpus_limitations],
         *[f"история клиента: {item}" for item in sorted(stats.limitations)],
     ]
 
@@ -561,19 +561,18 @@ def build_contract(
             "clients": stats.clients,
             "events": stats.events,
             "values": stats.values,
-            "profiles_as_of": stats.profile_versions,
+            "profiles": stats.profiles,
             "clients_without_profile": stats.clients_without_profile,
-            "day_precision_events": stats.day_precision_events,
             "event_types": dict(sorted(stats.event_types.items())),
         },
-        "declared_by_split": {
+        "declared_by_corpus": {
             "events_rows": corpus.declared_rows,
-            "source_profile_version_rows": corpus.declared_profile_rows,
+            "profile_rows": corpus.declared_profile_rows,
             "clients_without_profile": corpus.declared_clients_without_profile,
             "content_sha256": corpus.content_sha256,
             "rule": (
-                "source_profile_version_rows это все версии профиля, известные к fit_end; fit видит по одной "
-                "действующей версии на клиента, а прежние значения приходят событиями изменения профиля"
+                "profile_rows это итоговые анкеты клиентов, по одной на клиента; "
+                "прежние значения приходят событиями изменения профиля"
             ),
         },
         "keys": {

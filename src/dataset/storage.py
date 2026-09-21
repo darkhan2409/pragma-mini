@@ -13,7 +13,6 @@ from src.preprocessing.artifacts import TableWriter, dumps_json, sha256_file, wr
 from .sample import Sample
 from .version import FORMAT_VERSION, SCHEMA_VERSION
 
-
 # ============================================================
 # ИДЕЯ
 # ============================================================
@@ -38,7 +37,6 @@ from .version import FORMAT_VERSION, SCHEMA_VERSION
 # становится одним переименованием.
 # ============================================================
 
-
 MANIFEST_FILE = "dataset_manifest.json"
 INDEX_FILE = "samples.parquet"
 SHARDS_DIR = "shards"
@@ -54,7 +52,6 @@ REPLACED_SUFFIX = ".replaced"
 # смещения pyarrow это int32.
 LIST_LIMIT = 2 ** 31 - 1
 
-
 # Колонки, объявленные модели, Masker и трассировке. Список
 # едет в манифест: потребитель не должен угадывать, что ему
 # разрешено читать.
@@ -65,7 +62,6 @@ MODEL_COLUMNS: tuple[str, ...] = (
     "event_starts",
     "event_lengths",
     "calendar",
-    "hour_known",
     "hours_to_cutoff",
     "coverage_at_cutoff",
     "history_age_days",
@@ -99,8 +95,6 @@ SERVICE_COLUMNS: tuple[str, ...] = (
     "group",
     "client_id",
     "cutoff",
-    "profile_version",
-    "valid_from",
     "has_profile",
     "history_age_reason",
     "truncated",
@@ -110,7 +104,6 @@ SERVICE_COLUMNS: tuple[str, ...] = (
     "limitations",
     "dep_key",
 )
-
 
 SHARD_SCHEMA = pa.schema(
     [
@@ -129,7 +122,7 @@ SHARD_SCHEMA = pa.schema(
         ("event_starts", pa.list_(pa.int32())),
         ("event_lengths", pa.list_(pa.int32())),
         ("calendar", pa.list_(pa.float32())),
-        ("hour_known", pa.list_(pa.bool_())),
+
         ("hours_to_cutoff", pa.list_(pa.float64())),
         ("event_eligible", pa.list_(pa.bool_())),
         ("value_event", pa.list_(pa.int32())),
@@ -143,8 +136,6 @@ SHARD_SCHEMA = pa.schema(
         ("profile_value_length", pa.list_(pa.int32())),
         ("profile_value_key_id", pa.list_(pa.int32())),
         ("profile_state", pa.string()),
-        ("profile_version", pa.int64()),
-        ("valid_from", pa.timestamp("us")),
         ("has_profile", pa.bool_()),
         ("coverage_at_cutoff", pa.list_(pa.int8())),
         ("history_age_days", pa.float64()),
@@ -157,7 +148,6 @@ SHARD_SCHEMA = pa.schema(
         ("dep_status", pa.list_(pa.int8())),
     ]
 )
-
 
 INDEX_SCHEMA = pa.schema(
     [
@@ -184,8 +174,6 @@ INDEX_SCHEMA = pa.schema(
         ("history_age_days", pa.float64()),
         ("history_age_reason", pa.string()),
         ("profile_state", pa.string()),
-        ("profile_version", pa.int64()),
-        ("valid_from", pa.timestamp("us")),
         ("selection", pa.string()),
         ("coverage", pa.string()),
         ("relationship", pa.string()),
@@ -193,7 +181,6 @@ INDEX_SCHEMA = pa.schema(
         ("dep_key", pa.list_(pa.string())),
     ]
 )
-
 
 EVENTS_SCHEMA = pa.schema(
     [
@@ -207,13 +194,10 @@ EVENTS_SCHEMA = pa.schema(
         ("selection_reason", pa.string()),
         ("exclusion_reason", pa.string()),
         ("event_id", pa.string()),
-        ("event_version", pa.int32()),
         ("stable_event_index", pa.int64()),
         ("event_time", pa.timestamp("us")),
         ("source", pa.string()),
         ("event_type", pa.string()),
-        ("time_precision", pa.string()),
-        ("hour_known", pa.bool_()),
         ("n_values", pa.int32()),
         ("n_tokens", pa.int32()),
         ("eligible", pa.bool_()),
@@ -225,20 +209,16 @@ EVENTS_SCHEMA = pa.schema(
     ]
 )
 
-
 class StorageError(ValueError):
     """
     Набор записать или прочитать нельзя.
     """
 
-
 def shard_name(group: str, number: int) -> str:
     return f"{group}-{number:05d}"
 
-
 def _json(value) -> str:
     return dumps_json(value).strip()
-
 
 def shard_row(sample: Sample) -> dict:
     return {
@@ -257,7 +237,6 @@ def shard_row(sample: Sample) -> dict:
         "event_starts": sample.event_starts.tolist(),
         "event_lengths": sample.event_lengths.tolist(),
         "calendar": sample.calendar.tolist(),
-        "hour_known": sample.hour_known.tolist(),
         "hours_to_cutoff": sample.hours_to_cutoff.tolist(),
         "event_eligible": sample.event_eligible.tolist(),
         "value_event": sample.value_event.tolist(),
@@ -271,8 +250,6 @@ def shard_row(sample: Sample) -> dict:
         "profile_value_length": sample.profile_value_length.tolist(),
         "profile_value_key_id": sample.profile_value_key_id.tolist(),
         "profile_state": sample.profile_state,
-        "profile_version": sample.profile_version,
-        "valid_from": sample.valid_from,
         "has_profile": sample.has_profile,
         "coverage_at_cutoff": sample.coverage_at_cutoff.tolist(),
         "history_age_days": sample.history_age_days,
@@ -285,7 +262,6 @@ def shard_row(sample: Sample) -> dict:
         "dep_status": list(sample.dependencies.status),
     }
 
-
 def index_row(sample: Sample, shard: str, row: int) -> dict:
 
     out = sample.as_index_row(shard, row)
@@ -295,8 +271,6 @@ def index_row(sample: Sample, shard: str, row: int) -> dict:
             "history_age_days": sample.history_age_days,
             "history_age_reason": sample.history_age_reason,
             "profile_state": sample.profile_state,
-            "profile_version": sample.profile_version,
-            "valid_from": sample.valid_from,
             "selection": _json(sample.selection),
             "coverage": _json(sample.coverage),
             "relationship": _json(sample.relationship),
@@ -306,7 +280,6 @@ def index_row(sample: Sample, shard: str, row: int) -> dict:
     )
 
     return out
-
 
 def event_rows(sample: Sample) -> list[dict]:
 
@@ -331,7 +304,6 @@ def event_rows(sample: Sample) -> list[dict]:
         out.append(row)
 
     return out
-
 
 @dataclass
 class ShardWriter:
@@ -429,7 +401,6 @@ class ShardWriter:
         self._number += 1
         self._in_shard = 0
 
-
 def _check_lists(rows: list[dict]) -> None:
     """
     Списочная колонка группы строк не переполняет смещения
@@ -449,19 +420,15 @@ def _check_lists(rows: list[dict]) -> None:
                 "уменьшите row_group_samples"
             )
 
-
 # ------------------------------------------------------------
 # ПУБЛИКАЦИЯ
 # ------------------------------------------------------------
 
-
 def building_dir(root: Path, dataset_id: str) -> Path:
     return Path(root) / f"{dataset_id}{BUILDING_SUFFIX}"
 
-
 def target_dir(root: Path, dataset_id: str) -> Path:
     return Path(root) / dataset_id
-
 
 def prepare_build(root: Path, dataset_id: str, force: bool) -> Path:
     """
@@ -490,7 +457,6 @@ def prepare_build(root: Path, dataset_id: str, force: bool) -> Path:
     building.mkdir(parents=True)
 
     return building
-
 
 def publish(root: Path, dataset_id: str, attempts: int = 10, pause: float = 0.5) -> Path:
     """
@@ -536,7 +502,6 @@ def publish(root: Path, dataset_id: str, attempts: int = 10, pause: float = 0.5)
 
     return target
 
-
 def _rename(source: Path, destination: Path, attempts: int, pause: float) -> None:
     """
     Переименование каталога с повторами.
@@ -563,7 +528,6 @@ def _rename(source: Path, destination: Path, attempts: int, pause: float) -> Non
         "Каталог сборки сохранён"
     )
 
-
 def write_manifest(directory: Path, manifest: dict, outputs: list[Path]) -> Path:
     """
     Манифест пишется последним и сам перечисляет все файлы.
@@ -586,7 +550,6 @@ def write_manifest(directory: Path, manifest: dict, outputs: list[Path]) -> Path
     write_json(path, manifest)
 
     return path
-
 
 __all__ = [
     "BUILDING_SUFFIX",

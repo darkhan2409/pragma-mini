@@ -44,10 +44,9 @@ if TYPE_CHECKING:  # pragma: no cover - только для подсказок �
 # ============================================================
 
 
-PROJECTION_VERSION = "1.3.0"
+PROJECTION_VERSION = "2.0.0"
 
 EVENT_TYPE_FIELD = "event_type"
-INITIATOR_FIELD = "change_initiator"
 
 
 class ProjectionError(ValueError):
@@ -174,27 +173,19 @@ ENTITY_REFS: dict[str, tuple[str, str]] = {
 INTERNAL_FIELDS: dict[str, str] = {
     # конверт
     "event_id": "тождество записи: связывает версии, модели не нужно",
-    "event_version": "номер версии записи витрины",
-    "correlation_id": "техническая связка цепочки",
-    "link_type": "метка доставки и вида связи",
-    "is_test_account": "техническая учётная запись",
-    "effective_at": "служит выбору действующего состояния на дату",
-    "time_precision": "объявленная точность времени, признак качества",
     # payload
     "product_id": "идентификатор каталога: заменён на product_code, product_family и product_name",
     "previous_product_id": "идентификатор каталога: заменён на название и семейство прежнего продукта",
     "cause_event_id": "внутренняя ссылка на событие-причину: заменена признаками связи",
-    "timestamp_quality": "признак качества времени",
+    "session_id": "внутренний ключ сессии приложения: собирает шаги одной сессии, модели не нужен",
+    "transfer_id": "внутренний ключ перевода: сводит две его ноги, модели не нужен",
     "due_date": "плановая дата платежа: модель получает days_to_due, календарных дат в словарях нет",
     # производные canonical
     "client_idx": "внутренний индекс клиента в группе",
     "stable_event_index": "внутренний номер логического события",
-    "version_role": "решение о версии строки",
-    "same_version_row": "адрес строки-носителя той же версии",
-    "is_exact_duplicate": "метка повторной доставки",
+    "is_repeated_event_id": "метка повторного идентификатора",
     "before_window": "строка старше окна наблюдения",
     "at_or_after_extract": "строка на границе выгрузки или позже",
-    "time_finer_than_precision": "признак качества времени",
     "ambiguous_local_time": "признак качества времени",
     "balance_chain_gap": "между наблюдаемыми строками потеряно движение денег, признак качества",
     "payload_status": "результат разбора payload",
@@ -211,27 +202,36 @@ INTERNAL_FIELDS: dict[str, str] = {
 # ------------------------------------------------------------
 # ИНИЦИАТОР
 # ------------------------------------------------------------
+# ДЕЙСТВИЕ КЛИЕНТА
+# ------------------------------------------------------------
 #
-# Типы событий, где различие client / bank / system несёт
-# банковский смысл: одно и то же действие меняет значение в
-# зависимости от того, кто его совершил.
+# Метки инициатора в конверте больше нет. Кто совершил событие,
+# видно по его типу: покупку и перевод делает клиент, начисление
+# процентов и блокировку по подозрению — банк.
+#
+# Список объявлен здесь, а не выводится из источника: источник
+# говорит, какая система записала факт, а не кто действовал.
 # ------------------------------------------------------------
 
-INITIATOR_EVENT_TYPES: frozenset[str] = frozenset(
+CLIENT_ACTION_EVENT_TYPES: frozenset[str] = frozenset(
     {
-        "card_blocked",
-        "card_unblocked",
-        "card_reissued",
-        "product_closed",
-        "product_migrated",
-        "contract_terms_changed",
-        "loan_restructured",
+        # деньги, которые клиент двигает сам
+        "purchase",
+        "cash_withdrawal",
+        "cash_deposit",
+        "transfer_out",
+        "p2p_out",
+        "deposit_topup",
+        "deposit_withdrawal",
+        "bill_payment",
+        "early_repayment",
+        # приложение
+        "app_screen",
+        "app_operation",
+        "banner_clicked",
+        # обращения и заявки
+        "application_submitted",
         "case_opened",
-        "case_updated",
-        "case_resolved",
-        "communication_sent",
-        "fraud_decision",
-        "profile_change",
     }
 )
 
@@ -353,11 +353,6 @@ def model_event(row: dict, refs: LocalRefs) -> ModelEvent:
             name, _ = ENTITY_REFS[column]
             fields[name] = refs.ref(column, value)
 
-    if row[EVENT_TYPE_FIELD] in INITIATOR_EVENT_TYPES:
-        initiator = row.get(INITIATOR_FIELD)
-        if initiator is not None:
-            fields[INITIATOR_FIELD] = initiator
-
     return ModelEvent(
         client_id=row["client_id"],
         event_time=row["event_time"],
@@ -461,7 +456,7 @@ def projection_registry(payload_names: Iterable[str], timezone: str | None = Non
             "identifiers": "сырые идентификаторы не выходят наружу: сущности клиента получают локальные ссылки",
             "refs": "номер ссылки выдаётся по первому появлению сущности в истории клиента и между клиентами ничего не значит",
             "internal": "технические поля не становятся semantic keys, не попадают в словари, маски и модель",
-            "initiator": "change_initiator идёт в fields только у типов событий, где различие несёт банковский смысл",
+            "client_action": "кто действовал, видно по типу события; метки инициатора в конверте нет",
         },
         "calendar": {
             **{key: value for key, value in CALENDAR_ENCODING.items() if key != "features"},
@@ -474,13 +469,13 @@ def projection_registry(payload_names: Iterable[str], timezone: str | None = Non
             "semantic_payload_fields": len(allowed),
             "local_refs": len(refs),
             "internal_payload_fields": len(internal),
-            "initiator_event_types": len(INITIATOR_EVENT_TYPES),
+            "client_action_event_types": len(CLIENT_ACTION_EVENT_TYPES),
             "added_by_semantic_stage": len(SEMANTIC_LAYER_FIELDS),
         },
         "semantic_fields": {name: SEMANTIC_PAYLOAD_FIELDS[name] for name in allowed},
         "local_refs": {name: ENTITY_REFS[name][0] for name in refs},
         "internal_fields": dict(sorted(INTERNAL_FIELDS.items())),
-        "initiator_event_types": sorted(INITIATOR_EVENT_TYPES),
+        "client_action_event_types": sorted(CLIENT_ACTION_EVENT_TYPES),
         "added_by_semantic_stage": dict(sorted(SEMANTIC_LAYER_FIELDS.items())),
     }
 
@@ -488,7 +483,7 @@ def projection_registry(payload_names: Iterable[str], timezone: str | None = Non
 __all__ = [
     "ENTITY_REFS",
     "EVENT_TYPE_FIELD",
-    "INITIATOR_EVENT_TYPES",
+    "CLIENT_ACTION_EVENT_TYPES",
     "INTERNAL_FIELDS",
     "SEMANTIC_LAYER_FIELDS",
     "PROJECTION_VERSION",

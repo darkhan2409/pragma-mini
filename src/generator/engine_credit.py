@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from . import params as params_module
-from .config import INITIATOR_BANK, INITIATOR_CLIENT, INITIATOR_SYSTEM
+
 from .engine import _HANDLERS, _emit_money
 from .finance import deposits as deposit_rules
 from .finance import loans as loan_rules
@@ -37,6 +37,8 @@ def loan_payload(contract_id: str, loan, **extra) -> dict:
         "amount_due": None,
         "amount_paid": None,
         "principal_outstanding": loan.principal_outstanding,
+        # Текущее состояние договора, а не то, что было при
+        # последнем обходе месяца.
         "days_past_due": loan.dpd,
         "due_date": None,
         "cause_event_id": None,
@@ -110,8 +112,9 @@ def _on_loan_payment_intent(sim, state: ClientState, ts: datetime, payload: dict
         return
 
     # Платят то, что должны на сегодня: текущий взнос вместе с
-    # накопившимся долгом.
-    repay_loan(state, ts, loan, loan_rules.arrears_amount(loan), "app")
+    # накопившимся долгом. Плановый платёж сессии приложения не
+    # принадлежит, поэтому и канал у него не app.
+    repay_loan(state, ts, loan, loan_rules.arrears_amount(loan), "ecom")
 
 
 def _on_installment_due(sim, state: ClientState, ts: datetime, payload: dict) -> None:
@@ -137,9 +140,6 @@ def _on_installment_due(sim, state: ClientState, ts: datetime, payload: dict) ->
                 due_date=item.due_date.date().isoformat(),
                 reason="schedule",
             ),
-            initiator=INITIATOR_SYSTEM,
-            correlation_id=contract_id,
-            link_type="schedule",
         )
     )
 
@@ -202,10 +202,13 @@ def _withdraw_from_deposit(state: ClientState, ts: datetime, target, amount: int
 
     from .engine_app import _own_transfer
 
-    _own_transfer(
+    moved = _own_transfer(
         state, ts, "deposit_withdrawal", deposit.account_id, target.account_id,
         amount, deposit.contract_id, "withdrawal_before_payment",
     )
+
+    if not moved:
+        return False
 
     deposit.principal = max(0, deposit.principal - amount)
 
@@ -255,13 +258,15 @@ def _topup_before_payment(state: ClientState, ts: datetime, amount: int, rng) ->
         "credit",
         hidden.account_id,
         {
-            "channel": "atm" if from_cash else "app",
+            # Наличные вносит банкомат, перевод приходит из
+            # другого банка. Сессии приложения тут нет ни в том,
+            # ни в другом случае.
+            "channel": "atm" if from_cash else "system",
             "counterparty": "Own account",
             "reason": "topup_before_installment",
             "mcc": MCC_CASH if from_cash else MCC_TRANSFER,
             "merchant_country": "KZ",
         },
-        INITIATOR_CLIENT,
     )
 
     return True
@@ -289,16 +294,25 @@ def _decline_payment(state: ClientState, ts: datetime, loan, item, amount: int) 
             "mcc": MCC_SALARY,
             "merchant_country": "KZ",
         },
-        INITIATOR_SYSTEM,
-        correlation_id=loan.contract_id,
-        link_type="schedule",
         status="declined",
     )
 
 
-def repay_loan(state: ClientState, ts: datetime, loan, amount: int, channel: str) -> None:
+def repay_loan(
+    state: ClientState,
+    ts: datetime,
+    loan,
+    amount: int,
+    channel: str,
+    session_id: str | None = None,
+) -> None:
     """
     Платёж по кредиту: сначала деньги, затем отметка в графике.
+
+    session_id называет сессию приложения, если платёж сделан в
+    ней. Без него канал app у денежной строки был бы ложью: в
+    выгрузке появлялась операция «в приложении», которую нельзя
+    связать ни с одной сессией.
     """
 
     if amount <= 0 or loan.closed:
@@ -384,15 +398,13 @@ def repay_loan(state: ClientState, ts: datetime, loan, amount: int, channel: str
         f"loan:{loan.contract_id}",
         {
             "channel": channel,
+            "session_id": session_id,
             "contract_id": loan.contract_id,
             "cause_event_id": covered[0][0].due_event_id,
             "reason": "installment",
             "mcc": MCC_SALARY,
             "merchant_country": "KZ",
         },
-        INITIATOR_SYSTEM if channel == "system" else INITIATOR_CLIENT,
-        correlation_id=loan.contract_id,
-        link_type="schedule",
     )
 
     for position, (target, paid) in enumerate(covered):
@@ -410,9 +422,6 @@ def repay_loan(state: ClientState, ts: datetime, loan, amount: int, channel: str
                     cause_event_id=target.due_event_id,
                     reason="payment",
                 ),
-                initiator=INITIATOR_SYSTEM if channel == "system" else INITIATOR_CLIENT,
-                correlation_id=loan.contract_id,
-                link_type="schedule",
             )
         )
 
@@ -427,9 +436,6 @@ def _clear_arrears(state: ClientState, ts: datetime, loan) -> None:
             "arrears_cleared",
             ts + timedelta(seconds=5),
             loan_payload(loan.contract_id, loan, days_past_due=0, reason="arrears_cleared"),
-            initiator=INITIATOR_SYSTEM,
-            correlation_id=loan.contract_id,
-            link_type="schedule",
         )
     )
 
@@ -478,7 +484,7 @@ def _on_loan_check(sim, state: ClientState, ts: datetime, payload: dict) -> None
         cure = settings.cure_probability_per_day[band] * (1.0 - 0.6 * stress)
 
         if rng.random() < cure:
-            repay_loan(state, ts + timedelta(seconds=30), loan, arrears, "app")
+            repay_loan(state, ts + timedelta(seconds=30), loan, arrears, "ecom")
 
     for item in loan.schedule:
 
@@ -511,9 +517,6 @@ def _on_loan_check(sim, state: ClientState, ts: datetime, payload: dict) -> None
                     cause_event_id=item.due_event_id,
                     reason="missed",
                 ),
-                initiator=INITIATOR_SYSTEM,
-                correlation_id=contract_id,
-                link_type="schedule",
             )
         )
 
@@ -538,9 +541,6 @@ def _on_loan_check(sim, state: ClientState, ts: datetime, payload: dict) -> None
                     days_past_due=milestone,
                     reason=f"dpd_{milestone}",
                 ),
-                initiator=INITIATOR_SYSTEM,
-                correlation_id=contract_id,
-                link_type="schedule",
             )
         )
 
@@ -553,9 +553,6 @@ def _on_loan_check(sim, state: ClientState, ts: datetime, payload: dict) -> None
                     "loan_restructured",
                     ts + timedelta(seconds=120),
                     loan_payload(contract_id, loan, days_past_due=0, reason="restructured"),
-                    initiator=INITIATOR_BANK,
-                    correlation_id=contract_id,
-                    link_type="schedule",
                 )
             )
 
@@ -597,14 +594,12 @@ def close_loan(state: ClientState, ts: datetime, loan, early: bool, reason: str 
             "debit",
             f"loan:{loan.contract_id}",
             {
-                "channel": "app",
+                # Досрочное погашение вне сессии приложения.
+                "channel": "ecom",
                 "contract_id": loan.contract_id,
                 "reason": "early_repayment",
                 "merchant_country": "KZ",
             },
-            INITIATOR_CLIENT,
-            correlation_id=loan.contract_id,
-            link_type="schedule",
         )
 
         loan.principal_outstanding = 0
@@ -623,9 +618,6 @@ def close_loan(state: ClientState, ts: datetime, loan, early: bool, reason: str 
                     loan.contract_id, loan, amount_due=payoff, amount_paid=payoff,
                     days_past_due=0, reason="early_repayment",
                 ),
-                initiator=INITIATOR_CLIENT,
-                correlation_id=loan.contract_id,
-                link_type="schedule",
             )
         )
 
@@ -637,9 +629,6 @@ def close_loan(state: ClientState, ts: datetime, loan, early: bool, reason: str 
             ts + timedelta(seconds=210),
             loan_payload(loan.contract_id, loan, days_past_due=0,
                          reason=reason or ("early" if early else "scheduled")),
-            initiator=INITIATOR_SYSTEM,
-            correlation_id=loan.contract_id,
-            link_type="schedule",
         )
     )
 
@@ -668,11 +657,7 @@ def emit_product_closed(state: ClientState, ts: datetime, contract, reason: str)
                 "term": contract.term,
                 "rate": contract.rate,
                 "reason": reason,
-                "timestamp_quality": "exact",
             },
-            initiator=INITIATOR_SYSTEM,
-            correlation_id=contract.contract_id,
-            link_type="contract",
         )
     )
 

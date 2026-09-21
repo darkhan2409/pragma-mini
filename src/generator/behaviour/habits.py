@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .. import params as params_module
-from ..config import HISTORY_END, HISTORY_START
+from .. import config
 from ..life import calendar as cal
 from ..life.persona import Persona
 from ..rng import NS_HABITS, keyed_rng, stable_hash
@@ -174,7 +174,7 @@ def _bills(persona: Persona, events: tuple) -> tuple:
 
     rng = keyed_rng(NS_HABITS, persona.client_ordinal, 2)
 
-    start = max(HISTORY_START, persona.relationship_start)
+    start = max(config.HISTORY_START, persona.relationship_start)
 
     autopay_chance = 0.25 + 0.5 * persona.trait("financial_discipline")
 
@@ -236,8 +236,8 @@ def _subscriptions(persona: Persona, settlement: str) -> tuple:
 
     result: list[Subscription] = []
 
-    first_month = cal.month_index(HISTORY_START)
-    last_month = cal.month_index(HISTORY_END)
+    first_month = cal.month_index(config.HISTORY_START)
+    last_month = cal.month_index(config.HISTORY_END)
 
     for index in range(count):
 
@@ -298,7 +298,7 @@ def build_habits(persona: Persona, events: tuple) -> Habits:
 
     eras: list[Era] = [
         Era(
-            valid_from=min(HISTORY_START, persona.relationship_start),
+            valid_from=min(config.HISTORY_START, persona.relationship_start),
             settlement=persona.settlement,
             home_district=persona.home_district,
             work_district=persona.work_district,

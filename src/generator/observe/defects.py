@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from .. import params as params_module
 from ..rng import NS_OBSERVE, keyed_rng, stable_hash
 from . import coverage
-from .envelope import Event, round_to_precision
+from .envelope import Event
 
 
 # ============================================================
@@ -16,24 +16,17 @@ from .envelope import Event, round_to_precision
 # Идеально чистая история нереалистична. Дефект принадлежит
 # ИСТОЧНИКУ, а не равномерному шуму по всем данным:
 #
-#   поздние записи
-#   дубли и технические повторы
-#   исправления: тот же event_id, версия выше
 #   пропуски полей с причиной
 #   сбой источника: записи дня не доходят вовсе
 #   смена схемы: поле начинает собираться с определённой даты
-#   огрубление точности времени
+#
+# Чего здесь БОЛЬШЕ НЕТ: дублей и исправлений. Запись приходит
+# в выгрузку один раз и сразу окончательной, поэтому ни второй
+# версии, ни повторной доставки не бывает.
 #
 # Проход идёт по идентичности события, а не по номеру строки:
 # вставка события в другом месте ленты ничего не сдвигает.
 # ============================================================
-
-
-# Источники, чья запись несёт проводку. Огрубление времени
-# переставило бы её относительно соседних движений по счёту, и
-# наблюдаемый остаток перестал бы продолжать предыдущий. Время
-# теряет витрина договоров, а не касса.
-MONEY_SOURCES: frozenset[str] = frozenset({"transactions", "loans"})
 
 
 def _rng(event: Event, slot: int):
@@ -45,7 +38,7 @@ def _paired(event: Event) -> bool:
     Запись, у которой есть обязательная вторая половина.
     """
 
-    if event.link_type == "transfer":
+    if event.payload.get("transfer_id"):
         return True
 
     if event.payload.get("counterparty") == "own_account":
@@ -137,90 +130,23 @@ def _apply_field_missing(event: Event, rng) -> Event:
     return replace(event, payload=payload) if changed else event
 
 
-def _coarse_precision(event: Event, rng) -> Event:
-
-    settings = params_module.active().defects
-
-    if event.source in MONEY_SOURCES:
-        return event
-
-    share = settings.coarse_precision_share.get(event.source, 0.0)
-
-    if share <= 0.0 or rng.random() >= share:
-        return event
-
-    if event.time_precision == "second":
-        precision = "minute"
-    elif event.time_precision == "minute":
-        precision = "day"
-    else:
-        precision = "day"
-
-    return replace(
-        event,
-        time_precision=precision,
-        event_time=round_to_precision(event.event_time, precision),
-    )
-
-
-def plan_correction(event: Event, rng) -> tuple[str, object] | None:
-    """
-    Какое поле записи витрина сначала записала неверно.
-
-    Исправление НЕ портит запись. Наоборот: первая версия
-    уходит с ошибкой, а исправление возвращает настоящее
-    значение. Иначе итоговая версия ленты противоречила бы
-    остаткам, а препроцессинг читает именно итоговую.
-    """
-
-    fields = params_module.active().defects.correction_fields.get(event.source)
-
-    if not fields:
-        return None
-
-    for field in fields:
-
-        value = event.payload.get(field)
-
-        if value is None:
-            continue
-
-        if isinstance(value, bool) or not isinstance(value, int):
-            continue
-
-        wrong = int(value * rng.uniform(0.94, 1.06))
-
-        if wrong == value:
-            wrong = value + (1 if rng.random() < 0.5 else -1)
-
-        return field, wrong
-
-    return None
-
-
-def apply(events: list, client_ordinal: int) -> tuple[list, dict, list]:
+def apply(events: list, client_ordinal: int) -> tuple[list, list]:
     """
     Наблюдаемая лента: к каждому событию применяются дефекты
     его источника.
 
-    Возвращает тройку: наблюдаемые записи, план ошибок первой
-    версии `{event_id: (поле, неверное значение)}` и записи,
-    которых сбой источника не донёс до выгрузки вовсе.
+    Возвращает пару: наблюдаемые записи и записи, которых сбой
+    источника не донёс до выгрузки вовсе.
 
     Потерянная запись это потеря НАБЛЮДЕНИЯ, а не отмена события:
     деньги по ней двигались, остаток счёта её учёл, и переписывать
     остальную цепочку так, будто её не было, нельзя. Поэтому
     потери возвращаются наружу и уходят в скрытую истину.
-
-    Ошибка первой версии вносится ПОСЛЕ простановки остатков,
-    чтобы цепочка строилась по настоящей сумме, а не по опечатке
-    витрины.
     """
 
     settings = params_module.active().defects
 
     observed: list[Event] = []
-    corrections: dict[str, tuple] = {}
     lost: list[Event] = []
 
     # Событие, на которое кто-то ссылается как на причину, не
@@ -262,59 +188,10 @@ def apply(events: list, client_ordinal: int) -> tuple[list, dict, list]:
 
         current = _apply_schema_change(event)
         current = _apply_field_missing(current, rng)
-        current = _coarse_precision(current, rng)
 
         observed.append(current)
 
-        # --- дубль: та же запись ещё раз ---
-
-        duplicate_share = settings.duplicate_share.get(event.source, 0.0)
-
-        if duplicate_share and rng.random() < duplicate_share:
-            observed.append(current.copy_as_duplicate())
-
-        # --- исправление: версия выше ---
-        #
-        # Исправление несёт НАСТОЯЩЕЕ значение. Ошибка попадёт
-        # в первую версию позже, когда остатки уже посчитаны.
-
-        correction_share = settings.correction_share.get(event.source, 0.0)
-
-        if correction_share and rng.random() < correction_share:
-
-            plan = plan_correction(current, rng)
-
-            if plan is not None:
-                observed.append(current.copy_as_correction(dict(current.payload)))
-                corrections[current.event_id] = plan
-
-    return observed, corrections, lost
-
-
-def apply_first_version_errors(observed: list, corrections: dict) -> None:
-    """
-    Вносит ошибку витрины в первую версию записи.
-
-    Делать это раньше нельзя: остатки считаются по настоящим
-    суммам, и опечатка испортила бы всю цепочку. После пересчёта
-    неверное значение остаётся ровно в той версии, которую банк
-    потом исправил.
-    """
-
-    if not corrections:
-        return
-
-    for event in observed:
-
-        plan = corrections.get(event.event_id)
-
-        if plan is None or event.event_version > 1:
-            continue
-
-        field, wrong = plan
-
-        if field in event.payload:
-            event.payload[field] = wrong
+    return observed, lost
 
 
 def plan_refunds(purchases: list) -> list:
@@ -369,4 +246,4 @@ def plan_refunds(purchases: list) -> list:
     return planned
 
 
-__all__ = ["MONEY_SOURCES", "apply", "plan_refunds"]
+__all__ = ["apply", "plan_refunds"]

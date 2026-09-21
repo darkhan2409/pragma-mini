@@ -443,9 +443,6 @@ def _traits(sample: Sample) -> list[str]:
     if not sample.has_targets:
         out.append("no_targets")
 
-    if any(row["event_version"] > 1 for row in sample.events):
-        out.append("corrected_event")
-
     if sample.truncated:
         out.append("truncated")
 
@@ -482,10 +479,8 @@ def _golden_entry(sample: Sample, trait: str) -> dict:
                 "event_type": row["event_type"],
                 "event_time": row["event_time"].isoformat(),
                 "event_id": row["event_id"],
-                "event_version": row["event_version"],
                 "n_tokens": row["n_tokens"],
                 "eligible": row["eligible"],
-                "hour_known": row["hour_known"],
                 "selection_reason": row["selection_reason"],
                 "value_keys": row["value_keys"][:12],
             }
@@ -550,7 +545,7 @@ def _report(inputs: DatasetInputs, config: DatasetConfig, dataset_id: str,
     agreement = {
         group: {
             "dataset": by_group[group]["eligible_events"],
-            "split_manifest": value,
+            "corpus_manifest": value,
             "agree": by_group[group]["eligible_events"] == value,
             "comparable": (
                 config.context.policy == "all"

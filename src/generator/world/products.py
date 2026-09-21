@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
 from .. import params as params_module
-from ..config import HISTORY_END, HISTORY_START, REGISTRY_START
+from .. import config
+from ..config import REGISTRY_START
 from ..rng import state_cache
 from . import hcb_timeline
 from .hcb_timeline import Period, ProductRecord, Timeline, Version
@@ -664,7 +665,7 @@ def _build(policy: str, unknown_policy: str, closed_to_servicing_days: int, synt
 
     timeline: Timeline = hcb_timeline.load()
 
-    unknown_start = REGISTRY_START if unknown_policy == "registry_start" else HISTORY_START
+    unknown_start = REGISTRY_START if unknown_policy == "registry_start" else config.HISTORY_START
 
     records = list(timeline.products)
     records.extend(_synthetic_records(settings.products.synthetic_products))
@@ -714,7 +715,7 @@ def horizon_rows() -> tuple:
     return tuple(
         row
         for row in catalog().rows
-        if row.valid_to > REGISTRY_START and row.valid_from < HISTORY_END
+        if row.valid_to > REGISTRY_START and row.valid_from < config.HISTORY_END
     )
 
 

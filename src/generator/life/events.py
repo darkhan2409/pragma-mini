@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .. import params as params_module
-from ..config import HISTORY_END, HISTORY_START
+from .. import config
 from ..rng import NS_LIFE, keyed_rng
 from ..world import geography
 from .persona import Persona
@@ -130,10 +130,7 @@ def plan_events(persona: Persona) -> tuple:
 
     settings = params_module.active().lifecycle
 
-    if persona.is_test_account:
-        return ()
-
-    span_days = (HISTORY_END - HISTORY_START).days
+    span_days = (config.HISTORY_END - config.HISTORY_START).days
     years = span_days / 365.25
 
     events: list[LifeEvent] = []
@@ -164,7 +161,7 @@ def plan_events(persona: Persona) -> tuple:
             )
 
             offset = item_rng.integers(0, span_days)
-            ts = HISTORY_START + timedelta(days=int(offset), hours=int(item_rng.integers(8, 20)))
+            ts = config.HISTORY_START + timedelta(days=int(offset), hours=int(item_rng.integers(8, 20)))
 
             payload: dict = {}
 
@@ -216,7 +213,7 @@ def plan_events(persona: Persona) -> tuple:
             if known_share > 0.0 and item_rng.random() < known_share:
                 delay = item_rng.integers(*settings.profile_change_delay_days)
                 known_at = ts + timedelta(days=int(delay))
-                if known_at >= HISTORY_END:
+                if known_at >= config.HISTORY_END:
                     known_at = None
             else:
                 known_at = None

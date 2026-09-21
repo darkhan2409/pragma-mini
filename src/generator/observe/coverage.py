@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .. import params as params_module
-from ..config import HISTORY_END, HISTORY_START, SOURCES, SOURCE_AVAILABILITY
+from .. import config
+from ..config import SOURCES, SOURCE_AVAILABILITY
 from ..life.persona import Persona
 from ..rng import NS_COVERAGE, keyed_rng, stable_hash, state_cache
 
@@ -34,7 +35,6 @@ REASON_NOT_ONBOARDED = "client_not_onboarded"
 REASON_NO_CONSENT = "no_consent"
 REASON_OUTAGE = "source_outage"
 REASON_RELATIONSHIP_CLOSED = "relationship_closed"
-REASON_TEST_ACCOUNT = "test_account"
 
 APP_SOURCES = ("app_screens", "app_operations", "banners")
 
@@ -51,13 +51,23 @@ class Coverage:
     coverage_status: str
     coverage_reason: str | None
     opening_state: str | None
+    outage_days: str | None
 
 
 @state_cache
 def app_adoption(client_ordinal: int) -> datetime | None:
     """
-    Когда клиент установил приложение. Часть когорты не
-    устанавливает его никогда.
+    Когда клиент установил приложение.
+
+    Приложение — норма, а не исключение: его ставит подавляющее
+    большинство. Небольшая доля не ставит никогда, и это не
+    дефект данных, а часть жизни: остаются люди, которые ходят
+    в отделение.
+
+    Дата установки всегда попадает ВНУТРЬ окна наблюдения.
+    Раньше она могла вылететь за его границу, и клиент молча
+    оставался без приложения — доля пользователей оказывалась
+    заметно ниже объявленной.
     """
 
     from ..life.persona import draw_persona
@@ -70,21 +80,28 @@ def app_adoption(client_ordinal: int) -> datetime | None:
 
     digital = persona.trait("digital_affinity")
 
-    probability = settings.app_adoption_share * (
-        settings.app_adoption_digital_factor + (1.0 - settings.app_adoption_digital_factor) * 0.5 + digital * 0.7
-    )
+    # Цифровая склонность двигает вероятность мягко: разница
+    # между самым и наименее цифровым клиентом — проценты, а не
+    # разы. Приложением пользуются почти все.
+    probability = settings.app_adoption_share * (0.94 + 0.12 * digital)
 
-    if rng.random() >= min(0.99, probability):
+    if rng.random() >= min(0.995, probability):
         return None
 
-    start = max(HISTORY_START, persona.relationship_start)
+    # Раньше начала наблюдения приложения быть не может, как и
+    # раньше того дня, когда человек стал клиентом.
+    start = max(config.HISTORY_START, persona.relationship_start)
 
-    offset = int(rng.integers(0, 420)) - 180
+    # Половина окна на то, чтобы установить: у большинства это
+    # случается вскоре после начала отношений с банком.
+    span_days = max(1, (config.HISTORY_END - start).days)
 
-    adopted = start + timedelta(days=max(0, offset))
+    offset = int(rng.integers(0, max(1, span_days // 2)))
 
-    if adopted >= HISTORY_END:
-        return None
+    adopted = start + timedelta(days=offset)
+
+    if adopted >= config.HISTORY_END:
+        adopted = start
 
     return adopted.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -113,7 +130,7 @@ def consent_date(client_ordinal: int) -> datetime | None:
 
     given = start + timedelta(days=int(rng.integers(0, 200)))
 
-    if given >= HISTORY_END:
+    if given >= config.HISTORY_END:
         return None
 
     return given.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -139,7 +156,7 @@ def first_seen(persona: Persona, source: str) -> datetime | None:
 
     moment = max(SOURCE_AVAILABILITY[source], start)
 
-    if moment >= HISTORY_END:
+    if moment >= config.HISTORY_END:
         return None
 
     return moment
@@ -160,7 +177,7 @@ def source_outages(client_ordinal: int, source: str) -> tuple:
 
     rng = keyed_rng(NS_COVERAGE, client_ordinal, 3, stable_hash(source) % 97)
 
-    span_days = (HISTORY_END - SOURCE_AVAILABILITY[source]).days
+    span_days = (config.HISTORY_END - SOURCE_AVAILABILITY[source]).days
 
     if span_days <= 0:
         return ()
@@ -194,15 +211,24 @@ def coverage_rows(persona: Persona, opening: dict | None = None, closed_at: date
 
         seen = first_seen(persona, source)
 
-        outages = source_outages(persona.client_ordinal, source)
+        # Сбой засчитывается только внутри наблюдаемого отрезка
+        # этого клиента. День, когда витрина молчала, а клиент ещё
+        # не пришёл или уже ушёл, ничего о его покрытии не говорит:
+        # такой день делал источник «частичным» на пустом месте.
+        #
+        # Отрезок закрыт с обеих сторон: началом наблюдения и
+        # концом отношений, если они закончились раньше выгрузки.
+        stop = config.HISTORY_END if closed_at is None else min(closed_at, config.HISTORY_END)
+
+        outages = tuple(
+            day
+            for day in source_outages(persona.client_ordinal, source)
+            if seen is not None and seen.date() <= day < stop.date()
+        )
 
         last_available: datetime | None = None
         status = STATUS_FULL
         reason: str | None = None
-
-        if persona.is_test_account:
-            status = STATUS_PARTIAL
-            reason = REASON_TEST_ACCOUNT
 
         if seen is None:
 
@@ -229,7 +255,7 @@ def coverage_rows(persona: Persona, opening: dict | None = None, closed_at: date
                 status = STATUS_PARTIAL
                 reason = REASON_OUTAGE
 
-            if closed_at is not None and closed_at < HISTORY_END:
+            if closed_at is not None and closed_at < config.HISTORY_END:
                 status = STATUS_ENDED
                 reason = REASON_RELATIONSHIP_CLOSED
                 last_available = closed_at
@@ -248,6 +274,14 @@ def coverage_rows(persona: Persona, opening: dict | None = None, closed_at: date
                     if opening and opening.get(source)
                     else None
                 ),
+                # Сбой без даты не проверить и не учесть: раньше
+                # строка сообщала «был сбой», а когда именно —
+                # знал только генератор.
+                outage_days=(
+                    json.dumps([day.isoformat() for day in outages])
+                    if outages
+                    else None
+                ),
             )
         )
 
@@ -262,7 +296,6 @@ __all__ = [
     "REASON_NO_CONSENT",
     "REASON_OUTAGE",
     "REASON_RELATIONSHIP_CLOSED",
-    "REASON_TEST_ACCOUNT",
     "STATUS_ENDED",
     "STATUS_FULL",
     "STATUS_LATE_START",

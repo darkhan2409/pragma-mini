@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .. import params as params_module
-from ..config import HISTORY_END, HISTORY_START
+from .. import config
 from ..rng import NS_GRAPH, keyed_rng, stable_hash
 
 
@@ -155,7 +155,7 @@ def build_graph(community_id: int, members: tuple, personas: dict) -> CommunityG
 
     households: dict[int, str] = {}
 
-    pool = [ordinal for ordinal in members if not personas[ordinal].is_test_account]
+    pool = list(members)
 
     # --- домохозяйства ---
 
@@ -182,14 +182,11 @@ def build_graph(community_id: int, members: tuple, personas: dict) -> CommunityG
 
         persona = personas[ordinal]
 
-        if persona.is_test_account:
-            continue
-
         income = max(50_000, persona.true_income)
 
         client_rng = keyed_rng(NS_GRAPH, community_id, 2, ordinal)
 
-        start = max(HISTORY_START, persona.relationship_start)
+        start = max(config.HISTORY_START, persona.relationship_start)
 
         # --- работодатель ---
 
@@ -305,7 +302,7 @@ def build_graph(community_id: int, members: tuple, personas: dict) -> CommunityG
 
                 internal_share = settings.internal_share.get(relation_type, 0.15)
 
-                candidates = [other for other in members if other != ordinal and not personas[other].is_test_account]
+                candidates = [other for other in members if other != ordinal]
 
                 if candidates and item_rng.random() < internal_share:
                     partner = candidates[item_rng.integers(0, len(candidates))]
@@ -325,7 +322,7 @@ def build_graph(community_id: int, members: tuple, personas: dict) -> CommunityG
                 end_share = settings.relation_end_share_per_year.get(relation_type)
 
                 if end_share and item_rng.random() < end_share:
-                    offset = item_rng.integers(60, max(61, (HISTORY_END - start).days))
+                    offset = item_rng.integers(60, max(61, (config.HISTORY_END - start).days))
                     valid_to = start + timedelta(days=int(offset))
 
                 relationships.append(

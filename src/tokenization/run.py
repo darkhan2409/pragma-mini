@@ -132,7 +132,7 @@ def run_contract(args) -> int:
     print(
         f"    корпус на {report['fit_end'][:10]}: клиентов {report['corpus']['clients']}, "
         f"событий {report['corpus']['events']}, значений {report['corpus']['values']}, "
-        f"действующих анкет {report['corpus']['profiles_as_of']}"
+        f"анкет {report['corpus']['profiles']}"
     )
     print(
         f"    ключей объявлено {report['keys']['declared']}: код получают "

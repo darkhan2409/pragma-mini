@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .. import params as params_module
-from ..config import HISTORY_END, HISTORY_START
+from .. import config
 from ..rng import NS_LIFECYCLE, keyed_rng
 from .persona import Persona
 
@@ -67,17 +67,14 @@ def plan_pauses(persona: Persona, events: tuple) -> tuple:
 
     settings = params_module.active().lifecycle
 
-    if persona.is_test_account:
-        return ()
-
     # Пауза это целые сутки, а не отрезок с произвольного часа:
     # план дня спрашивает о паузе один раз на день, и граница
     # посреди дня оставила бы в тишине половину суток.
-    start = max(HISTORY_START, persona.relationship_start).replace(
+    start = max(config.HISTORY_START, persona.relationship_start).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
 
-    span_days = (HISTORY_END - start).days
+    span_days = (config.HISTORY_END - start).days
 
     if span_days <= 40:
         return ()
@@ -101,8 +98,8 @@ def plan_pauses(persona: Persona, events: tuple) -> tuple:
                 kind="full",
                 reason="lost_interest",
                 start=begin,
-                planned_end=HISTORY_END,
-                actual_end=HISTORY_END,
+                planned_end=config.HISTORY_END,
+                actual_end=config.HISTORY_END,
                 return_trigger="none",
                 reason_known_to_bank=False,
             ),
@@ -129,8 +126,8 @@ def plan_pauses(persona: Persona, events: tuple) -> tuple:
 
         finish = begin + timedelta(days=actual_days)
 
-        if finish > HISTORY_END:
-            finish = HISTORY_END
+        if finish > config.HISTORY_END:
+            finish = config.HISTORY_END
 
         if any(not (finish <= left or begin >= right) for left, right in occupied):
             continue
@@ -146,7 +143,7 @@ def plan_pauses(persona: Persona, events: tuple) -> tuple:
                 start=begin,
                 planned_end=begin + timedelta(days=planned_days),
                 actual_end=finish,
-                return_trigger=trigger if finish < HISTORY_END else "none",
+                return_trigger=trigger if finish < config.HISTORY_END else "none",
                 reason_known_to_bank=bool(
                     item_rng.random() < settings.pause_reason_becomes_known_share
                 ),

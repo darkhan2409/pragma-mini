@@ -194,8 +194,17 @@ class DatasetConfig:
 
     groups: tuple[str, ...] = GROUPS
 
-    # Дополнительные срезы по группам. Конечный срез группы
-    # берётся из фактического разделения и здесь не повторяется.
+    # Дополнительные срезы по группам.
+    #
+    # СЕЙЧАС ОНИ ЗАПРЕЩЕНЫ, и поле оставлено только затем, чтобы
+    # отказ был внятным. Анкета клиента одна — итоговая, на
+    # границу выгрузки. На конечном срезе группы это честно: срез
+    # и есть граница. На любом более раннем срезе та же анкета
+    # была бы знанием из будущего, и пример перестал бы быть
+    # честным молча.
+    #
+    # Вернуть ранние срезы можно, когда профиль снова научится
+    # отвечать на вопрос «что банк знал к этой дате».
     extra_cutoffs: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     context: ContextPolicy = field(default_factory=ContextPolicy)
@@ -219,6 +228,19 @@ class DatasetConfig:
 
         if len(set(self.groups)) != len(self.groups):
             raise ConfigError("группа названа дважды")
+
+        declared = sorted(
+            group for group, moments in self.extra_cutoffs.items() if moments
+        )
+
+        if declared:
+            raise ConfigError(
+                "дополнительные срезы запрещены (объявлены у групп "
+                + ", ".join(declared)
+                + "): профиль это одна итоговая строка на границу выгрузки, и на более раннем "
+                "срезе он был бы знанием из будущего. Пример строится только на конечном "
+                "срезе группы"
+            )
 
         for group, moments in sorted(self.extra_cutoffs.items()):
 

@@ -35,7 +35,7 @@ from .merchants import MERCHANT_KEYS
 
 
 STAGE = "semantic"
-STAGE_VERSION = "2.7.0"
+STAGE_VERSION = "3.0.0"
 SCHEMA_VERSION = 1
 
 REGISTRY_FILE = "semantic_registry.json"
@@ -194,24 +194,27 @@ def build_group(
         "calendar": {
             "channel": CALENDAR_ENCODING["channel"],
             "features": list(CALENDAR_ENCODING["features"]),
-            # Правило для следующего этапа. Сам календарь не
-            # меняется: час считается из event_time всегда.
-            "hour_known_rule": (
-                "hour_known=false означает, что час события не наблюдался: "
-                "точность источника дневная или отметка времени date_only. "
-                "Пара hour_sin/hour_cos у такой записи не измерена, и "
-                "модельные входы не должны считать час суток точным"
+            # Правило для следующего этапа.
+            "hour_rule": (
+                "время события точное, поэтому час суток наблюдался всегда: "
+                "пара hour_sin/hour_cos измерена у каждой записи"
             ),
         },
         "timing": {
             "precision_rule": (
                 "интервалы since_previous_hours, since_same_type_hours, "
                 "since_last_income_hours, age_of_history_days и days_to_due считаются "
-                "в объявленной точности события: оба момента усекаются до более грубой "
-                "точности пары, у записи дневной точности интервалы кратны суткам; "
-                "само время в canonical не округляется"
+                "по точному времени событий: усекать и согласовывать точности нечего"
             ),
         },
+        "profile_rule": (
+            "анкета клиента одна — итоговая, на границу выгрузки. Расчётные признаки, "
+            "которые делят сумму операции на доход (amount_to_declared_income и "
+            "подобные), берут ИМЕННО ЕЁ, а не анкету на момент операции: прежних "
+            "значений в данных больше нет. На конечном срезе группы это честно, на "
+            "более раннем было бы знанием из будущего — поэтому ранние срезы запрещены "
+            "построителем датасета"
+        ),
         "registry": registry,
         "model_projection": projection_registry(
             (name for name in payload_names),
@@ -262,16 +265,16 @@ def _payload_names(catalogue: dict) -> list[str]:
 
 def _relation_totals(items: list) -> dict:
     """
-    Сколько связей найдено и у скольких из них длительность не
-    передаётся из-за неизвестного порядка.
+    Сколько связей найдено.
+
+    Длительность есть у каждой: время событий точное, и порядок
+    причины со следствием известен всегда.
     """
 
-    ambiguous = sum(1 for item in items if item.reason == chains_module.TIME_ORDER_AMBIGUOUS)
-
     return {
-        "with_interval": len(items) - ambiguous,
-        chains_module.TIME_ORDER_AMBIGUOUS: ambiguous,
-        "rule": "отрицательный интервал признаком не становится: связь остаётся, длительность нет",
+        "with_interval": sum(1 for item in items if item.days_since_related_event is not None),
+        "total": len(items),
+        "rule": "время точное: причина всегда раньше следствия, иначе это поломка данных",
     }
 
 
@@ -363,7 +366,8 @@ def render_semantic_md(report: dict) -> str:
         f"{report['calendar']['channel']}: {', '.join(report['calendar']['features'])}. "
         "Считается из event_time и в смысловые значения не входит.\n"
     )
-    out.append(f"\n{report['calendar']['hour_known_rule']}.\n")
+    out.append(f"\n{report['calendar']['hour_rule']}.\n")
+    out.append(f"\n{report['profile_rule']}.\n")
 
     if report.get("timing"):
         out.append(f"\n{report['timing']['precision_rule']}.\n")

@@ -24,21 +24,9 @@ from ..rawdata import COVERAGE_SCHEMA, DTYPE_MAP, ENVELOPE_SCHEMA, RawManifest
 # ============================================================
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 
 TS = pa.timestamp("us")
-
-VERSION_ROLE_ORIGINAL = "original"
-VERSION_ROLE_CORRECTION = "correction"
-VERSION_ROLE_REDELIVERY = "redelivery"
-VERSION_ROLE_CONFLICT = "conflict"
-
-VERSION_ROLES: tuple[str, ...] = (
-    VERSION_ROLE_ORIGINAL,
-    VERSION_ROLE_CORRECTION,
-    VERSION_ROLE_REDELIVERY,
-    VERSION_ROLE_CONFLICT,
-)
 
 PAYLOAD_OK = "ok"
 PAYLOAD_UNPARSEABLE = "unparseable"
@@ -58,25 +46,22 @@ DERIVED_COLUMNS: tuple[tuple[str, pa.DataType, str, str], ...] = (
         "stable_event_index",
         pa.int64(),
         "int",
-        "номер логического события клиента по (event_time, приоритет типа, event_id); "
-        "все версии и дубли события делят один номер",
+        "номер логического события клиента по (event_time, приоритет типа, event_id)",
     ),
-    ("version_role", pa.string(), "str", "original, correction, redelivery или conflict"),
-    ("is_exact_duplicate", pa.bool_(), "bool", "техническая повторная доставка той же версии с тем же содержимым"),
     (
-        "same_version_row",
-        pa.int64(),
-        "int",
-        "raw_row первой строки той же пары (event_id, event_version), если эта строка не первая",
-    ),
-    ("before_window", pa.bool_(), "bool", "событие произошло раньше history_start выгрузки"),
-    ("at_or_after_extract", pa.bool_(), "bool", "событие произошло на границе extract_time или позже"),
-    (
-        "time_finer_than_precision",
+        "is_repeated_event_id",
         pa.bool_(),
         "bool",
-        "значение времени точнее, чем объявленная источником точность",
+        "event_id этой строки уже встречался в выгрузке: запись обязана приходить один раз",
     ),
+    (
+        "before_window",
+        pa.bool_(),
+        "bool",
+        "событие произошло раньше history_start выгрузки: по контракту таких строк нет, "
+        "и колонка это проверка, а не описание",
+    ),
+    ("at_or_after_extract", pa.bool_(), "bool", "событие произошло на границе extract_time или позже"),
     ("ambiguous_local_time", pa.bool_(), "bool", "местное время попадает в объявленный неоднозначный интервал"),
     (
         "balance_chain_gap",
@@ -196,7 +181,6 @@ CLIENT_INDEX_SCHEMA = pa.schema(
         ("spans_row_groups", pa.bool_()),
         ("event_time_min", TS),
         ("event_time_max", TS),
-        ("is_test_account", pa.bool_()),
     ]
 )
 
@@ -208,16 +192,13 @@ MENTIONS_SCHEMA = pa.schema(
         ("client_idx", pa.int64()),
         ("client_id", pa.string()),
         ("event_id", pa.string()),
-        ("event_version", pa.int32()),
         ("stable_event_index", pa.int64()),
         ("event_time", TS),
-        ("effective_at", TS),
         ("event_type", pa.string()),
         ("source", pa.string()),
         ("field_name", pa.string()),
         ("is_transition", pa.bool_()),
         ("transition", pa.string()),
-        ("version_role", pa.string()),
         ("raw_row", pa.int64()),
     ]
 )
@@ -227,9 +208,8 @@ MENTIONS_SCHEMA = pa.schema(
 # здесь нет намеренно: кто с кем сошёлся на дату, решает этап
 # истории среди видимых строк.
 #
-# Версии записи и роль строки лежат рядом: у исправленного
-# перевода действует последняя версия, и выбирать её обязан тот
-# же, кто читает историю.
+# transfer_id приходит из payload: в конверте связи нет, вид её
+# задаёт имя ключа.
 TRANSFERS_SCHEMA = pa.schema(
     [
         ("transfer_id", pa.string()),
@@ -237,8 +217,6 @@ TRANSFERS_SCHEMA = pa.schema(
         ("client_idx", pa.int64()),
         ("client_id", pa.string()),
         ("event_id", pa.string()),
-        ("event_version", pa.int32()),
-        ("version_role", pa.string()),
         ("event_type", pa.string()),
         ("stable_event_index", pa.int64()),
         ("event_time", TS),
@@ -251,16 +229,16 @@ TRANSFERS_SCHEMA = pa.schema(
 )
 
 
-DEDUPE_LOG_SCHEMA = pa.schema(
+# Повторы идентификатора: запись обязана приходить в выгрузку
+# ровно один раз, и повтор это поломка контракта, а не дефект
+# доставки. Строка сохраняется с пометкой, чтобы расхождение
+# было видно, а не исчезло молча.
+REPEATS_SCHEMA = pa.schema(
     [
         ("event_id", pa.string()),
         ("client_id", pa.string()),
-        ("event_version", pa.int32()),
-        ("verdict", pa.string()),
         ("raw_row", pa.int64()),
-        ("same_version_row", pa.int64()),
         ("first_raw_row", pa.int64()),
-        ("differing_fields", pa.list_(pa.string())),
         ("reason", pa.string()),
     ]
 )
@@ -283,7 +261,6 @@ REJECTS_SCHEMA = pa.schema(
 
 __all__ = [
     "CLIENT_INDEX_SCHEMA",
-    "DEDUPE_LOG_SCHEMA",
     "DERIVED_COLUMNS",
     "DERIVED_NAMES",
     "ENVELOPE_NAMES",
@@ -292,13 +269,9 @@ __all__ = [
     "PAYLOAD_OK",
     "PAYLOAD_UNPARSEABLE",
     "REJECTS_SCHEMA",
+    "REPEATS_SCHEMA",
     "SCHEMA_VERSION",
     "TRANSFERS_SCHEMA",
-    "VERSION_ROLES",
-    "VERSION_ROLE_CONFLICT",
-    "VERSION_ROLE_CORRECTION",
-    "VERSION_ROLE_ORIGINAL",
-    "VERSION_ROLE_REDELIVERY",
     "coverage_schema",
     "events_schema",
     "payload_columns",

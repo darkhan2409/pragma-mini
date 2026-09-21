@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
-
-import yaml
 
 from ..config import PRODUCT_TIMELINE_PATH
 from ..rng import state_cache
@@ -17,7 +16,7 @@ from ..rng import state_cache
 # ============================================================
 #
 # Python здесь только ЗАГРУЖАЕТ и ПРОВЕРЯЕТ. Все факты живут в
-# data/reference/home_product_timeline.yaml, и добавить дату,
+# reference/home_product_timeline.json, и добавить дату,
 # тариф или ссылку можно только туда.
 #
 # Дата это период. Месяц или год не превращаются в день:
@@ -435,7 +434,7 @@ def _load_cached(path_text: str) -> Timeline:
 
     sha256 = hashlib.sha256(payload).hexdigest()
 
-    return parse(yaml.safe_load(payload.decode("utf-8")), sha256)
+    return parse(json.loads(payload.decode("utf-8")), sha256)
 
 
 def load(path: str | Path | None = None) -> Timeline:

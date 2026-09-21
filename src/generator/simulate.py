@@ -7,11 +7,8 @@ from datetime import datetime, timedelta
 from . import params as params_module
 from .behaviour import adoption as adoption_module
 from .behaviour import habits as habits_module
+from . import config
 from .config import (
-    HISTORY_END,
-    HISTORY_START,
-    INITIATOR_BANK,
-    INITIATOR_CLIENT,
     REGISTRY_START,
 )
 from .finance import deposits as deposit_rules
@@ -39,7 +36,6 @@ from .observe import coverage as coverage_module
 from .observe.envelope import Event, EventFactory
 from .rng import (
     NS_PREHISTORY,
-    NS_PRODUCT_TIME,
     NS_ADOPTION,
     NS_CARD,
     NS_LEDGER,
@@ -69,7 +65,7 @@ class ClientState:
     ledger: Ledger
     events: list = field(default_factory=list)
     truth: list = field(default_factory=list)
-    profile_versions: list = field(default_factory=list)
+    profile_known: bool = False
 
     life_events: tuple = ()
     stress_episodes: tuple = ()
@@ -132,7 +128,36 @@ class ClientState:
         return self.persona.client_id
 
     def emit(self, event: Event) -> Event:
-        self.events.append(event)
+        """
+        Записывает событие в ленту клиента.
+
+        Три условия, и все про НАБЛЮДЕНИЕ, а не про симуляцию:
+
+          событие раньше начала окна выгрузка не показывает
+          вовсе — то, что было до него, описывает opening_state
+          покрытия, а не задним числом выданная лента;
+
+          событие на границе выгрузки или позже в неё не попадает:
+          выгрузка сделана в этот момент, и того, что случилось
+          после, банк ещё не знает. Проверка нужна именно здесь:
+          отдельные места прибавляют к моменту минуты и секунды
+          (решение по заявке, вторая нога перевода, подтверждение
+          операции) и легко переступают границу;
+
+          система банка, которой в тот день ещё не существовало,
+          записать ничего не могла.
+
+        Объект всё равно возвращается: деньги по нему двигались,
+        договор открылся, цепочка остатков осталась целой. Просто
+        наблюдения этой строки у банка нет.
+        """
+
+        if not in_window(event.event_time):
+            return event
+
+        if event.event_time >= config.SOURCE_AVAILABILITY[event.source]:
+            self.events.append(event)
+
         return event
 
     def note(self, ts: datetime, kind: str, key: str, value) -> None:
@@ -177,6 +202,68 @@ class ClientState:
         """
 
         return any(not item.closed for item in self.loans.values())
+
+    def income_months_at(self, ts: datetime) -> int:
+        """
+        Сколько месяцев подряд у клиента идёт доход, который банк
+        может подтвердить.
+
+        Считается по ДЕЙСТВУЮЩИМ потокам дохода, а не по сроку
+        отношений с банком. Человек мог обслуживаться здесь пять
+        лет и устроиться на работу вчера — для условия
+        income_months это ноль месяцев, а не шестьдесят.
+
+        Стаж отсчитывается от последнего РАЗРЫВА, и разрывом
+        считается не только начало потока, но и его конец. Иначе
+        достаточно было бы сдавать квартиру десять лет, чтобы
+        вчерашняя потеря работы прошла незамеченной: самый старый
+        поток продолжался бы, и стаж остался бы десятилетним при
+        доходе, упавшем в несколько раз.
+
+        Так что берётся позднейшее из двух: начало непрерывной
+        части нынешнего дохода и момент, когда клиент последний
+        раз лишился подтверждаемого потока.
+        """
+
+        confirmable = [
+            item
+            for item in self.income_streams
+            if item.kind in income_module.CONFIRMABLE_KINDS
+        ]
+
+        starts = [item.valid_from for item in confirmable if item.active_at(ts)]
+
+        if not starts:
+            return 0
+
+        ended = [
+            item.valid_to
+            for item in confirmable
+            if item.valid_to is not None and item.valid_to <= ts
+        ]
+
+        start = min(starts)
+
+        if ended:
+            start = max(start, max(ended))
+
+        months = (ts.year - start.year) * 12 + (ts.month - start.month)
+
+        if ts.day < start.day:
+            months -= 1
+
+        return max(0, months)
+
+    def open_loan_count(self) -> int:
+        """
+        Сколько кредитов действует прямо сейчас.
+
+        Условиям каталога нужен именно счёт, а не признак:
+        рефинансирование требует двух кредитов, и «хотя бы один»
+        этому условию не отвечает.
+        """
+
+        return sum(1 for item in self.loans.values() if not item.closed)
 
     def held_codes(self, ts: datetime) -> frozenset:
         return frozenset(
@@ -223,6 +310,36 @@ class ClientState:
     def worst_dpd(self) -> int:
         return max((state.dpd for state in self.loans.values() if not state.closed), default=0)
 
+    def card_facts(self, card, card_id: str | None = None) -> dict:
+        """
+        Продуктовая часть payload карточного события.
+
+        Раньше каждое из четырёх мест писало её заново и, не найдя
+        договора, подставляло правдоподобные числа: версию 1 и
+        семейство debit_card. Выдуманное значение в выгрузке
+        неотличимо от настоящего, поэтому здесь его нет: карта без
+        договора это поломка симуляции, и она обязана быть видна.
+        """
+
+        contract = self.contracts.get(card.contract_id)
+
+        if contract is None:
+            raise KeyError(
+                f"карта {card.card_id} ссылается на договор {card.contract_id}, "
+                f"которого нет у клиента {self.client_id}"
+            )
+
+        return {
+            "product_id": contract.product_id,
+            "product_code": contract.product_code,
+            "product_version": contract.product_version,
+            "tariff_version": contract.tariff_version,
+            "product_family": contract.product_family,
+            "contract_id": contract.contract_id,
+            "account_id": card.account_id,
+            "card_id": card_id or card.card_id,
+        }
+
 
 @dataclass
 class Action:
@@ -236,7 +353,7 @@ class Action:
 @dataclass
 class CommunityResult:
     events: list
-    profile_versions: list
+    profile_rows: list
     coverage: list
     truth_clients: list
     truth_events: list
@@ -268,8 +385,36 @@ def _application_id(client_id: str, ts: datetime, index: int) -> str:
     return f"app_{stable_hash('application', client_id, ts.toordinal(), index) % 10 ** 12:012d}"
 
 
-def _transfer_id(client_id: str, ts: datetime, index: int) -> str:
-    return f"trf_{stable_hash('transfer', client_id, ts.toordinal(), index) % 10 ** 12:012d}"
+def in_window(ts: datetime) -> bool:
+    """
+    Момент попадает в окно выгрузки.
+
+    Границы не симметричны по смыслу, и это важно:
+
+      до начала окна мир ЖИЛ — деньги двигались, договоры
+      открывались, просто банк этого в выгрузку не положил;
+
+      на конце окна и позже мира ещё НЕТ — выгрузка снята в этот
+      момент, и ничего после него случиться не успело.
+
+    Поэтому проводка до начала окна делается, а после конца —
+    нет: иначе остаток менялся бы от события, которого не было.
+    """
+
+    return config.HISTORY_START <= ts < config.HISTORY_END
+
+
+def _transfer_id(client_id: str, ts: datetime, index: int, scope: str = "transfer") -> str:
+    """
+    Идентификатор перевода: общий у обеих его ног.
+
+    scope разводит независимые источники переводов. Запланированный
+    на день перевод и перевод из сессии приложения нумеруются
+    каждый по-своему, и без разных областей их номера столкнулись
+    бы, склеив два разных перевода в один.
+    """
+
+    return f"trf_{stable_hash(scope, client_id, ts.toordinal(), index) % 10 ** 12:012d}"
 
 
 class CommunitySimulation:
@@ -311,7 +456,7 @@ class CommunitySimulation:
 
         state = ClientState(
             persona=persona,
-            factory=EventFactory(persona.client_id, persona.is_test_account),
+            factory=EventFactory(persona.client_id),
             ledger=Ledger(persona.client_id),
         )
 
@@ -350,7 +495,7 @@ class CommunitySimulation:
     def _initial_profile(self, persona: Persona) -> dict:
 
         return {
-            "age": persona.age_at(HISTORY_START),
+            "age": persona.age_at(config.HISTORY_START),
             "gender": persona.gender,
             "family_status": persona.family_status,
             "children": persona.children,
@@ -358,12 +503,12 @@ class CommunitySimulation:
             "region": persona.region,
             "city": persona.settlement,
             "housing_type": persona.housing_type,
-            "pensioner": persona.is_pensioner_at(HISTORY_START),
+            "pensioner": persona.is_pensioner_at(config.HISTORY_START),
             "income_type": persona.income_type,
             "declared_income": persona.declared_income,
             "industry": persona.industry,
             "salary_day": persona.salary_day,
-            "relationship_months": persona.relationship_months_at(HISTORY_START),
+            "relationship_months": persona.relationship_months_at(config.HISTORY_START),
             "contracts_count": 0,
             "active_contracts": 0,
             "holds_credit_card": False,
@@ -512,24 +657,8 @@ class CommunitySimulation:
                 card.activated_at = ts
             return contract
 
-        # Витрина договоров у части продуктов теряет время.
-        # Запись при этом не может оказаться раньше своей
-        # причины: тогда реестр учитывает её следующим днём.
-        quality_rng = keyed_rng(NS_PRODUCT_TIME, state.ordinal, ts.toordinal(), index)
-
-        share = self.settings.defects.date_only_share.get(family, 0.1)
-
-        date_only = quality_rng.random() < share
-
+        # Время договора точное: витрина больше его не теряет.
         registry_ts = ts
-
-        if date_only:
-            registry_ts = ts.replace(hour=0, minute=0, second=0, microsecond=0)
-            if registry_ts <= (not_before or ts) - timedelta(seconds=1):
-                registry_ts = registry_ts + timedelta(days=1)
-            if registry_ts >= HISTORY_END:
-                registry_ts = ts
-                date_only = False
 
         payload = {
             "product_id": contract.product_id,
@@ -541,16 +670,17 @@ class CommunitySimulation:
             "account_id": contract.account_id,
             "card_id": contract.card_id,
             "offer_id": offer_id,
+            # Договор прямо называет заявку, по которой открыт.
+            # Раньше связь читалась только по reason и требовала
+            # догадки, а заявок у клиента может быть несколько.
+            "application_id": application_id,
             "previous_product_id": previous_product_id,
             "migration_reason": migration_reason,
             "amount_or_limit": amount,
             "term": term,
             "rate": contract.rate,
             "reason": "application_approved" if application_id else "opened",
-            "timestamp_quality": "date_only" if date_only else "exact",
         }
-
-        precision = "day" if date_only else "second"
 
         if account is not None:
             state.emit(
@@ -558,11 +688,6 @@ class CommunitySimulation:
                     "account_opened",
                     registry_ts,
                     payload,
-                    initiator=INITIATOR_BANK,
-                    correlation_id=contract_id,
-                    link_type="contract",
-                    effective_at=ts,
-                    precision=precision,
                 )
             )
 
@@ -571,11 +696,6 @@ class CommunitySimulation:
                 "product_migrated" if migration_reason else "product_opened",
                 registry_ts,
                 payload,
-                initiator=INITIATOR_BANK,
-                correlation_id=application_id or contract_id,
-                link_type="application" if application_id else "contract",
-                effective_at=ts,
-                precision=precision,
             )
         )
 
@@ -587,7 +707,7 @@ class CommunitySimulation:
 
             activation = ts + timedelta(days=int(rng.integers(low, high + 1)), hours=int(rng.integers(1, 20)))
 
-            if activation >= HISTORY_END:
+            if activation >= config.HISTORY_END:
                 activation = ts
 
             card.activated_at = activation
@@ -598,9 +718,6 @@ class CommunitySimulation:
                     "card_activated",
                     activation,
                     payload,
-                    initiator=INITIATOR_CLIENT,
-                    correlation_id=contract_id,
-                    link_type="contract",
                 )
             )
 
@@ -619,7 +736,7 @@ class CommunitySimulation:
 
         persona = state.persona
 
-        if persona.relationship_start >= HISTORY_START:
+        if persona.relationship_start >= config.HISTORY_START:
             return
 
         rng = keyed_rng(NS_LEDGER, state.ordinal, 1)
@@ -637,7 +754,7 @@ class CommunitySimulation:
                 emit_events=persona.relationship_start >= REGISTRY_START,
             )
 
-        span = max(1, (HISTORY_START - persona.relationship_start).days)
+        span = max(1, (config.HISTORY_START - persona.relationship_start).days)
 
         products = self.settings.products
 
@@ -661,7 +778,7 @@ class CommunitySimulation:
                 days=offset, hours=int(family_rng.integers(9, 19))
             )
 
-            if ts >= HISTORY_START:
+            if ts >= config.HISTORY_START:
                 continue
 
             item = self._pick_product(state, family, ts)
@@ -683,8 +800,10 @@ class CommunitySimulation:
                 state.held_counts(ts),
                 state.assets(),
                 True,
-                state.has_open_loan(),
+                state.open_loan_count(),
                 len(state.open_contracts(ts)),
+                state.income_months_at(ts),
+                amount,
             ):
                 continue
 
@@ -708,7 +827,7 @@ class CommunitySimulation:
         state.ledger.accounts[state.ledger.cash_id].balance = opening_cash
         state.ledger.accounts[state.ledger.other_bank_id].balance = opening_other
 
-        card_account = state.primary_card_account(HISTORY_START)
+        card_account = state.primary_card_account(config.HISTORY_START)
 
         if card_account is not None:
             card_account.balance = _money(
@@ -732,7 +851,7 @@ class CommunitySimulation:
 
             account = state.ledger.get(contract.account_id) if contract.account_id else None
 
-            if account is None or account.balance <= 0 or not contract.is_open_at(HISTORY_START):
+            if account is None or account.balance <= 0 or not contract.is_open_at(config.HISTORY_START):
                 continue
 
             terms = contract.terms
@@ -750,7 +869,7 @@ class CommunitySimulation:
                 capitalisation=str(terms.get("capitalisation", "daily")),
             )
 
-            while deposit.matures_at <= HISTORY_START:
+            while deposit.matures_at <= config.HISTORY_START:
                 deposit.matures_at = cal.add_months(deposit.matures_at, term)
                 contract.renewals += 1
 
@@ -764,11 +883,11 @@ class CommunitySimulation:
         state.opening_state = {
             "product_events": {
                 "contracts_before_window": len(state.contracts),
-                "open_contracts": len(state.open_contracts(HISTORY_START)),
+                "open_contracts": len(state.open_contracts(config.HISTORY_START)),
             },
             "transactions": {
-                "card_balance": state.primary_card_account(HISTORY_START).balance
-                if state.primary_card_account(HISTORY_START)
+                "card_balance": state.primary_card_account(config.HISTORY_START).balance
+                if state.primary_card_account(config.HISTORY_START)
                 else 0,
                 "deposit_balance": state.assets(),
             },
@@ -836,7 +955,7 @@ class CommunitySimulation:
         )
 
         for item in loan.schedule:
-            if item.due_date < HISTORY_START:
+            if item.due_date < config.HISTORY_START:
                 loan_rules.apply_payment(loan, item, item.amount, item.due_date)
 
         if loan.principal_outstanding <= 0:

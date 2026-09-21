@@ -9,6 +9,8 @@ import pyarrow as pa
 from .artifacts import _md_table
 from .history import (
     INTERNAL_COLUMNS,
+    PAIR_OWN,
+    PAIR_VISIBLE,
     CanonicalStore,
     ClientHistory,
     history_as_of,
@@ -35,12 +37,11 @@ from .history import (
 
 CHECKS = {
     "no_future_rows": "во входе нет строк с event_time на границе cutoff либо позже",
-    "one_version_per_event": "у каждого события ровно одна строка",
+    "one_row_per_event": "у каждого event_id ровно одна строка",
     "business_order_non_decreasing": "бизнес-порядок не убывает по времени события",
-    "internal_columns_hidden": "служебные поля выбора версии наружу не выдаются",
-    "profile_known_at_cutoff": "версия профиля уже действовала к cutoff",
+    "internal_columns_hidden": "служебные поля наружу не выдаются",
+    "one_profile_row": "у клиента не больше одной строки профиля",
     "known_events_only_grow": "между срезами набор известных событий только растёт",
-    "versions_only_grow": "между срезами версия события не понижается",
     "past_is_immutable": "содержимое уже известного события не меняется от более позднего среза",
 }
 
@@ -130,7 +131,7 @@ def check_single(history: ClientHistory) -> list[str]:
 
         ids = events.column("event_id").to_pylist()
         if len(ids) != len(set(ids)):
-            problems.append("one_version_per_event: событие встречается дважды")
+            problems.append("one_row_per_event: событие встречается дважды")
 
         if any(later < earlier for earlier, later in zip(event_time, event_time[1:])):
             problems.append("business_order_non_decreasing: порядок убывает по времени события")
@@ -139,8 +140,8 @@ def check_single(history: ClientHistory) -> list[str]:
     if leaked:
         problems.append(f"internal_columns_hidden: наружу вышли {leaked}")
 
-    if history.profile is not None and history.profile["valid_from"] >= cutoff:
-        problems.append("profile_known_at_cutoff: выбрана версия, которая ещё не действует")
+    if (history.profile_meta or {}).get("rows", 0) > 1:
+        problems.append("one_profile_row: у клиента больше одной строки профиля")
 
     return problems
 
@@ -152,20 +153,12 @@ def check_across(previous: ClientHistory, current: ClientHistory, columns: Seque
 
     problems: list[str] = []
 
-    before = dict(
-        zip(previous.events.column("event_id").to_pylist(), previous.events.column("event_version").to_pylist())
-    )
-    after = dict(
-        zip(current.events.column("event_id").to_pylist(), current.events.column("event_version").to_pylist())
-    )
+    before = set(previous.events.column("event_id").to_pylist())
+    after = set(current.events.column("event_id").to_pylist())
 
-    lost = set(before) - set(after)
+    lost = before - after
     if lost:
         problems.append(f"known_events_only_grow: пропало событий {len(lost)}")
-
-    downgraded = [key for key in before if key in after and after[key] < before[key]]
-    if downgraded:
-        problems.append(f"versions_only_grow: версия понизилась у {len(downgraded)} событий")
 
     old = _content_key(previous.events, columns)
     new = _content_key(current.events, columns)
@@ -201,7 +194,6 @@ def temporal_report(
 
     checked_clients = 0
     entity_states: Counter = Counter()
-    pending_total = 0
     transfers_visible = 0
     transfers_lonely = 0
 
@@ -238,10 +230,11 @@ def temporal_report(
 
             for item in history.entities:
                 entity_states[f"{item.kind}:{item.state}"] += 1
-                pending_total += len(item.pending)
 
             for item in history.transfers:
-                if item.pair_state == "counterpart_visible":
+                # Перевод себе наблюдается обеими ногами: он такой же
+                # собранный, как пара двух клиентов.
+                if item.pair_state in (PAIR_VISIBLE, PAIR_OWN):
                     transfers_visible += 1
                 else:
                     transfers_lonely += 1
@@ -274,20 +267,29 @@ def temporal_report(
         "per_cutoff": per_cutoff,
         "coverage_states": dict(sorted(coverage_states.items())),
         "entity_states": dict(sorted(entity_states.items())),
-        "pending_changes": pending_total,
         "transfers": {
             "counterpart_visible": transfers_visible,
             "counterpart_not_visible": transfers_lonely,
-            "rule": "встречная сторона видна только после своего события; иначе перевод односторонний",
+            "rule": (
+                "встречная сторона видна только после своего события; иначе перевод односторонний. "
+                "Перевод между своими счетами наблюдается обеими ногами у одного клиента и "
+                "односторонним не считается"
+            ),
         },
         "limitations": dict(sorted(limitations.items())),
         "rules": {
             "cutoff": "исключительная граница: событие обязано быть строго раньше",
-            "versions": "у события действует наибольшая версия; повторная доставка не создаёт действия",
-            "order": "бизнес-порядок по времени события и приоритету типа; версии события делят одно место",
-            "profile": "valid_from < cutoff, valid_to не фильтрует",
+            "rows": "event_id приходит в выгрузку один раз; запись сразу окончательна",
+            "order": "бизнес-порядок по времени события и приоритету типа",
+            "profile": "одна итоговая строка на клиента; версий и границ действия нет",
             "coverage": "состояние только из датированных полей; недатированные причины остаются вне состояния",
-            "internal": "служебные флаги выбора версии наружу не выдаются",
+            "transitions": (
+                "переход состояния действует с момента, которым записан: отдельного "
+                "времени вступления в силу у записи нет. Объявленное заранее изменение "
+                "выразить нечем, и событие обязано рождаться тогда, когда изменение "
+                "наступает"
+            ),
+            "internal": "служебные флаги слоя наружу не выдаются",
         },
     }
 
@@ -326,9 +328,7 @@ def render_history_md(history: ClientHistory, tail: int = 15) -> str:
                 ["строк у клиента всего", counts["rows"]],
                 ["видно событий", counts["visible"]],
                 ["ещё не произошло", counts["event_not_happened"]],
-                ["повторных доставок отброшено", counts["duplicate"]],
-                ["перекрыто старшей версией", counts["superseded"]],
-                ["конфликтов отброшено", counts["conflict_dropped"]],
+                ["повторов event_id отброшено", counts["repeated"]],
             ],
             ["показатель", "значение"],
         )
@@ -339,15 +339,12 @@ def render_history_md(history: ClientHistory, tail: int = 15) -> str:
     out.append("\n## Профиль\n")
 
     if history.profile is None:
-        out.append(f"Версии профиля на эту дату ещё нет: известно {meta['versions_known']} из {meta['versions_total']}.\n")
+        out.append("Анкеты у клиента нет: банк её ещё не посчитал.\n")
     else:
         profile = history.profile
         out.append(
             _md_table(
                 [
-                    ["версия", meta["profile_version"]],
-                    ["действует с", _fmt(meta["valid_from"])],
-                    ["возраст версии, дней", meta["age_days"]],
                     ["возраст клиента", _fmt(profile.get("age"))],
                     ["город", _fmt(profile.get("city"))],
                     ["доход заявленный", _fmt(profile.get("declared_income"))],
@@ -403,11 +400,10 @@ def render_history_md(history: ClientHistory, tail: int = 15) -> str:
                         _fmt(item.since),
                         _fmt(item.opening_observed),
                         _fmt(item.last_transition),
-                        ", ".join(f"{name} c {_fmt(moment)}" for name, moment in item.pending) or "—",
                     ]
                     for item in history.entities[:20]
                 ],
-                ["вид", "идентификатор", "состояние", "с", "открытие наблюдалось", "последний переход", "ещё не в силе"],
+                ["вид", "идентификатор", "состояние", "с", "открытие наблюдалось", "последний переход"],
             )
         )
 
@@ -459,13 +455,12 @@ def render_history_md(history: ClientHistory, tail: int = 15) -> str:
                         _fmt(row["event_time"]),
                         row["event_type"],
                         row["source"],
-                        row["version_role"],
                         _fmt(row.get("amount")),
                         _fmt(row.get("merchant_name") or row.get("counterparty") or row.get("template")),
                     ]
                     for row in rows
                 ],
-                ["время события", "тип", "источник", "роль версии", "сумма", "кому или что"],
+                ["время события", "тип", "источник", "сумма", "кому или что"],
             )
         )
 

@@ -32,7 +32,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         overrides={
             "lifecycle": {
                 "life_event_rate_per_year": {"job_loss": 2.5, "income_down": 1.2, "illness": 0.6},
-                "pause_probability_per_year": {"rare": 0.1, "moderate": 0.1, "regular": 0.1,
+                "pause_probability_per_year": {"silent": 0.1, "rare": 0.1, "regular": 0.1,
                                                "high": 0.1, "extreme": 0.1},
             },
             "stress": {"random_shock_per_year": 1.2, "cooldown_days": 20, "max_episodes": 6},
@@ -92,7 +92,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         description="полная пауза и возвращение клиента",
         overrides={
             "lifecycle": {
-                "pause_probability_per_year": {"rare": 4.0, "moderate": 4.0, "regular": 4.0,
+                "pause_probability_per_year": {"silent": 4.0, "rare": 4.0, "regular": 4.0,
                                                "high": 4.0, "extreme": 4.0},
                 "pause_kind_weights": {"full": 1.0, "app_only": 0.0, "cards_only": 0.0,
                                        "other_bank": 0.0, "seasonal": 0.0},
@@ -146,7 +146,7 @@ SCENARIOS: tuple[Scenario, ...] = (
                                         "random_counterparty": (0.5, 1.0)},
             },
             "activity": {
-                "transfers_per_month": {"rare": 6.0, "moderate": 8.0, "regular": 10.0,
+                "transfers_per_month": {"silent": 6.0, "rare": 8.0, "regular": 10.0,
                                         "high": 12.0, "extreme": 14.0},
             },
         },

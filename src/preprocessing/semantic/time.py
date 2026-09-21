@@ -19,11 +19,9 @@ from .keys import TIMING_KEYS
 # event_time в preprocessing/calendar.py и здесь не дублируется.
 #
 # Точность не придумывается: интервал считается в объявленной
-# точности события. У записи дневной точности час и минута не
-# наблюдались, что бы ни стояло в поле времени, поэтому её
-# интервалы кратны суткам: оба момента усекаются до более грубой
-# точности пары. Признак «время суток» из такого события тоже не
-# выводится — это работа календаря и его флага hour_known.
+# времени события. Время точное, поэтому интервал это прямая
+# разность двух моментов: усекать и согласовывать точности
+# больше нечего.
 #
 # Всё считается только по видимым на cutoff событиям. Будущая
 # дата возврата, итоговая длительность паузы и прочее знание из
@@ -34,75 +32,16 @@ from .keys import TIMING_KEYS
 HOUR = 3600.0
 DAY = 86400.0
 
-DATE_ONLY = "date_only"
 
-# Объявленные точности от точной к грубой. Точность пары событий
-# это более грубая из двух.
-PRECISION_ORDER: tuple[str, ...] = ("second", "minute", "day")
-
-
-class PrecisionError(ValueError):
+def interval_hours(later: datetime, earlier: datetime) -> float:
     """
-    Источник объявил точность, которой слой не знает: судить о
-    времени по ней нельзя.
+    Часы между двумя событиями.
+
+    Время события точное, поэтому усекать и согласовывать
+    точности больше нечего: разность берётся как есть.
     """
 
-
-def effective_precision(row: dict) -> str:
-    """
-    Насколько точно источник знает время этой записи.
-
-    Дневное качество отметки в payload значит то же, что дневная
-    точность источника: час и минута не наблюдались. Правило одно
-    на весь слой: интервалы, порядок в цепочках и hour_known
-    смотрят сюда.
-    """
-
-    if row.get("timestamp_quality") == DATE_ONLY:
-        return "day"
-
-    declared = row.get("time_precision") or "second"
-
-    if declared not in PRECISION_ORDER:
-        raise PrecisionError(
-            f"неизвестная объявленная точность времени {declared!r}: "
-            "судить о времени события по ней нельзя"
-        )
-
-    return declared
-
-
-def coarser(first: str, second: str) -> str:
-    return max(first, second, key=PRECISION_ORDER.index)
-
-
-def floor_to_precision(moment: datetime, precision: str) -> datetime:
-    """
-    Момент, усечённый до объявленной точности: то, что источник
-    действительно знает о времени.
-    """
-
-    if precision == "day":
-        return moment.replace(hour=0, minute=0, second=0, microsecond=0)
-
-    if precision == "minute":
-        return moment.replace(second=0, microsecond=0)
-
-    return moment
-
-
-def interval_hours(
-    later: datetime, later_precision: str, earlier: datetime, earlier_precision: str
-) -> float:
-    """
-    Часы между двумя событиями в точности пары: оба момента
-    усечены до более грубой из двух точностей. У пары с дневной
-    записью результат кратен 24.
-    """
-
-    precision = coarser(later_precision, earlier_precision)
-
-    return _hours(floor_to_precision(later, precision), floor_to_precision(earlier, precision))
+    return _hours(later, earlier)
 
 # Событие «доход»: с него считается время до следующей траты.
 INCOME_TYPES: frozenset[str] = frozenset(
@@ -125,7 +64,6 @@ class EventTiming:
     since_same_type_hours: float | None
     since_last_income_hours: float | None
     age_of_history_days: float | None
-    time_precision: str
     days_to_due: float | None = None
 
     def as_dict(self) -> dict:
@@ -134,7 +72,6 @@ class EventTiming:
             "since_same_type_hours": self.since_same_type_hours,
             "since_last_income_hours": self.since_last_income_hours,
             "age_of_history_days": self.age_of_history_days,
-            "time_precision": self.time_precision,
             "days_to_due": self.days_to_due,
         }
 
@@ -143,9 +80,6 @@ class EventTiming:
         Интервалы, которые получает модель, под объявленными
         ключами. Пустой интервал признаком не становится: «не с
         чем сравнивать» это не ноль.
-
-        time_precision сюда не входит: объявленная точность это
-        признак качества, он остаётся внутри слоя.
         """
 
         return {
@@ -168,13 +102,12 @@ def timings(rows: list[dict], observed_start: datetime | None) -> list[EventTimi
     Интервалы по видимой истории клиента в бизнес-порядке.
 
     Первое событие интервала не имеет: None здесь означает «не с
-    чем сравнивать», а не ноль. Каждый интервал считается в
-    точности своей пары событий.
+    чем сравнивать», а не ноль.
     """
 
-    previous: tuple[datetime, str] | None = None
-    per_type: dict[str, tuple[datetime, str]] = {}
-    last_income: tuple[datetime, str] | None = None
+    previous: datetime | None = None
+    per_type: dict[str, datetime] = {}
+    last_income: datetime | None = None
 
     out: list[EventTiming] = []
 
@@ -182,42 +115,34 @@ def timings(rows: list[dict], observed_start: datetime | None) -> list[EventTimi
 
         moment = row["event_time"]
         event_type = row["event_type"]
-        precision = effective_precision(row)
-
-        # Возраст истории и дни до платежа считаются от момента,
-        # каким его знает источник: у дневной записи это её дата.
-        known = floor_to_precision(moment, precision)
 
         due = row.get("due_date")
 
         out.append(
             EventTiming(
                 since_previous_hours=(
-                    None if previous is None else interval_hours(moment, precision, *previous)
+                    None if previous is None else interval_hours(moment, previous)
                 ),
                 since_same_type_hours=(
                     None
                     if event_type not in per_type
-                    else interval_hours(moment, precision, *per_type[event_type])
+                    else interval_hours(moment, per_type[event_type])
                 ),
                 since_last_income_hours=(
-                    None if last_income is None else interval_hours(moment, precision, *last_income)
+                    None if last_income is None else interval_hours(moment, last_income)
                 ),
                 age_of_history_days=(
-                    None
-                    if observed_start is None
-                    else _days(known, floor_to_precision(observed_start, precision))
+                    None if observed_start is None else _days(moment, observed_start)
                 ),
-                time_precision=precision,
-                days_to_due=_days_to_due(known, due),
+                days_to_due=_days_to_due(moment, due),
             )
         )
 
-        previous = (moment, precision)
-        per_type[event_type] = (moment, precision)
+        previous = moment
+        per_type[event_type] = moment
 
         if event_type in INCOME_TYPES:
-            last_income = (moment, precision)
+            last_income = moment
 
     return out
 
@@ -246,8 +171,7 @@ def product_ages(rows: list[dict], cutoff: datetime) -> dict[str, float]:
     """
     Возраст сущности в днях на cutoff, считая от ВИДИМОГО
     открытия. Сущность без наблюдаемого открытия возраста не
-    получает: выдумывать его нельзя. Момент открытия берётся в
-    объявленной точности: у дневной записи это дата.
+    получает: выдумывать его нельзя.
     """
 
     opened: dict[str, datetime] = {}
@@ -257,7 +181,7 @@ def product_ages(rows: list[dict], cutoff: datetime) -> dict[str, float]:
         if row["event_type"] not in OPENING_TYPES:
             continue
 
-        known = floor_to_precision(row["event_time"], effective_precision(row))
+        known = row["event_time"]
 
         for column in ("contract_ref", "account_ref", "card_ref"):
             ref = row.get(column)
@@ -272,15 +196,9 @@ def relationship_days(observed_start: datetime | None, cutoff: datetime) -> floa
 
 
 __all__ = [
-    "DATE_ONLY",
     "INCOME_TYPES",
     "OPENING_TYPES",
-    "PRECISION_ORDER",
     "EventTiming",
-    "PrecisionError",
-    "coarser",
-    "effective_precision",
-    "floor_to_precision",
     "interval_hours",
     "product_ages",
     "relationship_days",

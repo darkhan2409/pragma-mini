@@ -151,12 +151,12 @@ class GroupWindow:
 
 def default_windows() -> dict[str, GroupWindow]:
 
-    start = datetime(2023, 1, 1)
+    start = datetime(2024, 1, 1)
 
     return {
         "train": GroupWindow(start, datetime(2026, 1, 1), start, datetime(2026, 1, 1)),
-        "val": GroupWindow(start, datetime(2026, 6, 1), datetime(2026, 1, 1), datetime(2026, 6, 1)),
-        "test": GroupWindow(start, datetime(2026, 9, 1), datetime(2026, 6, 1), datetime(2026, 9, 1)),
+        "val": GroupWindow(start, datetime(2026, 5, 1), datetime(2026, 1, 1), datetime(2026, 5, 1)),
+        "test": GroupWindow(start, datetime(2026, 9, 1), datetime(2026, 5, 1), datetime(2026, 9, 1)),
     }
 
 
@@ -168,7 +168,7 @@ class PreprocessingConfig:
     timezone: str = "Asia/Almaty"
 
     # Согласованное начало истории для всех групп.
-    required_history_start: datetime = datetime(2023, 1, 1)
+    required_history_start: datetime = datetime(2024, 1, 1)
 
     windows: dict[str, GroupWindow] = field(default_factory=default_windows)
 
@@ -246,7 +246,7 @@ class PreprocessingConfig:
                 "history_sample_clients",
                 "history_report_cutoffs",
             ),
-            "split": (
+            "corpus": (
                 "schema_version",
                 "windows",
                 "required_history_start",

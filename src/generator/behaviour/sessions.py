@@ -82,7 +82,10 @@ GOAL_DOMAIN = {
 GOAL_FLOW = {
     GOAL_BALANCE: (("home", "s_000_home"), ("home", "s_010_balance"), ("home", "s_011_history")),
     GOAL_PAYMENT: (("home", "s_000_home"), ("payments", "s_300_payments"), ("payments", None)),
-    GOAL_TRANSFER: (("home", "s_000_home"), ("transfers", "s_200_transfers"), ("transfers", "s_203_transfer_confirm")),
+    # У перевода путь достраивается в _steps: экран зависит от
+    # выбранного вида перевода, и подтверждение идёт ПОСЛЕ ввода
+    # данных, а не вместо него.
+    GOAL_TRANSFER: (("home", "s_000_home"), ("transfers", "s_200_transfers"), (None, None)),
     GOAL_CARDS: (("home", "s_000_home"), ("cards", "s_100_cards"), ("cards", "s_101_card_detail")),
     GOAL_EXPLORE: (("home", "s_000_home"), (None, None), (None, None)),
     GOAL_SUPPORT: (("home", "s_000_home"), ("support", "s_900_support"), ("support", "s_901_chat")),
@@ -90,6 +93,16 @@ GOAL_FLOW = {
     GOAL_PROFILE: (("home", "s_000_home"), ("profile", "s_800_profile"), ("profile", "s_801_settings")),
     GOAL_LOAN: (("home", "s_000_home"), ("loans", "s_400_loans"), ("loans", "s_403_loan_schedule")),
     GOAL_DEPOSIT: (("home", "s_000_home"), ("deposits", "s_500_deposits"), ("deposits", "s_503_deposit_detail")),
+}
+
+# Экран ввода данных по виду перевода. Перевод по шаблону
+# открывает экран перевода по телефону: реквизиты уже сохранены,
+# отдельного экрана у него нет.
+TRANSFER_ENTRY_SCREEN = {
+    "transfer_phone": "s_201_transfer_phone",
+    "transfer_card": "s_202_transfer_card",
+    "transfer_own": "s_204_transfer_own",
+    "transfer_template": "s_201_transfer_phone",
 }
 
 GOAL_OPERATION = {
@@ -419,6 +432,23 @@ def _build_steps(
         )
         return moment
 
+    def push_screen(domain: str, screen: str) -> None:
+        """
+        Добавляет экран, если клиент на нём уже не стоит.
+
+        Блуждание по разделу может само привести на экран ввода
+        перевода, и тогда целевой шаг открывал его второй раз
+        подряд: в ленте это два одинаковых app_screen через
+        несколько секунд.
+        """
+
+        if steps and steps[-1].kind == "screen" and steps[-1].screen == screen:
+            return
+
+        advance()
+
+        steps.append(Step(kind="screen", ts=moment, domain=domain, screen=screen))
+
     # --- вход ---
 
     biometry = rng.random() < 0.35 + 0.45 * persona.trait("digital_affinity", started_at)
@@ -518,6 +548,16 @@ def _build_steps(
         if not options:
             continue
 
+        # Человек не открывает тот же экран, на котором уже
+        # стоит: подряд два одинаковых app_screen это не
+        # блуждание по разделу, а дубль в ленте.
+        last = steps[-1].screen if steps and steps[-1].kind == "screen" else None
+
+        choices = [name for name in options if name != last]
+
+        if not choices:
+            continue
+
         advance()
 
         steps.append(
@@ -525,7 +565,7 @@ def _build_steps(
                 kind="screen",
                 ts=moment,
                 domain=source.domain,
-                screen=str(options[int(extra_rng.integers(0, len(options)))]),
+                screen=str(choices[int(extra_rng.integers(0, len(choices)))]),
             )
         )
 
@@ -571,11 +611,26 @@ def _build_steps(
         return steps
 
     if goal == GOAL_TRANSFER:
+
         operation = str(
             rng.choice(("transfer_phone", "transfer_card", "transfer_own", "transfer_template"))
         )
+
+        # Перевод между своими счетами возможен, только когда
+        # счетов больше одного.
         if operation == "transfer_own" and context.accounts < 2:
             operation = "transfer_phone"
+
+        # Экран ввода данных соответствует выбранному переводу:
+        # по номеру телефона, по номеру карты, между своими
+        # счетами. Шаблон открывает тот же экран, что и перевод
+        # по телефону: данные уже сохранены.
+        entry = TRANSFER_ENTRY_SCREEN[operation]
+
+        push_screen("transfers", entry)
+
+        # Подтверждение — последний экран перед операцией.
+        push_screen("transfers", "s_203_transfer_confirm")
 
     if goal == GOAL_CARDS and context.card_blocked:
         operation = "card_unblock"

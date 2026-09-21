@@ -14,9 +14,10 @@ from src.preprocessing.manifest import fingerprint_path, load_fingerprint, outpu
 from src.preprocessing.semantic.as_of import SemanticHistory, open_merchants, open_products, semantic_as_of
 from src.preprocessing.semantic.build import REGISTRY_FILE as SEMANTIC_REGISTRY_FILE
 from src.preprocessing.semantic.build import STAGE as SEMANTIC_STAGE
-from src.preprocessing.split import SPLIT_MANIFEST_FILE, TRAIN_INDEX_FILE, catalog_digests
-from src.preprocessing.split import STAGE as SPLIT_STAGE
-from src.preprocessing.split import SplitError, TrainCorpus
+from src.preprocessing.corpus import CORPUS_MANIFEST_FILE, TRAIN_INDEX_FILE, catalog_digests
+from src.preprocessing.corpus import STAGE as CORPUS_STAGE
+from src.preprocessing.corpus import CorpusError as TrainCorpusError
+from src.preprocessing.corpus import TrainCorpus
 
 from .schema import SemanticSchema
 
@@ -30,7 +31,7 @@ from .schema import SemanticSchema
 #
 # Второй реализации видимости здесь нет и быть не может. Всё,
 # что знает токенизатор о том, какие строки ему разрешены,
-# приходит из split.TrainCorpus: он проверяет пригодность,
+# приходит из TrainCorpus этапа corpus: он проверяет пригодность,
 # свежесть canonical, горизонт и сам индекс, а клиента выдаёт
 # только из разрешённой группы.
 #
@@ -176,7 +177,7 @@ class FitCorpus:
         return int(self.manifest["groups"][self.group]["clients_without_profile"])
 
     @property
-    def split_limitations(self) -> tuple[str, ...]:
+    def corpus_limitations(self) -> tuple[str, ...]:
         return tuple(self.manifest.get("limitations", ()))
 
     # --- чтение ---
@@ -215,10 +216,10 @@ class FitCorpus:
         processed = Path(processed_dir)
         raw = Path(raw_dir)
 
-        split_dir = processed / SPLIT_STAGE
+        corpus_dir = processed / CORPUS_STAGE
         canonical_dir = processed / CANONICAL_STAGE / group
 
-        manifest_path = split_dir / SPLIT_MANIFEST_FILE
+        manifest_path = corpus_dir / CORPUS_MANIFEST_FILE
 
         if not manifest_path.exists():
             raise CorpusError(
@@ -237,20 +238,20 @@ class FitCorpus:
         # Маркеры этапов: отпечаток говорит о согласии маркера с
         # манифестом, а целы ли сами файлы, проверяют выходы.
         _marker(processed, CANONICAL_STAGE, group, f"canonical/{group}")
-        _marker(processed, SPLIT_STAGE, None, "split")
+        _marker(processed, CORPUS_STAGE, None, "corpus")
         _marker(processed, SEMANTIC_STAGE, group, f"semantic/{group}")
 
         catalogs = FitCorpus._catalogs(raw, manifest, group)
 
         try:
             corpus = TrainCorpus.open(
-                split_dir,
+                corpus_dir,
                 canonical_dir,
                 processed_dir=processed,
                 allow_short_horizon=allow_short_horizon,
                 products=open_products(raw),
             )
-        except SplitError as error:
+        except TrainCorpusError as error:
             raise CorpusError(str(error)) from error
 
         schema = SemanticSchema.open(processed, group)
@@ -258,8 +259,8 @@ class FitCorpus:
         semantic_path, field_path = SemanticSchema.paths(processed, group)
 
         inputs = {
-            SPLIT_MANIFEST_FILE: sha256_file(manifest_path),
-            TRAIN_INDEX_FILE: sha256_file(split_dir / TRAIN_INDEX_FILE),
+            CORPUS_MANIFEST_FILE: sha256_file(manifest_path),
+            TRAIN_INDEX_FILE: sha256_file(corpus_dir / TRAIN_INDEX_FILE),
             SEMANTIC_REGISTRY_FILE: sha256_file(semantic_path),
             CANONICAL_REGISTRY_FILE: sha256_file(field_path),
             **{f"catalog/{name}.parquet": digest for name, digest in catalogs.items()},
@@ -362,7 +363,7 @@ class GroupCorpus:
 
         _marker(processed, CANONICAL_STAGE, group, f"canonical/{group}")
 
-        manifest_path = processed / SPLIT_STAGE / SPLIT_MANIFEST_FILE
+        manifest_path = processed / CORPUS_STAGE / CORPUS_MANIFEST_FILE
 
         readiness = Readiness(READY, ())
         clients: list[str] | None = None
@@ -386,7 +387,7 @@ class GroupCorpus:
         if clients is None:
             # Разделения нет: состав группы берётся из адресной
             # книги canonical, тестовые аккаунты исключаются.
-            clients = [row["client_id"] for row in store.clients if not row["is_test_account"]]
+            clients = [row["client_id"] for row in store.clients]
 
         return GroupCorpus(
             store=store,

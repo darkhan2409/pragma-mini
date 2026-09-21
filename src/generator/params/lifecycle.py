@@ -53,8 +53,8 @@ class LifecycleParams:
     # Паузы.
     pause_probability_per_year: dict = field(
         default_factory=lambda: {
+            "silent": 4.00,
             "rare": 3.20,
-            "moderate": 1.60,
             "regular": 0.70,
             "high": 0.28,
             "extreme": 0.10,

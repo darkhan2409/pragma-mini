@@ -374,7 +374,7 @@ def provenance(event: SemanticEvent, identity: dict[int, tuple[str, int]]) -> di
             if index is not None:
                 known = identity.get(index)
                 if known is not None:
-                    entry["event_id"], entry["event_version"] = known
+                    entry["event_id"] = known
 
             sources.append(entry)
 
@@ -389,7 +389,7 @@ def event_identity(history: SemanticHistory) -> dict[int, tuple[str, int]]:
     Внутренний номер события -> его устойчивый идентификатор.
     """
 
-    return {item.stable_event_index: (item.event_id, item.event_version) for item in history.events}
+    return {item.stable_event_index: item.event_id for item in history.events}
 
 
 def decode_record(artifacts: FrozenArtifacts, record: EncodedRecord) -> list[dict]:

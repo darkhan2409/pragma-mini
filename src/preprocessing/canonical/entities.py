@@ -78,13 +78,10 @@ MENTION_COLUMNS = (
     "client_idx",
     "client_id",
     "event_id",
-    "event_version",
     "stable_event_index",
     "event_time",
-    "effective_at",
     "event_type",
     "source",
-    "version_role",
     "raw_row",
 )
 
@@ -153,23 +150,19 @@ def extract_transfers(table: pa.Table) -> list[dict]:
     просмотрены все клиенты: вторая сторона живёт у другого.
 
     Сторона узнаётся по ТИПУ СОБЫТИЯ (TRANSFER_SIDES) и непустому
-    correlation_id — тем же правилом, что и индекс переводов
-    истории. Метка связи описывает связь, а не вид операции:
-    комиссия за перевод носит ту же метку и тот же
-    correlation_id, но стороной перевода не является. Раньше
-    отбор шёл по метке, и комиссия становилась стороной без
-    направления.
-
-    Метки доставки в конверте больше нет, поэтому исправленная
-    строка перевода остаётся переводом и из таблицы не выпадает.
+    transfer_id в payload — тем же правилом, что и индекс
+    переводов истории. Тип операции решает всё: комиссия за
+    перевод несёт тот же transfer_id, но стороной перевода не
+    является. Раньше отбор шёл по метке связи в конверте, и
+    комиссия становилась стороной без направления.
     """
 
-    if "event_type" not in table.column_names or "correlation_id" not in table.column_names:
+    if "event_type" not in table.column_names or "transfer_id" not in table.column_names:
         return []
 
     mask = pc.and_(
         pc.is_in(table.column("event_type"), value_set=pa.array(sorted(TRANSFER_SIDES))),
-        pc.is_valid(table.column("correlation_id")),
+        pc.is_valid(table.column("transfer_id")),
     )
 
     rows = table.filter(mask)
@@ -183,13 +176,11 @@ def extract_transfers(table: pa.Table) -> list[dict]:
 
         out.append(
             {
-                "transfer_id": row["correlation_id"],
+                "transfer_id": row["transfer_id"],
                 "side": TRANSFER_SIDES.get(row["event_type"]),
                 "client_idx": row["client_idx"],
                 "client_id": row["client_id"],
                 "event_id": row["event_id"],
-                "event_version": row["event_version"],
-                "version_role": row["version_role"],
                 "event_type": row["event_type"],
                 "stable_event_index": row["stable_event_index"],
                 "event_time": row["event_time"],

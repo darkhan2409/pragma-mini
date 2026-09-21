@@ -9,13 +9,7 @@ from .behaviour import habits as habits_module
 from .behaviour import merchants as merchant_choice
 from .behaviour import needs as needs_module
 from .behaviour import sessions as session_module
-from .config import (
-    HISTORY_END,
-    HISTORY_START,
-    INITIATOR_CLIENT,
-    INITIATOR_EXTERNAL,
-    INITIATOR_SYSTEM,
-)
+from . import config
 from .finance import cards as card_rules
 from .finance import loans as loan_rules
 from .finance.entities import (
@@ -32,6 +26,7 @@ from .rng import (
     COMPONENT_CONTENT,
     COMPONENT_OUTCOME,
     COMPONENT_TIME,
+    NS_ADOPTION,
     NS_CARD_BLOCK,
     NS_LEDGER,
     NS_PURCHASE_SOURCE,
@@ -50,6 +45,7 @@ from .simulate import (
     CommunitySimulation,
     _money,
     _transfer_id,
+    in_window,
 )
 from .world.dictionaries import (
     MCC_CASH,
@@ -80,23 +76,18 @@ def run_community(community_id: int, ordinals: tuple) -> CommunityResult:
     for state in sim.clients.values():
 
         sim._prehistory(state)
-        state.state = lifecycle_module.initial_state(state.persona, HISTORY_START)
+        state.state = lifecycle_module.initial_state(state.persona, config.HISTORY_START)
 
         # Клиент, пришедший до окна наблюдения, известен банку с
         # первого его дня: первая версия профиля описывает то, с
         # чем он вошёл в окно. Клиент, зарегистрированный внутри
         # окна, получает первую версию в момент регистрации.
-        if state.persona.relationship_start < HISTORY_START:
-            _update_profile(
-                state,
-                HISTORY_START,
-                moment=HISTORY_START,
-                reason="opening_state",
-            )
+        if state.persona.relationship_start < config.HISTORY_START:
+            _update_profile(state, config.HISTORY_START, moment=config.HISTORY_START)
 
-    day = HISTORY_START
+    day = config.HISTORY_START
 
-    while day < HISTORY_END:
+    while day < config.HISTORY_END:
 
         sim.queue = []
 
@@ -137,6 +128,17 @@ def run_community(community_id: int, ordinals: tuple) -> CommunityResult:
 # в плане у него нет: внутри одной секунды он идёт последним.
 REFUND_ORDER = 10_000
 
+# Канал операции, которую клиент сделал сам, но не в сессии
+# приложения.
+#
+# app в денежном событии означает ровно одно: операция прошла
+# внутри сессии, у неё есть session_id и парная запись
+# app_operation. Всё остальное, что человек делает удалённо,
+# наблюдается как операция без присутствия — ecom. Иначе в
+# выгрузке появлялись строки с каналом app у клиента, который
+# приложение не ставил.
+CHANNEL_REMOTE = "ecom"
+
 
 # ============================================================
 # ПЛАН ДНЯ
@@ -160,7 +162,7 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
     def add(ts: datetime, kind: str, payload: dict) -> None:
         nonlocal order
         order += 1
-        if HISTORY_START <= ts < HISTORY_END:
+        if config.HISTORY_START <= ts < config.HISTORY_END:
             actions.append(Action(ts=ts, ordinal=state.ordinal, order=order, kind=kind, payload=payload))
 
     silenced = lifecycle_module.silenced_streams(state.pauses, day)
@@ -410,8 +412,9 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
             state.held_counts(day),
             state.assets(),
             app_adopted,
-            state.has_open_loan(),
+            state.open_loan_count(),
             len(state.open_contracts(day)),
+            state.income_months_at(day),
             stress,
         )
 
@@ -488,7 +491,21 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
     # --- органический интерес к продукту ---
 
     if day >= persona.relationship_start and "purchases" not in silenced:
-        add(day.replace(hour=20, minute=15), "adoption", {"stress": stress, "app": app_adopted})
+
+        # Момент интереса разыгрывается, а не назначается. Раньше
+        # здесь стояло ровно 20:15, и ВСЕ заявки выгрузки падали
+        # в одну минуту суток — шаблон, которого в жизни нет.
+        pick = keyed_rng(NS_ADOPTION, state.ordinal, day.toordinal(), 3)
+
+        add(
+            day.replace(
+                hour=int(pick.integers(9, 23)),
+                minute=int(pick.integers(0, 60)),
+                second=int(pick.integers(0, 60)),
+            ),
+            "adoption",
+            {"stress": stress, "app": app_adopted},
+        )
 
     # --- крупная покупка как жизненное событие ---
     #
@@ -778,9 +795,6 @@ def _emit_money(
     direction: str,
     counterpart_account: str,
     payload: dict,
-    initiator: str,
-    correlation_id: str | None = None,
-    link_type: str | None = None,
     status: str = "approved",
     post: bool = True,
 ):
@@ -793,6 +807,30 @@ def _emit_money(
     """
 
     account = state.ledger.get(account_id) if account_id else None
+
+    # Одобренное списание не может увести счёт в минус. Проверка
+    # стоит ЗДЕСЬ, а не у каждого вызывающего: путей списания
+    # полтора десятка, счёт выбирается заранее, а исполняется
+    # операция позже — за это время соседние события дня успевают
+    # снять деньги, и остаток уходил ниже нуля у обычной карты.
+    #
+    # available знает про кредитный лимит: по кредитной карте
+    # минус разрешён ровно до него, по дебетовому счёту лимита
+    # нет и минуса быть не может.
+    #
+    # Нехватка денег превращается в ОТКАЗ, а не в тихий пропуск:
+    # попытка была, и банк её видел. Проводки у отказа нет, так
+    # что ни остаток, ни ledger не меняются.
+    if (
+        status == "approved"
+        and post
+        and direction == "debit"
+        and account is not None
+        and account.available < int(amount)
+    ):
+        status = "declined"
+        payload = dict(payload)
+        payload.setdefault("decline_reason", "insufficient_funds")
 
     body = dict(payload)
     body["amount"] = int(amount)
@@ -817,16 +855,13 @@ def _emit_money(
             body["original_currency"] = code
             body["original_amount"] = int(round(int(amount) / rate))
 
-    event = state.factory.make(
-        event_type,
-        ts,
-        body,
-        initiator=initiator,
-        correlation_id=correlation_id,
-        link_type=link_type,
-    )
+    event = state.factory.make(event_type, ts, body)
 
-    if status == "approved" and account is not None:
+    # За концом окна проводки нет. Строку туда всё равно не
+    # записать, а остаток она бы изменила — и следующий срез
+    # увидел бы деньги, которых выгрузка не показывает. До
+    # НАЧАЛА окна проводка, наоборот, нужна: там мир жил.
+    if status == "approved" and account is not None and ts < config.HISTORY_END:
 
         # Вторая нога перевода между своими счетами денег не
         # двигает: проводка первой ноги уже изменила оба остатка.
@@ -863,15 +898,14 @@ def _emit_money(
 
 
 def _decline(state: ClientState, ts: datetime, event_type: str, account_id: str | None,
-             amount: int, direction: str, payload: dict, reason: str, initiator: str,
-             correlation_id: str | None = None):
+             amount: int, direction: str, payload: dict, reason: str):
 
     body = dict(payload)
     body["decline_reason"] = reason
 
     return _emit_money(
         state, ts, event_type, account_id, amount, direction,
-        "external:none", body, initiator, correlation_id, status="declined",
+        "external:none", body, status="declined",
     )
 
 
@@ -890,7 +924,7 @@ def _on_registration(sim, state: ClientState, ts: datetime, payload: dict) -> No
     _touch_client(state, ts)
 
     # Профиль появляется вместе с клиентом, а не в конце месяца.
-    _update_profile(state, ts, moment=ts, reason="registration")
+    _update_profile(state, ts, moment=ts)
 
     state.note(ts, "state_transition", lifecycle_module.STATE_ONBOARDING, {"cause": "registration"})
 
@@ -936,7 +970,6 @@ def _on_income(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             "reason": payout.outcome,
             "merchant_country": "KZ",
         },
-        INITIATOR_EXTERNAL,
     )
 
     state.note(ts, "income_event", payout.outcome, {"amount": amount, "kind": payout.kind})
@@ -968,7 +1001,12 @@ def _on_bill(sim, state: ClientState, ts: datetime, payload: dict) -> None:
     merchant = choice.outlet if choice else None
 
     body = {
-        "channel": "app" if not bill.autopay else "system",
+        # Счёт оплачен без сессии приложения, значит и каналом
+        # app он быть не может: у операции в приложении есть
+        # session_id и своя запись app_operation. Самостоятельная
+        # оплата онлайн наблюдается как ecom, автоплатёж — как
+        # действие самого банка.
+        "channel": "ecom" if not bill.autopay else "system",
         "merchant_id": merchant.merchant_id if merchant else None,
         "outlet_id": merchant.outlet_id if merchant else None,
         "merchant_name": merchant.merchant_name if merchant else None,
@@ -1004,7 +1042,7 @@ def _on_bill(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
         if fail_rng.random() < params_module.active().activity.autopay_attempt_share:
             _decline(state, ts, "bill_payment", None, amount, "debit", body,
-                     "insufficient_funds", INITIATOR_SYSTEM)
+                     "insufficient_funds")
 
         state.note(ts, "hidden_purchase", "bill_unpaid_in_bank", {"amount": amount, "kind": bill.kind})
         return
@@ -1013,11 +1051,16 @@ def _on_bill(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     body["card_id"] = card.card_id if card else None
 
-    _emit_money(
+    paid = _emit_money(
         state, ts, "bill_payment", account.account_id, amount, "debit",
         f"merchant:{merchant.outlet_id}" if merchant else COUNTERPART_GOVERNMENT,
-        body, INITIATOR_SYSTEM,
+        body,
     )
+
+    # Отклонённое списание счёт не закрывает: он остался неоплачен.
+    if paid.payload.get("status") != "approved":
+        state.note(ts, "hidden_purchase", "bill_unpaid_in_bank",
+                   {"amount": amount, "kind": bill.kind})
 
 
 def _on_subscription(sim, state: ClientState, ts: datetime, payload: dict) -> None:
@@ -1058,7 +1101,7 @@ def _on_subscription(sim, state: ClientState, ts: datetime, payload: dict) -> No
 
         if fail_rng.random() < params_module.active().activity.autopay_attempt_share:
             _decline(state, ts, "purchase", None, amount, "debit", body,
-                     "insufficient_funds", INITIATOR_SYSTEM)
+                     "insufficient_funds")
             return
 
         state.note(ts, "hidden_purchase", "subscription_outside_bank", {"amount": amount})
@@ -1068,7 +1111,7 @@ def _on_subscription(sim, state: ClientState, ts: datetime, payload: dict) -> No
 
     event = _emit_money(
         state, ts, "purchase", account.account_id, amount, "debit",
-        f"merchant:{subscription.outlet_id}", body, INITIATOR_SYSTEM,
+        f"merchant:{subscription.outlet_id}", body,
     )
 
     _schedule_refunds(sim, state, event)
@@ -1164,7 +1207,7 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
         if rng.random() < settings.decline_attempt_share and state.may_decline(ts):
             _decline(state, ts, "purchase", None, amount, "debit", body,
-                     "insufficient_funds", INITIATOR_CLIENT)
+                     "insufficient_funds")
             _touch_client(state, ts)
             return
 
@@ -1191,7 +1234,7 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
                 None,
             )
             _decline(state, ts, "purchase", account.account_id, amount, "debit", body,
-                     "card_blocked", INITIATOR_CLIENT)
+                     "card_blocked")
             _touch_client(state, ts)
             return
 
@@ -1199,7 +1242,7 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     event = _emit_money(
         state, ts, "purchase", account.account_id, amount, "debit",
-        f"merchant:{choice.outlet.outlet_id}", body, INITIATOR_CLIENT,
+        f"merchant:{choice.outlet.outlet_id}", body,
     )
 
     _schedule_refunds(sim, state, event)
@@ -1247,7 +1290,7 @@ def _schedule_refunds(sim, state: ClientState, event) -> None:
 
         moment = plan["ts"]
 
-        if not (HISTORY_START <= moment < HISTORY_END):
+        if not (config.HISTORY_START <= moment < config.HISTORY_END):
             continue
 
         if moment.toordinal() == event.event_time.toordinal():
@@ -1306,9 +1349,6 @@ def _on_refund(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         if cause.payload.get("outlet_id")
         else "external:merchant",
         body,
-        INITIATOR_SYSTEM,
-        correlation_id=cause.event_id,
-        link_type=plan["kind"],
     )
 
 
@@ -1348,7 +1388,7 @@ def _on_cash(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
         if rng.random() < settings.decline_attempt_share and state.may_decline(ts):
             _decline(state, ts, "cash_withdrawal", None, amount, "debit", body,
-                     "insufficient_funds", INITIATOR_CLIENT)
+                     "insufficient_funds")
             return
 
         state.note(ts, "hidden_purchase", "cash_need", {"amount": amount, "reason": "postponed"})
@@ -1362,7 +1402,7 @@ def _on_cash(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     _emit_money(
         state, ts, "cash_withdrawal", account.account_id, amount, "debit",
-        state.ledger.cash_id, body, INITIATOR_CLIENT,
+        state.ledger.cash_id, body,
     )
 
     _touch_client(state, ts)
@@ -1389,7 +1429,6 @@ def _on_cash(sim, state: ClientState, ts: datetime, payload: dict) -> None:
                     "accrual_period": ts.strftime("%Y-%m"),
                     "merchant_country": "KZ",
                 },
-                INITIATOR_SYSTEM,
             )
 
 
@@ -1439,13 +1478,14 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
                         state, ts - timedelta(minutes=3), "transfer_in", account.account_id,
                         amount, "credit", state.ledger.other_bank_id,
                         {
-                            "channel": "app",
+                            # Деньги пришли из другого банка: этот
+                            # банк их только зачислил.
+                            "channel": "system",
                             "counterparty": "Own account",
                             "reason": "topup_before_transfer",
                             "mcc": MCC_TRANSFER,
                             "merchant_country": "KZ",
                         },
-                        INITIATOR_CLIENT,
                     )
                     sources = state.ledger.payment_sources(ts, amount)
 
@@ -1470,14 +1510,13 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             _decline(
                 state, ts, "p2p_out" if internal else "transfer_out", None, amount, "debit",
                 {
-                    "channel": "app",
+                    "channel": CHANNEL_REMOTE,
                     "counterparty": counterpart.masked_name,
                     "mcc": MCC_TRANSFER,
                     "merchant_country": "KZ",
                     "reason": "transfer",
                 },
                 "insufficient_funds",
-                INITIATOR_CLIENT,
             )
             _touch_client(state, ts)
             return
@@ -1487,7 +1526,10 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
     transfer_id = _transfer_id(state.client_id, ts, payload["index"])
 
     body = {
-        "channel": "app",
+        # Плановый перевод сессии не принадлежит: записи
+        # app_operation и session_id у него нет, поэтому и канал
+        # не app.
+        "channel": CHANNEL_REMOTE,
         "counterparty": counterpart.masked_name,
         "mcc": MCC_TRANSFER,
         "merchant_country": "KZ",
@@ -1506,12 +1548,18 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         if target is None:
             internal = False
 
+    # Обе ноги перевода или ни одной. Зачисление получателю
+    # датируется секундой позже, и на самом краю окна оно уже не
+    # попадает в выгрузку: у перевода осталась бы одна сторона, а
+    # деньги ушли бы в никуда.
+    if internal and not in_window(ts + timedelta(seconds=1)):
+        internal = False
+
     if internal:
 
         _emit_money(
             state, ts, "p2p_out", account.account_id, amount, "debit",
-            target.account_id, body, INITIATOR_CLIENT,
-            correlation_id=transfer_id, link_type="transfer",
+            target.account_id, dict(body, transfer_id=transfer_id),
         )
 
         # Деньги доходят немедленно и влияют на решения получателя.
@@ -1524,10 +1572,8 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
                 "mcc": MCC_TRANSFER,
                 "merchant_country": "KZ",
                 "reason": "transfer",
+                "transfer_id": transfer_id,
             },
-            INITIATOR_EXTERNAL,
-            correlation_id=transfer_id,
-            link_type="transfer",
         )
 
     else:
@@ -1540,8 +1586,7 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
         _emit_money(
             state, ts, "transfer_out", account.account_id, amount, "debit",
-            destination, body, INITIATOR_CLIENT,
-            correlation_id=transfer_id, link_type="transfer",
+            destination, dict(body, transfer_id=transfer_id),
         )
 
     _touch_client(state, ts)
@@ -1565,7 +1610,6 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
                     "accrual_period": ts.strftime("%Y-%m"),
                     "merchant_country": "KZ",
                 },
-                INITIATOR_SYSTEM,
             )
 
 
@@ -1618,7 +1662,6 @@ def _on_inbound_transfer(sim, state: ClientState, ts: datetime, payload: dict) -
             "merchant_country": "KZ",
             "reason": "inbound",
         },
-        INITIATOR_EXTERNAL,
     )
 
 
@@ -1655,7 +1698,6 @@ def _on_cash_deposit(sim, state: ClientState, ts: datetime, payload: dict) -> No
             "is_online": False,
             "reason": "cash_deposit",
         },
-        INITIATOR_CLIENT,
     )
 
     _touch_client(state, ts)

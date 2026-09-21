@@ -6,7 +6,7 @@ from pathlib import Path
 from src.preprocessing.artifacts import read_json
 from src.preprocessing.canonical.build import REGISTRY_FILE as CANONICAL_REGISTRY_FILE
 from src.preprocessing.canonical.build import STAGE as CANONICAL_STAGE
-from src.preprocessing.projection import EVENT_TYPE_FIELD, INITIATOR_EVENT_TYPES, INITIATOR_FIELD
+from src.preprocessing.projection import EVENT_TYPE_FIELD
 from src.preprocessing.semantic.build import REGISTRY_FILE as SEMANTIC_REGISTRY_FILE
 from src.preprocessing.semantic.build import STAGE as SEMANTIC_STAGE
 from src.preprocessing.semantic.keys import (
@@ -223,12 +223,9 @@ class SemanticSchema:
             raise SchemaError("; ".join(sorted(set(problems))))
 
         event_type_key = ENVELOPE_KEYS[EVENT_TYPE_FIELD].key
-        initiator_key = ENVELOPE_KEYS[INITIATOR_FIELD].key
 
         for owner, keys in declared.items():
             keys.add(event_type_key)
-            if owner in INITIATOR_EVENT_TYPES:
-                keys.add(initiator_key)
 
         return (
             {owner: tuple(sorted(keys)) for owner, keys in sorted(declared.items())},

@@ -13,12 +13,19 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 
 DATA_DIR = BASE_DIR / "data"
 RAW_DIR = DATA_DIR / "raw"
-REFERENCE_DIR = DATA_DIR / "reference"
 
-PRODUCT_TIMELINE_PATH = REFERENCE_DIR / "home_product_timeline.yaml"
+# Справочник фактов о банке лежит в репозитории, а не в data/:
+# это рукотворный ВХОД генератора, а не его результат, и чистка
+# данных не должна его уносить.
+REFERENCE_DIR = BASE_DIR / "reference"
 
-GENERATOR_VERSION = "4.0"
-SCHEMA_VERSION = 5
+PRODUCT_TIMELINE_PATH = REFERENCE_DIR / "home_product_timeline.json"
+
+# Контракт v7: снимок остатка больше не денежная операция,
+# пустых ключей в payload нет, покрытие называет дни сбоев.
+# Выгрузка v6 под эти правила не подходит и читаться не должна.
+GENERATOR_VERSION = "5.1"
+SCHEMA_VERSION = 7
 
 SEED = 42
 
@@ -29,9 +36,15 @@ SEED = 42
 #
 # Лента хранит фактические события всего окна. Ни cutoff,
 # ни меток здесь нет: выбор среза принадлежит препроцессингу.
+#
+# Окно у каждой группы своё и объявлено в DATASETS ниже.
+# Перед генерацией группы оно ставится через activate_horizon,
+# поэтому модули обязаны читать config.HISTORY_START, а не
+# импортировать это имя значением: импортированное значение
+# переключения не увидит.
 # ============================================================
 
-HISTORY_START = datetime(2024, 6, 1)
+HISTORY_START = datetime(2024, 1, 1)
 
 HISTORY_END = datetime(2026, 9, 1)
 
@@ -45,80 +58,125 @@ REGISTRY_START = datetime(2018, 1, 1)
 #
 # Источник это система банка, которая записала факт.
 # До availability источник не существует, и событий в нём нет.
+#
+# None означает «существует с начала наблюдения» и следует за
+# горизонтом группы. Остальные даты — настоящие даты запуска
+# систем, они от горизонта не зависят.
 # ============================================================
 
-SOURCE_AVAILABILITY: dict[str, datetime] = {
-    "profile": HISTORY_START,
-    "applications": HISTORY_START,
-    "product_events": REGISTRY_START,
-    "loans": HISTORY_START,
-    "transactions": HISTORY_START,
+SOURCE_LAUNCH: dict[str, datetime | None] = {
+    "profile": None,
+    "applications": None,
+    # Договоры старше окна в выгрузку не попадают: их состояние
+    # описывает opening_state покрытия. Поэтому витрина договоров
+    # наблюдается с начала окна, как и остальные.
+    "product_events": None,
+    "loans": None,
+    "transactions": None,
     "antifraud": datetime(2025, 1, 15),
     "communications": datetime(2024, 12, 22),
     "banners": datetime(2024, 8, 1),
     "app_screens": datetime(2024, 12, 16),
-    "app_operations": HISTORY_START,
+    "app_operations": None,
     "support": datetime(2025, 3, 1),
 }
 
-SOURCES = tuple(SOURCE_AVAILABILITY)
+# Словарь МЕНЯЕТСЯ НА МЕСТЕ при смене горизонта: так его видят
+# и те модули, которые импортировали его именем.
+SOURCE_AVAILABILITY: dict[str, datetime] = {}
+
+
+def _apply_horizon() -> None:
+    for source, launch in SOURCE_LAUNCH.items():
+        SOURCE_AVAILABILITY[source] = HISTORY_START if launch is None else launch
+
+
+_apply_horizon()
+
+SOURCES = tuple(SOURCE_LAUNCH)
+
+
+def activate_horizon(start: datetime, end: datetime) -> None:
+    """
+    Ставит окно наблюдения перед генерацией группы.
+    """
+
+    global HISTORY_START, HISTORY_END
+
+    if start >= end:
+        raise ValueError(f"горизонт пуст: начало {start} не раньше конца {end}")
+
+    if start < REGISTRY_START:
+        raise ValueError(f"история начинается раньше реестра договоров: {start} < {REGISTRY_START}")
+
+    HISTORY_START = start
+    HISTORY_END = end
+
+    _apply_horizon()
 
 
 # ============================================================
 # КОНВЕРТ
 # ============================================================
+#
+# Конверт состоит из шести колонок: event_id, client_id,
+# event_type, source, event_time, payload. Ни точности времени,
+# ни версии, ни метки связи в нём нет.
+#
+# event_time — точное время события. Деловая связь живёт
+# ключами payload: cause_event_id называет событие-причину, а
+# contract_id, application_id, case_id, offer_id, session_id и
+# transfer_id — сущность, частью которой запись является.
 
-PRECISION_SECOND = "second"
-PRECISION_MINUTE = "minute"
-PRECISION_DAY = "day"
 
-# Точность month не встречается ни в одном источнике.
-TIME_PRECISIONS = (PRECISION_SECOND, PRECISION_MINUTE, PRECISION_DAY)
+# ============================================================
+# ДЕЙСТВИЕ КЛИЕНТА
+# ============================================================
+#
+# Клиент действовал в этом месяце или молчал — вопрос о типе
+# события, а не о метке в конверте. Метки инициатора больше
+# нет: покупку делает клиент, начисление процентов — банк, и
+# различить их можно по самому типу.
+#
+# Сюда входит только то, что клиент делает САМ. Зачисление
+# зарплаты, списание по подписке, плановый платёж по графику и
+# любые решения банка — не действия клиента, даже когда они
+# касаются его денег.
 
-# Точность времени источника: у витрины кредитного обслуживания
-# времени нет вовсе, у коммуникаций оно округлено до минуты.
-SOURCE_PRECISION: dict[str, str] = {
-    "profile": PRECISION_MINUTE,
-    "applications": PRECISION_MINUTE,
-    "product_events": PRECISION_SECOND,
-    "loans": PRECISION_DAY,
-    "transactions": PRECISION_SECOND,
-    "antifraud": PRECISION_SECOND,
-    "communications": PRECISION_MINUTE,
-    "banners": PRECISION_SECOND,
-    "app_screens": PRECISION_SECOND,
-    "app_operations": PRECISION_SECOND,
-    "support": PRECISION_MINUTE,
-}
-
-INITIATOR_CLIENT = "client"
-INITIATOR_BANK = "bank_employee"
-INITIATOR_SYSTEM = "system"
-INITIATOR_EXTERNAL = "external_source"
-
-CHANGE_INITIATORS = (
-    INITIATOR_CLIENT,
-    INITIATOR_BANK,
-    INITIATOR_SYSTEM,
-    INITIATOR_EXTERNAL,
+CLIENT_ACTION_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        # деньги, которые клиент двигает сам
+        "purchase",
+        "cash_withdrawal",
+        "cash_deposit",
+        "transfer_out",
+        "p2p_out",
+        "deposit_topup",
+        "deposit_withdrawal",
+        "bill_payment",
+        "early_repayment",
+        # приложение
+        "app_screen",
+        "app_operation",
+        "banner_clicked",
+        # обращения и заявки
+        "application_submitted",
+        "case_opened",
+    }
 )
 
-# Вид деловой связи записи, и только он. Способа доставки здесь
-# нет: повторная доставка и исправление узнаются по паре
-# (event_id, event_version), а не по особой метке. Метка затирала
-# бы вид связи, и исправленный перевод переставал быть переводом.
-LINK_TYPES = (
-    "offer",
-    "application",
-    "contract",
-    "schedule",
-    "session",
-    "transfer",
-    "case",
-    "fraud_episode",
-    "reversal",
-    "refund",
-    "chargeback",
+# Действие ЧУЖОЙ руки: деньги пришли снаружи, вернул мерчант,
+# перевёл родственник. Банк тут ни при чём, и клиент тоже.
+EXTERNAL_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "salary_credit",
+        "pension_credit",
+        "other_income_credit",
+        "transfer_in",
+        "p2p_in",
+        "refund",
+        "chargeback",
+    }
 )
 
 
@@ -252,6 +310,8 @@ MONEY_FIELDS: tuple[FieldSpec, ...] = (
     _f("card_id", "str", True, LEVEL_CONTRACT, "карта, если операция картой"),
     _f("contract_id", "str", True, LEVEL_CONTRACT, "договор, если операция относится к договору"),
     _f("cause_event_id", "str", True, LEVEL_OPERATION, "event_id события-причины, либо null"),
+    _f("transfer_id", "str", True, LEVEL_OPERATION, "перевод, если у операции есть вторая нога"),
+    _f("session_id", "str", True, LEVEL_SESSION, "сессия приложения, если операция сделана в нём"),
     _f("accrual_period", "str", True, LEVEL_CONTRACT, "период начисления YYYY-MM для периодических сумм"),
     _f("reason", "str", True, LEVEL_OPERATION, "основание операции"),
     _f("merchant_id", "str", True, LEVEL_OPERATION, "сеть или поставщик услуг"),
@@ -276,13 +336,13 @@ PRODUCT_FIELDS: tuple[FieldSpec, ...] = (
     _f("account_id", "str", True, LEVEL_CONTRACT, "счёт договора"),
     _f("card_id", "str", True, LEVEL_CONTRACT, "карта договора"),
     _f("offer_id", "str", True, LEVEL_COMMUNICATION, "предложение, из которого вырос договор"),
+    _f("application_id", "str", True, LEVEL_OPERATION, "заявка, по которой открыт договор"),
     _f("previous_product_id", "str", True, LEVEL_PRODUCT, "продукт, с которого перешёл клиент"),
     _f("migration_reason", "str", True, LEVEL_PRODUCT, "причина перехода"),
     _f("amount_or_limit", "int", True, LEVEL_CONTRACT, "сумма договора или лимит"),
     _f("term", "int", True, LEVEL_CONTRACT, "срок договора в месяцах"),
     _f("rate", "float", True, LEVEL_CONTRACT, "номинальная ставка"),
     _f("reason", "str", True, LEVEL_CONTRACT, "основание события"),
-    _f("timestamp_quality", "str", False, LEVEL_CONTRACT, "exact или date_only"),
 )
 
 LOAN_FIELDS: tuple[FieldSpec, ...] = (
@@ -310,6 +370,19 @@ APPLICATION_FIELDS: tuple[FieldSpec, ...] = (
     _f("reject_reason", "str", True, LEVEL_OPERATION, "причина отказа"),
     _f("approved_amount", "int", True, LEVEL_OPERATION, "одобренная сумма"),
     _f("approved_term", "int", True, LEVEL_OPERATION, "одобренный срок"),
+)
+
+# Снимок остатка — НЕ операция. У него нет суммы, направления и
+# статуса: банк ничего не проводил, он сообщил, сколько лежит на
+# счёте на конец периода. Раньше снимок шёл общим денежным
+# набором и выглядел зачислением: amount равнялся остатку,
+# direction был credit, status — approved, а currency при этом
+# оставалась пустой. Читатель ленты видел несуществующий приход.
+SNAPSHOT_FIELDS: tuple[FieldSpec, ...] = (
+    _f("account_id", "str", False, LEVEL_CONTRACT, "счёт, остаток которого зафиксирован"),
+    _f("balance_after", "int", False, LEVEL_CONTRACT, "остаток счёта на конец периода"),
+    _f("currency", "str", False, LEVEL_OPERATION, "валюта счёта: всегда KZT"),
+    _f("accrual_period", "str", False, LEVEL_CONTRACT, "период YYYY-MM, на конец которого снят остаток"),
 )
 
 EVENT_SPECS: dict[str, dict] = {}
@@ -389,9 +462,10 @@ for _money_event, _text in (
     ("interest_credit", "начисление процентов"),
     ("fee_charge", "комиссия"),
     ("cashback_credit", "начисление кешбэка"),
-    ("balance_snapshot", "остаток счёта на конец месяца"),
 ):
     _spec(_money_event, "transactions", MONEY_FIELDS, _text)
+
+_spec("balance_snapshot", "transactions", SNAPSHOT_FIELDS, "остаток счёта на конец месяца")
 
 _spec(
     "fraud_alert",
@@ -447,6 +521,8 @@ for _banner_event, _text in (("banner_shown", "показ баннера"), ("ba
             _f("offer_id", "str", True, LEVEL_COMMUNICATION, "предложение"),
             _f("product_id", "str", True, LEVEL_PRODUCT, "продукт оффера"),
             _f("campaign_code", "str", True, LEVEL_COMMUNICATION, "код кампании"),
+            _f("session_id", "str", True, LEVEL_SESSION, "сессия приложения, в которой показан баннер"),
+            _f("cause_event_id", "str", True, LEVEL_SESSION, "показ, за которым последовал клик"),
         ),
         _text,
     )
@@ -460,6 +536,8 @@ _spec(
         _f("product_id", "str", True, LEVEL_PRODUCT, "продукт раздела"),
         _f("funnel_stage", "str", True, LEVEL_SESSION, "стадия воронки заявки"),
         _f("reject_reason", "str", True, LEVEL_SESSION, "причина отказа на экране отказа"),
+        _f("session_id", "str", True, LEVEL_SESSION, "сессия приложения, если экран её часть"),
+        _f("application_id", "str", True, LEVEL_OPERATION, "заявка, если экран её воронка"),
     ),
     "экран приложения",
 )
@@ -474,6 +552,8 @@ _spec(
         _f("amount", "int", True, LEVEL_SESSION, "сумма операции, если она денежная"),
         _f("error_code", "str", True, LEVEL_SESSION, "код ошибки"),
         _f("device_new", "bool", True, LEVEL_SESSION, "операция с нового устройства"),
+        _f("session_id", "str", True, LEVEL_SESSION, "сессия приложения"),
+        _f("contract_id", "str", True, LEVEL_CONTRACT, "договор, если операция относится к договору"),
     ),
     "операция в приложении",
 )
@@ -502,8 +582,16 @@ EVENT_TYPE_SOURCE: dict[str, str] = {
     event_type: spec["source"] for event_type, spec in EVENT_SPECS.items()
 }
 
-PAYLOAD_FIELDS: dict[str, tuple[str, ...]] = {
-    event_type: tuple(field.name for field in spec["fields"])
+PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
+    event_type: frozenset(field.name for field in spec["fields"])
+    for event_type, spec in EVENT_SPECS.items()
+}
+
+# Ключи, без которых события не бывает. Каталог уже объявляет
+# это полем nullable; карта нужна, чтобы проверка на выходе
+# генератора стоила один поиск в множестве, а не обход схемы.
+PAYLOAD_REQUIRED: dict[str, frozenset[str]] = {
+    event_type: frozenset(field.name for field in spec["fields"] if not field.nullable)
     for event_type, spec in EVENT_SPECS.items()
 }
 
@@ -607,12 +695,59 @@ PROFILE_FIELDS = (
 
 
 # ============================================================
-# ПРЕСЕТЫ
+# ГРУППЫ ДАТАСЕТА
 # ============================================================
+#
+# Один запуск генератора рождает три группы подряд, каждую в
+# свой каталог data/raw/<группа>. Всё, что их различает, живёт
+# здесь и правится руками: ни пресетов, ни ключей командной
+# строки нет, чтобы состав выгрузки нельзя было сменить
+# случайно, опечаткой в команде.
+#
+# Мир у групп ОБЩИЙ: один world_seed даёт одну географию, одни
+# бренды и одни торговые точки. Клиентов и их поведение делает
+# seed группы, поэтому популяции не пересекаются.
+#
+# Горизонт у каждой группы свой. Начало обычно общее: слой
+# разделения требует истории с required_history_start и ругается
+# на группу, которая началась позже. Конец задаёт границу
+# выгрузки, и он должен быть не раньше конечного среза группы
+# в preprocessing.settings.default_windows.
+#
+# Большие выгрузки делаются только по отдельному решению.
 
-PRESETS = {
-    "smoke": 100,
-    "check": 300,
-    "dev": 10_000,
-    "eval": 50_000,
+WORLD_SEED = 42
+
+
+@dataclass(frozen=True)
+class DatasetGroup:
+    """
+    Группа датасета: сколько клиентов, какое окно, какой seed.
+    """
+
+    clients: int
+    history_start: datetime
+    history_end: datetime
+    seed: int
+
+
+DATASETS: dict[str, DatasetGroup] = {
+    "train": DatasetGroup(
+        clients=1,
+        history_start=datetime(2024, 1, 1),
+        history_end=datetime(2026, 1, 1),
+        seed=107,
+    ),
+    "val": DatasetGroup(
+        clients=10,
+        history_start=datetime(2024, 1, 1),
+        history_end=datetime(2026, 5, 1),
+        seed=202,
+    ),
+    "test": DatasetGroup(
+        clients=10,
+        history_start=datetime(2024, 1, 1),
+        history_end=datetime(2026, 9, 1),
+        seed=303,
+    ),
 }

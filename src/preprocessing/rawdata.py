@@ -38,7 +38,7 @@ from .artifacts import sha256_file
 
 MANIFEST_NAME = "manifest.json"
 
-EXPECTED_SCHEMA_VERSION = 5
+EXPECTED_SCHEMA_VERSION = 7
 
 # Файлы, без которых группа не обрабатывается.
 REQUIRED_FILES: tuple[str, ...] = (
@@ -88,13 +88,6 @@ ENVELOPE_SCHEMA = pa.schema(
         ("event_type", pa.string()),
         ("source", pa.string()),
         ("event_time", pa.timestamp("us")),
-        ("effective_at", pa.timestamp("us")),
-        ("time_precision", pa.string()),
-        ("event_version", pa.int32()),
-        ("change_initiator", pa.string()),
-        ("correlation_id", pa.string()),
-        ("link_type", pa.string()),
-        ("is_test_account", pa.bool_()),
         ("payload", pa.string()),
     ]
 )
@@ -109,6 +102,7 @@ COVERAGE_SCHEMA = pa.schema(
         ("coverage_status", pa.string()),
         ("coverage_reason", pa.string()),
         ("opening_state", pa.string()),
+        ("outage_days", pa.string()),
     ]
 )
 
@@ -187,7 +181,6 @@ class EventTypeInfo:
 class SourceInfo:
     source: str
     available_from: datetime
-    time_precision: str
     defect_profile: dict = field(default_factory=dict)
 
 
@@ -235,7 +228,7 @@ class RawManifest:
             "registry_start": None if self.registry_start is None else self.registry_start.isoformat(),
             "extract_time": self.extract_time.isoformat(),
             "sources": {
-                name: {"available_from": info.available_from.isoformat(), "time_precision": info.time_precision}
+                name: {"available_from": info.available_from.isoformat()}
                 for name, info in sorted(self.sources.items())
             },
             "event_types": list(self.event_types),
@@ -316,7 +309,6 @@ def read_manifest(raw_dir: Path) -> RawManifest:
         name: SourceInfo(
             source=name,
             available_from=datetime.fromisoformat(info["available_from"]),
-            time_precision=str(info.get("time_precision", "second")),
             defect_profile=dict(info.get("defect_profile", {})),
         )
         for name, info in data["sources"].items()

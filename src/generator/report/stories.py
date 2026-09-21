@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 
+from ..config import CLIENT_ACTION_EVENT_TYPES
+
 
 # ============================================================
 # ИСТОРИИ КЛИЕНТОВ
@@ -67,9 +69,13 @@ def _profiles(data: dict) -> dict:
 
     for row in data["events"]:
         counts[row["client_id"]][row["event_type"]] += 1
-        initiators[row["client_id"]][row["change_initiator"]] += 1
-        if row["event_type"] == "app_screen" and row["correlation_id"]:
-            sessions[row["client_id"]].add(row["correlation_id"])
+        if row["event_type"] in CLIENT_ACTION_EVENT_TYPES:
+            initiators[row["client_id"]]["client"] += 1
+        else:
+            initiators[row["client_id"]]["bank"] += 1
+
+        if row["event_type"] == "app_screen" and row["payload"].get("session_id"):
+            sessions[row["client_id"]].add(row["payload"]["session_id"])
 
     truth_by_client: dict[str, list] = defaultdict(list)
 

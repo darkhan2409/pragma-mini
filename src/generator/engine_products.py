@@ -6,14 +6,7 @@ from . import params as params_module
 from .behaviour import adoption as adoption_module
 from .behaviour import support as support_module
 from .behaviour import fraud as fraud_behaviour
-from .config import (
-    HISTORY_END,
-    HISTORY_START,
-    INITIATOR_BANK,
-    INITIATOR_CLIENT,
-    INITIATOR_EXTERNAL,
-    INITIATOR_SYSTEM,
-)
+from . import config
 from .engine import _HANDLERS, _decline, _emit_money, _touch_client
 from .engine_app import unblock_card
 from .engine_credit import emit_product_closed
@@ -231,13 +224,58 @@ def _funnel(state: ClientState, application: Application, ts: datetime, approved
                     "funnel_stage": stage,
                     "reject_reason": reject_reason if stage == "rejected" else None,
                 },
-                initiator=INITIATOR_CLIENT,
-                correlation_id=application.application_id,
-                link_type="application",
             )
         )
 
     return moment
+
+
+# Часы, в которые канал подачи вообще работает.
+#
+# Приложение, сайт, банкомат и терминал доступны круглосуточно;
+# отделение, почта и партнёрская касса — нет. Заявка в отделение
+# в полночь это не редкий случай, а невозможный.
+CHANNEL_HOURS: dict[str, tuple[int, int]] = {
+    "app": (0, 24),
+    "web": (0, 24),
+    "atm": (0, 24),
+    "terminal": (0, 24),
+    "call_center": (8, 22),
+    "partner_pos": (10, 21),
+    "branch": (9, 19),
+    "micro_office": (9, 19),
+    "qazpost": (9, 18),
+}
+
+
+def _channel_moment(ts: datetime, channel: str, rng) -> datetime | None:
+    """
+    Момент подачи внутри рабочих часов канала.
+
+    Сдвиг только ВПЕРЁД, и это главное правило здесь. Решение о
+    заявке принято по состоянию клиента на исходный момент: по
+    его остаткам, договорам и просрочке на 22:00. Перенос заявки
+    на 10:00 того же дня датировал бы её задним числом — решением,
+    принятым по данным, которых в ту минуту ещё не было.
+
+    Канал уже закрылся — заявки сегодня не будет вовсе. Интерес к
+    продукту разыгрывается каждый день заново, поэтому клиент
+    просто дойдёт до отделения в другой раз.
+    """
+
+    low, high = CHANNEL_HOURS.get(channel, (9, 19))
+
+    if (low, high) == (0, 24) or low <= ts.hour < high:
+        return ts
+
+    if ts.hour >= high:
+        return None
+
+    return ts.replace(
+        hour=low,
+        minute=int(rng.integers(0, 60)),
+        second=int(rng.integers(0, 60)),
+    )
 
 
 def _application_payload(application: Application, **extra) -> dict:
@@ -284,8 +322,9 @@ def _on_adoption(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         state.held_counts(ts),
         state.assets(),
         app_adopted,
-        state.has_open_loan(),
+        state.open_loan_count(),
         len(state.open_contracts(ts)),
+        state.income_months_at(ts),
         stress,
     )
 
@@ -339,12 +378,37 @@ def _on_adoption(sim, state: ClientState, ts: datetime, payload: dict) -> None:
     channel = str(rng.choice(list(channels)))
 
     if channel == "app" and not app_adopted:
-        channel = "branch"
+
+        # Приложения у клиента нет. Отделение сюда не подставляется:
+        # продукт может продаваться только онлайн, и заявка в
+        # отделении по нему невозможна. Берётся другой канал ИЗ
+        # РАЗРЕШЁННЫХ продуктом, а если такого нет — заявки нет.
+        instead = [name for name in channels if name != "app"]
+
+        if not instead:
+            return
+
+        channel = str(rng.choice(instead))
+
+    # Дальше момент подачи принадлежит каналу, а не плану дня.
+    moment = _channel_moment(ts, channel, rng)
+
+    if moment is None:
+        return
+
+    ts = moment
 
     amount, term = sim._contract_terms(state, candidate.view, ts, rng)
 
     # Класть нечего: заявки на вклад без денег не бывает.
     if amount is None and candidate.view.family in ("deposit", "deposit_certificate"):
+        return
+
+    # Сумма выбрана только сейчас, поэтому порог договора
+    # проверяется здесь, а не при отборе кандидатов.
+    minimum = int((candidate.version.eligibility or {}).get("min_amount", 0))
+
+    if minimum and (amount is None or amount < minimum):
         return
 
     application = Application(
@@ -368,9 +432,6 @@ def _on_adoption(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             "application_submitted",
             ts,
             _application_payload(application),
-            initiator=INITIATOR_CLIENT,
-            correlation_id=application.application_id,
-            link_type="application",
         )
     )
 
@@ -385,7 +446,7 @@ def _on_adoption(sim, state: ClientState, ts: datetime, payload: dict) -> None:
     if channel == "app" and app_adopted:
         decision_ts = _funnel(state, application, ts, approved, reason, rng)
 
-    if decision_ts >= HISTORY_END:
+    if decision_ts >= config.HISTORY_END:
         return
 
     application.decision = "approved" if approved else "rejected"
@@ -405,9 +466,6 @@ def _on_adoption(sim, state: ClientState, ts: datetime, payload: dict) -> None:
                 approved_amount=application.approved_amount,
                 approved_term=application.approved_term,
             ),
-            initiator=INITIATOR_BANK,
-            correlation_id=application.application_id,
-            link_type="application",
         )
     )
 
@@ -416,7 +474,7 @@ def _on_adoption(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     open_ts = decision_ts + timedelta(seconds=int(rng.integers(*settings.disbursement_delay_seconds)))
 
-    if open_ts >= HISTORY_END:
+    if open_ts >= config.HISTORY_END:
         return
 
     contract = sim._open_contract(
@@ -492,13 +550,15 @@ def _gather_on_card(state: ClientState, ts: datetime, amount: int) -> bool:
         "credit",
         hidden.account_id,
         {
-            "channel": "atm" if from_cash else "app",
+            # Наличные вносит банкомат, перевод приходит из
+            # другого банка. Сессии приложения тут нет ни в том,
+            # ни в другом случае.
+            "channel": "atm" if from_cash else "system",
             "counterparty": "Own account",
             "reason": "deposit_funding",
             "mcc": MCC_CASH if from_cash else MCC_TRANSFER,
             "merchant_country": "KZ",
         },
-        INITIATOR_CLIENT,
     )
 
     return True
@@ -565,9 +625,6 @@ def _activate_product(sim, state: ClientState, contract, view, ts: datetime, rng
                     "reason": "disbursement",
                     "merchant_country": "KZ",
                 },
-                INITIATOR_SYSTEM,
-                correlation_id=contract.contract_id,
-                link_type="contract",
             )
 
         # Рефинансирование не добавляет ещё один долг к прежним:
@@ -601,9 +658,6 @@ def _activate_product(sim, state: ClientState, contract, view, ts: datetime, rng
                     "cause_event_id": opened.event_id if opened else None,
                     "reason": "annuity",
                 },
-                initiator=INITIATOR_SYSTEM,
-                correlation_id=contract.contract_id,
-                link_type="schedule",
             )
         )
 
@@ -636,7 +690,7 @@ def _activate_product(sim, state: ClientState, contract, view, ts: datetime, rng
 
         from .engine_app import _own_transfer
 
-        _own_transfer(
+        if not _own_transfer(
             state,
             ts + timedelta(minutes=2),
             "deposit_topup",
@@ -645,7 +699,11 @@ def _activate_product(sim, state: ClientState, contract, view, ts: datetime, rng
             amount,
             contract.contract_id,
             "initial_deposit",
-        )
+        ):
+            # Денег на вклад так и не положили: договор без
+            # остатка не живёт, и аннулируется он здесь же.
+            _cancel_unfunded(state, ts, contract)
+            return
 
         terms = contract.terms
 
@@ -693,7 +751,8 @@ def _activate_product(sim, state: ClientState, contract, view, ts: datetime, rng
             "debit",
             COUNTERPART_BANK,
             {
-                "channel": "app",
+                # Регулярная премия списывается банком по договору.
+                "channel": "system",
                 "contract_id": contract.contract_id,
                 "reason": "insurance_premium",
                 "mcc": "6300",
@@ -701,9 +760,6 @@ def _activate_product(sim, state: ClientState, contract, view, ts: datetime, rng
                 "is_online": True,
                 "is_subscription": False,
             },
-            INITIATOR_CLIENT,
-            correlation_id=contract.contract_id,
-            link_type="contract",
         )
 
 
@@ -768,12 +824,7 @@ def _apply_new_versions(state: ClientState, ts: datetime) -> None:
                         "term": contract.term,
                         "rate": contract.rate,
                         "reason": "tariff_update" if not terms_changed else "terms_update",
-                        "timestamp_quality": "exact",
                     },
-                    initiator=INITIATOR_BANK,
-                    correlation_id=contract.contract_id,
-                    link_type="contract",
-                    effective_at=ts.replace(hour=0, minute=0, second=0),
                 )
             )
 
@@ -834,8 +885,6 @@ def _fraud_purchase(state: ClientState, account, card, ts, amount, episode, step
         "reason": "purchase",
     }
 
-    initiator = INITIATOR_CLIENT if episode.kind == "false_positive" else INITIATOR_EXTERNAL
-
     # Денег на счёте не хватило. Это ОТКАЗ, а не отсутствие
     # попытки: банк видит неудачную авторизацию и реагирует на
     # неё так же. Раньше эпизод на этом месте исчезал целиком —
@@ -844,7 +893,7 @@ def _fraud_purchase(state: ClientState, account, card, ts, amount, episode, step
         return (
             _decline(
                 state, ts, "purchase", account.account_id, amount, "debit",
-                body, "insufficient_funds", initiator,
+                body, "insufficient_funds",
             ),
             "card",
         )
@@ -858,7 +907,6 @@ def _fraud_purchase(state: ClientState, account, card, ts, amount, episode, step
         "debit",
         f"merchant:{outlet.outlet_id}",
         body,
-        initiator,
     )
 
     return event, "card"
@@ -879,7 +927,9 @@ def _fraud_transfer(state: ClientState, account, ts, amount, episode, step, rng)
     counterpart = f"cp_fraud_{stable_hash(state.client_id, ts.toordinal()) % 10 ** 8:08d}"
 
     body = {
-        "channel": "app",
+        # Мошенническая операция сессии клиента не принадлежит:
+        # ни app_operation, ни session_id у неё нет.
+        "channel": "ecom",
         "counterparty": f"P. {counterpart[-4:]}",
         "mcc": MCC_TRANSFER,
         "merchant_country": "KZ",
@@ -888,14 +938,12 @@ def _fraud_transfer(state: ClientState, account, ts, amount, episode, step, rng)
 
     # Социальную инженерию переводит сам клиент, захват доступа
     # делают чужие руки.
-    initiator = INITIATOR_CLIENT if episode.kind == "social_engineering" else INITIATOR_EXTERNAL
-
     # Денег не хватило — это отказ, а не отсутствие попытки.
     if not state.ledger.payment_sources(ts, amount):
         return (
             _decline(
                 state, ts, "transfer_out", account.account_id, amount, "debit",
-                body, "insufficient_funds", initiator,
+                body, "insufficient_funds",
             ),
             subject,
         )
@@ -909,7 +957,6 @@ def _fraud_transfer(state: ClientState, account, ts, amount, episode, step, rng)
         "debit",
         f"external:{counterpart}",
         body,
-        initiator,
     )
 
     return event, subject
@@ -920,7 +967,7 @@ def _emit_takeover_login(state: ClientState, ts: datetime) -> None:
     Вход с нового устройства перед захватом доступа.
     """
 
-    if ts < HISTORY_START or ts >= HISTORY_END:
+    if ts < config.HISTORY_START or ts >= config.HISTORY_END:
         return
 
     if state.app_adopted_at is None or ts < state.app_adopted_at:
@@ -940,9 +987,6 @@ def _emit_takeover_login(state: ClientState, ts: datetime) -> None:
                 "error_code": None,
                 "device_new": True,
             },
-            initiator=INITIATOR_CLIENT,
-            correlation_id=session_id,
-            link_type="session",
         )
     )
 
@@ -998,7 +1042,7 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
 
     alert_ts = ts + timedelta(minutes=episode.detect_delay_minutes)
 
-    if alert_ts >= HISTORY_END:
+    if alert_ts >= config.HISTORY_END:
         return
 
     # Тревожность считается от доли месячного дохода, а не от
@@ -1020,9 +1064,6 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
                 "rule_code": fraud_behaviour.rule_code(episode.kind),
                 "cause_event_id": event.event_id,
             },
-            initiator=INITIATOR_SYSTEM,
-            correlation_id=event.event_id,
-            link_type="fraud_episode",
         )
     )
 
@@ -1044,9 +1085,6 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
                 "resolution": episode.client_response if episode.client_response != "no_response" else None,
                 "cause_event_id": alert.event_id,
             },
-            initiator=INITIATOR_BANK,
-            correlation_id=alert.event_id,
-            link_type="fraud_episode",
         )
     )
 
@@ -1072,27 +1110,14 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
 
         card_rules.block(card, decision_ts, "fraud_suspicion", permanent=compromised)
 
-        contract = state.contracts.get(card.contract_id)
-
         state.emit(
             state.factory.make(
                 "card_blocked",
                 decision_ts + timedelta(seconds=10),
-                {
-                    "product_id": contract.product_id if contract else None,
-                    "product_code": card.product_code,
-                    "product_version": contract.product_version if contract else 1,
-                    "tariff_version": contract.tariff_version if contract else 1,
-                    "product_family": contract.product_family if contract else "debit_card",
-                    "contract_id": card.contract_id,
-                    "account_id": card.account_id,
-                    "card_id": card.card_id,
-                    "reason": "compromise" if compromised else "fraud_suspicion",
-                    "timestamp_quality": "exact",
-                },
-                initiator=INITIATOR_SYSTEM,
-                correlation_id=alert.event_id,
-                link_type="fraud_episode",
+                dict(
+                    state.card_facts(card),
+                    reason="compromise" if compromised else "fraud_suspicion",
+                ),
             )
         )
 
@@ -1141,7 +1166,7 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
 
             back_ts = case.resolved_at + timedelta(days=int(rng.integers(*settings.chargeback_delay_days)))
 
-            if back_ts < HISTORY_END:
+            if back_ts < config.HISTORY_END:
                 _emit_money(
                     state, back_ts, "chargeback", account.account_id, amount, "credit",
                     f"merchant:{event.payload.get('outlet_id')}"
@@ -1158,9 +1183,6 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
                         "reason": "dispute_resolved",
                         "merchant_country": event.payload.get("merchant_country"),
                     },
-                    INITIATOR_BANK,
-                    correlation_id=case.case_id,
-                    link_type="chargeback",
                 )
 
     # --- судьба заблокированной карты ---
@@ -1178,15 +1200,15 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
 
             reissue_ts = decision_ts + timedelta(days=int(rng.integers(*settings.reissue_delay_days)))
 
-            if reissue_ts < HISTORY_END:
+            if reissue_ts < config.HISTORY_END:
                 _reissue_card(state, card, reissue_ts)
 
         return
 
     unblock_ts = decision_ts + timedelta(hours=int(rng.integers(*settings.unblock_delay_hours)))
 
-    if unblock_ts < HISTORY_END:
-        unblock_card(state, unblock_ts, card, INITIATOR_CLIENT, "confirmed_by_client")
+    if unblock_ts < config.HISTORY_END:
+        unblock_card(state, unblock_ts, card, "confirmed_by_client")
 
 
 def _reissue_card(state: ClientState, card, ts: datetime, reason: str = "fraud_reissue") -> None:
@@ -1220,21 +1242,7 @@ def _reissue_card(state: ClientState, card, ts: datetime, reason: str = "fraud_r
         state.factory.make(
             "card_reissued",
             ts,
-            {
-                "product_id": contract.product_id if contract else None,
-                "product_code": card.product_code,
-                "product_version": contract.product_version if contract else 1,
-                "tariff_version": contract.tariff_version if contract else 1,
-                "product_family": contract.product_family if contract else "debit_card",
-                "contract_id": card.contract_id,
-                "account_id": card.account_id,
-                "card_id": fresh.card_id,
-                "reason": reason,
-                "timestamp_quality": "exact",
-            },
-            initiator=INITIATOR_BANK,
-            correlation_id=card.card_id,
-            link_type="contract",
+            dict(state.card_facts(card, fresh.card_id), reason=reason),
         )
     )
 
@@ -1257,33 +1265,24 @@ def _emit_case(state: ClientState, case) -> None:
             "case_opened",
             case.opened_at,
             body,
-            initiator=INITIATOR_CLIENT,
-            correlation_id=case.case_id,
-            link_type="case",
         )
     )
 
-    if case.updated_at is not None and case.updated_at < HISTORY_END:
+    if case.updated_at is not None and case.updated_at < config.HISTORY_END:
         state.emit(
             state.factory.make(
                 "case_updated",
                 case.updated_at,
                 dict(body, status="in_progress"),
-                initiator=INITIATOR_BANK,
-                correlation_id=case.case_id,
-                link_type="case",
             )
         )
 
-    if case.resolved_at < HISTORY_END:
+    if case.resolved_at < config.HISTORY_END:
         state.emit(
             state.factory.make(
                 "case_resolved",
                 case.resolved_at,
                 dict(body, status="resolved", resolution=case.resolution),
-                initiator=INITIATOR_BANK,
-                correlation_id=case.case_id,
-                link_type="case",
             )
         )
 
@@ -1324,8 +1323,6 @@ def _on_profile_change(sim, state: ClientState, ts: datetime, payload: dict) -> 
                     "change_source": "client" if event.kind in ("move", "wedding", "divorce") else "application",
                     "confirmed": event.confirmed,
                 },
-                initiator=INITIATOR_CLIENT,
-                effective_at=event.ts,
             )
         )
 
@@ -1422,8 +1419,8 @@ def _on_support_check(sim, state: ClientState, ts: datetime, payload: dict) -> N
             ),
             None,
         )
-        if card is not None and case.resolved_at < HISTORY_END:
-            unblock_card(state, case.resolved_at, card, INITIATOR_BANK, "support_resolution")
+        if card is not None and case.resolved_at < config.HISTORY_END:
+            unblock_card(state, case.resolved_at, card, "support_resolution")
 
     if case.resolution == "record_corrected":
         state.pending_notice = True
@@ -1517,27 +1514,11 @@ def _on_card_block_request(sim, state: ClientState, ts: datetime, payload: dict)
 
     card_rules.block(card, ts, reason, days=days, permanent=lost)
 
-    contract = state.contracts.get(card.contract_id)
-
     blocked = state.emit(
         state.factory.make(
             "card_blocked",
             ts,
-            {
-                "product_id": contract.product_id if contract else None,
-                "product_code": card.product_code,
-                "product_version": contract.product_version if contract else 1,
-                "tariff_version": contract.tariff_version if contract else 1,
-                "product_family": contract.product_family if contract else "debit_card",
-                "contract_id": card.contract_id,
-                "account_id": card.account_id,
-                "card_id": card.card_id,
-                "reason": reason,
-                "timestamp_quality": "exact",
-            },
-            initiator=INITIATOR_CLIENT,
-            correlation_id=card.contract_id,
-            link_type="contract",
+            dict(state.card_facts(card), reason=reason),
         )
     )
 
@@ -1545,7 +1526,7 @@ def _on_card_block_request(sim, state: ClientState, ts: datetime, payload: dict)
 
         reissue_ts = ts + timedelta(days=int(rng.integers(*settings.card_lost_reissue_delay_days)))
 
-        if reissue_ts < HISTORY_END:
+        if reissue_ts < config.HISTORY_END:
             _reissue_card(state, card, reissue_ts, reason="lost_or_stolen")
 
         return
@@ -1559,8 +1540,8 @@ def _on_card_block_request(sim, state: ClientState, ts: datetime, payload: dict)
         hours=int(rng.integers(2, max(3, 24 * max(1, days or 1))))
     )
 
-    if unblock_ts < HISTORY_END and card.blocked_until is not None and unblock_ts < card.blocked_until:
-        unblock_card(state, unblock_ts, card, INITIATOR_CLIENT, "client_request")
+    if unblock_ts < config.HISTORY_END and card.blocked_until is not None and unblock_ts < card.blocked_until:
+        unblock_card(state, unblock_ts, card, "client_request")
 
 
 _HANDLERS["fraud_step"] = _on_fraud_step

@@ -14,20 +14,17 @@ import pyarrow.parquet as pq
 
 from . import params as params_module
 from . import rng as rng_module
+from . import config
 from .config import (
     EVENT_TYPE_PRIORITY,
     GENERATOR_VERSION,
-    HISTORY_END,
-    HISTORY_START,
-    PRESETS,
     RAW_DIR,
     REGISTRY_START,
     SCHEMA_VERSION,
     SEED,
+    WORLD_SEED,
     SOURCES,
     SOURCE_AVAILABILITY,
-    SOURCE_PRECISION,
-    TIME_PRECISIONS,
     key_catalogue,
 )
 from .profile import PROFILE_SCHEMA
@@ -55,13 +52,6 @@ EVENTS_SCHEMA = pa.schema(
         ("event_type", pa.string()),
         ("source", pa.string()),
         ("event_time", pa.timestamp("us")),
-        ("effective_at", pa.timestamp("us")),
-        ("time_precision", pa.string()),
-        ("event_version", pa.int32()),
-        ("change_initiator", pa.string()),
-        ("correlation_id", pa.string()),
-        ("link_type", pa.string()),
-        ("is_test_account", pa.bool_()),
         ("payload", pa.string()),
     ]
 )
@@ -76,6 +66,7 @@ COVERAGE_SCHEMA = pa.schema(
         ("coverage_status", pa.string()),
         ("coverage_reason", pa.string()),
         ("opening_state", pa.string()),
+        ("outage_days", pa.string()),
     ]
 )
 
@@ -305,7 +296,6 @@ def _truth_clients_schema(rows: list) -> pa.Schema:
         ("settlement_type", pa.string()),
         ("true_income", pa.int64()),
         ("visible_share", pa.float64()),
-        ("is_test_account", pa.bool_()),
         ("registered_in_window", pa.bool_()),
         ("vanished_after_registration", pa.bool_()),
         ("night_segment", pa.bool_()),
@@ -331,7 +321,13 @@ _WORKER: dict = {}
 
 
 def _worker_init(seed: int, params_path: str | None, catalog_scale: float | None,
-                 community_size: int | None, world_seed: int | None = None) -> None:
+                 community_size: int | None, world_seed: int | None = None,
+                 horizon: tuple | None = None) -> None:
+
+    # Дочерний процесс импортирует config заново и о горизонте
+    # группы ничего не знает: его надо поставить здесь.
+    if horizon is not None:
+        config.activate_horizon(datetime.fromisoformat(horizon[0]), datetime.fromisoformat(horizon[1]))
 
     settings = _build_params(params_path, catalog_scale, community_size)
 
@@ -382,7 +378,7 @@ def _run_batch(job: tuple) -> tuple:
         result = run_community(community_id, members)
 
         rows["events"].extend(result.events)
-        rows["profile"].extend(result.profile_versions)
+        rows["profile"].extend(result.profile_rows)
         rows["source_coverage"].extend(result.coverage)
         rows["truth_clients"].extend(result.truth_clients)
         rows["truth_events"].extend(result.truth_events)
@@ -663,6 +659,8 @@ def _run_card(
         "total_clients": total_clients,
         "chunk_clients": chunk_clients,
         "community_size": community_size,
+        "history_start": config.HISTORY_START.isoformat(),
+        "history_end": config.HISTORY_END.isoformat(),
         "generation_config_sha256": settings.fingerprint(),
     }
 
@@ -674,9 +672,11 @@ def _run_card(
 
 def generate_dataset(
     total_clients: int,
-    out_dir: Path,
+    out_dir: Path | None = None,
     seed: int = SEED,
     world_seed: int | None = None,
+    history_start: datetime | None = None,
+    history_end: datetime | None = None,
     workers: int = 1,
     chunk_clients: int = 256,
     params_path: str | None = None,
@@ -686,7 +686,15 @@ def generate_dataset(
     quiet: bool = False,
 ) -> dict:
 
-    out = Path(out_dir)
+    out = Path(out_dir) if out_dir is not None else RAW_DIR / f"clients_{total_clients}"
+
+    if history_start is not None or history_end is not None:
+        config.activate_horizon(
+            history_start if history_start is not None else config.HISTORY_START,
+            history_end if history_end is not None else config.HISTORY_END,
+        )
+
+    horizon = (config.HISTORY_START.isoformat(), config.HISTORY_END.isoformat())
 
     settings = _build_params(params_path, catalog_scale, community_size)
 
@@ -754,14 +762,14 @@ def generate_dataset(
             print(f"batches: {done}/{len(jobs)}")
 
     if workers <= 1 or len(jobs) <= 1:
-        _worker_init(seed, params_path, catalog_scale, community_size, world_seed)
+        _worker_init(seed, params_path, catalog_scale, community_size, world_seed, horizon)
         for job in jobs:
             report(_run_batch(job))
     else:
         with Pool(
             processes=min(workers, len(jobs)),
             initializer=_worker_init,
-            initargs=(seed, params_path, catalog_scale, community_size, world_seed),
+            initargs=(seed, params_path, catalog_scale, community_size, world_seed, horizon),
         ) as pool:
             for result in pool.imap_unordered(_run_batch, jobs):
                 report(result)
@@ -814,31 +822,29 @@ def generate_dataset(
         "community_size": size,
         "communities": community_count,
         "chunk_clients": chunk_clients,
-        "history_start": HISTORY_START.isoformat(),
-        "history_end": HISTORY_END.isoformat(),
+        "history_start": config.HISTORY_START.isoformat(),
+        "history_end": config.HISTORY_END.isoformat(),
         "registry_start": REGISTRY_START.isoformat(),
-        "extract_time": HISTORY_END.isoformat(),
+        "extract_time": config.HISTORY_END.isoformat(),
         "sources": {
             source: {
                 "available_from": SOURCE_AVAILABILITY[source].isoformat(),
-                "time_precision": SOURCE_PRECISION[source],
                 "defect_profile": {
-                    "duplicate_share": settings.defects.duplicate_share.get(source, 0.0),
-                    "correction_share": settings.defects.correction_share.get(source, 0.0),
                     "outage_days_per_year": settings.defects.outage_days_per_year.get(source, 0.0),
                 },
             }
             for source in SOURCES
         },
-        "time_precisions": list(TIME_PRECISIONS),
         "event_type_priority": EVENT_TYPE_PRIORITY,
         "key_catalogue": key_catalogue(),
         "schema_changes": [dict(item) for item in settings.defects.schema_changes],
         "conflict_rules": [
-            "подтверждённое profile_change важнее анкеты заявки",
-            "анкета заявки важнее системного пересчёта профиля",
-            "системный пересчёт важнее косвенных признаков транзакций",
-            "у одного event_id действует наибольшая event_version",
+            "event_id встречается в выгрузке ровно один раз",
+            "event_time это точное время события; другого времени у записи нет",
+            "запись сразу окончательна: исправлений и повторных доставок не бывает",
+            "профиль это одна итоговая строка на клиента на границу выгрузки",
+            "события раньше history_start в выгрузку не попадают; договоры, "
+            "открытые до окна, описывает opening_state покрытия",
         ],
         "bank_timeline": [
             {key: (value.isoformat() if isinstance(value, (date, datetime)) else value)
@@ -887,55 +893,87 @@ def default_workers() -> int:
     return max(1, (os.cpu_count() or 2) - 1)
 
 
+def generate_group(
+    group: str,
+    workers: int = 1,
+    chunk_clients: int = 256,
+    params_path: str | None = None,
+    resume: bool = False,
+    quiet: bool = False,
+    root: Path | None = None,
+) -> dict:
+    """
+    ОДНА группа в свой каталог data/raw/<группа>.
+
+    Соседние группы не трогаются: запуск знает только про свой
+    каталог. Мир у групп общий — один WORLD_SEED даёт одну
+    географию, одни бренды и одни точки; клиентов и поведение
+    делает seed группы, поэтому популяции не пересекаются.
+    """
+
+    if group not in config.DATASETS:
+        known = ", ".join(sorted(config.DATASETS))
+        raise GenerationError(f"группа {group!r} не объявлена в config.DATASETS: есть {known}")
+
+    settings = config.DATASETS[group]
+
+    out = (Path(root) if root is not None else RAW_DIR) / group
+
+    if not quiet:
+        print("=" * 60)
+        print(f"ГРУППА {group}: {settings.clients} клиентов, "
+              f"{settings.history_start.date()} … {settings.history_end.date()}, "
+              f"seed {settings.seed}, world_seed {WORLD_SEED}")
+        print("=" * 60)
+
+    return generate_dataset(
+        total_clients=settings.clients,
+        out_dir=out,
+        seed=settings.seed,
+        world_seed=WORLD_SEED,
+        history_start=settings.history_start,
+        history_end=settings.history_end,
+        workers=workers,
+        chunk_clients=chunk_clients,
+        params_path=params_path,
+        resume=resume,
+        quiet=quiet,
+    )
+
+
 def main() -> None:
 
-    parser = argparse.ArgumentParser(description="Генерация RAW-датасета")
+    parser = argparse.ArgumentParser(
+        description="Генерация RAW: одна группа за запуск по config.DATASETS",
+    )
 
-    parser.add_argument("--preset", choices=tuple(PRESETS), default="smoke")
-    parser.add_argument("--clients", type=int, default=None)
-    parser.add_argument("--out", type=Path, default=None)
-    parser.add_argument("--seed", type=int, default=SEED, help="seed популяции: клиенты и поведение")
-    parser.add_argument("--world-seed", type=int, default=None,
-                        help="seed мира: география, мерчанты и точки; по умолчанию равен seed популяции")
+    # Состав выгрузки — клиенты, горизонты, seed — живёт только
+    # в config.DATASETS. Здесь остаётся имя группы и то, что
+    # данных не меняет.
+    parser.add_argument("group", choices=sorted(config.DATASETS),
+                        help="какую группу генерировать; соседние не трогаются")
     parser.add_argument("--workers", type=int, default=default_workers())
     parser.add_argument("--chunk-clients", type=int, default=256)
     parser.add_argument("--params", type=str, default=None)
-    parser.add_argument("--catalog-scale", type=float, default=None)
-    parser.add_argument("--community-size", type=int, default=None)
     parser.add_argument("--resume", action="store_true")
 
     args = parser.parse_args()
 
-    if args.clients is not None:
-        total = args.clients
-        out = args.out or RAW_DIR / f"clients_{total}"
-    else:
-        total = PRESETS[args.preset]
-        out = args.out or RAW_DIR / args.preset
-
-    counts = generate_dataset(
-        total_clients=total,
-        out_dir=out,
-        seed=args.seed,
-        world_seed=args.world_seed,
+    counts = generate_group(
+        args.group,
         workers=args.workers,
         chunk_clients=args.chunk_clients,
         params_path=args.params,
-        catalog_scale=args.catalog_scale,
-        community_size=args.community_size,
         resume=args.resume,
     )
 
     print()
     print("=" * 60)
-    print("RAW DATASET GENERATED")
+    print(f"RAW GROUP GENERATED: {args.group}  ->  {RAW_DIR / args.group}")
     print("=" * 60)
 
-    for name, value in counts.items():
-        print(f"{name:24s}{value:,}")
-
-    print()
-    print(f"output: {out}")
+    for table, value in counts.items():
+        print(f"{table:24s}{value:,}")
 
 
 if __name__ == "__main__":

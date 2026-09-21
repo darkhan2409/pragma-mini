@@ -1,0 +1,3549 @@
+{
+  "version": 1,
+  "collected_at": "2026-09-16",
+  "bank_timeline": [
+    {
+      "kind": "renaming",
+      "title": "АО «Хоум Кредит Банк» переименовано в АО «Home Credit Bank»",
+      "known_period_start": "2022-07-01",
+      "known_period_end": "2022-07-31",
+      "date_precision": "month",
+      "source": "https://ru.wikipedia.org/wiki/Home_Credit_Bank_Kazakhstan",
+      "confidence": "high"
+    },
+    {
+      "kind": "shareholder_change",
+      "title": "75 % акций выкуплены топ-менеджментом PPF",
+      "known_period_start": "2024-02-05",
+      "known_period_end": "2024-02-05",
+      "date_precision": "day",
+      "source": "https://home.kz/press-center/news/o-smene-akcionerov",
+      "confidence": "high"
+    },
+    {
+      "kind": "acquisition_agreed",
+      "title": "ForteBank договорился о покупке Home Credit Bank",
+      "known_period_start": "2025-06-01",
+      "known_period_end": "2025-06-30",
+      "date_precision": "month",
+      "source": "https://bizmedia.kz/2025-10-13-pereimenovanie-home-credit-bank-stala-izvestna-data/",
+      "confidence": "medium"
+    },
+    {
+      "kind": "shareholder_meeting",
+      "title": "Внеочередное общее собрание акционеров о переименовании",
+      "known_period_start": "2025-11-03",
+      "known_period_end": "2025-11-03",
+      "date_precision": "day",
+      "source": "https://bizmedia.kz/2025-10-13-pereimenovanie-home-credit-bank-stala-izvestna-data/",
+      "confidence": "high"
+    },
+    {
+      "kind": "reregistration",
+      "title": "Перерегистрация как дочернего банка АО «Forte Bank»",
+      "known_period_start": "2025-12-02",
+      "known_period_end": "2025-12-02",
+      "date_precision": "day",
+      "source": "https://forbes.kz/articles/naimenovanie-ao-home-credit-bank-izmenili-b19289/amp",
+      "confidence": "high"
+    },
+    {
+      "kind": "acquisition_closed",
+      "title": "ForteBank завершил приобретение 100 % акций",
+      "known_period_start": "2025-12-30",
+      "known_period_end": "2025-12-30",
+      "date_precision": "day",
+      "source": "https://ru.wikipedia.org/wiki/Home_Credit_Bank_Kazakhstan",
+      "confidence": "high"
+    },
+    {
+      "kind": "atm_network_shared",
+      "title": "Клиенты получили доступ к банкоматной сети ForteBank",
+      "known_period_start": "2026-03-13",
+      "known_period_end": "2026-03-13",
+      "date_precision": "day",
+      "source": "https://home.kz/press-center/smi/klienty-home-credit-bank-poluchili-dostup-k-bankomatnoy-seti-fortebank",
+      "confidence": "medium"
+    }
+  ],
+  "bank_rules": [
+    {
+      "rule": "max_debit_cards_total",
+      "value": 4,
+      "source": "https://home.kz/debit-cards/alem",
+      "confidence": "high"
+    }
+  ],
+  "products": [
+    {
+      "product_code": "POS_INSTALLMENT",
+      "product_id": "prd_pos_installment",
+      "family": "installment",
+      "name": "Рассрочка на товары у партнёров",
+      "pages": [
+        "https://home.kz/loans/consumer"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": "2005-01-01",
+          "known_period_end": "2005-12-31",
+          "date_precision": "year",
+          "source": "https://home.kz/about",
+          "evidence_at": "2026-09-16",
+          "confidence": "medium"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2005-01-01",
+            "known_period_end": "2005-12-31",
+            "date_precision": "year"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 21,
+            "max_age": 75,
+            "income_months": 6
+          },
+          "channels": [
+            "partner_pos",
+            "app",
+            "web"
+          ],
+          "terms": {
+            "amount_min": 10000,
+            "amount_max": 1500000,
+            "term_options": [
+              6,
+              12,
+              24
+            ],
+            "rate_min": 0.0,
+            "rate_max": 0.38,
+            "apr_max": 0.452,
+            "down_payment_min": 0.0
+          },
+          "source": "https://home.kz/loans/consumer",
+          "confidence": "medium"
+        },
+        {
+          "product_version": 2,
+          "tariff_version": 2,
+          "effective": {
+            "known_period_start": "2023-12-01",
+            "known_period_end": "2023-12-01",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 21,
+            "max_age": 75,
+            "income_months": 6
+          },
+          "channels": [
+            "partner_pos"
+          ],
+          "terms": {
+            "amount_min": 10000,
+            "amount_max": 1500000,
+            "term_options": [
+              24
+            ],
+            "rate_min": 0.0,
+            "rate_max": 0.0,
+            "promo": "0-0-24",
+            "promo_until": "2024-06-30"
+          },
+          "source": "https://home.kz/press-center/actions/vstrechaj-koktem-rassrochku-0-0-24",
+          "confidence": "high"
+        },
+        {
+          "product_version": 3,
+          "tariff_version": 3,
+          "effective": {
+            "known_period_start": "2024-07-01",
+            "known_period_end": "2024-07-01",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 21,
+            "max_age": 75,
+            "income_months": 6
+          },
+          "channels": [
+            "partner_pos",
+            "app",
+            "web"
+          ],
+          "terms": {
+            "amount_min": 10000,
+            "amount_max": 1500000,
+            "term_options": [
+              6,
+              12,
+              24
+            ],
+            "rate_min": 0.0,
+            "rate_max": 0.38,
+            "apr_max": 0.452
+          },
+          "source": "https://home.kz/press-center/actions/vstrechaj-koktem-rassrochku-0-0-24",
+          "confidence": "high"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": true,
+        "max_active_holdings": 4
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "TOUR_INSTALLMENT",
+      "product_id": "prd_tour_installment",
+      "family": "installment",
+      "name": "Туры в рассрочку",
+      "pages": [
+        "https://home.kz/loans/tury-v-rassrochku"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": "2016-01-01",
+          "known_period_end": "2016-12-31",
+          "date_precision": "year",
+          "source": "https://ru.wikipedia.org/wiki/Home_Credit_Bank_Kazakhstan",
+          "evidence_at": "2026-09-16",
+          "confidence": "low"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2016-01-01",
+            "known_period_end": "2016-12-31",
+            "date_precision": "year"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 21,
+            "max_age": 75,
+            "income_months": 6
+          },
+          "channels": [
+            "partner_pos",
+            "web"
+          ],
+          "terms": {
+            "amount_min": 30000,
+            "amount_max": 1500000,
+            "term_options": [
+              6,
+              12,
+              24
+            ],
+            "rate_min": 0.0,
+            "rate_max": 0.38,
+            "apr_max": 0.452
+          },
+          "source": "https://home.kz/loans/tury-v-rassrochku",
+          "confidence": "low"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": true,
+        "max_active_holdings": 2
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "CASH_LOAN_ONLINE",
+      "product_id": "prd_cash_loan_online",
+      "family": "cash_loan",
+      "name": "Кредит онлайн наличными",
+      "pages": [
+        "https://home.kz/loans/credit-online",
+        "https://home.kz/loans/zaim-online",
+        "https://home.kz/loans/kredit-do-zarplaty",
+        "https://home.kz/loans/kredit-dlya-pensionerov"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": "2019-01-01",
+          "known_period_end": "2019-12-31",
+          "date_precision": "year",
+          "source": "https://home.kz/about",
+          "evidence_at": "2026-09-16",
+          "confidence": "medium"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2019-01-01",
+            "known_period_end": "2019-12-31",
+            "date_precision": "year"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 23,
+            "max_age": 75,
+            "income_months": 6
+          },
+          "channels": [
+            "app",
+            "web",
+            "branch",
+            "call_center"
+          ],
+          "terms": {
+            "amount_min": 10000,
+            "amount_max": 9500000,
+            "term_min": 6,
+            "term_max": 60,
+            "rate_min": 0.19,
+            "rate_max": 0.38,
+            "apr_min": 0.213,
+            "apr_max": 0.459
+          },
+          "source": "https://home.kz/loans/credit-online",
+          "confidence": "medium"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": true,
+        "max_active_holdings": 3
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "REFINANCE",
+      "product_id": "prd_refinance",
+      "family": "refinance",
+      "name": "Рефинансирование кредитов",
+      "pages": [
+        "https://home.kz/loans/refinansirovanie-kreditov"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": null,
+          "known_period_end": "2026-09-16",
+          "date_precision": "unknown",
+          "source": "https://home.kz/loans/refinansirovanie-kreditov",
+          "evidence_at": "2026-09-16",
+          "confidence": "low"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": null,
+            "known_period_end": "2026-09-16",
+            "date_precision": "unknown"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 22,
+            "max_age": 75,
+            "income_months": 6,
+            "min_existing_loans": 2
+          },
+          "channels": [
+            "app",
+            "web",
+            "branch"
+          ],
+          "terms": {
+            "amount_min": 10000,
+            "amount_max": 9500000,
+            "term_min": 6,
+            "term_max": 60,
+            "rate_min": 0.28,
+            "rate_max": 0.38,
+            "apr_min": 0.324,
+            "apr_max": 0.459,
+            "disbursement_days_max": 3
+          },
+          "source": "https://home.kz/loans/refinansirovanie-kreditov",
+          "confidence": "low"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "TECHNODENGI",
+      "product_id": "prd_technodengi",
+      "family": "credit_card",
+      "name": "Техноденьги, кобренд с Technodom",
+      "pages": [],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": "2012-01-01",
+          "known_period_end": "2012-12-31",
+          "date_precision": "year",
+          "source": "https://ru.wikipedia.org/wiki/Home_Credit_Bank_Kazakhstan",
+          "evidence_at": "2026-09-16",
+          "confidence": "medium"
+        },
+        {
+          "kind": "service_end",
+          "known_period_start": "2013-01-01",
+          "known_period_end": "2024-06-01",
+          "date_precision": "interval",
+          "source": null,
+          "unresolved_source": true,
+          "evidence_at": "2026-09-16",
+          "confidence": "low"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2012-01-01",
+            "known_period_end": "2012-12-31",
+            "date_precision": "year"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 21,
+            "max_age": 65
+          },
+          "channels": [
+            "partner_pos",
+            "branch"
+          ],
+          "terms": {
+            "limit_min": 20000,
+            "limit_max": 500000,
+            "installment_months": 6,
+            "purchase_rate": 0.0
+          },
+          "source": null,
+          "unresolved_source": true,
+          "confidence": "low"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1
+      },
+      "migration_policy": "servicing_only"
+    },
+    {
+      "product_code": "DOS",
+      "product_id": "prd_dos",
+      "family": "credit_card",
+      "name": "Кредитная карта DOS",
+      "pages": [
+        "https://home.kz/credit-cards/credit-card-dos"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": null,
+          "known_period_end": "2023-03-01",
+          "date_precision": "unknown",
+          "source": "https://home.kz/credit-cards/credit-card-dos",
+          "evidence_at": "2026-09-16",
+          "confidence": "low"
+        },
+        {
+          "kind": "sales_end",
+          "known_period_start": "2023-03-01",
+          "known_period_end": "2026-09-16",
+          "date_precision": "interval",
+          "source": "https://home.kz/credit-cards/credit-card-dos",
+          "evidence_at": "2026-09-16",
+          "confidence": "low"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": null,
+            "known_period_end": "2023-03-01",
+            "date_precision": "unknown"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 21,
+            "max_age": 68,
+            "income_months": 6
+          },
+          "channels": [
+            "branch",
+            "app",
+            "web"
+          ],
+          "terms": {
+            "limit_min": 20000,
+            "limit_max": 2000000,
+            "installment_months": 4,
+            "purchase_rate": 0.0,
+            "fee_monthly_with_debt": 499,
+            "cashback_base": 0.01,
+            "cashback_max": 0.06,
+            "cashback_cap": 50000
+          },
+          "source": "https://home.kz/credit-cards/credit-card-dos",
+          "confidence": "medium"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1
+      },
+      "successor": "OZEN",
+      "migration_policy": "servicing_only"
+    },
+    {
+      "product_code": "DOS_PRO",
+      "product_id": "prd_dos_pro",
+      "family": "credit_card",
+      "name": "Кредитная карта DOS Pro",
+      "pages": [
+        "https://home.kz/credit-cards/credit-card-dos-pro"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": null,
+          "known_period_end": "2023-03-01",
+          "date_precision": "unknown",
+          "source": "https://home.kz/credit-cards/credit-card-dos-pro",
+          "evidence_at": "2026-09-16",
+          "confidence": "low"
+        },
+        {
+          "kind": "feature_added",
+          "title": "Смена состава партнёров Pro Club",
+          "known_period_start": "2023-03-01",
+          "known_period_end": "2023-03-01",
+          "date_precision": "day",
+          "source": "https://home.kz/credit-cards/credit-card-dos-pro",
+          "evidence_at": "2026-09-16",
+          "confidence": "medium"
+        },
+        {
+          "kind": "sales_end",
+          "known_period_start": "2023-03-01",
+          "known_period_end": "2026-09-16",
+          "date_precision": "interval",
+          "source": "https://home.kz/credit-cards/credit-card-dos-pro",
+          "evidence_at": "2026-09-16",
+          "confidence": "low"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": null,
+            "known_period_end": "2023-03-01",
+            "date_precision": "unknown"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 21,
+            "max_age": 68,
+            "income_months": 6
+          },
+          "channels": [
+            "branch",
+            "app",
+            "web"
+          ],
+          "terms": {
+            "limit_min": 20000,
+            "limit_max": 2000000,
+            "purchase_rate_partner": 0.0,
+            "purchase_rate_other": 0.36,
+            "cash_rate_nominal": 0.36,
+            "apr_max": 0.426,
+            "monthly_payment_share": 0.0833,
+            "fee_monthly": 0
+          },
+          "source": "https://home.kz/credit-cards/credit-card-dos-pro",
+          "confidence": "medium"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1
+      },
+      "predecessor": "DOS",
+      "successor": "OZEN",
+      "migration_policy": "servicing_only"
+    },
+    {
+      "product_code": "OZEN",
+      "product_id": "prd_ozen",
+      "family": "credit_card",
+      "name": "Карта рассрочки Özen",
+      "pages": [
+        "https://home.kz/credit-cards/ozen"
+      ],
+      "milestones": [
+        {
+          "kind": "pilot_start",
+          "known_period_start": "2023-09-01",
+          "known_period_end": "2023-09-30",
+          "date_precision": "month",
+          "source": "project_owner",
+          "evidence_at": "2026-09-16",
+          "confidence": "medium"
+        },
+        {
+          "kind": "sales_start",
+          "known_period_start": "2023-12-25",
+          "known_period_end": "2023-12-25",
+          "date_precision": "day",
+          "source": "https://forbes.kz/articles/home_credit_bank_zapustil_kartu_rassrochki_ozen",
+          "evidence_at": "2023-12-25",
+          "confidence": "high"
+        },
+        {
+          "kind": "feature_added",
+          "title": "Изменены условия для партнёров, для физлиц условия прежние",
+          "known_period_start": "2025-08-26",
+          "known_period_end": "2025-08-26",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news/sme-card-ozen",
+          "evidence_at": "2025-08-26",
+          "confidence": "high"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2023-12-25",
+            "known_period_end": "2023-12-25",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 22,
+            "max_age": 63,
+            "income_months": 6
+          },
+          "channels": [
+            "app",
+            "branch",
+            "micro_office",
+            "call_center",
+            "qazpost",
+            "partner_pos",
+            "web"
+          ],
+          "terms": {
+            "limit_min": 20000,
+            "limit_max": 2000000,
+            "card_limit_max": 5500000,
+            "installment_months": 6,
+            "purchase_rate": 0.0,
+            "cash_rate_nominal": 0.381,
+            "cash_apr": 0.46,
+            "fee_monthly": 0,
+            "atm_fee": 0,
+            "transfer_fee": 0,
+            "payment_days": [
+              4,
+              14,
+              24
+            ],
+            "daily_cash_limit": 2000000
+          },
+          "source": "https://home.kz/credit-cards/ozen",
+          "confidence": "high"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1
+      },
+      "predecessor": "DOS_PRO",
+      "migration_policy": "servicing_only"
+    },
+    {
+      "product_code": "HOME_CARD",
+      "product_id": "prd_home_card",
+      "family": "debit_card",
+      "name": "Дебетовая карта Home Card",
+      "pages": [
+        "https://home.kz/debit-cards/homecard"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": "2019-01-01",
+          "known_period_end": "2019-12-31",
+          "date_precision": "year",
+          "source": "project_owner",
+          "evidence_at": "2026-09-16",
+          "confidence": "medium"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2019-01-01",
+            "known_period_end": "2019-12-31",
+            "date_precision": "year"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16,
+            "max_age": 79
+          },
+          "channels": [
+            "app",
+            "web",
+            "branch"
+          ],
+          "terms": {
+            "fee_issue": 0,
+            "fee_monthly": 0,
+            "cashback_base": 0.01,
+            "cashback_balance_bonus": 0.02,
+            "balance_threshold": 100000,
+            "cashback_deposit_bonus": 0.02,
+            "deposit_threshold": 500000,
+            "cashback_cap": 15000,
+            "bonus_valid_months": 18,
+            "atm_free_monthly": 500000,
+            "atm_fee_rate": 0.02,
+            "atm_fee_min": 100
+          },
+          "source": "https://home.kz/debit-cards/homecard",
+          "confidence": "medium"
+        },
+        {
+          "product_version": 2,
+          "tariff_version": 2,
+          "effective": {
+            "known_period_start": "2025-01-01",
+            "known_period_end": "2025-01-01",
+            "date_precision": "day"
+          },
+          "applies_to": "existing_from_date",
+          "notice_days": 20,
+          "eligibility": {
+            "min_age": 16,
+            "max_age": 79
+          },
+          "channels": [
+            "app",
+            "web",
+            "branch"
+          ],
+          "terms": {
+            "fee_issue": 0,
+            "fee_monthly": 0,
+            "cashback_base": 0.01,
+            "cashback_balance_bonus": 0.02,
+            "balance_threshold": 100000,
+            "cashback_deposit_bonus": 0.02,
+            "deposit_threshold": 500000,
+            "cashback_cap": 15000,
+            "bonus_valid_months": 18,
+            "atm_free_monthly": 500000,
+            "atm_fee_rate": 0.02,
+            "atm_fee_min": 100,
+            "bonus_on_primary_card_only": true
+          },
+          "source": "https://home.kz/press-center/news/keshbek-po-home-card",
+          "confidence": "high"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": true,
+        "max_active_holdings": 2
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "HOME_CARD_LITE",
+      "product_id": "prd_home_card_lite",
+      "family": "debit_card",
+      "name": "Дебетовая карта Home Card Lite",
+      "pages": [
+        "https://home.kz/debit-cards/HomeCard-Lite",
+        "https://home.kz/faq/archived-products/home-card-lite"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": null,
+          "known_period_end": "2024-01-31",
+          "date_precision": "unknown",
+          "source": "https://home.kz/press-center/news/izmeneniya-po-limitam-keshbek-kartochki-home-card-lite",
+          "evidence_at": "2024-01-31",
+          "confidence": "low"
+        },
+        {
+          "kind": "sales_end",
+          "known_period_start": "2024-09-16",
+          "known_period_end": "2026-09-16",
+          "date_precision": "interval",
+          "source": "https://home.kz/faq/archived-products/home-card-lite",
+          "evidence_at": "2026-09-16",
+          "confidence": "low"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": null,
+            "known_period_end": "2024-01-31",
+            "date_precision": "unknown"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16,
+            "max_age": 79
+          },
+          "channels": [
+            "app",
+            "web",
+            "branch"
+          ],
+          "terms": {
+            "fee_issue": 0,
+            "fee_monthly": 0,
+            "cashback_intro": 0.1,
+            "cashback_intro_days": 90,
+            "cashback_after": 0.05,
+            "cashback_base": 0.01,
+            "cashback_categories": [
+              "grocery",
+              "fuel",
+              "utilities"
+            ],
+            "bonus_valid_months": 6,
+            "atm_free_monthly": 200000,
+            "atm_fee_rate": 0.02,
+            "transfer_free_monthly": 1000000,
+            "transfer_fee": 200
+          },
+          "source": "https://home.kz/debit-cards/HomeCard-Lite",
+          "confidence": "medium"
+        },
+        {
+          "product_version": 2,
+          "tariff_version": 2,
+          "effective": {
+            "known_period_start": "2024-02-01",
+            "known_period_end": "2024-02-01",
+            "date_precision": "day"
+          },
+          "applies_to": "existing_from_date",
+          "notice_days": 1,
+          "eligibility": {
+            "min_age": 16,
+            "max_age": 79
+          },
+          "channels": [
+            "app",
+            "web",
+            "branch"
+          ],
+          "terms": {
+            "fee_issue": 0,
+            "fee_monthly": 0,
+            "cashback_intro": 0.1,
+            "cashback_intro_days": 90,
+            "cashback_after": 0.05,
+            "cashback_base": 0.01,
+            "cashback_categories": [
+              "grocery",
+              "fuel",
+              "utilities"
+            ],
+            "cashback_cap": 20000,
+            "cashback_cap_fuel": 7000,
+            "cashback_cap_per_transaction": 1000,
+            "bonus_valid_months": 6
+          },
+          "source": "https://home.kz/press-center/news/izmeneniya-po-limitam-keshbek-kartochki-home-card-lite",
+          "confidence": "high"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1
+      },
+      "migration_policy": "servicing_only"
+    },
+    {
+      "product_code": "TAU",
+      "product_id": "prd_tau",
+      "family": "debit_card",
+      "name": "Премиальная карта Tau",
+      "pages": [
+        "https://home.kz/debit-cards/tau"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": "2024-09-01",
+          "known_period_end": "2024-09-30",
+          "date_precision": "month",
+          "source": "https://home.kz/press-center/smi/karta-tau-ot-homecredit-bank-privilegirovannyy-servis-i-vysokiy-keshbek",
+          "evidence_at": "2024-09-06",
+          "confidence": "medium"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2024-09-01",
+            "known_period_end": "2024-09-30",
+            "date_precision": "month"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 21,
+            "max_age": 79,
+            "min_assets": 15000000
+          },
+          "channels": [
+            "app",
+            "branch"
+          ],
+          "terms": {
+            "fee_issue": 0,
+            "fee_monthly": 0,
+            "cashback_base": 0.05,
+            "atm_free_monthly": 300000000,
+            "lounge_access": true,
+            "concierge": true
+          },
+          "source": "https://home.kz/debit-cards/tau",
+          "confidence": "medium"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1,
+        "compatibility_rules": {
+          "exclusive_with": [
+            "ALEM"
+          ]
+        }
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "ASPAN",
+      "product_id": "prd_aspan",
+      "family": "debit_card",
+      "name": "Карта путешествий Aspan",
+      "pages": [
+        "https://home.kz/debit-cards/travel-card-aspan"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": "2025-07-14",
+          "known_period_end": "2025-07-14",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news/karta-dlya-puteshestviy-aspan",
+          "evidence_at": "2025-07-22",
+          "confidence": "high"
+        },
+        {
+          "kind": "sales_suspended",
+          "known_period_start": "2026-05-01",
+          "known_period_end": "2026-05-01",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news/novye-karty-aspan-vremenno-ne-vypuskayutsya",
+          "evidence_at": "2026-04-29",
+          "confidence": "high"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2025-07-14",
+            "known_period_end": "2025-07-14",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 18,
+            "max_age": 79,
+            "requires_app": true
+          },
+          "channels": [
+            "app"
+          ],
+          "terms": {
+            "fee_issue": 0,
+            "fee_monthly": 0,
+            "fee_monthly_from": "2025-10-01",
+            "cashback_base": 0.01,
+            "cashback_balance_bonus": 0.02,
+            "balance_threshold": 200000,
+            "cashback_deposit_bonus": 0.02,
+            "deposit_threshold": 1000000,
+            "cashback_travel": 0.05,
+            "cashback_cap": 30000,
+            "atm_free_monthly": 1500000,
+            "atm_fee_rate": 0.02,
+            "atm_fee_min": 100,
+            "lounge_visits": 10
+          },
+          "source": "https://home.kz/press-center/news/karta-dlya-puteshestviy-aspan",
+          "confidence": "high"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 2,
+          "effective": {
+            "known_period_start": "2025-10-01",
+            "known_period_end": "2025-10-01",
+            "date_precision": "day"
+          },
+          "applies_to": "existing_from_date",
+          "notice_days": 14,
+          "eligibility": {
+            "min_age": 18,
+            "max_age": 79,
+            "requires_app": true
+          },
+          "channels": [
+            "app"
+          ],
+          "terms": {
+            "fee_issue": 0,
+            "fee_monthly": 3000,
+            "cashback_base": 0.01,
+            "cashback_balance_bonus": 0.02,
+            "balance_threshold": 200000,
+            "cashback_deposit_bonus": 0.02,
+            "deposit_threshold": 1000000,
+            "cashback_travel": 0.05,
+            "cashback_cap": 30000,
+            "atm_free_monthly": 1500000,
+            "atm_fee_rate": 0.02,
+            "atm_fee_min": 100,
+            "lounge_visits": 10
+          },
+          "source": "https://home.kz/debit-cards/travel-card-aspan",
+          "confidence": "high"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1,
+        "compatibility_rules": {
+          "exclusive_with": [
+            "ALEM"
+          ]
+        }
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "ARNA",
+      "product_id": "prd_arna",
+      "family": "debit_card",
+      "name": "Дебетовая карта Arna",
+      "pages": [
+        "https://home.kz/debit-cards/arna"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": "2025-09-09",
+          "known_period_end": "2025-09-09",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news/s-9-sentyabrya-2025-goda-v-home-kz-dostupna-novaya-debetnaya-karta-arna",
+          "evidence_at": "2025-09-09",
+          "confidence": "high"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2025-09-09",
+            "known_period_end": "2025-09-09",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16,
+            "max_age": 79
+          },
+          "channels": [
+            "app",
+            "web",
+            "branch"
+          ],
+          "terms": {
+            "fee_issue": 0,
+            "fee_monthly": 0,
+            "cashback_base": 0.01,
+            "cashback_balance_bonus": 0.02,
+            "balance_threshold": 100000,
+            "cashback_deposit_bonus": 0.02,
+            "deposit_threshold": 500000,
+            "cashback_utility_taxi": 0.05,
+            "cashback_cap": 15000,
+            "bonus_valid_months": 18,
+            "transfer_free_monthly": 1000000,
+            "transfer_fee": 200,
+            "atm_free_monthly": 500000,
+            "atm_fee_rate": 0.02,
+            "atm_fee_min": 100
+          },
+          "source": "https://home.kz/debit-cards/arna",
+          "confidence": "high"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 2,
+          "effective": {
+            "known_period_start": "2026-05-15",
+            "known_period_end": "2026-05-15",
+            "date_precision": "day"
+          },
+          "applies_to": "existing_from_date",
+          "notice_days": 15,
+          "eligibility": {
+            "min_age": 16,
+            "max_age": 79
+          },
+          "channels": [
+            "app",
+            "web",
+            "branch"
+          ],
+          "terms": {
+            "fee_issue": 0,
+            "fee_monthly": 0,
+            "cashback_base": 0.01,
+            "cashback_balance_bonus": 0.02,
+            "balance_threshold": 100000,
+            "cashback_deposit_bonus": 0.02,
+            "deposit_threshold": 500000,
+            "cashback_utility_taxi": 0.05,
+            "cashback_cap": 15000,
+            "bonus_valid_months": 18,
+            "transfer_free_monthly": 1000000,
+            "transfer_fee": 200,
+            "atm_free_count_monthly": 5,
+            "atm_fee_rate": 0.02,
+            "atm_fee_min": 100
+          },
+          "source": "https://home.kz/press-center/news",
+          "confidence": "high",
+          "note": "листинг новостей, пункт 2026-04-30 об изменении комиссий за снятие"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "ALEM",
+      "product_id": "prd_alem",
+      "family": "debit_card",
+      "name": "Премиальная карта Álem",
+      "pages": [
+        "https://home.kz/debit-cards/alem"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": null,
+          "known_period_end": "2026-09-16",
+          "date_precision": "unknown",
+          "source": "https://home.kz/debit-cards/alem",
+          "evidence_at": "2026-09-16",
+          "confidence": "low"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": null,
+            "known_period_end": "2026-09-16",
+            "date_precision": "unknown"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 18,
+            "max_age": 79,
+            "min_assets": 3000000
+          },
+          "channels": [
+            "app",
+            "branch"
+          ],
+          "terms": {
+            "fee_issue": 0,
+            "fee_monthly": 0,
+            "cashback_base": 0.05,
+            "cashback_cap": 50000,
+            "atm_free_monthly": 1500000,
+            "atm_fee_rate": 0.02,
+            "atm_fee_min": 100,
+            "lounge_visits": 10
+          },
+          "source": "https://home.kz/debit-cards/alem",
+          "confidence": "low"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1,
+        "compatibility_rules": {
+          "exclusive_with": [
+            "TAU",
+            "ASPAN"
+          ]
+        }
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "TAN",
+      "product_id": "prd_tan",
+      "family": "debit_card",
+      "name": "Пенсионная карта Tañ",
+      "pages": [
+        "https://home.kz/debit-cards/hcb-pn"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": null,
+          "known_period_end": "2026-09-16",
+          "date_precision": "unknown",
+          "source": "https://home.kz/debit-cards/hcb-pn",
+          "evidence_at": "2026-09-16",
+          "confidence": "low"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": null,
+            "known_period_end": "2026-09-16",
+            "date_precision": "unknown"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 58,
+            "max_age": 85,
+            "requires_pension": true
+          },
+          "channels": [
+            "branch"
+          ],
+          "terms": {
+            "fee_issue": 0,
+            "fee_monthly": 0,
+            "cashback_pharmacy_first_year": 0.1,
+            "cashback_pharmacy_after": 0.03,
+            "cashback_base": 0.03,
+            "cashback_cap": 15000,
+            "atm_free_monthly": 500000,
+            "atm_fee_rate": 0.02,
+            "atm_fee_min": 100
+          },
+          "source": "https://home.kz/debit-cards/hcb-pn",
+          "confidence": "low"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "DEPOSIT_PROSTOY",
+      "product_id": "prd_deposit_prostoy",
+      "family": "deposit",
+      "name": "Депозит «Простой»",
+      "pages": [
+        "https://home.kz/deposits/depozity-v-tenge"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": "2020-06-30",
+          "known_period_end": "2020-06-30",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news/depositnaya-lineika",
+          "evidence_at": "2020-06-30",
+          "confidence": "high"
+        },
+        {
+          "kind": "feature_added",
+          "title": "Прекращён приём вкладов на 18 и 24 месяца",
+          "known_period_start": "2017-04-03",
+          "known_period_end": "2017-04-03",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news/uvedomlenie-o-prekrasenie-priema-vkladov-po-produktu-prostoj-so-srokom-na-18-mesacev-i-24-mesaca",
+          "evidence_at": "2024-01-31",
+          "confidence": "high"
+        },
+        {
+          "kind": "feature_added",
+          "title": "Добавлен срок 13 месяцев",
+          "known_period_start": "2026-04-30",
+          "known_period_end": "2026-04-30",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news",
+          "evidence_at": "2026-04-30",
+          "confidence": "high",
+          "note": "листинг новостей, пункт 2026-04-30"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2020-07-01",
+            "known_period_end": "2020-07-01",
+            "date_precision": "day"
+          },
+          "applies_to": "on_renewal",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app",
+            "branch",
+            "terminal"
+          ],
+          "terms": {
+            "min_amount": 1000,
+            "max_amount": 10000000,
+            "term_options": [
+              6,
+              12
+            ],
+            "rate": 0.1389,
+            "topup": true,
+            "withdrawal": true,
+            "capitalisation": "daily"
+          },
+          "source": "https://home.kz/press-center/news/depositnaya-lineika",
+          "confidence": "high"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 2,
+          "effective": {
+            "known_period_start": "2024-08-01",
+            "known_period_end": "2024-08-01",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app",
+            "branch",
+            "terminal"
+          ],
+          "terms": {
+            "min_amount": 1000,
+            "term_options": [
+              6,
+              12
+            ],
+            "rate": 0.1266,
+            "topup": true,
+            "withdrawal": true,
+            "capitalisation": "daily"
+          },
+          "source": "https://home.kz/press-center/news/izmenenie-stavok-po-depozitam-i-bankovskim-depozitnym-sertifikatam-s-1-avgusta-2024",
+          "confidence": "high"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 3,
+          "effective": {
+            "known_period_start": "2024-12-07",
+            "known_period_end": "2024-12-07",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app",
+            "branch",
+            "terminal"
+          ],
+          "terms": {
+            "min_amount": 1000,
+            "term_options": [
+              6,
+              12
+            ],
+            "rate": 0.138,
+            "topup": true,
+            "withdrawal": true,
+            "capitalisation": "daily"
+          },
+          "source": "https://home.kz/press-center/news/izmen-stavka-depo-06122024",
+          "confidence": "high"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 4,
+          "effective": {
+            "known_period_start": "2026-04-18",
+            "known_period_end": "2026-04-18",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app",
+            "branch",
+            "terminal"
+          ],
+          "terms": {
+            "min_amount": 1000,
+            "term_options": [
+              6,
+              12
+            ],
+            "rate": 0.1441,
+            "topup": true,
+            "withdrawal": true,
+            "capitalisation": "daily"
+          },
+          "source": "https://finratings.kz/news/13555-home-credit-bank-obnovil-stavki-po-depozitam-s-18-aprelia/",
+          "confidence": "high"
+        },
+        {
+          "product_version": 2,
+          "tariff_version": 5,
+          "effective": {
+            "known_period_start": "2026-04-30",
+            "known_period_end": "2026-04-30",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app",
+            "branch",
+            "terminal"
+          ],
+          "terms": {
+            "min_amount": 1000,
+            "term_options": [
+              6,
+              12,
+              13
+            ],
+            "rate": 0.1391,
+            "topup": true,
+            "withdrawal": true,
+            "capitalisation": "daily"
+          },
+          "source": "https://home.kz/press-center/news",
+          "confidence": "high",
+          "note": "листинг новостей, пункт 2026-04-30"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": true,
+        "max_active_holdings": 3
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "DEPOSIT_POCHTOVY",
+      "product_id": "prd_deposit_pochtovy",
+      "family": "deposit",
+      "name": "Депозит «Почтовый»",
+      "pages": [
+        "https://home.kz/deposits/depozit-poctovyj"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": null,
+          "known_period_end": "2026-09-16",
+          "date_precision": "unknown",
+          "source": "https://home.kz/deposits/depozit-poctovyj",
+          "evidence_at": "2026-09-16",
+          "confidence": "low"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": null,
+            "known_period_end": "2026-09-16",
+            "date_precision": "unknown"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "qazpost"
+          ],
+          "terms": {
+            "min_amount": 10000,
+            "max_amount": 50000000,
+            "term_options": [
+              12
+            ],
+            "rate": 0.1398,
+            "topup": true,
+            "withdrawal": true,
+            "capitalisation": "daily"
+          },
+          "source": "https://home.kz/deposits/depozit-poctovyj",
+          "confidence": "low"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "DEPOSIT_HOOM",
+      "product_id": "prd_deposit_hoom",
+      "family": "deposit",
+      "name": "Депозит «Сберегательный Хоум»",
+      "pages": [
+        "https://home.kz/deposits/depozit-sberegatelnyj"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": "2020-06-30",
+          "known_period_end": "2020-06-30",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news/depositnaya-lineika",
+          "evidence_at": "2020-06-30",
+          "confidence": "high"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2024-02-01",
+            "known_period_end": "2024-02-01",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app",
+            "branch"
+          ],
+          "terms": {
+            "min_amount": 100000,
+            "term_options": [
+              6,
+              12,
+              24
+            ],
+            "rate": 0.1653,
+            "topup": false,
+            "withdrawal": false,
+            "capitalisation": "daily"
+          },
+          "source": "https://home.kz/press-center/news/izmenenie-stavkov-po-depozitam-i-bankovskim-depozitnym-sertifikatam-s-1-fevralya-2024",
+          "confidence": "high"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 2,
+          "effective": {
+            "known_period_start": "2024-08-01",
+            "known_period_end": "2024-08-01",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app",
+            "branch"
+          ],
+          "terms": {
+            "min_amount": 100000,
+            "term_options": [
+              6,
+              12,
+              24
+            ],
+            "rate": 0.1621,
+            "topup": false,
+            "withdrawal": false,
+            "capitalisation": "daily"
+          },
+          "source": "https://home.kz/press-center/news/izmenenie-stavok-po-depozitam-i-bankovskim-depozitnym-sertifikatam-s-1-avgusta-2024",
+          "confidence": "high"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 3,
+          "effective": {
+            "known_period_start": "2024-12-07",
+            "known_period_end": "2024-12-07",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app",
+            "branch"
+          ],
+          "terms": {
+            "min_amount": 100000,
+            "term_options": [
+              6,
+              12,
+              24
+            ],
+            "rate": 0.1618,
+            "topup": false,
+            "withdrawal": false,
+            "capitalisation": "daily"
+          },
+          "source": "https://home.kz/press-center/news/izmen-stavka-depo-06122024",
+          "confidence": "high"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 4,
+          "effective": {
+            "known_period_start": "2025-07-23",
+            "known_period_end": "2025-07-23",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app",
+            "branch"
+          ],
+          "terms": {
+            "min_amount": 100000,
+            "term_options": [
+              6,
+              12,
+              24
+            ],
+            "rate": 0.1739,
+            "topup": false,
+            "withdrawal": false,
+            "capitalisation": "daily"
+          },
+          "source": "https://home.kz/press-center/news/izmenenie-po-sberegatelnym-depozitam-s-23-iyulya-2025-goda",
+          "confidence": "high"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 5,
+          "effective": {
+            "known_period_start": "2026-04-18",
+            "known_period_end": "2026-04-18",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app",
+            "branch"
+          ],
+          "terms": {
+            "min_amount": 100000,
+            "term_options": [
+              6,
+              12,
+              24
+            ],
+            "rate": 0.1824,
+            "topup": false,
+            "withdrawal": false,
+            "capitalisation": "daily"
+          },
+          "source": "https://finratings.kz/news/13555-home-credit-bank-obnovil-stavki-po-depozitam-s-18-aprelia/",
+          "confidence": "high"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 6,
+          "effective": {
+            "known_period_start": "2026-06-13",
+            "known_period_end": "2026-06-13",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app",
+            "branch"
+          ],
+          "terms": {
+            "min_amount": 100000,
+            "term_options": [
+              6,
+              12,
+              24
+            ],
+            "rate": 0.185,
+            "rate_by_term": {
+              "6": 0.185,
+              "12": 0.15,
+              "24": 0.1
+            },
+            "topup": false,
+            "withdrawal": false,
+            "capitalisation": "daily"
+          },
+          "source": "https://finratings.kz/news/14787-home-credit-bank-rezko-snizil-dokhodnost-depozita/",
+          "confidence": "high"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": true,
+        "max_active_holdings": 2
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "DEPOSIT_HOOM_PLUS",
+      "product_id": "prd_deposit_hoom_plus",
+      "family": "deposit",
+      "name": "Депозит «Сберегательный Хоум+»",
+      "pages": [
+        "https://home.kz/deposits/depozit-sberegatelnyj-plus"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": "2020-06-30",
+          "known_period_end": "2020-06-30",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news/depositnaya-lineika",
+          "evidence_at": "2020-06-30",
+          "confidence": "high"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2024-02-01",
+            "known_period_end": "2024-02-01",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app",
+            "branch"
+          ],
+          "terms": {
+            "min_amount": 1000,
+            "term_options": [
+              3,
+              6,
+              12
+            ],
+            "rate": 0.17,
+            "topup": true,
+            "withdrawal": false,
+            "capitalisation": "daily"
+          },
+          "source": "https://home.kz/press-center/news/izmenenie-stavkov-po-depozitam-i-bankovskim-depozitnym-sertifikatam-s-1-fevralya-2024",
+          "confidence": "high"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 2,
+          "effective": {
+            "known_period_start": "2026-04-18",
+            "known_period_end": "2026-04-18",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app",
+            "branch"
+          ],
+          "terms": {
+            "min_amount": 1000,
+            "term_options": [
+              3,
+              6,
+              12
+            ],
+            "rate": 0.1824,
+            "topup": true,
+            "withdrawal": false,
+            "capitalisation": "daily"
+          },
+          "source": "https://finratings.kz/news/13555-home-credit-bank-obnovil-stavki-po-depozitam-s-18-aprelia/",
+          "confidence": "high"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 3,
+          "effective": {
+            "known_period_start": "2026-05-15",
+            "known_period_end": "2026-05-15",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app",
+            "branch"
+          ],
+          "terms": {
+            "min_amount": 1000,
+            "term_options": [
+              3,
+              6,
+              12
+            ],
+            "rate": 0.1924,
+            "topup": true,
+            "withdrawal": false,
+            "capitalisation": "daily"
+          },
+          "source": "https://home.kz/press-center/news",
+          "confidence": "high",
+          "note": "листинг новостей, пункт 2026-05-14"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 4,
+          "effective": {
+            "known_period_start": "2026-06-13",
+            "known_period_end": "2026-06-13",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app",
+            "branch"
+          ],
+          "terms": {
+            "min_amount": 1000,
+            "term_options": [
+              3,
+              6,
+              12
+            ],
+            "rate": 0.1824,
+            "topup": true,
+            "withdrawal": false,
+            "capitalisation": "daily"
+          },
+          "source": "https://finratings.kz/news/14787-home-credit-bank-rezko-snizil-dokhodnost-depozita/",
+          "confidence": "high"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 5,
+          "effective": {
+            "known_period_start": "2026-08-01",
+            "known_period_end": "2026-08-01",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app",
+            "branch"
+          ],
+          "terms": {
+            "min_amount": 1000,
+            "term_options": [
+              3,
+              6,
+              12
+            ],
+            "rate": 0.1774,
+            "apr": 0.2,
+            "topup": true,
+            "withdrawal": false,
+            "capitalisation": "daily"
+          },
+          "source": "https://finratings.kz/news/15770-samyi-dokhodnyi-depozit-ischeznet-s-1-avgusta-home-credit-bank-snizhaet-stavki/",
+          "confidence": "high"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 6,
+          "effective": {
+            "known_period_start": "2026-08-05",
+            "known_period_end": "2026-08-05",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app",
+            "branch"
+          ],
+          "terms": {
+            "min_amount": 1000,
+            "term_options": [
+              3,
+              6,
+              12
+            ],
+            "rate": 0.1734,
+            "topup": true,
+            "withdrawal": false,
+            "capitalisation": "daily"
+          },
+          "source": "https://home.kz/press-center/news",
+          "confidence": "high",
+          "note": "листинг новостей, пункт 2026-08-04"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": true,
+        "max_active_holdings": 2
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "DEPOSIT_AKCIONNY",
+      "product_id": "prd_deposit_akcionny",
+      "family": "deposit",
+      "name": "Депозит «Сберегательный акционный»",
+      "pages": [
+        "https://home.kz/deposits/depozit-sberegatelnyy-akcionnyy"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": "2024-06-04",
+          "known_period_end": "2024-06-04",
+          "date_precision": "day",
+          "source": "https://inbusiness.kz/ru/last/rekordnaya-stavka-home-credit-bank-predstavil-depozit-s-dohodnostyu-18-godovyh",
+          "evidence_at": "2024-06-04",
+          "confidence": "high"
+        },
+        {
+          "kind": "sales_suspended",
+          "known_period_start": "2024-11-01",
+          "known_period_end": "2024-11-01",
+          "date_precision": "day",
+          "source": "project_owner",
+          "evidence_at": "2026-09-16",
+          "confidence": "medium",
+          "note": "по home.kz продукт продавался в декабре 2024; расхождение к подтверждению"
+        },
+        {
+          "kind": "sales_resumed",
+          "known_period_start": "2024-12-07",
+          "known_period_end": "2024-12-07",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news/izmen-stavka-depo-06122024",
+          "evidence_at": "2024-12-06",
+          "confidence": "medium"
+        },
+        {
+          "kind": "sales_end",
+          "known_period_start": "2025-07-23",
+          "known_period_end": "2025-07-23",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news/izmenenie-po-sberegatelnym-depozitam-s-23-iyulya-2025-goda",
+          "evidence_at": "2025-07-22",
+          "confidence": "high"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2024-06-04",
+            "known_period_end": "2024-06-04",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app",
+            "branch"
+          ],
+          "terms": {
+            "min_amount": 100000,
+            "term_options": [
+              3
+            ],
+            "rate": 0.18,
+            "topup": false,
+            "withdrawal": false,
+            "capitalisation": "daily"
+          },
+          "source": "https://inbusiness.kz/ru/last/rekordnaya-stavka-home-credit-bank-predstavil-depozit-s-dohodnostyu-18-godovyh",
+          "confidence": "high"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 2,
+          "effective": {
+            "known_period_start": "2024-12-07",
+            "known_period_end": "2024-12-07",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app",
+            "branch"
+          ],
+          "terms": {
+            "min_amount": 100000,
+            "term_options": [
+              3,
+              6
+            ],
+            "rate": 0.1655,
+            "topup": false,
+            "withdrawal": false,
+            "capitalisation": "daily"
+          },
+          "source": "https://home.kz/press-center/news/izmen-stavka-depo-06122024",
+          "confidence": "high"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1
+      },
+      "migration_policy": "servicing_only"
+    },
+    {
+      "product_code": "DEPOSIT_PROSTOY_PLUS",
+      "product_id": "prd_deposit_prostoy_plus",
+      "family": "deposit",
+      "name": "Депозит «Простой Плюс» с плавающей ставкой",
+      "pages": [
+        "https://home.kz/deposits/plavayuschiy-depozit"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": "2025-07-01",
+          "known_period_end": "2025-07-01",
+          "date_precision": "day",
+          "source": "https://finratings.kz/news/4822-home-credit-zapustil-gibkii-depozit/",
+          "evidence_at": "2025-07-01",
+          "confidence": "medium"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2025-07-01",
+            "known_period_end": "2025-07-01",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app",
+            "branch",
+            "terminal"
+          ],
+          "terms": {
+            "min_amount": 1000,
+            "term_options": [
+              12
+            ],
+            "floating": true,
+            "spread": -0.0175,
+            "topup": true,
+            "withdrawal": true,
+            "capitalisation": "daily"
+          },
+          "source": "https://finratings.kz/news/4822-home-credit-zapustil-gibkii-depozit/",
+          "confidence": "medium"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 2,
+          "effective": {
+            "known_period_start": "2025-07-02",
+            "known_period_end": "2026-09-16",
+            "date_precision": "interval"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app",
+            "branch",
+            "terminal"
+          ],
+          "terms": {
+            "min_amount": 1000,
+            "term_options": [
+              12
+            ],
+            "floating": true,
+            "spread": -0.0149,
+            "topup": true,
+            "withdrawal": true,
+            "capitalisation": "daily"
+          },
+          "source": "https://home.kz/deposits/plavayuschiy-depozit",
+          "confidence": "low"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "DEPOSITS_ARCHIVE_PRE_2018_10",
+      "product_id": "prd_deposits_archive_pre_2018_10",
+      "family": "deposit",
+      "name": "Архивные вклады, открытые до октября 2018",
+      "group": "archive_pre_2018_10",
+      "pages": [],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": "2015-01-01",
+          "known_period_end": "2015-12-31",
+          "date_precision": "year",
+          "source": "https://home.kz/about",
+          "evidence_at": "2026-09-16",
+          "confidence": "medium",
+          "note": "вклад «Бахыт» как известный представитель группы"
+        },
+        {
+          "kind": "sales_end",
+          "known_period_start": "2018-10-01",
+          "known_period_end": "2018-10-31",
+          "date_precision": "month",
+          "source": "https://finratings.kz/news/16228-home-credit-bank-urezal-dokhodnost-starykh-depozitov-na-4/",
+          "evidence_at": "2026-08-20",
+          "confidence": "medium"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2015-01-01",
+            "known_period_end": "2015-12-31",
+            "date_precision": "year"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "branch"
+          ],
+          "terms": {
+            "min_amount": 15000,
+            "term_options": [
+              12,
+              24
+            ],
+            "rate": 0.129,
+            "topup": true,
+            "withdrawal": false,
+            "capitalisation": "monthly"
+          },
+          "source": "https://home.kz/about",
+          "confidence": "low"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 2,
+          "effective": {
+            "known_period_start": "2026-08-19",
+            "known_period_end": "2026-08-19",
+            "date_precision": "day"
+          },
+          "applies_to": "on_renewal",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "branch"
+          ],
+          "terms": {
+            "min_amount": 15000,
+            "term_options": [
+              12,
+              24
+            ],
+            "rate": 0.089,
+            "rate_delta": -0.04,
+            "topup": true,
+            "withdrawal": false,
+            "capitalisation": "monthly"
+          },
+          "source": "https://finratings.kz/news/16228-home-credit-bank-urezal-dokhodnost-starykh-depozitov-na-4/",
+          "confidence": "high"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": true,
+        "max_active_holdings": 2
+      },
+      "migration_policy": "servicing_only"
+    },
+    {
+      "product_code": "CERT_STANDARD",
+      "product_id": "prd_cert_standard",
+      "family": "deposit_certificate",
+      "name": "Депозитный сертификат «Стандартный»",
+      "pages": [
+        "https://home.kz/investments/deposit-certificate"
+      ],
+      "milestones": [
+        {
+          "kind": "feature_added",
+          "title": "Ежедневные выплаты для сертификатов, купленных после 27.03.2023",
+          "known_period_start": "2023-03-27",
+          "known_period_end": "2023-03-27",
+          "date_precision": "day",
+          "source": "https://home.kz/investments/deposit-certificate",
+          "evidence_at": "2026-09-16",
+          "confidence": "high"
+        },
+        {
+          "kind": "feature_added",
+          "title": "Добавлен срок 6 месяцев",
+          "known_period_start": "2025-06-05",
+          "known_period_end": "2025-06-05",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news/izmenenie-po-depozitnym-sertifikatam-s-5-iyunya-2025-goda",
+          "evidence_at": "2025-06-02",
+          "confidence": "high"
+        },
+        {
+          "kind": "sales_start",
+          "known_period_start": null,
+          "known_period_end": "2023-03-27",
+          "date_precision": "unknown",
+          "source": "https://home.kz/investments/deposit-certificate",
+          "evidence_at": "2026-09-16",
+          "confidence": "low"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2024-02-01",
+            "known_period_end": "2024-02-01",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 18,
+            "requires_app": true
+          },
+          "channels": [
+            "app"
+          ],
+          "terms": {
+            "min_amount": 500000,
+            "term_options": [
+              12,
+              24,
+              36
+            ],
+            "rate_by_term": {
+              "12": 0.185,
+              "24": 0.1775,
+              "36": 0.17
+            },
+            "early_termination_days": 31,
+            "payout": "daily"
+          },
+          "source": "https://home.kz/press-center/news/izmenenie-stavkov-po-depozitam-i-bankovskim-depozitnym-sertifikatam-s-1-fevralya-2024",
+          "confidence": "high"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 2,
+          "effective": {
+            "known_period_start": "2024-08-01",
+            "known_period_end": "2024-08-01",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 18,
+            "requires_app": true
+          },
+          "channels": [
+            "app"
+          ],
+          "terms": {
+            "min_amount": 500000,
+            "term_options": [
+              12,
+              24,
+              36
+            ],
+            "rate_by_term": {
+              "12": 0.18,
+              "24": 0.173,
+              "36": 0.1655
+            },
+            "early_termination_days": 31,
+            "payout": "daily"
+          },
+          "source": "https://home.kz/press-center/news/izmenenie-stavok-po-depozitam-i-bankovskim-depozitnym-sertifikatam-s-1-avgusta-2024",
+          "confidence": "high"
+        },
+        {
+          "product_version": 2,
+          "tariff_version": 3,
+          "effective": {
+            "known_period_start": "2025-06-05",
+            "known_period_end": "2025-06-05",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 18,
+            "requires_app": true
+          },
+          "channels": [
+            "app"
+          ],
+          "terms": {
+            "min_amount": 500000,
+            "term_options": [
+              6,
+              12,
+              24,
+              36,
+              60
+            ],
+            "rate_by_term": {
+              "6": 0.1725,
+              "12": 0.175,
+              "24": 0.1775,
+              "36": 0.175,
+              "60": 0.1725
+            },
+            "early_termination_days": 31,
+            "payout": "daily"
+          },
+          "source": "https://home.kz/press-center/news/izmenenie-po-depozitnym-sertifikatam-s-5-iyunya-2025-goda",
+          "confidence": "high"
+        },
+        {
+          "product_version": 2,
+          "tariff_version": 4,
+          "effective": {
+            "known_period_start": "2026-06-13",
+            "known_period_end": "2026-06-13",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 18,
+            "requires_app": true
+          },
+          "channels": [
+            "app"
+          ],
+          "terms": {
+            "min_amount": 500000,
+            "term_options": [
+              6,
+              12,
+              24,
+              36,
+              60
+            ],
+            "rate_by_term": {
+              "6": 0.1675,
+              "12": 0.17,
+              "24": 0.1725,
+              "36": 0.17,
+              "60": 0.1675
+            },
+            "early_termination_days": 31,
+            "payout": "daily"
+          },
+          "source": "https://finratings.kz/news/14787-home-credit-bank-rezko-snizil-dokhodnost-depozita/",
+          "confidence": "high"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": true,
+        "max_active_holdings": 4
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "CERT_STANDARD_2",
+      "product_id": "prd_cert_standard_2",
+      "family": "deposit_certificate",
+      "name": "Депозитный сертификат «Стандартный 2.0» для Prime",
+      "pages": [
+        "https://home.kz/investments/deposit-certificate"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": null,
+          "known_period_end": "2024-02-01",
+          "date_precision": "unknown",
+          "source": "https://home.kz/press-center/news/izmenenie-stavkov-po-depozitam-i-bankovskim-depozitnym-sertifikatam-s-1-fevralya-2024",
+          "evidence_at": "2024-02-01",
+          "confidence": "low"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2024-02-01",
+            "known_period_end": "2024-02-01",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 18,
+            "min_assets": 15000000,
+            "requires_app": true
+          },
+          "channels": [
+            "app"
+          ],
+          "terms": {
+            "min_amount": 500000,
+            "term_options": [
+              12,
+              24
+            ],
+            "rate_by_term": {
+              "12": 0.18,
+              "24": 0.183
+            },
+            "early_termination_days": 90,
+            "payout": "daily"
+          },
+          "source": "https://home.kz/press-center/news/izmenenie-stavkov-po-depozitam-i-bankovskim-depozitnym-sertifikatam-s-1-fevralya-2024",
+          "confidence": "high"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 2,
+          "effective": {
+            "known_period_start": "2024-08-01",
+            "known_period_end": "2024-08-01",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 18,
+            "min_assets": 15000000,
+            "requires_app": true
+          },
+          "channels": [
+            "app"
+          ],
+          "terms": {
+            "min_amount": 500000,
+            "term_options": [
+              12,
+              24
+            ],
+            "rate_by_term": {
+              "12": 0.1735,
+              "24": 0.1755
+            },
+            "early_termination_days": 90,
+            "payout": "daily"
+          },
+          "source": "https://home.kz/press-center/news/izmenenie-stavok-po-depozitam-i-bankovskim-depozitnym-sertifikatam-s-1-avgusta-2024",
+          "confidence": "high"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 3,
+          "effective": {
+            "known_period_start": "2025-04-19",
+            "known_period_end": "2025-04-19",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 18,
+            "min_assets": 15000000,
+            "requires_app": true
+          },
+          "channels": [
+            "app"
+          ],
+          "terms": {
+            "min_amount": 500000,
+            "term_options": [
+              12,
+              24
+            ],
+            "rate_by_term": {
+              "12": 0.175,
+              "24": 0.1775
+            },
+            "early_termination_days": 90,
+            "payout": "daily"
+          },
+          "source": "https://bizmedia.kz/2025-04-21-home-credit-predlagaet-novyj-depozitnyj-sertifikat-chto-poluchat-vkladchiki-s-15-mln-tenge/",
+          "confidence": "high"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 4,
+          "effective": {
+            "known_period_start": "2026-06-13",
+            "known_period_end": "2026-06-13",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 18,
+            "min_assets": 15000000,
+            "requires_app": true
+          },
+          "channels": [
+            "app"
+          ],
+          "terms": {
+            "min_amount": 500000,
+            "term_options": [
+              12,
+              24
+            ],
+            "rate_by_term": {
+              "12": 0.195,
+              "24": 0.1875
+            },
+            "early_termination_days": 90,
+            "payout": "daily"
+          },
+          "source": "https://finratings.kz/news/14787-home-credit-bank-rezko-snizil-dokhodnost-depozita/",
+          "confidence": "high"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 5,
+          "effective": {
+            "known_period_start": "2026-08-01",
+            "known_period_end": "2026-08-01",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 18,
+            "min_assets": 15000000,
+            "requires_app": true
+          },
+          "channels": [
+            "app"
+          ],
+          "terms": {
+            "min_amount": 500000,
+            "term_options": [
+              12,
+              24
+            ],
+            "rate_by_term": {
+              "12": 0.19,
+              "24": 0.1825
+            },
+            "early_termination_days": 90,
+            "payout": "daily"
+          },
+          "source": "https://finratings.kz/news/15770-samyi-dokhodnyi-depozit-ischeznet-s-1-avgusta-home-credit-bank-snizhaet-stavki/",
+          "confidence": "high"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": true,
+        "max_active_holdings": 3
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "CERT_FLEX",
+      "product_id": "prd_cert_flex",
+      "family": "deposit_certificate",
+      "name": "Депозитный сертификат «Гибкий»",
+      "pages": [
+        "https://home.kz/investments/deposit-certificate"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": null,
+          "known_period_end": "2026-09-16",
+          "date_precision": "unknown",
+          "source": "https://home.kz/investments/deposit-certificate",
+          "evidence_at": "2026-09-16",
+          "confidence": "low"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": null,
+            "known_period_end": "2026-09-16",
+            "date_precision": "unknown"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 18,
+            "requires_app": true
+          },
+          "channels": [
+            "app"
+          ],
+          "terms": {
+            "min_amount": 100000,
+            "term_options": [
+              12
+            ],
+            "rate": 0.16,
+            "early_termination_days": 0,
+            "payout": "daily"
+          },
+          "source": "https://home.kz/investments/deposit-certificate",
+          "confidence": "low"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": true,
+        "max_active_holdings": 3
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "CERT_FLEX_PRIME",
+      "product_id": "prd_cert_flex_prime",
+      "family": "deposit_certificate",
+      "name": "Депозитный сертификат «Гибкий» для Prime",
+      "pages": [
+        "https://home.kz/investments/deposit-certificate"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": "2025-04-19",
+          "known_period_end": "2025-04-19",
+          "date_precision": "day",
+          "source": "https://bizmedia.kz/2025-04-21-home-credit-predlagaet-novyj-depozitnyj-sertifikat-chto-poluchat-vkladchiki-s-15-mln-tenge/",
+          "evidence_at": "2025-04-21",
+          "confidence": "high"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2025-04-19",
+            "known_period_end": "2025-04-19",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 18,
+            "min_assets": 15000000,
+            "requires_app": true
+          },
+          "channels": [
+            "app",
+            "branch"
+          ],
+          "terms": {
+            "min_amount": 100000,
+            "term_options": [
+              12
+            ],
+            "rate": 0.16,
+            "early_termination_days": 0,
+            "payout": "daily"
+          },
+          "source": "https://bizmedia.kz/2025-04-21-home-credit-predlagaet-novyj-depozitnyj-sertifikat-chto-poluchat-vkladchiki-s-15-mln-tenge/",
+          "confidence": "high"
+        },
+        {
+          "product_version": 1,
+          "tariff_version": 2,
+          "effective": {
+            "known_period_start": null,
+            "known_period_end": "2026-09-16",
+            "date_precision": "unknown"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 18,
+            "min_assets": 15000000,
+            "requires_app": true
+          },
+          "channels": [
+            "app",
+            "branch"
+          ],
+          "terms": {
+            "min_amount": 100000,
+            "term_options": [
+              12
+            ],
+            "rate": 0.175,
+            "early_termination_days": 0,
+            "payout": "daily"
+          },
+          "source": "https://home.kz/investments/deposit-certificate",
+          "confidence": "low"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": true,
+        "max_active_holdings": 2
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "USD_BONDS",
+      "product_id": "prd_usd_bonds",
+      "family": "bonds",
+      "name": "Дисконтные облигации банка в долларах США",
+      "pages": [
+        "https://home.kz/investments/obligasii-banka"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": "2024-01-01",
+          "known_period_end": "2024-12-31",
+          "date_precision": "year",
+          "source": "https://home.kz/press-center/smi/karta-tau-ot-homecredit-bank-privilegirovannyy-servis-i-vysokiy-keshbek",
+          "evidence_at": "2024-09-06",
+          "confidence": "medium"
+        },
+        {
+          "kind": "feature_added",
+          "title": "Новый выпуск облигаций с 29 октября",
+          "known_period_start": "2024-10-29",
+          "known_period_end": "2026-09-16",
+          "date_precision": "interval",
+          "source": "https://home.kz/press-center/news/novyy-vypusk-obligaciy-s-29-oktyabrya",
+          "evidence_at": "2026-09-16",
+          "confidence": "low",
+          "note": "год выпуска в заголовке не указан"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2024-01-01",
+            "known_period_end": "2024-12-31",
+            "date_precision": "year"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 18,
+            "requires_app": true
+          },
+          "channels": [
+            "app"
+          ],
+          "terms": {
+            "currency": "USD",
+            "rate": 0.06,
+            "term_max_months": 12,
+            "min_amount_usd": 1000,
+            "daily_limit_usd": 1000000,
+            "purchase_hours": [
+              9,
+              17
+            ],
+            "weekdays_only": true
+          },
+          "source": "https://home.kz/investments/obligasii-banka",
+          "confidence": "medium"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": true,
+        "max_active_holdings": 5
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "INS_FAMILY_UNIVERSAL",
+      "product_id": "prd_ins_family_universal",
+      "family": "insurance",
+      "name": "Универсальная защита семьи",
+      "pages": [
+        "https://home.kz/insurance/zaschita-semi-universalnaya"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": null,
+          "known_period_end": "2026-05-08",
+          "date_precision": "unknown",
+          "source": "https://home.kz/insurance",
+          "evidence_at": "2026-05-08",
+          "confidence": "low"
+        },
+        {
+          "kind": "sales_suspended",
+          "known_period_start": "2026-05-08",
+          "known_period_end": "2026-05-08",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news/vremenno-nedostupno-oformlenie-universalnoy-zaschity-semi",
+          "evidence_at": "2026-05-12",
+          "confidence": "high",
+          "note": "приостановлено оформление при покупке товара, канал partner_pos"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": null,
+            "known_period_end": "2026-05-08",
+            "date_precision": "unknown"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 18,
+            "max_age": 74
+          },
+          "channels": [
+            "app",
+            "web",
+            "partner_pos",
+            "branch"
+          ],
+          "terms": {
+            "payout_max": 7000000,
+            "term_months": 12
+          },
+          "source": "https://home.kz/insurance",
+          "confidence": "low"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "INS_FAMILY",
+      "product_id": "prd_ins_family",
+      "family": "insurance",
+      "name": "Защита семьи",
+      "pages": [
+        "https://home.kz/insurance"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": null,
+          "known_period_end": "2026-09-16",
+          "date_precision": "unknown",
+          "source": "https://home.kz/insurance",
+          "evidence_at": "2026-09-16",
+          "confidence": "low"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": null,
+            "known_period_end": "2026-09-16",
+            "date_precision": "unknown"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 18,
+            "max_age": 74
+          },
+          "channels": [
+            "app",
+            "web",
+            "branch"
+          ],
+          "terms": {
+            "payout_max": 2000000,
+            "term_months": 12,
+            "term_options": [
+              12,
+              24
+            ]
+          },
+          "source": "https://home.kz/insurance",
+          "confidence": "low"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "INS_TRAVELER",
+      "product_id": "prd_ins_traveler",
+      "family": "insurance",
+      "name": "Защита путешественника",
+      "pages": [
+        "https://home.kz/insurance/zashhita-puteshestvennika"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": null,
+          "known_period_end": "2026-09-16",
+          "date_precision": "unknown",
+          "source": "https://home.kz/insurance",
+          "evidence_at": "2026-09-16",
+          "confidence": "low"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": null,
+            "known_period_end": "2026-09-16",
+            "date_precision": "unknown"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 18,
+            "max_age": 74
+          },
+          "channels": [
+            "app",
+            "web"
+          ],
+          "terms": {
+            "price_annual": 5800,
+            "payout_max": 1470000,
+            "term_months": 12
+          },
+          "source": "https://home.kz/insurance",
+          "confidence": "low"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "INS_SICK_LEAVE",
+      "product_id": "prd_ins_sick_leave",
+      "family": "insurance",
+      "name": "Оплата больничного листа",
+      "pages": [
+        "https://home.kz/insurance"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": null,
+          "known_period_end": "2026-09-16",
+          "date_precision": "unknown",
+          "source": "https://home.kz/insurance",
+          "evidence_at": "2026-09-16",
+          "confidence": "low"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": null,
+            "known_period_end": "2026-09-16",
+            "date_precision": "unknown"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 18,
+            "max_age": 64
+          },
+          "channels": [
+            "app",
+            "web"
+          ],
+          "terms": {
+            "price_annual": 14900,
+            "payout_max": 300000,
+            "term_months": 12
+          },
+          "source": "https://home.kz/insurance",
+          "confidence": "low"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "INS_SHANYRAK",
+      "product_id": "prd_ins_shanyrak",
+      "family": "insurance",
+      "name": "Страхование жилья «Шанырак»",
+      "pages": [
+        "https://home.kz/insurance/shanyrak"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": null,
+          "known_period_end": "2026-09-16",
+          "date_precision": "unknown",
+          "source": "https://home.kz/insurance",
+          "evidence_at": "2026-09-16",
+          "confidence": "low"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": null,
+            "known_period_end": "2026-09-16",
+            "date_precision": "unknown"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 18,
+            "max_age": 79
+          },
+          "channels": [
+            "app",
+            "web",
+            "branch"
+          ],
+          "terms": {
+            "price_annual": 17000,
+            "payout_max": 3000000,
+            "term_months": 12
+          },
+          "source": "https://home.kz/insurance",
+          "confidence": "low"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "INS_FINANCIAL_PROTECTION",
+      "product_id": "prd_ins_financial_protection",
+      "family": "insurance",
+      "name": "Финансовая защита по кредиту",
+      "pages": [
+        "https://home.kz/insurance/finansovaya-zashita"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": null,
+          "known_period_end": "2026-09-16",
+          "date_precision": "unknown",
+          "source": "https://home.kz/insurance/finansovaya-zashita",
+          "evidence_at": "2026-09-16",
+          "confidence": "low"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": null,
+            "known_period_end": "2026-09-16",
+            "date_precision": "unknown"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 18,
+            "max_age": 74,
+            "requires_loan": true
+          },
+          "channels": [
+            "app",
+            "branch",
+            "partner_pos"
+          ],
+          "terms": {
+            "insurer": "АО «Европейская страховая компания»",
+            "deferral_months": 1,
+            "min_paid_installments": 3,
+            "payout_target": "loan_payment"
+          },
+          "source": "https://home.kz/insurance/finansovaya-zashita",
+          "confidence": "low"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": true,
+        "max_active_holdings": 3
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "APP_LEGACY",
+      "product_id": "prd_app_legacy",
+      "family": "service",
+      "name": "Приложение «Home Credit Bank — банк онлайн»",
+      "pages": [],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": "2014-01-01",
+          "known_period_end": "2014-12-31",
+          "date_precision": "year",
+          "source": "https://home.kz/about",
+          "evidence_at": "2026-09-16",
+          "confidence": "medium"
+        },
+        {
+          "kind": "sales_suspended",
+          "title": "Временный сбой старой версии приложения",
+          "known_period_start": "2024-06-28",
+          "known_period_end": "2024-06-28",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news/vremennye-sboi-v-rabote-servisov-280624",
+          "evidence_at": "2024-06-28",
+          "confidence": "high"
+        },
+        {
+          "kind": "sales_end",
+          "title": "Удалено из магазинов приложений",
+          "known_period_start": "2024-12-23",
+          "known_period_end": "2024-12-30",
+          "date_precision": "interval",
+          "source": "https://home.kz/press-center/news/prilozhenie-home-credit-bank-bank-onlayn-budet-udaleno-iz-magazinov-prilozheniy-5-dekabrya",
+          "evidence_at": "2024-12-06",
+          "confidence": "high"
+        },
+        {
+          "kind": "service_end",
+          "known_period_start": "2025-01-20",
+          "known_period_end": "2025-01-20",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news/prilozhenie-home-credit-bank-bank-onlayn-perestanet-rabotat-s-20-yanvarya",
+          "evidence_at": "2025-01-20",
+          "confidence": "high"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2014-01-01",
+            "known_period_end": "2014-12-31",
+            "date_precision": "year"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app"
+          ],
+          "terms": {
+            "features": [
+              "balance",
+              "transfers",
+              "payments"
+            ]
+          },
+          "source": "https://home.kz/about",
+          "confidence": "medium"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1
+      },
+      "successor": "APP_HOME_KZ",
+      "migration_policy": "forced_with_notice",
+      "notice_days": 45
+    },
+    {
+      "product_code": "APP_HOME_KZ",
+      "product_id": "prd_app_home_kz",
+      "family": "service",
+      "name": "Мобильное приложение Home.kz",
+      "pages": [
+        "https://home.kz/services/mobile-app"
+      ],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": "2024-06-12",
+          "known_period_end": "2024-06-12",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news/home-credit-bank-zapustil-novoe-mobilnoe-prilozhenie-home-kz-dlya-fizicheskih-lic",
+          "evidence_at": "2024-06-12",
+          "confidence": "high"
+        },
+        {
+          "kind": "feature_added",
+          "title": "Оплата через Kaspi QR",
+          "known_period_start": "2024-09-01",
+          "known_period_end": "2024-09-30",
+          "date_precision": "month",
+          "source": "https://home.kz/press-center/news/v-novom-prilozhenii-home-credit-bank-dostupna-oplata-cherez-kaspi-qr",
+          "evidence_at": "2024-09-16",
+          "confidence": "medium"
+        },
+        {
+          "kind": "feature_added",
+          "title": "ИИ-ассистент AiZhan",
+          "known_period_start": "2025-01-01",
+          "known_period_end": "2025-01-31",
+          "date_precision": "month",
+          "source": "https://finance.kz/news/iskusstvennyy-intellekt-s-dushoy-kak-chat-bot-aizhan-ot-home-credit-bank-transformiruet-bankovskoe-obsluzhivanie",
+          "evidence_at": "2026-09-16",
+          "confidence": "medium"
+        },
+        {
+          "kind": "feature_added",
+          "title": "Пополнение депозита и оплата кредита Отбасы банка",
+          "known_period_start": "2025-05-16",
+          "known_period_end": "2025-05-16",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news/popolnenie-depozita-i-oplata-kredita-v-otbasy-bank-teper-dostupny-v-home-kz",
+          "evidence_at": "2025-05-16",
+          "confidence": "high"
+        },
+        {
+          "kind": "sales_suspended",
+          "title": "Международные переводы временно недоступны",
+          "known_period_start": "2026-01-28",
+          "known_period_end": "2026-01-28",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news/mezhdunarodnye-perevody-vremenno-nedostupny",
+          "evidence_at": "2026-01-28",
+          "confidence": "high"
+        },
+        {
+          "kind": "feature_added",
+          "title": "Единый межбанковский QR",
+          "known_period_start": "2026-07-20",
+          "known_period_end": "2026-07-20",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news",
+          "evidence_at": "2026-07-20",
+          "confidence": "high",
+          "note": "листинг новостей, пункт 2026-07-20"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2024-06-12",
+            "known_period_end": "2024-06-12",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_age": 16
+          },
+          "channels": [
+            "app"
+          ],
+          "terms": {
+            "features": [
+              "balance",
+              "transfers",
+              "payments",
+              "deposits",
+              "loans",
+              "currency",
+              "qr"
+            ],
+            "min_android": 9,
+            "min_ios": 15
+          },
+          "source": "https://home.kz/press-center/news/home-credit-bank-zapustil-novoe-mobilnoe-prilozhenie-home-kz-dlya-fizicheskih-lic",
+          "confidence": "high"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1
+      },
+      "predecessor": "APP_LEGACY",
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "BANK_TARIFFS",
+      "product_id": "prd_bank_tariffs",
+      "family": "service",
+      "name": "Тарифы банка на снятие и переводы",
+      "pages": [],
+      "milestones": [
+        {
+          "kind": "feature_added",
+          "title": "Изменены комиссии за снятие в чужих банкоматах",
+          "known_period_start": "2026-05-15",
+          "known_period_end": "2026-05-15",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news",
+          "evidence_at": "2026-04-30",
+          "confidence": "high",
+          "note": "листинг новостей, пункт 2026-04-30"
+        },
+        {
+          "kind": "feature_added",
+          "title": "Введена комиссия за снятие с текущих счетов",
+          "known_period_start": "2026-06-23",
+          "known_period_end": "2026-06-23",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news",
+          "evidence_at": "2026-06-17",
+          "confidence": "high",
+          "note": "листинг новостей, пункт 2026-06-17"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2026-06-23",
+            "known_period_end": "2026-06-23",
+            "date_precision": "day"
+          },
+          "applies_to": "existing_from_date",
+          "notice_days": 6,
+          "eligibility": {},
+          "channels": [
+            "branch",
+            "atm"
+          ],
+          "terms": {
+            "current_account_withdrawal_free_to": 500000,
+            "current_account_withdrawal_rate_mid": 0.008,
+            "current_account_withdrawal_rate_high": 0.01,
+            "high_threshold": 5000000
+          },
+          "source": "https://home.kz/press-center/news",
+          "confidence": "high",
+          "note": "листинг новостей, пункт 2026-06-17"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1
+      },
+      "migration_policy": "none"
+    },
+    {
+      "product_code": "WELCOME_BONUS",
+      "product_id": "prd_welcome_bonus",
+      "family": "service",
+      "name": "Акция Welcome Bonus",
+      "pages": [],
+      "milestones": [
+        {
+          "kind": "sales_start",
+          "known_period_start": "2026-04-29",
+          "known_period_end": "2026-04-29",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news/akciya-welcome-bonus-prodlena",
+          "evidence_at": "2026-04-29",
+          "confidence": "high"
+        },
+        {
+          "kind": "feature_added",
+          "title": "Продление акции до 31 декабря 2026",
+          "known_period_start": "2026-07-29",
+          "known_period_end": "2026-07-29",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news",
+          "evidence_at": "2026-07-29",
+          "confidence": "high",
+          "note": "листинг новостей, пункт 2026-07-29"
+        },
+        {
+          "kind": "sales_end",
+          "known_period_start": "2026-12-31",
+          "known_period_end": "2026-12-31",
+          "date_precision": "day",
+          "source": "https://home.kz/press-center/news",
+          "evidence_at": "2026-07-29",
+          "confidence": "high",
+          "note": "листинг новостей, пункт 2026-07-29"
+        }
+      ],
+      "versions": [
+        {
+          "product_version": 1,
+          "tariff_version": 1,
+          "effective": {
+            "known_period_start": "2026-04-29",
+            "known_period_end": "2026-04-29",
+            "date_precision": "day"
+          },
+          "applies_to": "new_clients_only",
+          "eligibility": {
+            "min_amount": 500000
+          },
+          "channels": [
+            "app",
+            "branch"
+          ],
+          "terms": {
+            "bonus_rate": 0.0025,
+            "min_amount": 500000
+          },
+          "source": "https://home.kz/press-center/news/akciya-welcome-bonus-prodlena",
+          "confidence": "high"
+        }
+      ],
+      "holding_rules": {
+        "allow_multiple": false,
+        "max_active_holdings": 1
+      },
+      "migration_policy": "none"
+    }
+  ]
+}

@@ -75,7 +75,7 @@ def build_profile(raw: RawDataset, client_index: dict[str, int]) -> tuple[pa.Tab
         "rows": table.num_rows,
         "clients": len(set(table.column("client_id").to_pylist())),
         "clients_unknown_to_index": sorted(unknown_clients),
-        "rule": "версии сохранены полностью; valid_to не фильтрует и дыр не создаёт",
+        "rule": "одна итоговая строка на клиента: версий у профиля нет",
     }
 
     return table, report

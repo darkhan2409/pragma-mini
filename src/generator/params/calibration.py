@@ -55,6 +55,35 @@ class CalibrationTarget:
         }
 
 
+# Решение об объёме: лента клиента сделана плотнее прежнего
+# плана ради обучающего материала. Данными банка эта величина не
+# подтверждена и подтверждена быть не может — в отчёте банка
+# такой метрики нет.
+_VOLUME_DECISION = (
+    "решение владельца проекта о плотности ленты, а не измерение банка "
+    "и не полоса из плана"
+)
+
+# Сколько событий в месяц ожидается от клиента КАЖДОГО режима.
+#
+# Полоса — это ожидание, а не ограничитель. Клиент, выпавший из
+# своей полосы, остаётся в данных целиком: отчёт реализма
+# называет его и считает долю таких клиентов, но ленту никто не
+# обрезает. Обрезка превратила бы наблюдение в подгонку.
+# Полоса silent начинается не с нуля: даже молчун получает
+# зарплату, ежемесячную выписку, начисление процентов и
+# сервисные уведомления. Это события БАНКА, частотами активности
+# они не управляются, и требовать от такого клиента пустой ленты
+# значит требовать, чтобы банк перестал работать.
+EVENTS_PER_MONTH_BY_MODE: dict[str, tuple[int, int]] = {
+    "silent": (0, 15),
+    "rare": (6, 30),
+    "regular": (50, 110),
+    "high": (140, 320),
+    "extreme": (450, 1100),
+}
+
+
 def _reference(metric, group, unit, value, source, period, geography, confidence, tolerance=0.20, note=""):
     return CalibrationTarget(metric, group, unit, STATUS_REFERENCE, value=value, source=source,
                              period=period, geography=geography, confidence=confidence,
@@ -94,9 +123,13 @@ DEFAULT_TARGETS: tuple = (
                _BANK_REPORT, _BANK_PERIOD, "KZ", "high", 0.15),
     _reference("delivery_rate_push", "channels", "share", 0.426,
                _BANK_REPORT, _BANK_PERIOD, "KZ", "high", 0.30),
-    _reference("app_sessions_per_client_month", "activity", "events", 1.0,
-               _BANK_REPORT, _BANK_PERIOD, "KZ", "medium", 0.60,
-               note="покрытие GA4 в отчёте названо сомнительным"),
+    _hypothesis("app_sessions_per_client_month", "activity", "events", 6.0, 20.0,
+                note=(
+                    "прежний эталон банка (1 сессия в месяц) считался по всей базе, "
+                    "включая тех, кто приложение не ставил, и покрытие GA4 в отчёте "
+                    "названо сомнительным. Полоса взята для клиента, у которого "
+                    "приложение есть, и эталоном не является"
+                )),
     _reference("banner_ctr", "channels", "share", 0.0235,
                _BANK_REPORT, _BANK_PERIOD, "KZ", "high", 0.40),
     _reference("app_domain_share_auth", "activity", "share", 0.849,
@@ -110,15 +143,21 @@ DEFAULT_TARGETS: tuple = (
     _reference("app_domain_share_payments", "activity", "share", 0.296,
                _BANK_REPORT, _BANK_PERIOD, "KZ", "medium", 0.25),
 
-    # --- рабочая гипотеза объёма из плана ---
-    _hypothesis("events_per_client_month_mean", "activity", "events", 65, 85),
-    _hypothesis("events_per_client_month_p10", "activity", "events", 0, 2),
-    _hypothesis("events_per_client_month_p25", "activity", "events", 3, 15),
-    _hypothesis("events_per_client_month_median", "activity", "events", 40, 65),
-    _hypothesis("events_per_client_month_p75", "activity", "events", 80, 130),
-    _hypothesis("events_per_client_month_p90", "activity", "events", 150, 220),
-    _hypothesis("events_per_client_month_p95", "activity", "events", 220, 300),
-    _hypothesis("events_per_client_month_p99", "activity", "events", 400, 600),
+    # --- объём событий на клиента в месяц ---
+    #
+    # Это НЕ гипотеза плана и не измерение банка, а решение
+    # владельца проекта: сделать ленту клиента плотнее, чтобы
+    # модели было на чём учиться. Прежние полосы (среднее 65–85)
+    # взяты из плана и здесь сознательно заменены.
+    _hypothesis("events_per_client_month_mean", "activity", "events", 110, 150,
+                note=_VOLUME_DECISION),
+    _hypothesis("events_per_client_month_p10", "activity", "events", 0, 4),
+    _hypothesis("events_per_client_month_p25", "activity", "events", 6, 30),
+    _hypothesis("events_per_client_month_median", "activity", "events", 60, 100),
+    _hypothesis("events_per_client_month_p75", "activity", "events", 130, 200),
+    _hypothesis("events_per_client_month_p90", "activity", "events", 230, 330),
+    _hypothesis("events_per_client_month_p95", "activity", "events", 340, 500),
+    _hypothesis("events_per_client_month_p99", "activity", "events", 650, 1000),
     # --- кредитный риск и денежный поток ---
     _hypothesis("dpd90_client_share", "credit", "share", 0.03, 0.06,
                 note="доля клиентов, дошедших до просрочки 90+ за окно"),
@@ -182,8 +221,6 @@ DEFAULT_TARGETS: tuple = (
     _absent("confirmed_closure_share", "pauses", "share",
             "доля клиентов с ПОДТВЕРЖДЁННЫМ закрытием отношений; "
             "молчание на конце окна сюда не входит"),
-    _absent("duplicate_share", "defects", "share", "нужны технические дубли хранилища"),
-    _absent("correction_share", "defects", "share", "нужны версии записей хранилища"),
 )
 
 

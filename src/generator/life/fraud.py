@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .. import params as params_module
-from ..config import HISTORY_END, HISTORY_START
+from .. import config
 from ..rng import NS_FRAUD, keyed_rng
 from .events import active_vacation
 from .persona import Persona
@@ -53,9 +53,6 @@ def plan_episodes(persona: Persona, events: tuple) -> tuple:
 
     settings = params_module.active().fraud
 
-    if persona.is_test_account:
-        return ()
-
     vulnerability = persona.trait("fraud_vulnerability")
     digital = persona.trait("digital_affinity")
     mobility = persona.trait("mobility")
@@ -65,8 +62,8 @@ def plan_episodes(persona: Persona, events: tuple) -> tuple:
     rate *= 1.0 + (settings.online_exposure_factor - 1.0) * digital
     rate *= 1.0 + (settings.travel_exposure_factor - 1.0) * mobility
 
-    start = max(HISTORY_START, persona.relationship_start)
-    span_days = (HISTORY_END - start).days
+    start = max(config.HISTORY_START, persona.relationship_start)
+    span_days = (config.HISTORY_END - start).days
 
     if span_days <= 30:
         return ()

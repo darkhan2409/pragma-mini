@@ -67,13 +67,10 @@ METADATA_COLUMNS: tuple[str, ...] = (
     "client_id",
     "cutoff",
     "event_id",
-    "event_version",
     "stable_event_index",
     "event_time",
     "source",
     "event_type",
-    "hour_known",
-    "time_precision",
     "n_values",
     "n_tokens",
     "refs",
@@ -87,13 +84,10 @@ EVENTS_SCHEMA = pa.schema(
         ("client_id", pa.string()),
         ("cutoff", pa.timestamp("us")),
         ("event_id", pa.string()),
-        ("event_version", pa.int32()),
         ("stable_event_index", pa.int64()),
         ("event_time", pa.timestamp("us")),
         ("source", pa.string()),
         ("event_type", pa.string()),
-        ("hour_known", pa.bool_()),
-        ("time_precision", pa.string()),
         ("n_values", pa.int32()),
         ("n_tokens", pa.int32()),
         ("key_ids", pa.list_(pa.int32())),
@@ -114,8 +108,6 @@ PROFILES_SCHEMA = pa.schema(
     [
         ("client_id", pa.string()),
         ("cutoff", pa.timestamp("us")),
-        ("profile_version", pa.int64()),
-        ("valid_from", pa.timestamp("us")),
         ("profile_state", pa.string()),
         ("n_values", pa.int32()),
         ("n_tokens", pa.int32()),
@@ -173,7 +165,6 @@ class Counters:
     edge_buckets: dict[str, int] = field(default_factory=dict)
     event_tokens: list[int] = field(default_factory=list)
     text_pieces: list[int] = field(default_factory=list)
-    day_precision: int = 0
 
 
 @dataclass
@@ -318,9 +309,6 @@ def transform_group(
                     counters.event_tokens_total += record.n_tokens
                     counters.event_tokens.append(record.n_tokens)
 
-                    if not event.hour_known:
-                        counters.day_precision += 1
-
                     for key, length in zip(record.value_keys, record.value_lengths):
                         if artifacts.key_info.get(key, {}).get("value_kind") == "text":
                             counters.text_pieces.append(length)
@@ -336,13 +324,10 @@ def transform_group(
                             "client_id": history.client_id,
                             "cutoff": cutoff,
                             "event_id": event.event_id,
-                            "event_version": event.event_version,
                             "stable_event_index": event.stable_event_index,
                             "event_time": event.event_time,
                             "source": event.source,
                             "event_type": event.values.get("event_type"),
-                            "hour_known": event.hour_known,
-                            "time_precision": event.timing.time_precision,
                             "n_values": record.n_values,
                             "n_tokens": record.n_tokens,
                             "key_ids": record.key_ids,
@@ -407,8 +392,6 @@ def transform_group(
                             {
                                 "client_id": history.client_id,
                                 "cutoff": cutoff,
-                                "profile_version": meta.get("profile_version"),
-                                "valid_from": meta.get("valid_from"),
                                 "profile_state": meta.get("state"),
                                 "n_values": record.n_values,
                                 "n_tokens": record.n_tokens,
@@ -482,7 +465,6 @@ def transform_group(
             "profiles": counters.profiles,
             "clients_without_profile": counters.without_profile,
             "silent_clients": counters.silent_clients,
-            "day_precision_events": counters.day_precision,
         },
         "specials": {
             "missing": counters.missing,
@@ -609,10 +591,8 @@ def _golden(artifacts: FrozenArtifacts, history, config: TokenizerConfig, limit:
                 "client_id": history.client_id,
                 "cutoff": cutoff.isoformat(),
                 "event_id": event.event_id,
-                "event_version": event.event_version,
                 "event_type": event_type,
                 "event_time": event.event_time.isoformat(),
-                "hour_known": event.hour_known,
                 "n_tokens": record.n_tokens,
                 "pairs": [
                     {**item, "source_value": _short(values.get(item["key"]))}
