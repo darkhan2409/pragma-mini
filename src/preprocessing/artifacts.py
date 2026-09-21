@@ -159,23 +159,6 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def sha256_ints(values: list[int]) -> str:
-    return sha256_bytes(",".join(str(value) for value in sorted(values)).encode("utf-8"))
-
-
-def tree_digests(root: Path) -> dict[str, str]:
-    """
-    sha256 каждого файла под каталогом, ключ это относительный
-    путь с прямыми слэшами.
-    """
-
-    return {
-        path.relative_to(root).as_posix(): sha256_file(path)
-        for path in sorted(root.rglob("*"))
-        if path.is_file()
-    }
-
-
 # ============================================================
 # MARKDOWN
 # ============================================================
