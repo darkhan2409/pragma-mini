@@ -1057,7 +1057,7 @@ def _on_bill(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     _emit_money(
         state, ts, "bill_payment", account.account_id, amount, "debit",
-        f"merchant:{merchant.merchant_id}" if merchant else COUNTERPART_GOVERNMENT,
+        merchant_catalog.counterpart(merchant) if merchant else COUNTERPART_GOVERNMENT,
         body,
     )
 
@@ -1197,7 +1197,7 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         hidden = state.ledger.hidden_sources(amount)
 
         if hidden and rng.random() < settings.hidden_purchase_share:
-            state.ledger.post(ts, hidden[0].account_id, f"merchant:{choice.outlet.merchant_id}", amount)
+            state.ledger.post(ts, hidden[0].account_id, merchant_catalog.counterpart(choice.outlet), amount)
             return
 
         if rng.random() < settings.decline_attempt_share and state.may_decline(ts):
@@ -1235,7 +1235,7 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     event = _emit_money(
         state, ts, "purchase", account.account_id, amount, "debit",
-        f"merchant:{choice.outlet.merchant_id}", body,
+        merchant_catalog.counterpart(choice.outlet), body,
     )
 
     # Банк видел попытку, но денег не списал: ни возврата, ни

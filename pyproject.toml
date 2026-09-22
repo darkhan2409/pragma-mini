@@ -40,7 +40,6 @@ packages = [
     "src.generator.report",
     "src.preprocessing",
     "src.preprocessing.canonical",
-    "src.preprocessing.semantic",
     "src.tokenization",
     "src.dataset",
 ]

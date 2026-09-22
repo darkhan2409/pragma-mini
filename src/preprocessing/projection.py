@@ -2,12 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Iterable
-
-from .settings import CALENDAR_ENCODING
-
-if TYPE_CHECKING:  # pragma: no cover - только для подсказок типов
-    from .history import ClientHistory
+from typing import Iterable
 
 
 # ============================================================
@@ -45,7 +40,7 @@ if TYPE_CHECKING:  # pragma: no cover - только для подсказок �
 # ============================================================
 
 
-PROJECTION_VERSION = "6.0.0"
+PROJECTION_VERSION = "8.0.0"
 
 # Тип события: ключ payload выгрузки и колонка canonical под
 # одним именем. Смысловой ключ у него называется event_type —
@@ -192,8 +187,6 @@ INTERNAL_FIELDS: dict[str, str] = {
     "at_or_after_extract": "строка на границе выгрузки или позже",
     "ambiguous_local_time": "признак качества времени",
     "balance_chain_gap": "между наблюдаемыми строками потеряно движение денег, признак качества",
-    "payload_status": "результат разбора payload",
-    "payload_violations": "нарушения контракта payload",
     "known_missing": "причина пропуска по датированному правилу схемы",
     "merchant_name_norm": "нормализованная копия текста",
     "counterparty_norm": "нормализованная копия текста",
@@ -241,32 +234,19 @@ CLIENT_ACTION_EVENT_TYPES: frozenset[str] = frozenset(
 
 
 # ------------------------------------------------------------
-# ЧТО ДОБАВЛЯЕТ ЭТАП 5
+# ЧТО ВИДИТ МОДЕЛЬ СВЕРХ PAYLOAD
 # ------------------------------------------------------------
 #
-# Проекция пропускает только то, что лежит в самой строке.
-# Значения, которые нужно вывести из связи, из времени или из
-# расчёта, добавляет смысловой слой — и объявляет их такими же
-# ключами, как физические поля. Справочников среди источников
-# больше нет: точку и продукт описывает само событие.
+# Проекция пропускает только то, что лежит в самой строке,
+# и сверх этого добавляется ровно два вида значений:
+# локальные ссылки вместо сырых идентификаторов и прежнее
+# с новым значением изменившегося поля анкеты в его
+# собственном смысле.
 #
-# Список нужен здесь, чтобы граница читалась целиком: в модель
-# приходит не только payload.
+# Расчётных и временных признаков больше нет ни одного:
+# отдельного смыслового этапа, который их считал, в конвейере
+# нет, и обещать их модели было бы неправдой.
 # ------------------------------------------------------------
-
-SEMANTIC_LAYER_FIELDS: dict[str, str] = {
-    "days_to_due": "дней до планового платежа вместо самой даты",
-    "since_previous_hours": "часов с прошлого видимого события",
-    "since_same_type_hours": "часов с прошлого события того же типа",
-    "since_last_income_hours": "часов с последнего видимого дохода",
-    "age_of_history_days": "дней от начала наблюдаемой истории",
-    "amount_to_declared_income": "сумма операции к заявленному доходу",
-    "amount_to_limit": "сумма операции к лимиту договора",
-    "amount_to_balance_after": "сумма операции к остатку счёта",
-    "amount_to_client_average": "сумма операции к среднему по прошлым операциям того же типа",
-    "profile_<поле>_old": "прежнее значение изменившегося поля профиля в его собственном смысле",
-    "profile_<поле>_new": "новое значение изменившегося поля профиля в его собственном смысле",
-}
 
 
 # ============================================================
@@ -350,20 +330,6 @@ def model_event(row: dict, refs: LocalRefs) -> ModelEvent:
     )
 
 
-def model_history(history: "ClientHistory") -> list[ModelEvent]:
-    """
-    Финальная очищенная история клиента глазами модели.
-
-    Вход — результат history_as_of: по одному ряду на событие, в
-    действующей версии, в бизнес-порядке. Второй реализации
-    видимости здесь нет.
-    """
-
-    refs = LocalRefs()
-
-    return [model_event(row, refs) for row in history.events.to_pylist()]
-
-
 # ============================================================
 # РЕЕСТР И ПРОВЕРКА
 # ============================================================
@@ -418,71 +384,17 @@ def validate_projection(payload_names: Iterable[str]) -> None:
         raise ProjectionError("поля названы дважды: " + ", ".join(twice))
 
 
-def projection_registry(payload_names: Iterable[str], timezone: str | None = None) -> dict:
-    """
-    Что именно пересекает границу модели. Пишется в
-    field_registry.json рядом с физическими полями.
-    """
-
-    names = sorted(set(payload_names))
-
-    validate_projection(names)
-
-    allowed = [name for name in names if name in SEMANTIC_PAYLOAD_FIELDS]
-    refs = [name for name in names if name in ENTITY_REFS]
-    internal = [name for name in names if name in INTERNAL_FIELDS]
-
-    return {
-        "projection_version": PROJECTION_VERSION,
-        "schema": {
-            "client_id": "чей это факт",
-            "event_time": "когда произошло",
-            "source": "какая система записала",
-            "fields": "смысловые банковские значения, включая тип события",
-        },
-        "rules": {
-            "allowlist": "в модель проходит только явно названное поле; «всё, кроме исключений» запрещено",
-            "identifiers": "сырые идентификаторы не выходят наружу: сущности клиента получают локальные ссылки",
-            "refs": "номер ссылки выдаётся по первому появлению сущности в истории клиента и между клиентами ничего не значит",
-            "internal": "технические поля не становятся semantic keys, не попадают в словари, маски и модель",
-            "client_action": "кто действовал, видно по типу события; метки инициатора в конверте нет",
-        },
-        "calendar": {
-            **{key: value for key, value in CALENDAR_ENCODING.items() if key != "features"},
-            "features": list(CALENDAR_ENCODING["features"]),
-            "excluded_from": list(CALENDAR_ENCODING["excluded_from"]),
-            "timezone": timezone,
-            "note": "считается из event_time при подготовке входа модели; в fields не входит",
-        },
-        "counts": {
-            "semantic_payload_fields": len(allowed),
-            "local_refs": len(refs),
-            "internal_payload_fields": len(internal),
-            "client_action_event_types": len(CLIENT_ACTION_EVENT_TYPES),
-            "added_by_semantic_stage": len(SEMANTIC_LAYER_FIELDS),
-        },
-        "semantic_fields": {name: SEMANTIC_PAYLOAD_FIELDS[name] for name in allowed},
-        "local_refs": {name: ENTITY_REFS[name][0] for name in refs},
-        "internal_fields": dict(sorted(INTERNAL_FIELDS.items())),
-        "client_action_event_types": sorted(CLIENT_ACTION_EVENT_TYPES),
-        "added_by_semantic_stage": dict(sorted(SEMANTIC_LAYER_FIELDS.items())),
-    }
-
-
 __all__ = [
     "ENTITY_REFS",
     "EVENT_TYPE_FIELD",
     "CLIENT_ACTION_EVENT_TYPES",
     "INTERNAL_FIELDS",
-    "SEMANTIC_LAYER_FIELDS",
     "PROJECTION_VERSION",
     "SEMANTIC_PAYLOAD_FIELDS",
     "LocalRefs",
     "ModelEvent",
     "ProjectionError",
     "model_event",
-    "model_history",
     "model_role",
-    "projection_registry",
     "validate_projection",
 ]

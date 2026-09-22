@@ -35,7 +35,7 @@ from .rng import (
     stable_hash,
 )
 from .simulate import ClientState, _application_id
-from .world import merchants as merchant_catalog, products as product_catalog
+from .world import geography, merchants as merchant_catalog, products as product_catalog
 from .world.dictionaries import FUNNEL_SCREENS, MCC_CASH, MCC_TRANSFER
 
 
@@ -892,7 +892,7 @@ def _fraud_purchase(state: ClientState, account, card, ts, amount, episode, step
         account.account_id,
         amount,
         "debit",
-        f"merchant:{outlet.merchant_id}",
+        merchant_catalog.counterpart(outlet),
         body,
     )
 
@@ -1329,7 +1329,16 @@ def _new_profile_value(state: ClientState, name: str, event):
         return payload.get("region")
 
     if name == "city":
-        return payload.get("settlement")
+
+        target = payload.get("settlement")
+
+        if not target:
+            return None
+
+        # Переезд в сельскую местность города клиенту не даёт:
+        # корзина области это не населённый пункт, и прежний
+        # город при этом перестаёт быть верным.
+        return geography.by_name(target).public_name or CLEAR
 
     if name == "children":
         return payload.get("children_after")

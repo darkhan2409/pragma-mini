@@ -4,410 +4,352 @@ import argparse
 import sys
 from pathlib import Path
 
-from src.preprocessing.run import EXIT_BLOCKED, EXIT_OK, clean_directory
-from src.preprocessing.settings import PreprocessingConfig, normalize_group, processed_dir
+from src.preprocessing.artifacts import write_json
+from src.preprocessing.run import EXIT_BLOCKED, EXIT_OK
+from src.preprocessing.settings import GROUPS, normalize_group
 
-from .categorical import ValuesError, build_values
-from .contract import CONFIG_FILE, ContractError, build_contract
-from .corpus import CorpusError
-from .layout import LayoutError, build_layout
-from .numeric import BucketsError, build_buckets
+from .categorical import ValuesError, build_value_vocab, load_value_vocab
+from .fit import FitError, read_train, unit_warnings
+from .keyvocab import KeyVocabError, build_key_vocab, load_key_vocab
+from .layout import FrozenArtifacts, LayoutError, build_tokenizer
+from .numeric import BucketsError, build_buckets, load_buckets
 from .scan import ScanError
-from .schema import SchemaError
-from .settings import ConfigError, TokenizerConfig, tokenized_dir, vocab_dir
-from .text import TextError
-from .transform import TransformError, group_corpus, open_artifacts, resolve_cutoffs, transform_group
+from .schema import SchemaError, SemanticSchema
+from .settings import (
+    BPE_FILE,
+    BUCKETS_FILE,
+    KEY_VOCAB_FILE,
+    SPECIAL_TOKENS_FILE,
+    TOKENIZER_DIR,
+    TOKENIZER_FILE,
+    VALUE_VOCAB_FILE,
+    ConfigError,
+    TokenizerConfig,
+    tokenizer_path,
+)
+from .specials import SpecialsError, build_special_tokens, load_special_tokens
+from .text import TextError, build_bpe, load_bpe_file
+from .transform import TransformError, encode_group
 
 
 # ============================================================
 # ИДЕЯ
 # ============================================================
 #
-# Каждый этап токенизатора это отдельная команда и отдельная
-# остановка. Ни одна не запускает следующую сама: словарь это
-# решение, а не побочный эффект.
+# Словарь строится по шагам, и каждый шаг это отдельная команда
+# с одним видимым результатом. Автоматической цепочки нет
+# намеренно: словарь это решение, а не побочный эффект запуска.
 #
-#   contract   что разрешено читать и на чём разрешено учиться
-#   values     смыслы ключей и коды категорий
-#   buckets    границы чисел
-#   freeze     BPE и общее пространство ID
-#   encode     кодирование замороженными артефактами
+#   special-tokens data/tokenizer/special_tokens.json служебные токены и их ID
+#   key-vocab     data/tokenizer/key_vocab.json     поля модели и их ID
+#   value-vocab   data/tokenizer/value_vocab.json   категории train и их ID
+#   buckets       data/tokenizer/buckets.json       границы чисел и их токены
+#   bpe           data/tokenizer/bpe.json           разбиение текста
+#   final-vocab   data/tokenizer/tokenizer.json     единое пространство ID
+#   encode <g>    data/tokenized/<g>/               два файла закодированной группы
 #
-# Выход первых четырёх: data/artifacts/<name>/tokenizer/.
+# Для прода есть fit: он вызывает те же шесть этапов подряд и
+# останавливается на первой же ошибке, называя этап.
+#
+# Учатся только value-vocab, buckets и bpe, и только на
+# data/preprocessed/train.
+# Кодирование применяет готовый словарь и не меняет его.
 # ============================================================
 
 
 FAILURES = (
     BucketsError,
     ConfigError,
-    ContractError,
-    CorpusError,
+    FitError,
+    KeyVocabError,
     LayoutError,
     SchemaError,
     ScanError,
+    SpecialsError,
     TextError,
     ValuesError,
 )
 
 
-def dataset_name(args) -> str:
-
-    if args.name:
-        return args.name
-
-    if getattr(args, "raw", None) is not None:
-        return Path(args.raw).resolve().name
-
-    root = getattr(args, "raw_root", None)
-
-    if root is None:
-        raise SystemExit("нужно имя набора: укажите --name")
-
-    return Path(root).resolve().name
+def _config(args) -> TokenizerConfig:
+    return TokenizerConfig.load(Path(args.config) if args.config else None)
 
 
-def resolve_raw(args, group: str) -> Path:
-    """
-    Каталог RAW той группы, на которой работаем.
+def _write(name: str, payload: dict) -> Path:
 
-    Справочники продуктов и мерчантов лежат там, и смысловой
-    слой без них не расшифрует ни продукт, ни торговую точку.
-    """
+    path = tokenizer_path(name)
 
-    if args.raw is not None:
-        return Path(args.raw)
+    write_json(path, payload)
 
-    root = Path(args.raw_root)
-
-    candidates = [root / group] + ([root / "validation"] if group == "val" else [])
-
-    found = next((path for path in candidates if path.exists()), None)
-
-    if found is None:
-        raise SystemExit(f"в {root} нет подкаталога группы {group}")
-
-    return found
+    return path
 
 
-def run_contract(args) -> int:
+# ------------------------------------------------------------
+# ЭТАПЫ
+# ------------------------------------------------------------
 
-    try:
-        config = TokenizerConfig.load(Path(args.config) if args.config else None)
-    except ConfigError as error:
-        print(f"[contract] конфигурация: {error}")
-        return EXIT_BLOCKED
 
-    group = normalize_group(args.group) if args.group else config.fit_group
+def run_special_tokens(args) -> int:
 
-    name = dataset_name(args)
+    tokens = build_special_tokens()
 
-    processed = Path(args.processed) if args.processed else processed_dir(name)
+    path = _write(SPECIAL_TOKENS_FILE, tokens)
 
-    target = Path(args.out) if args.out else vocab_dir(name)
+    print(f"[special-tokens] служебные токены → {path}")
+    print(f"    токенов {tokens['size']}: ID с 0 по {tokens['next_id'] - 1}")
 
-    raw_dir = resolve_raw(args, group)
-
-    # Контракт это основание всего, что ниже: изменился он —
-    # прежние словари недействительны, и оставлять их рядом
-    # нельзя.
-    clean_directory(target)
-
-    try:
-        result = build_contract(
-            processed_dir=processed,
-            raw_dir=raw_dir,
-            target=target,
-            config=config,
-            group=group,
-            allow_short_horizon=args.allow_short_horizon,
-        )
-    except FAILURES as error:
-        print(f"[contract] группа {group}: {error}")
-        clean_directory(target)
-        return EXIT_BLOCKED
-
-    report = result.report
-
-    print(f"[contract] группа {group}: контракт входа → {target}")
-    print(
-        f"    корпус на {report['fit_end'][:10]}: клиентов {report['corpus']['clients']}, "
-        f"событий {report['corpus']['events']}, значений {report['corpus']['values']}, "
-        f"анкет {report['corpus']['profiles']}"
-    )
-    print(
-        f"    ключей объявлено {report['keys']['declared']}: код получают "
-        f"{report['keys']['model_feature']}, связями остаются {report['keys']['link']}; "
-        f"встретилось на train {report['keys']['observed_in_train']}"
-    )
-    print(
-        f"    отпечаток смыслового содержимого {report['fit_content_sha256'][:16]}, "
-        f"готовность {report['readiness']['status']}"
-    )
-
-    for item in report["contradictions"]:
-        print(f"    противоречие: {item['key']} — {item['detail']}")
-
-    for item in report["limitations"][:3]:
-        print(f"    ограничение: {item}")
+    for row in tokens["tokens"]:
+        print(f"    {row['id']:>2} {row['token']:<10} {row['role']}")
 
     return EXIT_OK
 
 
-def _later_stage(args, what: str, builder) -> int:
-    """
-    Общий путь этапов, которые читают готовые артефакты и ничего
-    не читают из данных заново.
-    """
+def run_key_vocab(args) -> int:
 
     try:
-        config = TokenizerConfig.load(Path(args.config) if args.config else None)
-    except ConfigError as error:
-        print(f"[{what}] конфигурация: {error}")
-        return EXIT_BLOCKED
-
-    group = normalize_group(args.group) if args.group else config.fit_group
-
-    name = dataset_name(args)
-
-    processed = Path(args.processed) if args.processed else processed_dir(name)
-    target = Path(args.out) if args.out else vocab_dir(name)
-
-    try:
-        result = builder(target, processed, config, group)
+        config = _config(args)
+        schema = SemanticSchema.open()
+        specials = load_special_tokens()
+        vocab = build_key_vocab(specials, config, schema)
     except FAILURES as error:
-        print(f"[{what}] группа {group}: {error}")
+        print(f"[key-vocab] {error}")
         return EXIT_BLOCKED
 
-    return result
+    path = _write(KEY_VOCAB_FILE, vocab)
 
-
-def run_values(args) -> int:
-
-    result = _later_stage(args, "values", build_values)
-
-    if isinstance(result, int):
-        return result
-
-    report = result.report
-    counts = report["counts"]
-
-    print(f"[values] группа {report['group']}: каталог значений собран")
+    print(f"[key-vocab] поля модели → {path}")
     print(
-        f"    ключей с кодом {counts['keys_model_feature']}: чисел {counts['numeric']}, "
-        f"категорий {counts['categorical']}, текстов {counts['text']}; ссылок {counts['link']}"
+        f"    ключей {vocab['size']}: ID с {vocab['first_key_id']} по {vocab['next_id'] - 1}; "
+        f"ссылок без кода {len(vocab['link_keys'])}"
+    )
+
+    kinds: dict[str, int] = {}
+
+    for row in vocab["keys"]:
+        kinds[row["value_kind"]] = kinds.get(row["value_kind"], 0) + 1
+
+    print("    по видам значения: " + ", ".join(f"{name} {count}" for name, count in sorted(kinds.items())))
+
+    return EXIT_OK
+
+
+def run_value_vocab(args) -> int:
+
+    try:
+        config = _config(args)
+        schema = SemanticSchema.open()
+        key_vocab = load_key_vocab()
+        train = read_train(config, schema)
+        vocab = build_value_vocab(train, key_vocab, config, schema)
+    except FAILURES as error:
+        print(f"[value-vocab] {error}")
+        return EXIT_BLOCKED
+
+    path = _write(VALUE_VOCAB_FILE, vocab)
+
+    counts = vocab["counts"]
+
+    print(f"[value-vocab] категории train → {path}")
+    print(
+        f"    значений {counts['values']} в {counts['domains']} доменах "
+        f"(объединённых {counts['domains_shared']}), редких {counts['rare']}"
     )
     print(
-        f"    доменов {counts['domains']} (объединённых {counts['domains_shared']}), "
-        f"различных значений {counts['values']}, редких {counts['rare']}"
+        f"    ID с {vocab['first_value_id']} по {vocab['next_id'] - 1}; "
+        f"ключей без наблюдений на train {counts['unobserved_in_train']}"
     )
-    print(f"    без наблюдений на train: {counts['unobserved_in_train']} ключей")
 
     return EXIT_OK
 
 
 def run_buckets(args) -> int:
 
-    result = _later_stage(args, "buckets", build_buckets)
+    try:
+        config = _config(args)
+        schema = SemanticSchema.open()
+        value_vocab = load_value_vocab()
+        train = read_train(config, schema)
+        registry = build_buckets(train, value_vocab, config, schema)
+    except FAILURES as error:
+        print(f"[buckets] {error}")
+        return EXIT_BLOCKED
 
-    if isinstance(result, int):
-        return result
+    path = _write(BUCKETS_FILE, registry)
 
-    report = result.report
-    counts = report["counts"]
+    counts = registry["counts"]
 
-    print(f"[buckets] группа {report['group']}: числовые диапазоны собраны")
-    print(f"    ключей {counts['keys']}, диапазонов {counts['buckets']}; источники границ {counts['by_source']}")
+    print(f"[buckets] числовые диапазоны → {path}")
+    print(
+        f"    ключей {counts['keys']}, диапазонов {counts['buckets']}; "
+        f"источники границ {counts['by_source']}"
+    )
+    print(f"    ID с {registry['first_bucket_id']} по {registry['next_id'] - 1}")
 
-    for item in report["warnings"][:5]:
+    for item in registry["warnings"][:5]:
         print(f"    предупреждение: {item}")
+
+    for item in unit_warnings(schema, config)[:5]:
+        print(f"    единица: {item}")
 
     return EXIT_OK
 
 
-def run_freeze(args) -> int:
+def run_bpe(args) -> int:
 
-    result = _later_stage(args, "freeze", build_layout)
+    try:
+        config = _config(args)
+        schema = SemanticSchema.open()
+        key_vocab = load_key_vocab()
+        train = read_train(config, schema)
+        model = build_bpe(train, key_vocab, config)
+    except FAILURES as error:
+        print(f"[bpe] {error}")
+        return EXIT_BLOCKED
 
-    if isinstance(result, int):
-        return result
+    path = _write(BPE_FILE, model)
 
-    manifest = result.report
-    sizes = manifest["layout"]["sizes"]
+    print(f"[bpe] разбиение текста → {path}")
 
-    print(f"[freeze] группа {manifest['group']}: словарь заморожен, отпечаток {manifest['artifact_id']}")
+    if model.get("enabled"):
+        print(
+            f"    ключи {', '.join(model['keys'])}: {model['corpus']['texts']} текстов, "
+            f"словарь {model['vocab_size']['actual']} из запрошенных {model['vocab_size']['requested']}"
+        )
+        print(f"    кусков на текст: медиана {model['pieces_per_text']['median']}, "
+              f"максимум {model['pieces_per_text']['max']}")
+    else:
+        print(f"    BPE выключен: {model.get('reason')}")
+
+    return EXIT_OK
+
+
+def run_final_vocab(args) -> int:
+
+    try:
+        key_vocab = load_key_vocab()
+        value_vocab = load_value_vocab()
+        buckets = load_buckets()
+        bpe = load_bpe_file()
+        specials = load_special_tokens()
+        bundle = build_tokenizer(specials, key_vocab, value_vocab, buckets, bpe)
+        FrozenArtifacts.from_bundle(bundle)
+    except FAILURES as error:
+        print(f"[final-vocab] {error}")
+        return EXIT_BLOCKED
+
+    path = _write(TOKENIZER_FILE, bundle)
+
+    sizes = bundle["layout"]["sizes"]
+    ranges = bundle["layout"]["ranges"]
+
+    print(f"[final-vocab] словарь собран → {path}")
+    print(f"    токенов в таблице {len(bundle['tokens'])}")
     print(
         f"    специальных {sizes['special']}, ключей {sizes['keys']}, категорий {sizes['categorical']}, "
         f"диапазонов {sizes['buckets']}, кусков BPE {sizes['bpe']}; всего ID {sizes['total']}"
     )
-
-    bpe = manifest["bpe"]
-
-    if bpe.get("enabled"):
-        print(
-            f"    BPE на ключах {', '.join(bpe['keys'])}: {bpe['corpus']['texts']} текстов, "
-            f"словарь {bpe['vocab_size']['actual']} из запрошенных {bpe['vocab_size']['requested']}"
-        )
-    else:
-        print(f"    BPE выключен: {bpe.get('reason')}")
+    print(
+        "    границы: специальные " + str(ranges["special"]) + ", ключи " + str(ranges["keys"])
+        + ", значения " + str(ranges["values"]) + ", BPE " + str(ranges["bpe"])
+    )
 
     return EXIT_OK
-
-
-def frozen_config(target: Path, artifacts) -> TokenizerConfig:
-    """
-    Конфигурация, которой заморожен этот словарь.
-    """
-
-    config = TokenizerConfig.load(target / CONFIG_FILE)
-
-    if config.sha256() != artifacts.manifest["config_sha256"]:
-        raise ConfigError(
-            f"{CONFIG_FILE} в каталоге артефактов не тот, которым заморожен словарь: "
-            "соберите словарь заново"
-        )
-
-    return config
-
-
-def group_cutoff(corpus, group: str):
-    """
-    Конечный cutoff группы.
-
-    Берётся из фактического разделения, а не из значений по
-    умолчанию: на нестандартных окнах умолчание указало бы не на
-    тот момент, и разница заметна не сразу.
-    """
-
-    if corpus.final_cutoff is not None:
-        return corpus.final_cutoff
-
-    return PreprocessingConfig.load(None).windows[group].final_cutoff
-
-
-def run_dirname(group: str, cutoffs: list, client: str | None) -> str:
-    """
-    Имя каталога результата, различающее разные прогоны.
-
-    Полный прогон группы и разбор одного клиента не должны
-    попадать в один каталог: диагностический запуск затёр бы
-    полноценный результат.
-    """
-
-    name = f"{group}__{cutoffs[-1].date()}"
-
-    if len(cutoffs) > 1:
-        name = f"{group}__{cutoffs[0].date()}__{cutoffs[-1].date()}__{len(cutoffs)}"
-
-    if client:
-        name = f"{name}__client_{client}"
-
-    return name
-
-
-def prepare_directory(directory: Path, force: bool) -> None:
-    """
-    Готовит каталог результата, не стирая чужой молча.
-    """
-
-    existing = [path for path in directory.rglob("*") if path.is_file()] if directory.exists() else []
-
-    if existing and not force:
-        raise TransformError(
-            f"в {directory} уже лежит результат из {len(existing)} файлов. "
-            "Перезапись стирает его целиком: укажите --force, если это то, чего вы хотите, "
-            "или задайте другой --tokenized"
-        )
-
-    clean_directory(directory)
 
 
 def run_encode(args) -> int:
 
-    name = dataset_name(args)
-
-    processed = Path(args.processed) if args.processed else processed_dir(name)
-    target = Path(args.out) if args.out else vocab_dir(name)
+    group = normalize_group(args.group)
 
     try:
-        artifacts = open_artifacts(target)
+        config = _config(args)
+        artifacts = FrozenArtifacts.load()
 
-        # Конфигурация едет вместе со словарём. Читается она из
-        # замороженного комплекта, а не из аргументов: иначе
-        # кодирование шло бы по одним правилам, а словарь был бы
-        # построен по другим.
-        config = frozen_config(target, artifacts)
+        if config.sha256() != artifacts.bundle["config_sha256"]:
+            raise ConfigError(
+                "конфигурация не та, которой собран словарь: кодирование пошло бы по одним "
+                "правилам, а словарь построен по другим. Соберите словарь заново"
+            )
 
-        if args.config is not None:
-
-            asked = TokenizerConfig.load(Path(args.config))
-
-            if asked.sha256() != config.sha256():
-                raise ConfigError(
-                    "переданная конфигурация отличается от той, которой заморожен словарь. "
-                    "Кодирование правил не меняет: чтобы применить другие, соберите словарь заново"
-                )
-
-        group = normalize_group(args.group) if args.group else config.fit_group
-
-        raw_dir = resolve_raw(args, group)
-
-        corpus = group_corpus(processed, raw_dir, group)
-
-        cutoffs = resolve_cutoffs(args.cutoff, group_cutoff(corpus, group))
-
-        directory = (
-            Path(args.tokenized)
-            if args.tokenized
-            else tokenized_dir(name) / artifacts.manifest["artifact_id"] / run_dirname(group, cutoffs, args.client)
-        )
-
-        prepare_directory(directory, args.force)
-
-        result = transform_group(
-            artifacts=artifacts,
-            corpus=corpus,
-            cutoffs=cutoffs,
-            directory=directory,
-            config=config,
-            clients=[args.client] if args.client else None,
-        )
+        report = encode_group(artifacts, group, config)
 
     except (*FAILURES, TransformError) as error:
-        group = normalize_group(args.group) if args.group else "—"
         print(f"[encode] группа {group}: {error}")
         return EXIT_BLOCKED
 
-    report = result.report
     counts = report["counts"]
 
-    print(f"[encode] группа {group}: срезы {', '.join(item[:10] for item in report['cutoffs'])} → {result.directory}")
+    print(f"[encode] группа {group} до {report['cutoff'][:10]} → data/tokenized/{group}")
     print(
-        f"    клиентов {counts['clients']} на {counts['client_slices']} срезах, "
-        f"событий {counts['events']}, значений {counts['values']}, токенов {counts['tokens']}"
+        f"    клиентов {counts['clients']}, событий {counts['events']}, значений {counts['values']}, "
+        f"токенов {counts['tokens']}"
     )
     print(
         f"    [MISSING] {report['specials']['missing']}, [UNK] {report['specials']['unknown']}, "
         f"[INVALID] {report['specials']['invalid']}, [EMPTY] {report['specials']['empty']}; "
-        f"токенов в событии до {report['lengths']['event_tokens']['max']}"
+        f"токенов в событии до {counts['max_event_tokens']}"
     )
-    print(f"    словарь {report['artifact_id']} не изменился: проверено до и после")
-
-    for item in report["skipped_cutoffs"]:
-        print(f"    пропущен срез {item['cutoff'][:10]}: {item['reason']}")
+    print(
+        f"    строк: events {report['rows']['events']}, profile {report['rows']['profile']}; "
+        f"молчащих клиентов {counts['silent_clients']}"
+    )
 
     return EXIT_OK
 
 
-def _add_common(parser: argparse.ArgumentParser) -> None:
+# ------------------------------------------------------------
+# ВЕСЬ FIT ОДНОЙ КОМАНДОЙ
+# ------------------------------------------------------------
 
-    parser.add_argument("--name", default=None, help="имя набора: data/processed/<name> и data/artifacts/<name>")
-    parser.add_argument("--group", default=None, help="группа fit; по умолчанию train")
-    parser.add_argument("--processed", type=Path, default=None, help="каталог набора вместо data/processed/<name>")
-    parser.add_argument(
-        "--out", type=Path, default=None,
-        help="каталог артефактов вместо data/artifacts/<name>/tokenizer",
-    )
-    parser.add_argument("--config", type=Path, default=None, help="JSON с переопределениями конфига токенизатора")
+
+# Этапы обучения в том же порядке, в каком их запускают
+# руками. Список один: второго описания цепочки нет.
+FIT_STAGES: tuple[tuple[str, object], ...] = (
+    ("special-tokens", run_special_tokens),
+    ("key-vocab", run_key_vocab),
+    ("value-vocab", run_value_vocab),
+    ("buckets", run_buckets),
+    ("bpe", run_bpe),
+    ("final-vocab", run_final_vocab),
+)
+
+
+def run_fit(args) -> int:
+    """
+    Все этапы обучения подряд, одной командой.
+
+    Собственной логики здесь нет: вызываются те же функции,
+    что и у отдельных команд, поэтому поэтапный запуск и
+    fit дают один и тот же результат.
+
+    Готовый словарь убирается ДО первого этапа: если
+    цепочка оборвётся, рядом не останется tokenizer.json от
+    прежней сборки, который выглядел бы собранным из уже
+    пересчитанных частей.
+    """
+
+    stale = tokenizer_path(TOKENIZER_FILE)
+
+    if stale.exists():
+        stale.unlink()
+
+    for number, (name, handler) in enumerate(FIT_STAGES, start=1):
+
+        print(f"[fit] этап {number}/{len(FIT_STAGES)}: {name}")
+
+        code = handler(args)
+
+        if code != EXIT_OK:
+            print(f"[fit] остановлено на этапе {name}: словарь не собран")
+            return code
+
+    print(f"[fit] словарь готов: {TOKENIZER_DIR}")
+
+    return EXIT_OK
+
+
+# ------------------------------------------------------------
+# КОМАНДЫ
+# ------------------------------------------------------------
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -416,55 +358,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="stage", required=True)
 
-    contract = subparsers.add_parser("contract", help="этап 1: контракт входа и разрешённый train-корпус")
+    def add(name: str, help_text: str, handler) -> argparse.ArgumentParser:
 
-    source = contract.add_mutually_exclusive_group(required=True)
-    source.add_argument("--raw", type=Path, help="каталог RAW группы, на которой идёт fit")
-    source.add_argument("--raw-root", type=Path, help="корень RAW с подкаталогами train/val/test")
+        item = subparsers.add_parser(name, help=help_text)
+        item.add_argument(
+            "--config", type=Path, default=None, help="JSON с переопределениями конфига токенизатора"
+        )
+        item.set_defaults(handler=handler)
 
-    _add_common(contract)
+        return item
 
-    contract.add_argument(
-        "--allow-short-horizon",
-        action="store_true",
-        help="согласиться на короткий горизонт наблюдения: результат помечается как диагностика",
-    )
-    contract.set_defaults(handler=run_contract)
+    add("fit", "все этапы обучения словаря подряд", run_fit)
 
-    values = subparsers.add_parser("values", help="этап 2: смыслы ключей и коды категорий")
-    _add_common(values)
-    values.set_defaults(handler=run_values, raw=None, raw_root=None)
+    add("special-tokens", "служебные токены и их ID", run_special_tokens)
+    add("key-vocab", "поля модели и их ID", run_key_vocab)
+    add("value-vocab", "категориальные значения train и их ID", run_value_vocab)
+    add("buckets", "границы чисел и их токены", run_buckets)
+    add("bpe", "разбиение текста на train", run_bpe)
+    add("final-vocab", "единое пространство ID: tokenizer.json", run_final_vocab)
 
-    buckets = subparsers.add_parser("buckets", help="этап 3: числовые диапазоны")
-    _add_common(buckets)
-    buckets.set_defaults(handler=run_buckets, raw=None, raw_root=None)
-
-    freeze = subparsers.add_parser("freeze", help="этап 4: BPE и общее пространство ID")
-    _add_common(freeze)
-    freeze.set_defaults(handler=run_freeze, raw=None, raw_root=None)
-
-    encode = subparsers.add_parser("encode", help="этап 5: кодирование замороженными артефактами")
-
-    source = encode.add_mutually_exclusive_group(required=True)
-    source.add_argument("--raw", type=Path, help="каталог RAW группы, которую кодируем")
-    source.add_argument("--raw-root", type=Path, help="корень RAW с подкаталогами train/val/test")
-
-    _add_common(encode)
-
-    encode.add_argument(
-        "--cutoff", action="append", default=None,
-        help="момент среза ISO; можно повторять. По умолчанию конечный cutoff группы",
-    )
-    encode.add_argument("--client", default=None, help="закодировать одного клиента")
-    encode.add_argument(
-        "--tokenized", type=Path, default=None,
-        help="каталог результата вместо data/tokenized/<name>/<artifact_id>/<группа>__<дата>",
-    )
-    encode.add_argument(
-        "--force", action="store_true",
-        help="перезаписать непустой каталог результата",
-    )
-    encode.set_defaults(handler=run_encode)
+    encode = add("encode", "кодирование группы готовым словарём", run_encode)
+    encode.add_argument("group", choices=GROUPS, help="группа: train, val или test")
 
     return parser
 

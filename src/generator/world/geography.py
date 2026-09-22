@@ -184,6 +184,21 @@ class Settlement:
     def is_rural(self) -> bool:
         return self.settlement_type == "rural"
 
+    @property
+    def public_name(self) -> str | None:
+        """
+        Название места для выгрузки.
+
+        Сельская территория области это КОРЗИНА населения, а не
+        населённый пункт: «North Kazakhstan rural» задаёт
+        доступность категорий, плотность точек, долю наличных и
+        часы работы, но такого места на карте нет. Наружу вместо
+        него не выходит ничего: сочинять название села нечем, а
+        область клиента и так названа отдельным полем.
+        """
+
+        return None if self.is_rural else self.name
+
 
 @state_cache
 def _geography() -> tuple:

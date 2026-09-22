@@ -1,17 +1,18 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-import pyarrow.parquet as pq
+from src.preprocessing.artifacts import read_json, sha256_bytes
+from src.preprocessing.canonical.events import TEXT_NORMALIZATION
+from src.preprocessing.keys import TEXT
 
-from src.preprocessing.artifacts import sha256_bytes, sha256_file
-from src.preprocessing.canonical.events import TEXT_NORMALIZATION, normalize_text
-
-from .contract import STATISTICS_DIR, TEXT_FILE
-from .settings import BpeConfig
+from .fit import TrainCorpus
+from .scan import FitStatistics
+from .settings import BPE_FILE, BpeConfig, TokenizerConfig, tokenizer_path
 
 
 # ============================================================
@@ -37,8 +38,6 @@ from .settings import BpeConfig
 # служебный токен, а не пропуск.
 # ============================================================
 
-
-BPE_FILE = "bpe.json"
 
 # Строки, на которых проверяется обратимость кодирования. Тут
 # намеренно лежат пустая строка, пробельные символы, казахские и
@@ -108,25 +107,20 @@ class BpeModel:
         return self.tokenizer.id_to_token(index)
 
 
-def corpus_rows(target: Path, keys: tuple[str, ...]) -> list[tuple[str, str, int]]:
+def corpus_rows(stats: FitStatistics, keys: tuple[str, ...]) -> list[tuple[str, str, int]]:
     """
     Нормализованные тексты разрешённых ключей с их частотой.
 
-    Порядок задан данными, а не файловой системой: сначала ключ,
-    потом сам текст.
+    Порядок задан данными: сначала ключ, потом сам текст.
     """
-
-    path = Path(target) / STATISTICS_DIR / TEXT_FILE
-
-    if not path.exists():
-        raise TextError(f"нет {path}: тексты собирает этап 1")
 
     allowed = set(keys)
 
     rows = [
-        (row["key"], row["text_norm"], int(row["count"]))
-        for row in pq.read_table(path).to_pylist()
-        if row["key"] in allowed
+        (key, text, entry.count)
+        for key, bucket in stats.text.items()
+        if key in allowed
+        for text, entry in bucket.items()
     ]
 
     return sorted(rows)
@@ -147,7 +141,7 @@ def _iterator(rows: list[tuple[str, str, int]]) -> Iterator[str]:
             yield text
 
 
-def train_bpe(target: Path, config: BpeConfig, keys: tuple[str, ...]) -> BpeModel:
+def train_bpe(stats: FitStatistics, config: BpeConfig, keys: tuple[str, ...]) -> BpeModel:
     """
     Обучает разбиение на разрешённых train-текстах.
     """
@@ -169,7 +163,7 @@ def train_bpe(target: Path, config: BpeConfig, keys: tuple[str, ...]) -> BpeMode
     import tokenizers
     from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
-    rows = corpus_rows(target, keys)
+    rows = corpus_rows(stats, keys)
 
     model = Tokenizer(models.BPE(unk_token=None))
 
@@ -188,10 +182,6 @@ def train_bpe(target: Path, config: BpeConfig, keys: tuple[str, ...]) -> BpeMode
     )
 
     model.train_from_iterator(_iterator(rows), trainer=trainer)
-
-    path = Path(target) / BPE_FILE
-    path.parent.mkdir(parents=True, exist_ok=True)
-    model.save(str(path), pretty=True)
 
     texts = sorted({text for _key, text, _count in rows})
 
@@ -224,7 +214,6 @@ def train_bpe(target: Path, config: BpeConfig, keys: tuple[str, ...]) -> BpeMode
         },
         "vocab_size": {"requested": config.vocab_size, "actual": model.get_vocab_size()},
         "trained_on_empty": not texts,
-        "file_sha256": sha256_file(path),
     }
 
     return BpeModel(enabled=True, keys=tuple(keys), info=info, tokenizer=model)
@@ -250,26 +239,96 @@ def check_roundtrip(model: BpeModel, texts: list[str]) -> list[str]:
     return broken
 
 
-def load_bpe(path: Path) -> BpeModel:
+def dump_bpe(model: BpeModel) -> dict:
     """
-    Замороженное разбиение с диска.
+    Разбиение в виде, пригодном для tokenizer.json.
+
+    Отдельного файла разбиения больше нет: оно едет разделом
+    внутри одного замороженного комплекта.
+    """
+
+    if model.tokenizer is None:
+        raise TextError("BPE выключен: сохранять нечего")
+
+    return json.loads(model.tokenizer.to_str())
+
+
+def load_bpe(data: dict) -> BpeModel:
+    """
+    Замороженное разбиение из записи tokenizer.json.
     """
 
     from tokenizers import Tokenizer
 
-    model = Tokenizer.from_file(str(path))
+    model = Tokenizer.from_str(json.dumps(data))
 
     return BpeModel(enabled=True, keys=(), info={"enabled": True}, tokenizer=model)
 
 
+def build_bpe(train: TrainCorpus, key_vocab: dict, config: TokenizerConfig) -> dict:
+    """
+    Разбиение текста, обученное на train, со всем, что
+    нужно для кодирования и раскодирования.
+
+    Номеров в общем пространстве ID здесь нет: куски
+    нумеруются внутри модели, а сдвиг назначает финальный
+    словарь, когда известны все остальные виды токенов.
+    """
+
+    text_keys = tuple(
+        row["key"]
+        for row in key_vocab["keys"]
+        if row["value_kind"] == TEXT and row["key"] not in config.text_keys_as_categorical
+    )
+
+    model = train_bpe(train.statistics, config.bpe, text_keys)
+
+    if model.enabled:
+
+        texts = sorted({text for _key, text, _count in corpus_rows(train.statistics, text_keys)})
+
+        broken = check_roundtrip(model, [*PROBES, *texts])
+
+        if broken:
+            raise TextError(
+                "разбиение текста не обратимо на "
+                + ", ".join(repr(item) for item in broken[:3])
+                + ": байтовый алфавит обязан кодировать любой текст без потерь"
+            )
+
+    return {
+        **model.info,
+        "fit": train.as_dict(),
+        "config_sha256": config.sha256(),
+        "size": model.size,
+        "model": dump_bpe(model) if model.enabled else None,
+    }
+
+
+def load_bpe_file(directory: Path | None = None) -> dict:
+    """
+    Разбиение предыдущего этапа.
+    """
+
+    path = (Path(directory) / BPE_FILE) if directory else tokenizer_path(BPE_FILE)
+
+    if not path.exists():
+        raise TextError(f"нет {path}: выполните python -m src.tokenization.run bpe")
+
+    return read_json(path)
+
+
+
 __all__ = [
-    "BPE_FILE",
     "PROBES",
     "BpeModel",
     "TextError",
     "check_roundtrip",
     "corpus_digest",
+    "build_bpe",
     "corpus_rows",
+    "dump_bpe",
     "load_bpe",
+    "load_bpe_file",
     "train_bpe",
 ]

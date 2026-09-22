@@ -138,7 +138,11 @@ class TableWriter:
     def close(self) -> int:
 
         if self._writer is None:
-            write_table(self.path, self.schema.empty_table())
+            # Пустой файл пишется ТОЙ ЖЕ схемой, включая её
+            # метаданные: граница периода объявлена файлом, и
+            # терять её из-за того, что строк не оказалось, нельзя.
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(self.schema.empty_table(), self.path, compression="zstd")
         else:
             self._writer.close()
 

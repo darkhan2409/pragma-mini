@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import unicodedata
-from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterator
 
@@ -15,9 +14,6 @@ from ..settings import PreprocessingConfig
 from .schema import (
     DERIVED_NAMES,
     ENVELOPE_NAMES,
-    PAYLOAD_NULL,
-    PAYLOAD_OK,
-    PAYLOAD_UNPARSEABLE,
     events_schema,
     payload_columns,
 )
@@ -81,7 +77,7 @@ def require_envelope(batch: pa.Table) -> None:
         raise CanonicalError(
             f"строка {row}: пустое обязательное поле конверта {name}. "
             f"Всего таких строк в пачке: {column.null_count}. "
-            "Выгрузка необрабатываема: выполните этап passport, он называет все такие строки"
+            "Выгрузка необрабатываема: проверка RAW называет такую строку до начала обработки"
         )
 
 
@@ -219,10 +215,6 @@ def _refuse_split_clients(batch: pa.Table, seen: set) -> None:
 @dataclass
 class ParsedBatch:
     table: pa.Table
-    status: list[str]
-    violations: dict[int, list[str]]
-    rejects: list[dict]
-    counts: dict[str, int] = field(default_factory=dict)
 
 
 def parse_batch(manifest: RawManifest, batch: pa.Table, payload_names: list[str]) -> ParsedBatch:
@@ -235,14 +227,8 @@ def parse_batch(manifest: RawManifest, batch: pa.Table, payload_names: list[str]
 
     columns = {name: field_type for name, field_type in payload_columns(manifest)}
 
-    status = [PAYLOAD_OK] * rows
-    violations: dict[int, list[str]] = {}
-    rejects: list[dict] = []
-    counts: dict[str, int] = {}
-
     if rows == 0:
-        empty = pa.table({name: pa.nulls(0, columns[name]) for name in payload_names})
-        return ParsedBatch(empty, status, violations, rejects, counts)
+        return ParsedBatch(pa.table({name: pa.nulls(0, columns[name]) for name in payload_names}))
 
     order: list[np.ndarray] = []
     pieces: list[pa.Table] = []
@@ -267,52 +253,24 @@ def parse_batch(manifest: RawManifest, batch: pa.Table, payload_names: list[str]
         info = manifest.catalogue.get(event_type) if event_type is not None else None
 
         if info is None:
-            # Тип вне каталога ключей: строка сохраняется, поля пустые.
-            for local, position in enumerate(indices):
-                status[int(position)] = PAYLOAD_UNPARSEABLE
-                violations.setdefault(int(position), []).append(f"unknown_event_type:{event_type}")
-                rejects.append(
-                    {
-                        "client_id": rows_of_type.column("client_id")[local].as_py(),
-                        "type": event_type,
-                        "reason": "unknown_event_type",
-                        "detail": "типа нет в каталоге ключей манифеста",
-                        "payload": rows_of_type.column("payload")[local].as_py(),
-                        "raw_file": "events.parquet",
-                        "raw_row_group": rows_of_type.column("raw_row_group")[local].as_py(),
-                        "raw_row": rows_of_type.column("raw_row")[local].as_py(),
-                    }
-                )
-            counts["unknown_event_type"] = counts.get("unknown_event_type", 0) + len(indices)
-            piece = pa.table({name: pa.nulls(len(indices), columns[name]) for name in payload_names})
-            order.append(indices)
-            pieces.append(piece)
-            continue
+            row = rows_of_type.column("raw_row")[0].as_py()
+            raise CanonicalError(
+                f"строка {row}: тип события {event_type!r} не объявлен каталогом ключей; "
+                "разобрать такую запись нечем"
+            )
 
         parsed = parse_payloads(info, rows_of_type.column("payload"))
 
-        for kind, count in parsed.counts.items():
-            counts[kind] = counts.get(kind, 0) + count
-
-        for local, items in parsed.by_row.items():
-            violations.setdefault(int(indices[local]), []).extend(items)
-
-        for local, items in parsed.by_row.items():
-            if any(item.startswith(("unparseable", "null_payload")) for item in items):
-                position = int(indices[local])
-                status[position] = PAYLOAD_UNPARSEABLE if items[0].startswith("unparseable") else PAYLOAD_NULL
-                rejects.append(
-                    {
-                        "client_id": rows_of_type.column("client_id")[local].as_py(),
-                        "type": event_type,
-                        "reason": items[0].split(":")[0],
-                        "detail": "; ".join(items),
-                        "payload": rows_of_type.column("payload")[local].as_py(),
-                        "raw_file": "events.parquet",
-                        "raw_row_group": rows_of_type.column("raw_row_group")[local].as_py(),
-                        "raw_row": rows_of_type.column("raw_row")[local].as_py(),
-                    }
-                )
+        # Любое расхождение с контрактом останавливает этап:
+        # журнала отказов больше нет, и молча принять строку
+        # нельзя.
+        if parsed.by_row:
+            local = min(parsed.by_row)
+            row = rows_of_type.column("raw_row")[local].as_py()
+            raise CanonicalError(
+                f"строка {row}, событие {event_type}: "
+                + "; ".join(parsed.by_row[local])
+            )
 
         piece = pa.table(
             {
@@ -334,7 +292,7 @@ def parse_batch(manifest: RawManifest, batch: pa.Table, payload_names: list[str]
     inverse = np.empty(rows, dtype=np.int64)
     inverse[positions] = np.arange(positions.size, dtype=np.int64)
 
-    return ParsedBatch(stacked.take(pa.array(inverse)), status, violations, rejects, counts)
+    return ParsedBatch(stacked.take(pa.array(inverse)))
 
 
 # ============================================================
@@ -447,9 +405,6 @@ def balance_chain_gaps(
 @dataclass
 class BatchResult:
     table: pa.Table
-    rejects: list[dict]
-    clients: list[dict]
-    counts: dict[str, int]
 
 
 def build_batch(
@@ -459,8 +414,6 @@ def build_batch(
     payload_names: list[str],
     schema: pa.Schema,
     client_index: dict[str, int],
-    row_group: int,
-    row_start: int,
 ) -> BatchResult:
 
     manifest = raw.manifest
@@ -479,7 +432,6 @@ def build_batch(
     # --- клиентский индекс ---
 
     client_idx = np.empty(rows, dtype=np.int64)
-    clients: list[dict] = []
 
     event_time = batch.column("event_time").to_numpy(zero_copy_only=False).astype("datetime64[us]")
     raw_row = np.asarray(batch.column("raw_row").to_pylist(), dtype=np.int64)
@@ -520,23 +472,6 @@ def build_batch(
 
         for rank, position in enumerate(positions):
             stable_index[position] = rank
-
-        clients.append(
-            {
-                "client_idx": index,
-                "client_id": str(client_id[lo]),
-                # Адрес уточняется по фактической разбивке файла
-                # после записи: писатель волен резать row group
-                # иначе, чем легли пачки.
-                "row_group": None,
-                "row_offset": None,
-                "global_row_start": row_start + lo,
-                "row_count": hi - lo,
-                "spans_row_groups": None,
-                "event_time_min": event_time[lo:hi].min().astype("datetime64[us]").astype(datetime),
-                "event_time_max": event_time[lo:hi].max().astype("datetime64[us]").astype(datetime),
-            }
-        )
 
     # --- наблюдаемость ---
 
@@ -621,10 +556,6 @@ def build_batch(
         "at_or_after_extract": pa.array(after_extract),
         "ambiguous_local_time": pa.array(ambiguous),
         "balance_chain_gap": pa.array(chain_gap),
-        "payload_status": pa.array(parsed.status, pa.string()),
-        "payload_violations": pa.array(
-            [parsed.violations.get(index) or None for index in range(rows)], pa.list_(pa.string())
-        ),
         "known_missing": pa.array(known_missing, pa.list_(pa.string())),
         "merchant_name_norm": normalized("merchant_name"),
         "counterparty_norm": normalized("counterparty"),
@@ -642,10 +573,17 @@ def build_batch(
 
     table = pa.table(columns).select(schema.names).cast(schema)
 
-    counts = dict(parsed.counts)
-    counts["rows"] = rows
+    # Строки клиента идут по времени, приоритету типа и месту в
+    # RAW: тот же порядок, что задаёт stable_event_index.
+    order = pa.compute.sort_indices(
+        table,
+        sort_keys=[
+            ("client_id", "ascending"),
+            ("stable_event_index", "ascending"),
+        ],
+    )
 
-    return BatchResult(table, parsed.rejects, clients, counts)
+    return BatchResult(table.take(order))
 
 
 def canonical_schema(manifest: RawManifest) -> pa.Schema:

@@ -9,10 +9,10 @@ __pycache__/
 .claude/
 
 data/raw/
-data/processed/
+data/preprocessed/
+data/tokenizer/
 data/tokenized/
-data/datasets/
-data/artifacts/
+data/dataset/
 data/runs/
 
 *.pt

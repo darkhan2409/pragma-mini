@@ -1,36 +1,15 @@
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
-import numpy as np
-import pyarrow as pa
 import pyarrow.compute as pc
-import pyarrow.parquet as pq
 
-from ..artifacts import TableWriter, _md_table, write_json, write_table, write_text
-from ..rawdata import RawDataset
+from ..artifacts import TableWriter, write_table
+from ..rawdata import RawDataset, check_raw
 from ..settings import PreprocessingConfig
-from .entities import extract_mentions, extract_transfers, order_transfers
-from .events import (
-    TEXT_NORMALIZATION,
-    build_batch,
-    canonical_schema,
-    iter_client_batches,
-)
-from .links import build_link_report, scan_entities
-from .registry import build_registry, registry_as_dict, registry_digest
-from .schema import (
-    CLIENT_INDEX_SCHEMA,
-    DERIVED_COLUMNS,
-    MENTIONS_SCHEMA,
-    REJECTS_SCHEMA,
-    SCHEMA_VERSION,
-    TRANSFERS_SCHEMA,
-    payload_columns,
-)
+from .events import build_batch, canonical_schema, iter_client_batches
+from .schema import SCHEMA_VERSION, payload_columns
 from .sidecars import build_profile
 
 
@@ -38,91 +17,62 @@ from .sidecars import build_profile
 # ИДЕЯ
 # ============================================================
 #
-# Оркестрация этапа 2: RAW одной группы -> canonical.
+# Этап 1: выгрузка одной группы -> очищенная группа.
+#
+# Результат этапа — РОВНО ДВА файла:
+#
+#   data/preprocessed/<group>/events.parquet
+#   data/preprocessed/<group>/profile.parquet
+#
+# Ни индекса клиентов, ни упоминаний сущностей, ни таблицы
+# переводов, ни журнала отказов, ни реестра полей, ни отчётов
+# рядом нет. Всё, что раньше лежало в спутниках, следующие этапы
+# считают по самой ленте: история собирается группировкой по
+# client_id, а переводы, договоры и карты читаются прямо из
+# полей событий. Схему даёт код.
+#
+# Порядок этапа:
+#
+#   1. проверить пригодность RAW;
+#   2. прочитать ленту и профиль;
+#   3. раскрыть payload вместе с ключом type;
+#   4. привести значения к объявленным типам;
+#   5. упорядочить события клиента по времени, приоритету типа
+#      и месту строки в RAW;
+#   6. записать два файла.
+#
+# Любая строка, которую нельзя разобрать по контракту,
+# ОСТАНАВЛИВАЕТ этап: журнала отказов больше нет, а частичный
+# слой на диске не остаётся.
 #
 # Лента читается пачками целых клиентов и пишется по одному row
 # group на пачку, поэтому память ограничена пачкой, а не файлом.
-# Профиль, покрытие, сущности, переводы, журнал дублей и отчёт о
-# связях собираются по дороге.
-#
-# Число строк обязано сойтись: в canonical ровно столько строк,
-# сколько их в RAW. Всё, что нельзя разобрать, остаётся строкой с
-# причиной, а не исчезает.
 # ============================================================
 
 
-STAGE = "canonical"
-STAGE_VERSION = "10.0.0"
-
-STATUS_OK = "ok"
-STATUS_ROW_COUNT_MISMATCH = "row_count_mismatch"
+STAGE = "preprocess"
+STAGE_VERSION = "11.0.0"
 
 EVENTS_FILE = "events.parquet"
 PROFILE_FILE = "profile.parquet"
-CLIENT_INDEX_FILE = "client_index.parquet"
-MENTIONS_FILE = "entities/mentions.parquet"
-TRANSFERS_FILE = "entities/transfers.parquet"
-REJECTS_FILE = "rejects.parquet"
-REGISTRY_FILE = "field_registry.json"
-REPORT_JSON_FILE = "canonical_report.json"
-REPORT_MD_FILE = "canonical_report.md"
+
+# Границы окна выгрузки едут метаданными самой ленты: отдельного
+# файла-паспорта у слоя нет, а следующим этапам нужно знать, чем
+# ограничена выгрузка.
+PERIOD_START_KEY = b"period_start"
+PERIOD_END_KEY = b"period_end"
 
 
 @dataclass
 class CanonicalResult:
-    report: dict
+    """
+    Что получилось: два файла и числа для терминала.
+    """
+
     outputs: list[Path]
-
-
-def build_client_index(raw: RawDataset) -> dict[str, int]:
-    """
-    Плотный внутренний индекс клиента: устойчивый номер в
-    лексикографическом порядке client_id.
-
-    Список собирается из профиля и ленты: клиент без событий не
-    исчезает, а клиент без профиля не теряется.
-    """
-
-    ids: set[str] = set()
-
-    if raw.exists("profile"):
-        ids.update(raw.read("profile", ["client_id"]).column("client_id").to_pylist())
-
-    for _, chunk in raw.iter_row_groups("events", ["client_id"]):
-        ids.update(pc.unique(chunk.column("client_id")).to_pylist())
-
-    return {value: index for index, value in enumerate(sorted(ids))}
-
-
-def locate_clients(events_path: Path, clients: list[dict]) -> None:
-    """
-    Проставляет адрес клиента по ФАКТИЧЕСКОЙ разбивке файла.
-
-    Пачка ложится в один row group, но это свойство писателя, а не
-    контракт. Границы читаются из метаданных, поэтому адрес верен
-    и если писатель однажды порежет файл иначе.
-    """
-
-    metadata = pq.read_metadata(events_path)
-
-    boundaries = [0]
-    for index in range(metadata.num_row_groups):
-        boundaries.append(boundaries[-1] + metadata.row_group(index).num_rows)
-
-    edges = np.asarray(boundaries, dtype=np.int64)
-
-    for item in clients:
-
-        start = item["global_row_start"]
-
-        if start is None or not item["row_count"]:
-            continue
-
-        group = int(np.searchsorted(edges, start, side="right") - 1)
-
-        item["row_group"] = group
-        item["row_offset"] = int(start - edges[group])
-        item["spans_row_groups"] = bool(start + item["row_count"] > edges[group + 1])
+    events_rows: int
+    profile_rows: int
+    clients: int
 
 
 def build_group(
@@ -132,7 +82,10 @@ def build_group(
     group: str | None,
 ) -> CanonicalResult:
 
-    raw = RawDataset(raw_dir)
+    # Пригодность входа проверяется ДО любой записи: непригодная
+    # выгрузка не должна оставить ни куска слоя.
+    raw = check_raw(raw_dir)
+
     manifest = raw.manifest
 
     out_dir = Path(out_dir)
@@ -140,412 +93,83 @@ def build_group(
     schema = canonical_schema(manifest)
     payload_names = [name for name, _ in payload_columns(manifest)]
 
-    client_index = build_client_index(raw)
+    client_index = _client_index(raw)
 
-    # --- лента ---
+    _clear(out_dir)
 
-    events_writer = TableWriter(out_dir / EVENTS_FILE, schema)
-    mentions_writer = TableWriter(out_dir / MENTIONS_FILE, MENTIONS_SCHEMA)
+    metadata = {
+        PERIOD_START_KEY: manifest.period_start.isoformat().encode("utf-8"),
+        PERIOD_END_KEY: manifest.period_end.isoformat().encode("utf-8"),
+    }
 
-    # Отчёт о сущностях копится по пачкам: читать всю таблицу
-    # упоминаний обратно значит держать в памяти целую группу.
-    entity_scan: dict[tuple[str, str], dict] = {}
-
-    rejects: list[dict] = []
-    clients: list[dict] = []
-    transfers: list[dict] = []
-
-    counts: Counter = Counter()
-    flags: Counter = Counter()
-
-    row_start = 0
-    row_group = 0
+    events_writer = TableWriter(out_dir / EVENTS_FILE, schema.with_metadata(metadata))
 
     for batch in iter_client_batches(raw, config.batch_clients):
 
-        result = build_batch(
-            raw,
-            config,
-            batch,
-            payload_names,
-            schema,
-            client_index,
-            row_group,
-            row_start,
-        )
+        result = build_batch(raw, config, batch, payload_names, schema, client_index)
 
         events_writer.write(result.table)
 
-        mentions = extract_mentions(result.table)
-        if mentions.num_rows:
-            mentions_writer.write(mentions)
-            scan_entities(mentions, entity_scan)
-
-        transfers.extend(extract_transfers(result.table))
-
-        rejects.extend(result.rejects)
-        clients.extend(result.clients)
-
-        for key, value in result.counts.items():
-            counts[key] += value
-
-        for name in (
-            "before_window",
-            "at_or_after_extract",
-            "ambiguous_local_time",
-            "balance_chain_gap",
-        ):
-            flags[name] += int(pc.sum(result.table.column(name)).as_py() or 0)
-
-        flags["payload_violations"] += int(
-            pc.sum(pc.is_valid(result.table.column("payload_violations"))).as_py() or 0
-        )
-        flags["known_missing"] += int(
-            pc.sum(pc.is_valid(result.table.column("known_missing"))).as_py() or 0
-        )
-
-        row_start += result.table.num_rows
-        row_group += 1
-
     events_rows = events_writer.close()
-    mentions_rows = mentions_writer.close()
 
-    # --- спутники ---
+    profile_table = build_profile(raw, client_index)
 
-    profile_table, profile_report = build_profile(raw, client_index)
     write_table(out_dir / PROFILE_FILE, profile_table)
 
-    transfers_table = order_transfers(transfers)
-    write_table(out_dir / TRANSFERS_FILE, transfers_table, TRANSFERS_SCHEMA)
-
-    write_table(
-        out_dir / REJECTS_FILE,
-        pa.Table.from_pylist(rejects, schema=REJECTS_SCHEMA) if rejects else REJECTS_SCHEMA.empty_table(),
-        REJECTS_SCHEMA,
+    return CanonicalResult(
+        outputs=[out_dir / EVENTS_FILE, out_dir / PROFILE_FILE],
+        events_rows=events_rows,
+        profile_rows=profile_table.num_rows,
+        clients=len(client_index),
     )
 
-    # Клиенты без событий тоже в индексе: отсутствие событий это
-    # наблюдение, а не повод исчезнуть.
-    with_events = {item["client_id"] for item in clients}
 
-    for client_id, index in sorted(client_index.items(), key=lambda item: item[1]):
-        if client_id not in with_events:
-            clients.append(
-                {
-                    "client_idx": index,
-                    "client_id": client_id,
-                    "row_group": None,
-                    "row_offset": None,
-                    "global_row_start": None,
-                    "row_count": 0,
-                    "spans_row_groups": False,
-                    "event_time_min": None,
-                    "event_time_max": None,
-                }
-            )
+def _client_index(raw: RawDataset) -> dict[str, int]:
+    """
+    Плотный внутренний номер клиента: устойчивый индекс в
+    лексикографическом порядке client_id.
 
-    clients.sort(key=lambda item: item["client_idx"])
+    Список собирается из профиля и ленты: клиент без событий не
+    исчезает, а клиент без профиля не теряется. Отдельным файлом
+    он не выкладывается — следующий этап считает его так же.
+    """
 
-    locate_clients(out_dir / EVENTS_FILE, clients)
+    ids: set[str] = set()
 
-    write_table(
-        out_dir / CLIENT_INDEX_FILE,
-        pa.Table.from_pylist(clients, schema=CLIENT_INDEX_SCHEMA),
-        CLIENT_INDEX_SCHEMA,
-    )
+    ids.update(raw.read("profile", ["client_id"]).column("client_id").to_pylist())
 
-    # --- реестр полей ---
+    for _, chunk in raw.iter_row_groups("events", ["client_id"]):
+        ids.update(pc.unique(chunk.column("client_id")).to_pylist())
 
-    extra = [("derived", name, dtype, description) for name, _, dtype, description in DERIVED_COLUMNS]
-    entries = build_registry(manifest, extra)
-
-    registry = registry_as_dict(entries, timezone=config.timezone)
-
-    write_json(out_dir / REGISTRY_FILE, registry)
-
-    # --- связи ---
-
-    link_report = build_link_report(
-        out_dir / EVENTS_FILE,
-        entity_scan,
-        transfers_table,
-        manifest.period_start,
-    )
-
-    # --- отчёт ---
-
-    raw_rows = manifest.events_rows
-
-    status = STATUS_OK if events_rows == raw_rows else STATUS_ROW_COUNT_MISMATCH
-
-    report: dict[str, Any] = {
-        "stage": STAGE,
-        "stage_version": STAGE_VERSION,
-        "schema_version": SCHEMA_VERSION,
-        "group": group,
-        "status": status,
-        "raw": manifest.echo(),
-        "config": config.section(STAGE),
-        "rows": {
-            "raw_events": raw_rows,
-            "canonical_events": events_rows,
-            "difference": events_rows - raw_rows,
-            "rule": "одна строка RAW это одна строка canonical: дубли и конфликты остаются с пометкой",
-            "profile": profile_table.num_rows,
-            "mentions": mentions_rows,
-            "transfer_sides": transfers_table.num_rows,
-            "rejects": len(rejects),
-            "clients": len(clients),
-            "clients_without_events": sum(1 for item in clients if not item["row_count"]),
-        },
-        "flags": dict(sorted(flags.items())),
-        "payload": {
-            "columns": len(payload_names),
-            "physical_fields": sum(1 for item in entries if item.role == "payload"),
-            "violations": {key: value for key, value in sorted(counts.items()) if key != "rows"},
-            "rule": "нарушение контракта обнуляет ячейку и остаётся в payload_violations строки",
-        },
-        "text_normalization": TEXT_NORMALIZATION,
-        "timezone": {
-            "contract": config.timezone,
-            "rule": "значения остаются наивными, как в выгрузке; пояс объявлен, а не применён",
-            "ambiguous_intervals": [item.as_dict() for item in config.ambiguous_local_intervals],
-            "ambiguous_rows": flags.get("ambiguous_local_time", 0),
-        },
-        "profile": profile_report,
-        "links": link_report,
-        "registry": {
-            "file": REGISTRY_FILE,
-            "digest": registry_digest(entries),
-            "counts": registry["counts"],
-            "rules": registry["rules"],
-        },
-    }
-
-    outputs = [
-        out_dir / EVENTS_FILE,
-        out_dir / PROFILE_FILE,
-        out_dir / CLIENT_INDEX_FILE,
-        out_dir / MENTIONS_FILE,
-        out_dir / TRANSFERS_FILE,
-        out_dir / REJECTS_FILE,
-        out_dir / REGISTRY_FILE,
-    ]
-
-    # Отчёт пишет сам этап: каталог canonical должен отвечать на
-    # вопрос о себе без помощи оркестратора, иначе читатель слоя
-    # не найдёт ни границ выгрузки, ни правил сборки.
-    write_json(out_dir / REPORT_JSON_FILE, report)
-    write_text(out_dir / REPORT_MD_FILE, render_canonical_md(report))
-
-    outputs += [out_dir / REPORT_JSON_FILE, out_dir / REPORT_MD_FILE]
-
-    return CanonicalResult(report, outputs)
+    return {value: index for index, value in enumerate(sorted(ids))}
 
 
-# ============================================================
-# MARKDOWN
-# ============================================================
+def _clear(out_dir: Path) -> None:
+    """
+    Каталог этапа перед записью пуст.
 
+    Чистится всё, что в нём лежит: прежняя сборка могла оставить
+    файлы, которых этап больше не делает.
+    """
 
-def render_canonical_md(report: dict) -> str:
+    if not out_dir.exists():
+        return
 
-    out: list[str] = []
-
-    group = report.get("group") or "—"
-
-    out.append(f"# Canonical: группа {group}\n")
-    out.append(f"Статус: **{report['status']}**.\n")
-
-    rows = report["rows"]
-
-    out.append("## Строки\n")
-    out.append(
-        _md_table(
-            [
-                ["строк RAW", rows["raw_events"]],
-                ["строк canonical", rows["canonical_events"]],
-                ["разница", rows["difference"]],
-                ["версии профиля", rows["profile"]],
-                ["упоминания сущностей", rows["mentions"]],
-                ["стороны переводов", rows["transfer_sides"]],
-                ["неразобранные строки", rows["rejects"]],
-                ["клиентов", rows["clients"]],
-                ["из них без событий", rows["clients_without_events"]],
-            ],
-            ["показатель", "значение"],
-        )
-    )
-    out.append(f"\n{rows['rule']}.\n")
-
-    out.append("\n## Наблюдаемость\n")
-    out.append(
-        _md_table(
-            [[name, count] for name, count in report["flags"].items()],
-            ["признак", "строк"],
-        )
-    )
-
-    payload = report["payload"]
-
-    out.append("\n## Payload\n")
-    out.append(
-        _md_table(
-            [
-                ["физических полей", payload["physical_fields"]],
-                ["колонок в таблице", payload["columns"]],
-                ["нарушения контракта", payload["violations"] or "—"],
-            ],
-            ["показатель", "значение"],
-        )
-    )
-    out.append(f"\n{payload['rule']}.\n")
-
-    timezone = report["timezone"]
-
-    out.append("\n## Время\n")
-    out.append(
-        _md_table(
-            [
-                ["часовой пояс контракта", timezone["contract"]],
-                ["правило", timezone["rule"]],
-                [
-                    "неоднозначные интервалы",
-                    ", ".join(f"{item['start']}…{item['end']} ({item['reason']})" for item in timezone["ambiguous_intervals"]) or "—",
-                ],
-                ["строк в них", timezone["ambiguous_rows"]],
-            ],
-            ["показатель", "значение"],
-        )
-    )
-
-    links = report["links"]
-
-    out.append("\n## Связи\n")
-
-    causes = links["causes"]
-    if causes.get("references"):
-        out.append(
-            _md_table(
-                [
-                    ["ссылок на причину", causes["references"]],
-                    ["разрешено", causes["resolved"]],
-                    ["не разрешено", causes["unresolved"] or "—"],
-                    ["у другого клиента", causes["cross_client"]],
-                    ["причина позже следствия", causes["cause_after_effect"]],
-                ],
-                ["показатель", "значение"],
-            )
-        )
-        out.append(f"\n{causes['rule']}.\n")
-
-    transfers = links["transfers"]
-    if transfers.get("sides"):
-        out.append("\n### Переводы\n")
-        out.append(
-            _md_table(
-                [
-                    ["сторон", transfers["sides"]],
-                    ["переводов", transfers["transfers"]],
-                    ["обе стороны есть в выгрузке", transfers["both_sides_in_full_extract"]],
-                    ["одна сторона в выгрузке", transfers["one_side_in_full_extract"]],
-                ],
-                ["показатель", "значение"],
-            )
-        )
-        out.append(f"\n{transfers['rule']}.\n")
-
-    entities = links["entities"]
-    if entities.get("entities"):
-        out.append("\n### Сущности\n")
-        out.append(
-            _md_table(
-                [
-                    [
-                        kind,
-                        item["entities"],
-                        "да" if item["opening_applicable"] else "нет",
-                        item["with_opening"],
-                        item["without_opening"],
-                        ", ".join(f"{k}={v}" for k, v in item["reasons"].items()) or "—",
-                    ]
-                    for kind, item in entities["by_kind"].items()
-                ],
-                ["вид", "всего", "открытие определено", "с открытием", "без открытия", "причины"],
-            )
-        )
-        out.append(f"\n{entities['rule']}.\n")
-
-    chains = links["chains"]
-    if chains.get("chains"):
-        out.append("\n### Цепочки\n")
-        out.append(
-            _md_table(
-                [
-                    [
-                        field_name,
-                        item["chains"],
-                        ", ".join(f"{size}:{count}" for size, count in item["sizes"].items()),
-                        ", ".join(f"{k}={v}" for k, v in item["event_types"].items()),
-                    ]
-                    for field_name, item in chains["by_field"].items()
-                ],
-                ["связь", "цепочек", "размеры", "типы событий"],
-            )
-        )
-
-    profile = report["profile"]
-
-    out.append("\n## Профиль\n")
-    out.append(
-        _md_table(
-            [
-                ["версий профиля", profile["rows"]],
-                ["клиентов в профиле", profile["clients"]],
-                ["правило профиля", profile["rule"]],
-            ],
-            ["показатель", "значение"],
-        )
-    )
-
-    registry = report["registry"]
-
-    out.append("\n## Реестр физических полей\n")
-    out.append(
-        _md_table(
-            [
-                ["всего записей", registry["counts"]["total"]],
-                ["полей payload", registry["counts"]["by_owner_kind"]["payload"]],
-                ["из них разных имён", registry["counts"]["distinct_payload_names"]],
-                ["конверт", registry["counts"]["by_owner_kind"]["envelope"]],
-                ["профиль", registry["counts"]["by_owner_kind"]["profile"]],
-                ["производные", registry["counts"]["by_owner_kind"]["derived"]],
-            ],
-            ["показатель", "значение"],
-        )
-    )
-    out.append(f"\n{registry['rules']['identity']}.\n")
-
-    return "\n".join(out) + "\n"
+    for item in sorted(out_dir.rglob("*"), reverse=True):
+        if item.is_file():
+            item.unlink()
+        else:
+            item.rmdir()
 
 
 __all__ = [
-    "CLIENT_INDEX_FILE",
-    "REGISTRY_FILE",
-    "REPORT_JSON_FILE",
-    "REPORT_MD_FILE",
-    "locate_clients",
     "EVENTS_FILE",
-    "MENTIONS_FILE",
+    "PERIOD_END_KEY",
+    "PERIOD_START_KEY",
     "PROFILE_FILE",
-    "REJECTS_FILE",
+    "SCHEMA_VERSION",
     "STAGE",
     "STAGE_VERSION",
-    "STATUS_OK",
-    "STATUS_ROW_COUNT_MISMATCH",
-    "TRANSFERS_FILE",
     "CanonicalResult",
-    "build_client_index",
     "build_group",
-    "render_canonical_md",
 ]

@@ -64,7 +64,7 @@ def calendar_features(ts) -> np.ndarray:
         position = int(np.flatnonzero(np.isnat(moments))[0])
         raise ValueError(
             f"событие {position}: нет event_time, календарь считать не из чего. "
-            "Пустое время блокируется паспортом и останавливает canonical"
+            "Пустое время останавливает preprocess проверкой RAW"
         )
 
     day = moments.astype("datetime64[D]")
