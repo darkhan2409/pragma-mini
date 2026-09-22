@@ -169,7 +169,7 @@ def _payment_capacity(state: ClientState, ts: datetime) -> int:
     allow_credit = params_module.active().products.loan_payment_from_credit_card
 
     values = [
-        account.available
+        state.ledger.available_at(account.account_id, ts)
         for account in state.ledger.accounts.values()
         if account.visible
         and account.is_open_at(ts)
@@ -230,7 +230,7 @@ def _topup_before_payment(state: ClientState, ts: datetime, amount: int, rng) ->
     if account is None:
         return False
 
-    shortfall = max(0, amount - account.available)
+    shortfall = max(0, amount - state.ledger.available_at(account.account_id, ts))
 
     if shortfall <= 0:
         return False
@@ -359,6 +359,15 @@ def repay_loan(
         return
 
     account = sources[0]
+
+    # Сколько на самом деле можно списать в этот момент. Ниже
+    # apply_payment уже проставляет отметки в графике, и отменить
+    # их за отказом было бы нечем — поэтому сумма ограничивается
+    # ЗДЕСЬ, до первой отметки, а не проверяется после списания.
+    amount = min(int(amount), state.ledger.available_at(account.account_id, ts))
+
+    if amount <= 0:
+        return
 
     # Один платёж закрывает столько взносов, на сколько хватает
     # денег. Клиент, отставший на месяц, догоняет график, а не
@@ -585,7 +594,7 @@ def close_loan(state: ClientState, ts: datetime, loan, early: bool, reason: str 
         if not sources:
             return
 
-        _emit_money(
+        paid = _emit_money(
             state,
             ts + timedelta(seconds=150),
             "loan_payment",
@@ -601,6 +610,10 @@ def close_loan(state: ClientState, ts: datetime, loan, early: bool, reason: str 
                 "merchant_country": "KZ",
             },
         )
+
+        # Денег не списали — кредит не погашен.
+        if paid.payload.get("status") != "approved":
+            return
 
         loan.principal_outstanding = 0
 

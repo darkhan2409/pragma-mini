@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .entities import (
     ACCOUNT_CASH,
@@ -65,6 +65,15 @@ class InsufficientFunds(Exception):
 NON_PAYMENT_KINDS: tuple[str, ...] = ("loan", "deposit")
 
 
+# Насколько далеко порядок решений может разойтись с порядком
+# ленты. Решение принимается не тогда, когда операция датирована:
+# счёт к сроку подтягивают на двенадцать минут раньше платежа,
+# просроченный счёт платят задним числом, кешбэк месяца начисляют
+# до выписки, а датируют после неё. Дальше двух суток это
+# расхождение не уходит ни в одном месте генератора.
+RECENT_WINDOW = timedelta(days=2)
+
+
 class Ledger:
     """
     Счета клиента и все проводки по ним.
@@ -78,6 +87,10 @@ class Ledger:
         # Проводки по счёту: начисление процентов смотрит только на
         # свой вклад, а не перебирает всю историю клиента.
         self.by_account: dict[str, list[Posting]] = {}
+        # Недавние проводки наблюдаемых счетов: по ним считается
+        # остаток НА МОМЕНТ операции, а не на момент решения.
+        # Скрытые счета сюда не попадают — их в ленте нет вовсе.
+        self.recent: dict[str, list[Posting]] = {}
         self._counter = 0
 
         self.cash_id = f"cash:{client_id}"
@@ -169,8 +182,16 @@ class Ledger:
         self.postings.append(posting)
 
         for side in (debit, credit):
-            if side in self.accounts:
-                self.by_account.setdefault(side, []).append(posting)
+
+            account = self.accounts.get(side)
+
+            if account is None:
+                continue
+
+            self.by_account.setdefault(side, []).append(posting)
+
+            if account.visible:
+                self.recent.setdefault(side, []).append(posting)
 
         return posting
 
@@ -195,11 +216,73 @@ class Ledger:
 
     # --------------------------------------------------------
 
-    def can_debit(self, account_id: str, amount: int) -> bool:
+    def available_at(self, account_id: str, ts: datetime) -> int:
+        """
+        Сколько можно списать со счёта операцией, датированной ts,
+        не уведя счёт в минус НИ В ОДНОЙ точке ленты.
+
+        Остаток счёта знает только сумму всех проводок, а решения
+        принимаются не в том порядке, в котором строки лягут в
+        файл. Поэтому здесь считается иначе:
+
+          проводка, датированная позже ts, из остатка вычитается —
+          в ленте на этом месте её ещё нет;
+
+          затем остаток прокручивается вперёд по уже известным
+          проводкам, и берётся самая низкая его точка. Списание
+          опускает всю дальнейшую цепочку на свою сумму, так что
+          разрешить можно ровно эту глубину.
+
+        Кредитному счёту минус разрешён: available знает про
+        кредитный лимит. Обычному счёту лимита нет, и available
+        равен остатку.
+        """
+
+        account = self.accounts.get(account_id)
+
+        if account is None:
+            return 0
+
+        recent = self.recent.get(account_id)
+
+        if not recent:
+            return account.available
+
+        # Чистится ЗДЕСЬ, по спрашиваемому моменту, а не по самой
+        # поздней проводке: проводка бывает датирована и на неделю
+        # вперёд (возврат, chargeback), и она обязана дожить до
+        # своего дня. Всё, что старше окна расхождения, в ленте
+        # заведомо стоит раньше любой следующей проверки.
+        if recent[0].ts < ts - RECENT_WINDOW:
+            recent[:] = [item for item in recent if item.ts >= ts - RECENT_WINDOW]
+
+        ahead = sorted(
+            (
+                (posting.ts, posting.amount if posting.credit == account_id else -posting.amount)
+                for posting in recent
+                if posting.ts > ts
+            ),
+            key=lambda item: item[0],
+        )
+
+        if not ahead:
+            return account.available
+
+        running = account.available - sum(value for _, value in ahead)
+
+        lowest = running
+
+        for _, value in ahead:
+            running += value
+            lowest = min(lowest, running)
+
+        return lowest
+
+    def can_debit(self, account_id: str, amount: int, ts: datetime) -> bool:
         account = self.accounts.get(account_id)
         if account is None:
             return False
-        return account.available >= amount
+        return self.available_at(account_id, ts) >= amount
 
     def payment_sources(self, ts: datetime, amount: int) -> list:
         """
@@ -213,7 +296,7 @@ class Ledger:
             if account.visible
             and account.is_open_at(ts)
             and account.kind not in NON_PAYMENT_KINDS
-            and account.available >= amount
+            and self.available_at(account.account_id, ts) >= amount
         ]
 
         order = {"card": 0, "current": 1, "credit_card": 2}
@@ -229,7 +312,7 @@ class Ledger:
         """
 
         sources = [
-            account.available
+            self.available_at(account.account_id, ts)
             for account in self.accounts.values()
             if account.visible
             and account.is_open_at(ts)

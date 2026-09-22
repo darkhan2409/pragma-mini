@@ -698,11 +698,12 @@ def _own_transfer(
         return False
 
     # Денег на счёте списания нет — перевода не будет вовсе.
-    # Отказ первой ноги оставил бы зачисление без списания:
-    # деньги появились бы из ниоткуда.
+    # Остаток берётся на момент списания: между решением и
+    # моментом операции порядок ленты и порядок решений
+    # расходятся.
     source = state.ledger.get(source_id)
 
-    if source is None or source.available < int(amount):
+    if source is None or state.ledger.available_at(source_id, ts) < int(amount):
         return False
 
     # Канал списания зависит от того, была ли сессия. Пополнение
@@ -721,6 +722,12 @@ def _own_transfer(
             "session_id": session_id,
         },
     )
+
+    # Отказ первой ноги оставил бы зачисление без списания:
+    # деньги появились бы из ниоткуда, а у перевода осталась бы
+    # одна сторона.
+    if debit.payload.get("status") != "approved":
+        return False
 
     _emit_money(
         state, credit_ts, credit_event_type or event_type,

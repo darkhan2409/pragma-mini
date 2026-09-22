@@ -584,16 +584,9 @@ def _build_steps(
             "taxes": "pay_tax",
         }.get(bill, "pay_utility")
 
-        advance()
-
-        steps.append(
-            Step(
-                kind="screen",
-                ts=moment,
-                domain="payments",
-                screen="s_301_payment_utility",
-            )
-        )
+        # Блуждание по разделу могло уже привести клиента на
+        # экран оплаты: открывать его второй раз подряд незачем.
+        push_screen("payments", "s_301_payment_utility")
 
         advance()
 
