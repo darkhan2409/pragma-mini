@@ -9,7 +9,7 @@ from src.preprocessing.settings import GroupWindow
 # ИДЕЯ
 # ============================================================
 #
-# Где вообще разрешено выбирать цели и что известно о времени.
+# Где вообще разрешено выбирать цели.
 #
 # Датасет НИЧЕГО не маскирует. Он только говорит, какие события
 # лежат в периоде будущих целей своей группы: старая история
@@ -24,12 +24,9 @@ from src.preprocessing.settings import GroupWindow
 # ============================================================
 
 
-HOUR_SECONDS = 3600.0
-
-
 class TargetsError(ValueError):
     """
-    Признак цели или канал времени посчитать нельзя.
+    Признак цели посчитать нельзя.
     """
 
 
@@ -45,19 +42,7 @@ def eligible(event_time: datetime, window: GroupWindow) -> bool:
     return window.target_start <= event_time < window.target_end
 
 
-def hours_to_cutoff(cutoff: datetime, event_time: datetime) -> float:
-    """
-    Сколько часов от события до среза.
-
-    Время события точное, поэтому разность берётся как есть:
-    согласовывать точности больше нечего.
-    """
-
-    return (cutoff - event_time).total_seconds() / HOUR_SECONDS
-
-
 __all__ = [
     "TargetsError",
     "eligible",
-    "hours_to_cutoff",
 ]

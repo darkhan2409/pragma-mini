@@ -5,36 +5,37 @@ from pathlib import Path
 from src.preprocessing.artifacts import read_json
 
 from .fit import TrainCorpus
-from .keyvocab import domains_of
+from .keyvocab import domains_of, next_id
 from .scan import TYPE_BOOL, TYPE_FLOAT, TYPE_INT, TYPE_ORDER
 from .schema import SemanticSchema
-from .settings import DECLINED_DOMAINS, VALUE_VOCAB_FILE, TokenizerConfig, tokenizer_path
-from .specials import KIND_CATEGORICAL
-from .version import FORMAT_VERSION, IMPLEMENTATION_VERSION, SCHEMA_VERSION
+from .settings import VALUE_VOCAB_FILE, TokenizerConfig, vocab_path
 
 
 # ============================================================
 # ЭТАП 3: КАТЕГОРИАЛЬНЫЕ ЗНАЧЕНИЯ
 # ============================================================
 #
-# Здесь лежит ответ на вопрос «какие значения бывают у этого
-# смысла» и ни на какой другой: чисел и кусков текста в этом
-# словаре нет.
+# Файл отвечает на один вопрос:
 #
-# Домен это множество значений, из которого берёт свои значения
-# один или несколько ключей. По умолчанию домен у каждого ключа
-# свой; объединение делается явным списком с причиной, и реестр
-# смысла имеет право его запретить.
+#   ключ + значение -> ID
 #
-# Значение это пара «тип, запись». Булево, целое и строка не
-# сравниваются между собой, даже когда записываются одинаково.
+# Именно пара, а не значение само по себе: active у карты и
+# active у обращения это разные факты, и общий номер склеил бы
+# их. Поэтому значения сгруппированы по ключу, а плоской таблицы
+# «значение -> номер» здесь нет.
 #
-# Все наблюдавшиеся на train категории сохраняются целиком.
-# Порог редкости существует, но по умолчанию выключен, и поиска
-# «лучшего порога» здесь нет: это была бы подгонка словаря под
-# данные под видом правила.
+# Ключи, объединённые в общий домен явным списком с причиной,
+# делят одни и те же номера: одинаковое значение у них и правда
+# одно и то же.
 #
-# Значения, которых на train не было, словаря не получают
+# Ключ без наблюдений на train остаётся в файле с пустым
+# набором: «категория, которой мы не видели» и «поле не
+# категория» это разные вещи.
+#
+# Чисел и кусков текста здесь нет. Частот тоже: они нужны при
+# построении и в готовом словаре ничего не кодируют.
+#
+# Значения, которых на train не было, номера не получают
 # никогда: на val и test они кодируются как [UNK].
 # ============================================================
 
@@ -76,23 +77,21 @@ def sort_key(value_type: str, text: str) -> tuple:
 
 def build_value_vocab(
     train: TrainCorpus,
-    key_vocab: dict,
+    key_vocab: dict[str, int],
     config: TokenizerConfig,
     schema: SemanticSchema,
-) -> dict:
+) -> dict[str, dict[str, int]]:
     """
-    Категориальные значения train, их ID, частоты и связь с
-    ключом.
+    Категориальные значения train по ключам: ключ -> значение -> ID.
     """
 
-    domain_of, domains = domains_of(config, schema)
+    domain_of = domains_of(config, schema)
 
-    stats = train.statistics
+    # --- что встретилось на train ---
 
-    collected: dict[str, dict[tuple[str, str], dict]] = {}
-    per_key: dict[str, list[tuple[str, str]]] = {}
+    per_domain: dict[str, dict[tuple[str, str], int]] = {}
 
-    for (key, value_type, value), entry in sorted(stats.categorical.items()):
+    for (key, value_type, value), entry in sorted(train.statistics.categorical.items()):
 
         domain = domain_of.get(key)
 
@@ -102,130 +101,60 @@ def build_value_vocab(
                 "статистика и реестр разошлись"
             )
 
-        slot = collected.setdefault(domain, {})
+        slot = per_domain.setdefault(domain, {})
+
         item = (value_type, value)
 
-        row = slot.get(item)
-
-        if row is None:
-            row = {"value_type": value_type, "value": value, "count": 0, "clients": 0, "keys": []}
-            slot[item] = row
-
-        row["count"] += entry.count
-        row["clients"] += entry.clients
-        row["keys"].append(key)
-
-        per_key.setdefault(key, []).append(item)
+        # Частота нужна здесь и только здесь: в файл она не едет.
+        slot[item] = slot.get(item, 0) + entry.count
 
     # --- номера ---
 
-    first_value_id = int(key_vocab["next_id"])
+    first_id = next_id(key_vocab)
 
-    rows: list[dict] = []
-    rare_total = 0
+    ids_of_domain: dict[str, dict[str, int]] = {}
 
-    for name in sorted(domains):
+    number = first_id
 
-        ordered = sorted(
-            collected.get(name, {}).values(),
-            key=lambda item: sort_key(item["value_type"], item["value"]),
-        )
+    for domain in sorted(set(domain_of.values()) | set(per_domain)):
 
-        ids: list[int] = []
+        ordered = sorted(per_domain.get(domain, {}), key=lambda item: sort_key(*item))
 
-        for item in ordered:
+        assigned: dict[str, int] = {}
+        types: dict[str, str] = {}
 
-            item["keys"] = sorted(set(item["keys"]))
-            item["rare"] = config.rare_min_count is not None and item["count"] < config.rare_min_count
-            rare_total += int(item["rare"])
+        for value_type, text in ordered:
 
-            row = {
-                "id": first_value_id + len(rows),
-                "kind": KIND_CATEGORICAL,
-                "domain": name,
-                "key": None,
-                "value_type": item["value_type"],
-                "value": item["value"],
-                "label": f"{name}={item['value']}",
-                "count": item["count"],
-                "clients": item["clients"],
-                "rare": item["rare"],
-                "keys": item["keys"],
-            }
+            # Значение в файле это запись, а не пара «тип, запись».
+            # У одного ключа тип один — это проверяет fit; в общем
+            # домене разные типы с одинаковой записью слились бы
+            # молча, и это останавливает этап.
+            if text in assigned:
+                raise ValuesError(
+                    f"домен {domain}: запись {text!r} встретилась и как {types[text]}, и как "
+                    f"{value_type}: одним номером это разные значения не становятся"
+                )
 
-            rows.append(row)
-            ids.append(row["id"])
+            assigned[text] = number
+            types[text] = value_type
+            number += 1
 
-        domains[name]["values"] = len(ids)
-        domains[name]["value_ids"] = ids
+        ids_of_domain[domain] = assigned
 
-    # --- связь с ключом ---
-
-    index_of = {(row["domain"], row["value_type"], row["value"]): row["id"] for row in rows}
-
-    by_key: dict[str, list[int]] = {}
-
-    for row in key_vocab["keys"]:
-
-        if row["value_kind"] != KIND_CATEGORICAL:
-            continue
-
-        key = row["key"]
-        domain = row["domain"]
-
-        observed = sorted(set(per_key.get(key, [])), key=lambda item: sort_key(*item))
-
-        by_key[key] = [index_of[(domain, value_type, value)] for value_type, value in observed]
-
-    unobserved = sorted(key for key, ids in by_key.items() if not ids)
+    # --- по ключам ---
 
     return {
-        "schema_version": SCHEMA_VERSION,
-        "format_version": FORMAT_VERSION,
-        "implementation_version": IMPLEMENTATION_VERSION,
-        "fit": train.as_dict(),
-        "config_sha256": config.sha256(),
-        "first_value_id": first_value_id,
-        "size": len(rows),
-        "next_id": first_value_id + len(rows),
-        "rules": {
-            "identity": "значение это пара «тип, запись»: true, 1 и \"1\" разными не выглядят, "
-                        "но разными являются",
-            "domain": "по умолчанию домен у ключа свой; объединение делается явным списком с причиной "
-                      "и запрещено там, где смысловой реестр объявил ключи несовместимыми",
-            "order": "значения домена упорядочены по типу и по самому значению, а не по его записи",
-            "rare": (
-                "все наблюдавшиеся категории сохраняются целиком"
-                if config.rare_min_count is None
-                else f"значение реже {config.rare_min_count} наблюдений помечено редким"
-            ),
-            "unknown": "UNK это категория, которой на train не было; RARE это известная train-категория, "
-                       "объединённая по правилу редкости. Это разные вещи",
-            "digits": "цифровые коды это категории: MCC, версия продукта и версия тарифа величинами не являются",
-        },
-        "counts": {
-            "domains": len(domains),
-            "domains_shared": sum(1 for item in domains.values() if item["shared"]),
-            "values": len(rows),
-            "rare": rare_total,
-            "keys": len(by_key),
-            "unobserved_in_train": len(unobserved),
-        },
-        "domains": [domains[name] for name in sorted(domains)],
-        "values": rows,
-        "by_key": by_key,
-        "unobserved_in_train": unobserved,
-        "declined_domains": [{"keys": list(keys), "reason": reason} for keys, reason in DECLINED_DOMAINS],
-        "ambiguous": [{"keys": list(keys), "reason": reason} for keys, reason in schema.ambiguous],
+        key: dict(ids_of_domain.get(domain_of[key], {}))
+        for key in sorted(schema.categorical_keys)
     }
 
 
-def load_value_vocab(directory: Path | None = None) -> dict:
+def load_value_vocab(directory: Path | None = None) -> dict[str, dict[str, int]]:
     """
     Каталог значений предыдущего этапа.
     """
 
-    path = (Path(directory) / VALUE_VOCAB_FILE) if directory else tokenizer_path(VALUE_VOCAB_FILE)
+    path = (Path(directory) / VALUE_VOCAB_FILE) if directory else vocab_path(VALUE_VOCAB_FILE)
 
     if not path.exists():
         raise ValuesError(f"нет {path}: выполните python -m src.tokenization.run value-vocab")

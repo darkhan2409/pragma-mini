@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.preprocessing.settings import PreprocessingConfig
-from src.tokenization.layout import FrozenArtifacts
-from src.tokenization.specials import EMPTY, INVALID, MISSING, UNK
+from src.tokenization.finalvocab import FrozenArtifacts
+from src.tokenization.settings import TokenizerConfig
+from src.tokenization.specials import UNK
 
 from .sample import Sample, SampleError, build_sample
 from .settings import SAMPLES_FILE, DatasetConfig, dataset_dir
@@ -47,56 +48,30 @@ class BuildError(ValueError):
 
 SAMPLES_SCHEMA = pa.schema(
     [
-        # --- тождество ---
         ("client_id", pa.string()),
-        ("group", pa.string()),
-        ("cutoff", pa.timestamp("us")),
-        ("weight", pa.float64()),
-        ("sample_seed", pa.int64()),
 
-        # --- размеры ---
-        ("n_events", pa.int32()),
-        ("n_tokens", pa.int32()),
-        ("n_values", pa.int32()),
-
-        # --- события: входы модели ---
+        # --- события клиента одной последовательностью ---
         ("key_ids", pa.list_(pa.int32())),
         ("value_ids", pa.list_(pa.int32())),
         ("positions", pa.list_(pa.int32())),
         ("event_starts", pa.list_(pa.int32())),
         ("event_lengths", pa.list_(pa.int32())),
-
-        # --- события: время ---
         ("event_time", pa.list_(pa.timestamp("us"))),
-        ("hours_to_cutoff", pa.list_(pa.float64())),
         ("calendar", pa.list_(pa.float32())),
 
-        # --- цели ---
-        ("event_eligible", pa.list_(pa.bool_())),
-        ("n_eligible_events", pa.int32()),
-        ("has_targets", pa.bool_()),
+        # --- границы значений, включая составные ---
+        ("value_starts", pa.list_(pa.int32())),
+        ("value_lengths", pa.list_(pa.int32())),
 
-        # --- значения событий ---
-        ("value_event", pa.list_(pa.int32())),
-        ("value_start", pa.list_(pa.int32())),
-        ("value_length", pa.list_(pa.int32())),
-        ("value_key_id", pa.list_(pa.int32())),
+        # --- что разрешено маскировать ---
+        ("target_event_mask", pa.list_(pa.bool_())),
 
         # --- профиль ---
         ("profile_key_ids", pa.list_(pa.int32())),
         ("profile_value_ids", pa.list_(pa.int32())),
         ("profile_positions", pa.list_(pa.int32())),
-        ("profile_value_start", pa.list_(pa.int32())),
-        ("profile_value_length", pa.list_(pa.int32())),
-        ("profile_value_key_id", pa.list_(pa.int32())),
-        ("has_profile", pa.bool_()),
-
-        # --- служебное ---
-        ("truncated", pa.bool_()),
-        ("excluded_events", pa.int32()),
-        ("excluded_tokens", pa.int32()),
-        ("excluded_eligible", pa.int32()),
-        ("limitations", pa.list_(pa.string())),
+        ("profile_value_starts", pa.list_(pa.int32())),
+        ("profile_value_lengths", pa.list_(pa.int32())),
     ]
 )
 
@@ -114,68 +89,43 @@ class Counters:
     eligible: int = 0
     with_targets: int = 0
     silent: int = 0
-    without_profile: int = 0
+    empty_profiles: int = 0
     truncated: int = 0
     excluded_events: int = 0
     max_tokens: int = 0
-    specials: dict[str, int] = field(default_factory=dict)
-    limitations: set[str] = field(default_factory=set)
+    unknown: int = 0
 
 
 def _row(sample: Sample) -> dict:
     return {
         "client_id": sample.client_id,
-        "group": sample.group,
-        "cutoff": sample.cutoff,
-        "weight": sample.weight,
-        "sample_seed": sample.sample_seed,
-        "n_events": sample.n_events,
-        "n_tokens": sample.n_tokens,
-        "n_values": sample.n_values,
         "key_ids": sample.key_ids.tolist(),
         "value_ids": sample.value_ids.tolist(),
         "positions": sample.positions.tolist(),
         "event_starts": sample.event_starts.tolist(),
         "event_lengths": sample.event_lengths.tolist(),
         "event_time": sample.event_time.tolist(),
-        "hours_to_cutoff": sample.hours_to_cutoff.tolist(),
         "calendar": sample.calendar.tolist(),
-        "event_eligible": sample.event_eligible.tolist(),
-        "n_eligible_events": sample.n_eligible_events,
-        "has_targets": sample.has_targets,
-        "value_event": sample.value_event.tolist(),
-        "value_start": sample.value_start.tolist(),
-        "value_length": sample.value_length.tolist(),
-        "value_key_id": sample.value_key_id.tolist(),
+        "value_starts": sample.value_starts.tolist(),
+        "value_lengths": sample.value_lengths.tolist(),
+        "target_event_mask": sample.target_event_mask.tolist(),
         "profile_key_ids": sample.profile_key_ids.tolist(),
         "profile_value_ids": sample.profile_value_ids.tolist(),
         "profile_positions": sample.profile_positions.tolist(),
-        "profile_value_start": sample.profile_value_start.tolist(),
-        "profile_value_length": sample.profile_value_length.tolist(),
-        "profile_value_key_id": sample.profile_value_key_id.tolist(),
-        "has_profile": sample.has_profile,
-        "truncated": sample.truncated,
-        "excluded_events": sample.excluded_events,
-        "excluded_tokens": sample.excluded_tokens,
-        "excluded_eligible": sample.excluded_eligible,
-        "limitations": list(sample.limitations),
+        "profile_value_starts": sample.profile_value_starts.tolist(),
+        "profile_value_lengths": sample.profile_value_lengths.tolist(),
     }
 
 
-def _count_specials(artifacts: FrozenArtifacts, sample: Sample, counters: Counters) -> None:
+def _count_unknown(artifacts: FrozenArtifacts, sample: Sample, counters: Counters) -> None:
+    """
+    Сколько значений словарь не знает.
+    """
 
-    names = {
-        artifacts.special(MISSING): "missing",
-        artifacts.special(UNK): "unknown",
-        artifacts.special(INVALID): "invalid",
-        artifacts.special(EMPTY): "empty",
-    }
+    unknown = artifacts.special(UNK)
 
     for values in (sample.value_ids, sample.profile_value_ids):
-        for value_id in values.tolist():
-            name = names.get(value_id)
-            if name is not None:
-                counters.specials[name] = counters.specials.get(name, 0) + 1
+        counters.unknown += int((values == unknown).sum())
 
 
 def build_group(
@@ -196,20 +146,19 @@ def build_group(
         raise BuildError(f"для группы {group} не объявлено окно наблюдения")
 
     try:
-        source = TokenizedGroup(group)
+        source = TokenizedGroup(group, artifacts)
     except TokenizedError as error:
         raise BuildError(str(error)) from error
 
-    cutoff = source.cutoff
-
-    if cutoff != window.final_cutoff:
-        raise BuildError(
-            f"группа {group} закодирована до {cutoff.isoformat()}, а окно объявляет "
-            f"{window.final_cutoff.isoformat()}: кодирование и настройки разошлись, "
-            f"выполните python -m src.tokenization.run encode {group}"
-        )
+    # Срез у группы один и объявлен её окном: второй записи
+    # того же значения рядом с данными не нужно.
+    cutoff = window.final_cutoff
 
     _clear(directory)
+
+    # На какой группе учился словарь: остальные группы
+    # оценочные, и терять их цели при усечении нельзя.
+    fit_group = TokenizerConfig.load(None).fit_group
 
     counters = Counters()
 
@@ -224,9 +173,7 @@ def build_group(
                 sample = build_sample(
                     artifacts=artifacts,
                     client=client,
-                    group=group,
                     window=window,
-                    cutoff=cutoff,
                     policy=config.context,
                 )
             except SampleError as error:
@@ -235,7 +182,7 @@ def build_group(
             # Оценка обязана мериться одной линейкой. Потерянная
             # цель в validation или test делает её зависящей от
             # политики усечения, и молчать об этом нельзя.
-            if group != artifacts.bundle["fit"]["group"] and sample.excluded_eligible:
+            if group != fit_group and sample.excluded_eligible:
                 raise BuildError(
                     f"группа {group}, клиент {client.client_id}: отбор контекста выбросил "
                     f"{sample.excluded_eligible} событий периода целей. В оценочной группе это "
@@ -245,18 +192,19 @@ def build_group(
             counters.samples += 1
             counters.events += sample.n_events
             counters.tokens += sample.n_tokens + sample.profile_tokens
-            counters.values += sample.n_values + len(sample.profile_value_start)
+            counters.values += sample.n_values + int(sample.profile_value_starts.size)
             counters.profile_tokens += sample.profile_tokens
-            counters.eligible += sample.n_eligible_events
-            counters.with_targets += int(sample.has_targets)
+            eligible = int(sample.target_event_mask.sum())
+
+            counters.eligible += eligible
+            counters.with_targets += int(eligible > 0)
             counters.silent += int(sample.n_events == 0)
-            counters.without_profile += int(not sample.has_profile)
+            counters.empty_profiles += int(sample.profile_tokens <= 1)
             counters.truncated += int(sample.truncated)
             counters.excluded_events += sample.excluded_events
             counters.max_tokens = max(counters.max_tokens, sample.n_tokens)
-            counters.limitations.update(sample.limitations)
 
-            _count_specials(artifacts, sample, counters)
+            _count_unknown(artifacts, sample, counters)
 
             batch.append(_row(sample))
 
@@ -284,13 +232,12 @@ def build_group(
             "eligible_events": counters.eligible,
             "samples_with_targets": counters.with_targets,
             "silent_clients": counters.silent,
-            "clients_without_profile": counters.without_profile,
+            "empty_profiles": counters.empty_profiles,
             "truncated": counters.truncated,
             "excluded_events": counters.excluded_events,
             "max_tokens": counters.max_tokens,
         },
-        "specials": dict(sorted(counters.specials.items())),
-        "limitations": sorted(counters.limitations),
+        "unknown_values": counters.unknown,
     }
 
 

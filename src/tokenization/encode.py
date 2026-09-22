@@ -4,16 +4,15 @@ from dataclasses import dataclass, field
 
 from src.preprocessing.canonical.events import normalize_text
 from src.preprocessing.read import ClientEvent, ClientHistory
-from src.preprocessing.keys import CATEGORICAL, NUMERIC, TEXT
 
-from .layout import FrozenArtifacts
-from .numeric import FOUND_BUCKET, FOUND_INVALID
-from .scan import value_text, value_type
-from .specials import EMPTY, EVT, INVALID, MISSING, UNK, USR
+from .finalvocab import FrozenArtifacts
+from .numeric import BucketsError
+from .scan import value_text
+from .specials import EVT, UNK, USR
 
 
 # ============================================================
-# ИДЕЯ
+# КОДИРОВАНИЕ
 # ============================================================
 #
 # Кодирование применяет готовый словарь и ничего не обучает.
@@ -25,6 +24,12 @@ from .specials import EMPTY, EVT, INVALID, MISSING, UNK, USR
 # positions это номер куска ВНУТРИ значения, а не порядок полей
 # события. Порядок полей смысла не несёт вовсе: событие это
 # набор пар, а его границы задаются отдельно.
+#
+# Пары существуют только у того, что есть. Отсутствующее поле в
+# последовательность не попадает вовсе, и пустой после
+# нормализации текст это то же отсутствие: служебного токена
+# «значения нет» больше нет. Неизвестное, но корректное значение
+# кодируется [UNK].
 #
 # Ничего не обрезается. Значение, которое не помещается в
 # объявленный предел кусков, это явная ошибка, а не молчаливо
@@ -145,9 +150,13 @@ class EncodedRecord:
             raise EncodeError(f"span'ы покрывают {covered} позиций из {len(self.key_ids)}")
 
 
-def _text_value_ids(artifacts: FrozenArtifacts, key: str, value: object, limit: int) -> list[int]:
+def _text_value_ids(artifacts: FrozenArtifacts, key: str, value: object,
+                    limit: int) -> list[int] | None:
     """
     Куски текста в общем пространстве ID.
+
+    None означает, что значения нет: пустой после нормализации
+    текст поля не создаёт.
     """
 
     if not isinstance(value, str):
@@ -156,8 +165,7 @@ def _text_value_ids(artifacts: FrozenArtifacts, key: str, value: object, limit: 
     normalized = normalize_text(value)
 
     if normalized is None:
-        # Пустой текст это не отсутствие значения: поле пришло.
-        return [artifacts.special(EMPTY)]
+        return None
 
     if not artifacts.bpe.enabled:
         return [artifacts.special(UNK)]
@@ -170,45 +178,42 @@ def _text_value_ids(artifacts: FrozenArtifacts, key: str, value: object, limit: 
             "Текст не обрезается: поднимите предел осознанно"
         )
 
-    return [artifacts.bpe_offset + piece for piece in pieces]
+    return [artifacts.piece_id(piece) for piece in pieces]
 
 
-def _value_ids(artifacts: FrozenArtifacts, key: str, value: object, limit: int) -> list[int]:
+def _value_ids(artifacts: FrozenArtifacts, key: str, value: object,
+               limit: int) -> list[int] | None:
     """
     Значение одного ключа в общем пространстве ID.
+
+    None означает, что пары у этого ключа не будет.
     """
 
-    kind = artifacts.key_info[key]["value_kind"]
+    kind = artifacts.kind(key)
 
-    if kind == TEXT:
+    if kind == "text":
         return _text_value_ids(artifacts, key, value, limit)
 
-    if kind == CATEGORICAL:
+    if kind == "categorical":
 
-        found = artifacts.categorical_id(key, value_type(value), value_text(value))
+        found = artifacts.categorical_id(key, value_text(value))
 
         return [artifacts.special(UNK) if found is None else found]
 
-    if kind == NUMERIC:
+    try:
+        found = artifacts.bucket_id(key, value)
+    except (BucketsError, TypeError, ValueError) as error:
+        raise EncodeError(f"ключ {key}: {error}") from error
 
-        encoder = artifacts.encoders[key]
-
-        found, index = encoder.locate(value)
-
-        if found == FOUND_BUCKET:
-            return [artifacts.bucket_id(key, index)]
-
-        return [artifacts.special(INVALID if found == FOUND_INVALID else UNK)]
-
-    raise EncodeError(f"ключ {key}: неизвестный вид значения {kind!r}")
+    return [artifacts.special(UNK) if found is None else found]
 
 
 def encode_values(
     artifacts: FrozenArtifacts,
     values: dict[str, object],
-    declared: tuple[str, ...],
     lead: str,
     limit: int,
+    links: frozenset[str] = frozenset(),
 ) -> EncodedRecord:
     """
     Пары одной записи: ведущий маркер, затем значения по
@@ -222,44 +227,35 @@ def encode_values(
     # Содержательным значением он при этом не становится.
     record.set_lead(lead, artifacts.special(lead))
 
-    emit: list[tuple[int, str, object, bool]] = []
+    emit: list[tuple[int, str, object]] = []
 
     for key, value in values.items():
 
-        if key in artifacts.link_keys:
+        if key in links:
             # Ссылка кодом не становится: она уезжает в
             # метаданные связи рядом с записью.
             continue
 
-        info = artifacts.key_info.get(key)
+        if value is None:
+            # Поля нет — и пары нет.
+            continue
 
-        if info is None:
+        key_id = artifacts.key_id(key)
+
+        if key_id is None:
             record.unknown_keys.append(key)
             continue
 
-        emit.append((info["id"], key, value, False))
+        emit.append((key_id, key, value))
 
-    present = set(values)
+    for key_id, key, value in sorted(emit, key=lambda item: item[0]):
 
-    for key in declared:
+        ids = _value_ids(artifacts, key, value, limit)
 
-        if key in present:
+        if ids is None:
             continue
 
-        info = artifacts.key_info.get(key)
-
-        if info is None:
-            continue
-
-        emit.append((info["id"], key, None, True))
-
-    for key_id, key, value, absent in sorted(emit):
-
-        if absent:
-            record.add(key, key_id, [artifacts.special(MISSING)])
-            continue
-
-        record.add(key, key_id, _value_ids(artifacts, key, value, limit))
+        record.add(key, key_id, ids)
 
     record.unknown_keys.sort()
     record.check()
@@ -267,63 +263,33 @@ def encode_values(
     return record
 
 
-def encode_event(artifacts: FrozenArtifacts, event: ClientEvent, limit: int) -> EncodedRecord:
+def encode_event(artifacts: FrozenArtifacts, event: ClientEvent, limit: int,
+                 links: frozenset[str] = frozenset()) -> EncodedRecord:
     """
     Одно событие: ведущий [EVT] и пары его значений.
     """
 
-    values = event.model_values()
-
-    event_type = values.get("event_type")
-
-    declared = artifacts.declared_by_event_type.get(event_type, ()) if event_type else ()
-
-    return encode_values(artifacts, values, declared, EVT, limit)
+    return encode_values(artifacts, event.model_values(), EVT, limit, links)
 
 
-def encode_profile(artifacts: FrozenArtifacts, history: ClientHistory, limit: int) -> EncodedRecord:
+def encode_profile(artifacts: FrozenArtifacts, history: ClientHistory, limit: int,
+                   links: frozenset[str] = frozenset()) -> EncodedRecord:
     """
-    Представление профиля на cutoff: ведущий [USR] и пары его
-    значений.
+    Представление профиля: ведущий [USR] и пары его значений.
 
-    Пока версия профиля известна, объявленным считается весь
-    набор ключей профиля: пустой доход у клиента с анкетой это
-    факт о клиенте. Но если анкеты нет вовсе, записи с двумя
-    десятками [MISSING] не появляется: «банк ещё ничего не знает
-    о клиенте» и «банк знает, но поля пусты» это разные вещи, и
-    состояние профиля названо метаданными.
-
-    Решает именно СОСТОЯНИЕ, а не пустота словаря значений:
-    известная версия, у которой все поля пусты, это анкета, и
-    все её ключи обязаны получить [MISSING].
+    У клиента без анкеты остаётся только маркер: банк о нём ещё
+    ничего не знает, и выдумывать пустые поля незачем.
     """
 
-    declared = artifacts.profile_keys if profile_known(history) else ()
-
-    return encode_values(artifacts, history.profile or {}, declared, USR, limit)
+    return encode_values(artifacts, history.profile or {}, USR, limit, links)
 
 
-def profile_known(history: ClientHistory) -> bool:
-    """
-    Есть ли у клиента анкета вообще.
-
-    Пустой словарь значений ответом не является: у известной
-    анкеты все поля могут оказаться незаполненными.
-    """
-
-    return history.has_profile
-
-
-def references(artifacts: FrozenArtifacts, event: ClientEvent) -> dict[str, str]:
+def references(event: ClientEvent, links: frozenset[str]) -> dict[str, str]:
     """
     Локальные ссылки события: связь, а не значение.
     """
 
-    return {
-        key: value
-        for key, value in sorted(event.values.items())
-        if key in artifacts.link_keys
-    }
+    return {key: value for key, value in sorted(event.values.items()) if key in links}
 
 
 def decode_record(artifacts: FrozenArtifacts, record: EncodedRecord) -> list[dict]:
@@ -339,8 +305,7 @@ def decode_record(artifacts: FrozenArtifacts, record: EncodedRecord) -> list[dic
                 "key": record.lead,
                 "key_id": record.key_ids[0],
                 "value_ids": [record.value_ids[0]],
-                "positions": [record.positions[0]],
-                "decoded": [artifacts.describe(record.value_ids[0])["label"]],
+                "decoded": [artifacts.describe(record.value_ids[0])],
                 "marker": True,
             }
         )
@@ -354,14 +319,13 @@ def decode_record(artifacts: FrozenArtifacts, record: EncodedRecord) -> list[dic
             "key_id": record.key_ids[start],
             "value_ids": ids,
             "positions": record.positions[start : start + length],
-            "decoded": [artifacts.describe(value_id)["label"] for value_id in ids],
+            "decoded": [artifacts.describe(value_id) for value_id in ids],
         }
 
         # У текста куски читаются по отдельности плохо: рядом
-        # кладётся собранный обратно текст, и он обязан совпасть
-        # с нормализованным исходным.
-        if artifacts.bpe.enabled and all(value_id >= artifacts.bpe_offset for value_id in ids):
-            item["decoded_text"] = artifacts.bpe.decode([value_id - artifacts.bpe_offset for value_id in ids])
+        # кладётся собранный обратно текст.
+        if artifacts.kind(key) == "text" and artifacts.bpe.enabled:
+            item["decoded_text"] = artifacts.decode_text(ids)
 
         out.append(item)
 
@@ -375,6 +339,5 @@ __all__ = [
     "encode_event",
     "encode_profile",
     "encode_values",
-    "profile_known",
     "references",
 ]

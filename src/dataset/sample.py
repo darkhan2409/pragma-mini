@@ -1,18 +1,17 @@
 from __future__ import annotations
 
-import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 
 import numpy as np
 
 from src.preprocessing.settings import GroupWindow
-from src.tokenization.layout import FrozenArtifacts
+from src.tokenization.finalvocab import FrozenArtifacts
 from src.tokenization.specials import PAD
 
 from .context import EventStub, Selection, select
 from .settings import ContextPolicy
-from .targets import eligible, hours_to_cutoff
+from .targets import eligible
 from .tokenized import TokenizedClient
 
 
@@ -20,19 +19,22 @@ from .tokenized import TokenizedClient
 # ИДЕЯ
 # ============================================================
 #
-# Один пример это один клиент группы на её конечный срез.
+# Один пример это один клиент группы: его события во времени и
+# его профиль.
 #
-# Внутри примера три круга колонок, и граница между ними не
-# декоративная:
+# В примере лежит только то, что нужно модели и маскированию:
+# сама последовательность, границы событий и значений, время и
+# маска допустимых целей. Всё, что считается по этим массивам,
+# в файле не хранится — число событий это длина event_starts, а
+# принадлежность значения событию видна по границам.
 #
-#   model    входы модели: токены событий и профиля, каналы
-#            времени;
-#   masker   границы значений, признак допустимой цели и вес;
-#   service  трассировка: клиент, срез, усечение, ограничения.
-#            В embedding ничего из этого не входит.
+# Адрес значения это его начало в ОБЩЕЙ последовательности
+# клиента: Masker прячет значение по паре начало/длина, не
+# заглядывая в словарь и не пересчитывая смещения событий.
 #
-# Адрес значения это пара «событие, столбец внутри него»: Masker
-# прячет значение по этому адресу, не заглядывая в словарь.
+# Маска целей это период целей своей группы: старая история
+# validation и test остаётся видимым контекстом, но целью чужой
+# группы не становится.
 #
 # Клиент без событий остаётся примером. Никакой выдуманной
 # покупки: пустая история это факт о клиенте, а не пустое место.
@@ -51,52 +53,39 @@ class Sample:
     Готовый пример: один клиент целиком.
     """
 
-    # --- тождество ---
     client_id: str
-    group: str
-    cutoff: datetime
-    weight: float
-    sample_seed: int
 
-    # --- события: входы модели ---
+    # --- события ---
     key_ids: np.ndarray
     value_ids: np.ndarray
     positions: np.ndarray
     event_starts: np.ndarray
     event_lengths: np.ndarray
-
-    # --- события: каналы времени ---
-    calendar: np.ndarray
-    hours_to_cutoff: np.ndarray
     event_time: np.ndarray
+    calendar: np.ndarray
+
+    # --- границы значений в общей последовательности ---
+    value_starts: np.ndarray
+    value_lengths: np.ndarray
 
     # --- цели ---
-    event_eligible: np.ndarray
-
-    # --- значения событий ---
-    value_event: np.ndarray
-    value_start: np.ndarray
-    value_length: np.ndarray
-    value_key_id: np.ndarray
+    target_event_mask: np.ndarray
 
     # --- профиль ---
     profile_key_ids: np.ndarray
     profile_value_ids: np.ndarray
     profile_positions: np.ndarray
-    profile_value_start: np.ndarray
-    profile_value_length: np.ndarray
-    profile_value_key_id: np.ndarray
-    has_profile: bool
+    profile_value_starts: np.ndarray
+    profile_value_lengths: np.ndarray
 
-    # --- отбор истории ---
-    n_eligible_events: int
-    has_targets: bool
-    truncated: bool
-    excluded_events: int
-    excluded_tokens: int
-    excluded_eligible: int
-
-    limitations: list[str] = field(default_factory=list)
+    # --- не попадает в файл ---
+    #
+    # Отбор контекста нужен сборщику: усечение оценочной группы
+    # запрещено, и об этом обязан узнать человек. В строке
+    # примера этих чисел нет.
+    truncated: bool = False
+    excluded_events: int = 0
+    excluded_eligible: int = 0
 
     # --------------------------------------------------------
 
@@ -110,7 +99,7 @@ class Sample:
 
     @property
     def n_values(self) -> int:
-        return int(self.value_event.size)
+        return int(self.value_starts.size)
 
     @property
     def profile_tokens(self) -> int:
@@ -134,12 +123,17 @@ class Sample:
         if self.calendar.size != self.n_events * 6:
             raise SampleError(f"{self.client_id}: календарь не по шесть чисел на событие")
 
-        for name in ("hours_to_cutoff", "event_eligible", "event_time"):
+        for name in ("event_time", "target_event_mask"):
             if getattr(self, name).size != self.n_events:
                 raise SampleError(f"{self.client_id}: канал {name} не по одному значению на событие")
 
-        # События лежат подряд и покрывают все токены.
+        if self.value_starts.size != self.value_lengths.size:
+            raise SampleError(f"{self.client_id}: границы значений разной длины")
+
+        # События лежат подряд и покрывают все токены, а значения
+        # внутри события идут следом за его маркером.
         covered = 0
+        value = 0
 
         for start, length in zip(self.event_starts.tolist(), self.event_lengths.tolist()):
 
@@ -154,21 +148,27 @@ class Sample:
             if self.key_ids[start] != self.value_ids[start] or self.positions[start] != 0:
                 raise SampleError(f"{self.client_id}: событие начинается не с маркера")
 
+            value = _check_spans(
+                self.client_id, self.value_starts, self.value_lengths, value, start + 1, start + length
+            )
+
             covered += length
 
         if covered != self.n_tokens:
             raise SampleError(f"{self.client_id}: границы покрывают {covered} токенов из {self.n_tokens}")
 
+        if value != self.n_values:
+            raise SampleError(
+                f"{self.client_id}: {self.n_values - value} значений лежат вне своих событий"
+            )
+
         _check_record(self.client_id, "профиль", self.profile_key_ids, self.profile_value_ids,
                       self.profile_positions)
 
-        # Границы значений: внутри своей записи, без нахлёста, и
-        # маркер под них не попадает.
-        _check_spans(self.client_id, self.value_event, self.value_start, self.value_length,
-                     self.event_lengths.tolist())
-
-        _check_spans(self.client_id, np.zeros(self.profile_value_start.size, dtype=np.int64),
-                     self.profile_value_start, self.profile_value_length, [self.profile_tokens])
+        _check_spans(
+            self.client_id, self.profile_value_starts, self.profile_value_lengths, 0, 1,
+            self.profile_tokens
+        )
 
         # ID в пространстве словаря, [PAD] нигде не написан.
         pad = artifacts.special(PAD)
@@ -201,63 +201,48 @@ def _check_record(client_id: str, what: str, key_ids: np.ndarray, value_ids: np.
         raise SampleError(f"{client_id}: {what} начинается не с маркера")
 
 
-def _check_spans(client_id: str, owner: np.ndarray, start: np.ndarray, length: np.ndarray,
-                 lengths: list[int]) -> None:
-
-    if not (owner.size == start.size == length.size):
-        raise SampleError(f"{client_id}: границы значений разной длины")
-
-    covered: dict[int, int] = {}
-
-    for index in range(owner.size):
-
-        which = int(owner[index])
-        first = int(start[index])
-        size = int(length[index])
-
-        # Маркер занимает нулевой столбец записи и значением не
-        # является: span на него наложиться не может.
-        expected = covered.get(which, 1)
-
-        if first != expected:
-            raise SampleError(
-                f"{client_id}: значение записи {which} начинается в столбце {first}, "
-                f"а покрыто до {expected}"
-            )
-
-        covered[which] = first + size
-
-    for which, size in covered.items():
-        if size != lengths[which]:
-            raise SampleError(
-                f"{client_id}: значения записи {which} покрывают {size} токенов из {lengths[which]}"
-            )
-
-
-def sample_seed_of(group: str, client_id: str, cutoff: datetime) -> int:
+def _check_spans(client_id: str, starts: np.ndarray, lengths: np.ndarray, first: int,
+                 begin: int, end: int) -> int:
     """
-    Устойчивый номер примера для будущего Masker.
+    Значения записи идут подряд от begin до end без дыр и
+    нахлёстов. Возвращает номер следующего непроверенного
+    значения.
 
-    Считается от тождества примера, а не от его места в файле:
-    иначе маска зависела бы от порядка чтения и от размера
-    batch.
+    Маркер занимает нулевой столбец записи и значением не
+    является: span на него наложиться не может.
     """
 
-    text = f"{group}\x1f{client_id}\x1f{cutoff.isoformat()}"
+    covered = begin
 
-    digest = hashlib.blake2b(text.encode("utf-8"), digest_size=8).digest()
+    index = first
 
-    return int.from_bytes(digest, "big") & ((1 << 63) - 1)
+    while index < starts.size and int(starts[index]) < end:
+
+        start = int(starts[index])
+        length = int(lengths[index])
+
+        if start != covered:
+            raise SampleError(
+                f"{client_id}: значение начинается в {start}, а покрыто до {covered}"
+            )
+
+        if length < 1:
+            raise SampleError(f"{client_id}: значение без единого токена")
+
+        covered = start + length
+        index += 1
+
+    if covered != end:
+        raise SampleError(f"{client_id}: значения покрывают до {covered} вместо {end}")
+
+    return index
 
 
 def build_sample(
     artifacts: FrozenArtifacts,
     client: TokenizedClient,
-    group: str,
     window: GroupWindow,
-    cutoff: datetime,
     policy: ContextPolicy,
-    weight: float = 1.0,
 ) -> Sample:
     """
     Пример из закодированной истории клиента.
@@ -285,27 +270,27 @@ def build_sample(
     event_starts: list[int] = []
     event_lengths: list[int] = []
     calendar: list[float] = []
-    to_cutoff: list[float] = []
     moments: list[datetime] = []
-    event_eligible: list[bool] = []
+    target_mask: list[bool] = []
 
-    value_event: list[int] = []
-    value_start: list[int] = []
-    value_length: list[int] = []
-    value_key_id: list[int] = []
+    value_starts: list[int] = []
+    value_lengths: list[int] = []
 
-    for slot, position in enumerate(selection.kept):
+    for position in selection.kept:
 
         item = client.events[position]
 
-        event_starts.append(len(key_ids))
+        start = len(key_ids)
+
+        event_starts.append(start)
         event_lengths.append(item.n_tokens)
 
+        # Границы значения считаются от начала ОБЩЕЙ
+        # последовательности: по ним же видно, какому событию
+        # значение принадлежит.
         for local in range(item.n_values):
-            value_event.append(slot)
-            value_start.append(item.value_starts[local])
-            value_length.append(item.value_lengths[local])
-            value_key_id.append(item.key_ids[item.value_starts[local]])
+            value_starts.append(start + item.value_starts[local])
+            value_lengths.append(item.value_lengths[local])
 
         key_ids.extend(item.key_ids)
         value_ids.extend(item.value_ids)
@@ -313,50 +298,34 @@ def build_sample(
 
         if len(item.calendar) != 6:
             raise SampleError(
-                f"клиент {client.client_id}, событие {item.stable_event_index}: "
+                f"клиент {client.client_id}, событие {item.event_time.isoformat()}: "
                 f"календарь из {len(item.calendar)} чисел вместо шести"
             )
 
         calendar.extend(item.calendar)
-        to_cutoff.append(hours_to_cutoff(cutoff, item.event_time))
         moments.append(item.event_time)
-        event_eligible.append(flags[position])
+        target_mask.append(flags[position])
 
     sample = Sample(
         client_id=client.client_id,
-        group=group,
-        cutoff=cutoff,
-        weight=weight,
-        sample_seed=sample_seed_of(group, client.client_id, cutoff),
         key_ids=_ints(key_ids),
         value_ids=_ints(value_ids),
         positions=_ints(positions),
         event_starts=_ints(event_starts),
         event_lengths=_ints(event_lengths),
-        calendar=np.asarray(calendar, dtype=np.float32),
-        hours_to_cutoff=np.asarray(to_cutoff, dtype=np.float64),
         event_time=np.asarray(moments, dtype="datetime64[us]"),
-        event_eligible=np.asarray(event_eligible, dtype=bool),
-        value_event=_ints(value_event),
-        value_start=_ints(value_start),
-        value_length=_ints(value_length),
-        value_key_id=_ints(value_key_id),
+        calendar=np.asarray(calendar, dtype=np.float32),
+        value_starts=_ints(value_starts),
+        value_lengths=_ints(value_lengths),
+        target_event_mask=np.asarray(target_mask, dtype=bool),
         profile_key_ids=_ints(client.profile_key_ids),
         profile_value_ids=_ints(client.profile_value_ids),
         profile_positions=_ints(client.profile_positions),
-        profile_value_start=_ints(client.profile_value_starts),
-        profile_value_length=_ints(client.profile_value_lengths),
-        profile_value_key_id=_ints(
-            [client.profile_key_ids[start] for start in client.profile_value_starts]
-        ),
-        has_profile=client.has_profile,
-        n_eligible_events=sum(1 for slot in selection.kept if flags[slot]),
-        has_targets=any(flags[slot] for slot in selection.kept),
+        profile_value_starts=_ints(client.profile_value_starts),
+        profile_value_lengths=_ints(client.profile_value_lengths),
         truncated=selection.truncated,
         excluded_events=selection.n_excluded,
-        excluded_tokens=selection.excluded_tokens,
         excluded_eligible=selection.excluded_eligible,
-        limitations=list(client.limitations),
     )
 
     sample.check(artifacts)
@@ -372,5 +341,4 @@ __all__ = [
     "Sample",
     "SampleError",
     "build_sample",
-    "sample_seed_of",
 ]

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from src.preprocessing.run import EXIT_BLOCKED, EXIT_OK
 from src.preprocessing.settings import GROUPS, normalize_group
-from src.tokenization.layout import FrozenArtifacts, LayoutError
+from src.tokenization.finalvocab import FrozenArtifacts, VocabError
 
 from .build import BuildError, build_group
 from .context import ContextError
@@ -25,7 +25,7 @@ from .tokenized import TokenizedError
 #   python -m src.dataset.run val
 #   python -m src.dataset.run test
 #
-# Вход: data/tokenized/<group>/ и data/tokenizer/tokenizer.json.
+# Вход: data/tokenized/<group>/ и словарь из data/vocab/.
 # Выход: data/dataset/<group>/samples.parquet и ничего больше.
 #
 # Словарь один на все группы — тот, что обучен на train. Другого
@@ -34,7 +34,7 @@ from .tokenized import TokenizedError
 # ============================================================
 
 
-FAILURES = (BuildError, ConfigError, ContextError, LayoutError, SampleError, TokenizedError)
+FAILURES = (BuildError, ConfigError, ContextError, SampleError, TokenizedError, VocabError)
 
 
 def run_group(args) -> int:
@@ -63,20 +63,14 @@ def run_group(args) -> int:
     print(
         f"    в периоде целей событий {counts['eligible_events']} у "
         f"{counts['samples_with_targets']} примеров; молчащих клиентов {counts['silent_clients']}, "
-        f"без анкеты {counts['clients_without_profile']}"
+        f"пустых анкет {counts['empty_profiles']}"
     )
     print(
         f"    усечено примеров {counts['truncated']} (событий за границей "
         f"{counts['excluded_events']}); токенов в примере до {counts['max_tokens']}"
     )
 
-    if report["specials"]:
-        print("    служебные значения: " + ", ".join(
-            f"{name} {count}" for name, count in report["specials"].items()
-        ))
-
-    for item in report["limitations"][:3]:
-        print(f"    ограничение: {item}")
+    print(f"    [UNK] значений {report['unknown_values']}")
 
     return EXIT_OK
 

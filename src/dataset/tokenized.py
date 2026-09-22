@@ -7,8 +7,9 @@ from typing import Iterator
 
 import pyarrow.parquet as pq
 
-from src.tokenization.transform import CUTOFF_KEY, EVENTS_FILE, PROFILE_FILE
+from src.tokenization.finalvocab import FrozenArtifacts, VALUE_PREFIX
 from src.tokenization.settings import tokenized_dir
+from src.tokenization.transform import EVENTS_FILE, PROFILE_FILE
 
 
 # ============================================================
@@ -27,8 +28,17 @@ from src.tokenization.settings import tokenized_dir
 # задал препроцессинг, и он деловой; датасету нужен временной, и
 # сортировка делается здесь явно, а не подразумевается.
 #
+# Тип события отдельной колонкой не хранится: он уже лежит парой
+# ключ/значение внутри самого события, и восстанавливается через
+# словарь. Второй записи одного и того же факта рядом нет.
+#
 # Ничего не кодируется и не пересчитывается: токены уже готовы.
 # ============================================================
+
+
+# Ключ, по которому читается тип события: политика отбора
+# контекста смотрит на него, когда решает, что такое веха.
+EVENT_TYPE_KEY = "event_type"
 
 
 class TokenizedError(ValueError):
@@ -44,7 +54,6 @@ class TokenizedEvent:
     """
 
     event_time: datetime
-    stable_event_index: int
     event_type: str | None
     key_ids: list[int]
     value_ids: list[int]
@@ -77,9 +86,6 @@ class TokenizedClient:
     profile_value_starts: list[int] = field(default_factory=list)
     profile_value_lengths: list[int] = field(default_factory=list)
 
-    has_profile: bool = False
-    limitations: list[str] = field(default_factory=list)
-
     @property
     def n_events(self) -> int:
         return len(self.events)
@@ -88,15 +94,20 @@ class TokenizedClient:
     def profile_tokens(self) -> int:
         return len(self.profile_key_ids)
 
+    @property
+    def profile_values(self) -> int:
+        return len(self.profile_value_starts)
+
 
 class TokenizedGroup:
     """
     Закодированная группа по стандартному пути.
     """
 
-    def __init__(self, group: str, directory: Path | None = None):
+    def __init__(self, group: str, artifacts: FrozenArtifacts, directory: Path | None = None):
 
         self.group = group
+        self.artifacts = artifacts
         self.directory = Path(directory) if directory is not None else tokenized_dir(group)
 
         for name in (EVENTS_FILE, PROFILE_FILE):
@@ -114,28 +125,7 @@ class TokenizedGroup:
 
         self.client_ids: list[str] = sorted(self._profiles)
 
-        self.cutoff = self._cutoff()
-
-    def _cutoff(self) -> datetime:
-        """
-        Момент, до которого взята история группы.
-
-        Записан кодированием в метаданные файла: второй раз
-        вычислять его из конфигурации значило бы завести два
-        ответа на один вопрос.
-        """
-
-        metadata = self._events.schema_arrow.metadata or {}
-
-        stored = metadata.get(CUTOFF_KEY)
-
-        if stored is None:
-            raise TokenizedError(
-                f"в {self.directory / EVENTS_FILE} нет границы среза: файл собран старым кодом, "
-                f"выполните python -m src.tokenization.run encode {self.group}"
-            )
-
-        return datetime.fromisoformat(stored.decode("utf-8"))
+        self._event_type_key = artifacts.key_id(EVENT_TYPE_KEY)
 
     # --- чтение ---
 
@@ -144,9 +134,9 @@ class TokenizedGroup:
         Клиенты по одному, в порядке client_id.
 
         Состав задаёт профиль, а не файл событий: клиент без
-        событий тоже приходит, и порядок не зависит от того,
-        у кого события есть. Пустая история это факт о клиенте,
-        а не повод его пропустить.
+        событий тоже приходит, и порядок не зависит от того, у
+        кого события есть. Пустая история это факт о клиенте, а
+        не повод его пропустить.
         """
 
         stream = self._client_rows()
@@ -196,6 +186,30 @@ class TokenizedGroup:
         if current is not None:
             yield current, buffer
 
+    def _event_type(self, row: dict) -> str | None:
+        """
+        Тип события из его же пар ключ/значение.
+
+        Имя токена в финальном словаре это `value:<ключ>=<значение>`,
+        поэтому тип читается без второй колонки рядом с данными.
+        """
+
+        if self._event_type_key is None:
+            return None
+
+        for start in row["value_starts"]:
+
+            if row["key_ids"][start] != self._event_type_key:
+                continue
+
+            name = self.artifacts.describe(row["value_ids"][start])
+
+            prefix = f"{VALUE_PREFIX}{EVENT_TYPE_KEY}="
+
+            return name[len(prefix):] if name.startswith(prefix) else None
+
+        return None
+
     def _client(self, client_id: str, rows: list[dict]) -> TokenizedClient:
 
         profile = self._profiles.get(client_id)
@@ -209,8 +223,7 @@ class TokenizedGroup:
         events = [
             TokenizedEvent(
                 event_time=row["event_time"],
-                stable_event_index=row["stable_event_index"],
-                event_type=row["event_type"],
+                event_type=self._event_type(row),
                 key_ids=list(row["key_ids"]),
                 value_ids=list(row["value_ids"]),
                 positions=list(row["positions"]),
@@ -224,7 +237,7 @@ class TokenizedGroup:
         # Порядок примера временной. Событие-исправление может
         # быть датировано позже своего исходного, и деловой
         # порядок файла этого не отражает.
-        events.sort(key=lambda item: (item.event_time, item.stable_event_index))
+        events.sort(key=lambda item: item.event_time)
 
         return TokenizedClient(
             client_id=client_id,
@@ -234,12 +247,11 @@ class TokenizedGroup:
             profile_positions=list(profile["positions"]),
             profile_value_starts=list(profile["value_starts"]),
             profile_value_lengths=list(profile["value_lengths"]),
-            has_profile=bool(profile["has_profile"]),
-            limitations=list(profile["limitations"] or ()),
         )
 
 
 __all__ = [
+    "EVENT_TYPE_KEY",
     "TokenizedClient",
     "TokenizedError",
     "TokenizedEvent",
