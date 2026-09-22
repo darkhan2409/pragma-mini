@@ -23,7 +23,7 @@ from .tokenized import TokenizedError, TokenizedGroup
 # Сборка группы это один проход по её закодированным клиентам и
 # один файл на выходе:
 #
-#   data/dataset/<group>/samples.parquet
+#   data/05_dataset/<group>/samples.parquet
 #
 # Строка это клиент: его события во времени, его профиль,
 # границы, каналы времени, маска допустимых целей и вес. Второй

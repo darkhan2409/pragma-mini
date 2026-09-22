@@ -20,11 +20,11 @@ from .schema import SCHEMA_VERSION, payload_columns
 #
 # Результат этапа — РОВНО ОДИН файл:
 #
-#   data/preprocessed/<group>/events.parquet
+#   data/02_preprocessed/<group>/events.parquet
 #
 # Анкета клиента не копируется: чистить в ней нечего, и
 # следующие этапы читают её прямо из выгрузки
-# data/raw/<group>/profile.parquet. Двух почти одинаковых
+# data/01_raw/<group>/profile.parquet. Двух почти одинаковых
 # таблиц с одним смыслом быть не должно.
 #
 # Ни индекса клиентов, ни упоминаний сущностей, ни таблицы

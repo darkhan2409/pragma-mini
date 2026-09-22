@@ -18,8 +18,8 @@ from .settings import METHOD_UNFITTED, TokenizerConfig
 # Учиться разрешено ровно на одном: на обработанной группе
 # train до её конечного cutoff.
 #
-#   data/preprocessed/train/events.parquet
-#   data/raw/train/profile.parquet
+#   data/02_preprocessed/train/events.parquet
+#   data/01_raw/train/profile.parquet
 #
 # Все три обучающих этапа (значения, границы, BPE) читают этот
 # корпус одинаково и через эту функцию. Второго способа

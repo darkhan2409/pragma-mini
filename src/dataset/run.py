@@ -25,8 +25,8 @@ from .tokenized import TokenizedError
 #   python -m src.dataset.run val
 #   python -m src.dataset.run test
 #
-# Вход: data/tokenized/<group>/ и словарь из data/vocab/.
-# Выход: data/dataset/<group>/samples.parquet и ничего больше.
+# Вход: data/04_tokenized/<group>/ и словарь из data/03_vocab/.
+# Выход: data/05_dataset/<group>/samples.parquet и ничего больше.
 #
 # Словарь один на все группы — тот, что обучен на train. Другого
 # у набора быть не может: одинаковые ID у разных групп это и

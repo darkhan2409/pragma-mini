@@ -27,8 +27,8 @@ from .version import SCHEMA_VERSION
 
 # Один каталог на группу и один файл в нём.
 #
-#   data/dataset/<group>/samples.parquet
-DATASET_DIR = DATA_DIR / "dataset"
+#   data/05_dataset/<group>/samples.parquet
+DATASET_DIR = DATA_DIR / "05_dataset"
 
 SAMPLES_FILE = "samples.parquet"
 

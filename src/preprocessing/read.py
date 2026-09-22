@@ -30,8 +30,8 @@ from .settings import group_dir, raw_group_dir
 # Единственный способ добраться до данных для модели: две
 # таблицы и ничего больше.
 #
-#   data/preprocessed/<group>/events.parquet   очищенная лента
-#   data/raw/<group>/profile.parquet           анкета как есть
+#   data/02_preprocessed/<group>/events.parquet   очищенная лента
+#   data/01_raw/<group>/profile.parquet           анкета как есть
 #
 # Анкета берётся прямо из выгрузки: препроцессингу в ней
 # нечего чинить, а копия с тем же содержимым была бы вторым

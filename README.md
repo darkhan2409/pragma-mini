@@ -12,12 +12,15 @@
 
 ```
 data/
-├── raw/<group>/            выгрузка генератора: события и профиль
-├── preprocessed/<group>/   очищенная лента: events.parquet
-├── vocab/                  чем кодируются данные: шесть файлов словаря
-├── tokenized/<group>/      результат кодирования: events.parquet, profile.parquet
-└── dataset/<group>/        готовые примеры: samples.parquet
+├── 01_raw/<group>/          выгрузка генератора: события и профиль
+├── 02_preprocessed/<group>/ очищенная лента: events.parquet
+├── 03_vocab/                чем кодируются данные: шесть файлов словаря
+├── 04_tokenized/<group>/    результат кодирования: events.parquet, profile.parquet
+└── 05_dataset/<group>/      готовые примеры: samples.parquet
 ```
+
+Номер в имени каталога это порядок этапов конвейера: каждый следующий
+читает предыдущий.
 
 `<group>` это `train`, `val` или `test`. Клиенты групп не пересекаются, словарь
 и все статистики учатся только на `train`.
@@ -32,7 +35,7 @@ python -m src.generator.emit test
 
 Посмотреть на выгрузку глазами: `python -m src.generator.report.show --help`.
 
-Результат: `data/raw/<group>/` — лента событий и профиль клиентов. Конверт
+Результат: `data/01_raw/<group>/` — лента событий и профиль клиентов. Конверт
 события: `client_id`, `event_time`, `source`, `payload`; тип события лежит в
 `payload.type`.
 
@@ -47,21 +50,21 @@ python -m src.preprocessing.run preprocess test
 Проверяет RAW по контракту и раскрывает payload в типизированные колонки.
 Результат группы это ровно один файл: `events.parquet`. Анкета не
 копируется — чистить в ней нечего, и следующие этапы читают её прямо
-из `data/raw/<group>/profile.parquet`. Любая строка, которую нельзя разобрать
+из `data/01_raw/<group>/profile.parquet`. Любая строка, которую нельзя разобрать
 по контракту, останавливает этап, и частичный результат не сохраняется.
 
 ## 3. Словарь
 
 Все словари, границы чисел и BPE учатся только на train: лента из
-`data/preprocessed/train/events.parquet`, анкета из `data/raw/train/profile.parquet`.
+`data/02_preprocessed/train/events.parquet`, анкета из `data/01_raw/train/profile.parquet`.
 
 ```bash
-python -m src.tokenization.run special-tokens   # data/vocab/special_tokens.json
-python -m src.tokenization.run key-vocab        # data/vocab/key_vocab.json
-python -m src.tokenization.run value-vocab      # data/vocab/value_vocab.json
-python -m src.tokenization.run buckets          # data/vocab/buckets.json
-python -m src.tokenization.run bpe              # data/vocab/bpe.json
-python -m src.tokenization.run final-vocab      # data/vocab/final_vocab.json
+python -m src.tokenization.run special-tokens   # data/03_vocab/special_tokens.json
+python -m src.tokenization.run key-vocab        # data/03_vocab/key_vocab.json
+python -m src.tokenization.run value-vocab      # data/03_vocab/value_vocab.json
+python -m src.tokenization.run buckets          # data/03_vocab/buckets.json
+python -m src.tokenization.run bpe              # data/03_vocab/bpe.json
+python -m src.tokenization.run final-vocab      # data/03_vocab/final_vocab.json
 ```
 
 Для прода те же шесть этапов запускаются одной командой:
@@ -127,8 +130,8 @@ python -m src.tokenization.run encode val
 python -m src.tokenization.run encode test
 ```
 
-Вход: `data/preprocessed/<group>/events.parquet`, `data/raw/<group>/profile.parquet`
-и словарь из `data/vocab/`. Выход: `data/tokenized/<group>/events.parquet` и
+Вход: `data/02_preprocessed/<group>/events.parquet`, `data/01_raw/<group>/profile.parquet`
+и словарь из `data/03_vocab/`. Выход: `data/04_tokenized/<group>/events.parquet` и
 `profile.parquet`.
 
 Ничего не дообучается: значение, которого на train не было, кодируется `[UNK]`.
@@ -155,8 +158,8 @@ python -m src.dataset.run val
 python -m src.dataset.run test
 ```
 
-Вход: `data/tokenized/<group>/` и словарь из `data/vocab/`.
-Результат: `data/dataset/<group>/samples.parquet`. Строка это один клиент на
+Вход: `data/04_tokenized/<group>/` и словарь из `data/03_vocab/`.
+Результат: `data/05_dataset/<group>/samples.parquet`. Строка это один клиент на
 конечный cutoff своей группы.
 
 ```

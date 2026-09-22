@@ -8,11 +8,11 @@ __pycache__/
 # локальные настройки сессии и рабочие копии репозитория
 .claude/
 
-data/raw/
-data/preprocessed/
-data/vocab/
-data/tokenized/
-data/dataset/
+data/01_raw/
+data/02_preprocessed/
+data/03_vocab/
+data/04_tokenized/
+data/05_dataset/
 data/runs/
 
 *.pt

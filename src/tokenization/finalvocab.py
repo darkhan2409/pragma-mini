@@ -165,7 +165,7 @@ def load_final_vocab(directory: Path | None = None) -> dict[str, int]:
 @dataclass
 class FrozenArtifacts:
     """
-    Файлы словаря из data/vocab, которыми кодируют и расшифровывают.
+    Файлы словаря из data/03_vocab, которыми кодируют и расшифровывают.
 
     Ничего не обучает и не меняет: каждый файл отвечает за свой
     вопрос, а финальный словарь переводит имя токена в номер.
@@ -257,7 +257,7 @@ class FrozenArtifacts:
     @staticmethod
     def load(directory: Path | None = None) -> "FrozenArtifacts":
         """
-        Словарь целиком: шесть файлов из data/vocab.
+        Словарь целиком: шесть файлов из data/03_vocab.
         """
 
         directory = Path(directory) if directory is not None else VOCAB_DIR
