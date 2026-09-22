@@ -19,7 +19,7 @@ from .settings import METHOD_UNFITTED, TokenizerConfig
 # train до её конечного cutoff.
 #
 #   data/preprocessed/train/events.parquet
-#   data/preprocessed/train/profile.parquet
+#   data/raw/train/profile.parquet
 #
 # Все три обучающих этапа (значения, границы, BPE) читают этот
 # корпус одинаково и через эту функцию. Второго способа

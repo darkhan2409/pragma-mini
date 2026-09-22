@@ -33,6 +33,9 @@ from .specials import EMPTY, INVALID, MISSING, UNK
 #   data/tokenized/<group>/events.parquet
 #   data/tokenized/<group>/profile.parquet
 #
+# Профиль здесь уже закодирован: это представление анкеты
+# токенами, а не копия выгрузки.
+#
 # client_id и event_time сохраняются: по ним датасет группирует
 # и сортирует. Границы значений внутри записи сохраняются тоже —
 # без них последовательность ID это просто числа.

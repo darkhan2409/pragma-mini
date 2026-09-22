@@ -57,7 +57,8 @@ def run_group(args) -> int:
     print(f"[dataset] группа {group} на срез {report['cutoff'][:10]} → {report['file']}")
     print(
         f"    примеров {counts['samples']}, событий {counts['events']}, "
-        f"значений {counts['values']}, токенов {counts['tokens']}"
+        f"значений {counts['values']}, токенов {counts['tokens']} "
+        f"(из них на профили {counts['profile_tokens']})"
     )
     print(
         f"    в периоде целей событий {counts['eligible_events']} у "

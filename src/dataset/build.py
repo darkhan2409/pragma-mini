@@ -105,8 +105,12 @@ SAMPLES_SCHEMA = pa.schema(
 class Counters:
     samples: int = 0
     events: int = 0
+    # Токены и значения считаются по ОБЕИМ записям примера:
+    # итог набора обязан сходиться с тем, что насчитало
+    # кодирование, иначе две величины молча расходятся.
     tokens: int = 0
     values: int = 0
+    profile_tokens: int = 0
     eligible: int = 0
     with_targets: int = 0
     silent: int = 0
@@ -240,8 +244,9 @@ def build_group(
 
             counters.samples += 1
             counters.events += sample.n_events
-            counters.tokens += sample.n_tokens
-            counters.values += sample.n_values
+            counters.tokens += sample.n_tokens + sample.profile_tokens
+            counters.values += sample.n_values + len(sample.profile_value_start)
+            counters.profile_tokens += sample.profile_tokens
             counters.eligible += sample.n_eligible_events
             counters.with_targets += int(sample.has_targets)
             counters.silent += int(sample.n_events == 0)
@@ -275,6 +280,7 @@ def build_group(
             "events": counters.events,
             "tokens": counters.tokens,
             "values": counters.values,
+            "profile_tokens": counters.profile_tokens,
             "eligible_events": counters.eligible,
             "samples_with_targets": counters.with_targets,
             "silent_clients": counters.silent,

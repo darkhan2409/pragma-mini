@@ -13,7 +13,7 @@
 ```
 data/
 ├── raw/<group>/            выгрузка генератора: события и профиль
-├── preprocessed/<group>/   очищенная группа: events.parquet, profile.parquet
+├── preprocessed/<group>/   очищенная лента: events.parquet
 ├── tokenizer/              словарь по этапам и итоговый tokenizer.json
 ├── tokenized/<group>/      закодированная группа: events.parquet, profile.parquet
 └── dataset/<group>/        готовые примеры: samples.parquet
@@ -45,13 +45,15 @@ python -m src.preprocessing.run preprocess test
 ```
 
 Проверяет RAW по контракту и раскрывает payload в типизированные колонки.
-Результат группы это ровно два файла: `events.parquet` и `profile.parquet`.
-Любая строка, которую нельзя разобрать по контракту, останавливает этап, и
-частичный результат не сохраняется.
+Результат группы это ровно один файл: `events.parquet`. Анкета не
+копируется — чистить в ней нечего, и следующие этапы читают её прямо
+из `data/raw/<group>/profile.parquet`. Любая строка, которую нельзя разобрать
+по контракту, останавливает этап, и частичный результат не сохраняется.
 
 ## 3. Словарь
 
-Все словари, границы чисел и BPE учатся только на `data/preprocessed/train`.
+Все словари, границы чисел и BPE учатся только на train: лента из
+`data/preprocessed/train/events.parquet`, анкета из `data/raw/train/profile.parquet`.
 
 ```bash
 python -m src.tokenization.run special-tokens   # data/tokenizer/special_tokens.json
@@ -95,8 +97,9 @@ python -m src.tokenization.run encode val
 python -m src.tokenization.run encode test
 ```
 
-Вход: `data/preprocessed/<group>/` и `data/tokenizer/tokenizer.json`. Выход:
-`data/tokenized/<group>/events.parquet` и `profile.parquet`. Ничего не
+Вход: `data/preprocessed/<group>/events.parquet`, `data/raw/<group>/profile.parquet`
+и `data/tokenizer/tokenizer.json`. Выход: `data/tokenized/<group>/events.parquet` и
+`profile.parquet` — здесь анкета уже закодирована токенами. Ничего не
 дообучается: значение, которого на train не было, кодируется специальным
 токеном. `client_id` и `event_time` сохраняются, границы записей едут
 массивами начал и длин.

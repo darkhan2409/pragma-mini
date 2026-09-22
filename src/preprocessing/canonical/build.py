@@ -5,12 +5,11 @@ from pathlib import Path
 
 import pyarrow.compute as pc
 
-from ..artifacts import TableWriter, write_table
+from ..artifacts import TableWriter
 from ..rawdata import RawDataset, check_raw
 from ..settings import PreprocessingConfig
 from .events import build_batch, canonical_schema, iter_client_batches
 from .schema import SCHEMA_VERSION, payload_columns
-from .sidecars import build_profile
 
 
 # ============================================================
@@ -19,10 +18,14 @@ from .sidecars import build_profile
 #
 # Этап 1: выгрузка одной группы -> очищенная группа.
 #
-# Результат этапа — РОВНО ДВА файла:
+# Результат этапа — РОВНО ОДИН файл:
 #
 #   data/preprocessed/<group>/events.parquet
-#   data/preprocessed/<group>/profile.parquet
+#
+# Анкета клиента не копируется: чистить в ней нечего, и
+# следующие этапы читают её прямо из выгрузки
+# data/raw/<group>/profile.parquet. Двух почти одинаковых
+# таблиц с одним смыслом быть не должно.
 #
 # Ни индекса клиентов, ни упоминаний сущностей, ни таблицы
 # переводов, ни журнала отказов, ни реестра полей, ни отчётов
@@ -39,7 +42,7 @@ from .sidecars import build_profile
 #   4. привести значения к объявленным типам;
 #   5. упорядочить события клиента по времени, приоритету типа
 #      и месту строки в RAW;
-#   6. записать два файла.
+#   6. записать ленту.
 #
 # Любая строка, которую нельзя разобрать по контракту,
 # ОСТАНАВЛИВАЕТ этап: журнала отказов больше нет, а частичный
@@ -54,7 +57,6 @@ STAGE = "preprocess"
 STAGE_VERSION = "11.0.0"
 
 EVENTS_FILE = "events.parquet"
-PROFILE_FILE = "profile.parquet"
 
 # Границы окна выгрузки едут метаданными самой ленты: отдельного
 # файла-паспорта у слоя нет, а следующим этапам нужно знать, чем
@@ -66,12 +68,11 @@ PERIOD_END_KEY = b"period_end"
 @dataclass
 class CanonicalResult:
     """
-    Что получилось: два файла и числа для терминала.
+    Что получилось: один файл и числа для терминала.
     """
 
     outputs: list[Path]
     events_rows: int
-    profile_rows: int
     clients: int
 
 
@@ -112,14 +113,9 @@ def build_group(
 
     events_rows = events_writer.close()
 
-    profile_table = build_profile(raw, client_index)
-
-    write_table(out_dir / PROFILE_FILE, profile_table)
-
     return CanonicalResult(
-        outputs=[out_dir / EVENTS_FILE, out_dir / PROFILE_FILE],
+        outputs=[out_dir / EVENTS_FILE],
         events_rows=events_rows,
-        profile_rows=profile_table.num_rows,
         clients=len(client_index),
     )
 
@@ -166,7 +162,6 @@ __all__ = [
     "EVENTS_FILE",
     "PERIOD_END_KEY",
     "PERIOD_START_KEY",
-    "PROFILE_FILE",
     "SCHEMA_VERSION",
     "STAGE",
     "STAGE_VERSION",

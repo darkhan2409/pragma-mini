@@ -72,8 +72,10 @@ def run_preprocess(args) -> int:
 
     print(
         f"[{STAGE}] группа {group}: событий {result.events_rows}, "
-        f"профилей {result.profile_rows}, клиентов {result.clients} → {target}"
+        f"клиентов {result.clients} → {target}"
     )
+    print("    анкета не копируется: следующие этапы читают её из "
+          f"{raw_dir / 'profile.parquet'}")
 
     return EXIT_OK
 

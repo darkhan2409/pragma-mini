@@ -795,7 +795,7 @@ DATASETS: dict[str, DatasetGroup] = {
         clients=1,
         history_start=datetime(2024, 1, 1),
         history_end=datetime(2026, 1, 1),
-        seed=499,
+        seed=498,
     ),
     "val": DatasetGroup(
         clients=10,
