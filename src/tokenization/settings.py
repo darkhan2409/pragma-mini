@@ -33,13 +33,13 @@ from .version import SCHEMA_VERSION
 
 # Пути стандартны и в командах не задаются.
 #
-#   data/vocab/               чем кодируются данные: шесть файлов словаря
-#   data/tokenized/<group>/   результат кодирования, два файла
+#   data/03_vocab/               чем кодируются данные: шесть файлов словаря
+#   data/04_tokenized/<group>/   результат кодирования, два файла
 #
 # Словарь один на весь конвейер и учится только на train,
 # поэтому лежит отдельно от групп.
-VOCAB_DIR = DATA_DIR / "vocab"
-TOKENIZED_DIR = DATA_DIR / "tokenized"
+VOCAB_DIR = DATA_DIR / "03_vocab"
+TOKENIZED_DIR = DATA_DIR / "04_tokenized"
 
 SPECIAL_TOKENS_FILE = "special_tokens.json"
 KEY_VOCAB_FILE = "key_vocab.json"
@@ -573,7 +573,7 @@ class TokenizerConfig:
 
 def vocab_path(name: str) -> Path:
     """
-    Путь к файлу словаря в data/vocab.
+    Путь к файлу словаря в data/03_vocab.
     """
 
     return VOCAB_DIR / name

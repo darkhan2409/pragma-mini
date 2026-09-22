@@ -28,12 +28,12 @@ from .artifacts import dumps_json, sha256_bytes
 
 # Пути стандартны и в командах не задаются.
 #
-#   data/raw/<group>/            выгрузка генератора
-#   data/preprocessed/<group>/   очищенная лента и профиль, два файла
+#   data/01_raw/<group>/            выгрузка генератора
+#   data/02_preprocessed/<group>/   очищенная лента и профиль, два файла
 #
 # Каталог группы держит ТОЛЬКО два файла, и отчётов рядом с
 # данными нет: что случилось на этапе, говорит сама команда.
-PREPROCESSED_DIR = DATA_DIR / "preprocessed"
+PREPROCESSED_DIR = DATA_DIR / "02_preprocessed"
 
 # Имена групп совпадают с именами подкаталогов RAW.
 GROUPS: tuple[str, ...] = ("train", "val", "test")
@@ -281,7 +281,7 @@ def normalize_group(name: str) -> str:
 
 def group_dir(group: str) -> Path:
     """
-    Каталог очищенной группы: data/preprocessed/<group>.
+    Каталог очищенной группы: data/02_preprocessed/<group>.
     """
 
     return PREPROCESSED_DIR / normalize_group(group)
@@ -289,7 +289,7 @@ def group_dir(group: str) -> Path:
 
 def raw_group_dir(group: str) -> Path:
     """
-    Каталог выгрузки группы: data/raw/<group>.
+    Каталог выгрузки группы: data/01_raw/<group>.
     """
 
     return RAW_DIR / normalize_group(group)

@@ -31,8 +31,8 @@ from .specials import UNK
 #
 # Результат группы это ровно два файла:
 #
-#   data/tokenized/<group>/events.parquet
-#   data/tokenized/<group>/profile.parquet
+#   data/04_tokenized/<group>/events.parquet
+#   data/04_tokenized/<group>/profile.parquet
 #
 # Профиль здесь уже закодирован: это представление анкеты
 # токенами, а не копия выгрузки.

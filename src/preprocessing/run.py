@@ -15,9 +15,9 @@ from .settings import GROUPS, PreprocessingConfig, group_dir, normalize_group, r
 #
 #   python -m src.preprocessing.run preprocess <group>
 #
-# Она читает data/raw/<group>, проверяет выгрузку, раскрывает
+# Она читает data/01_raw/<group>, проверяет выгрузку, раскрывает
 # payload, приводит значения к объявленным типам, упорядочивает
-# события клиента и кладёт ДВА файла в data/preprocessed/<group>.
+# события клиента и кладёт ДВА файла в data/02_preprocessed/<group>.
 #
 # Ни истории на дату, ни разделения, ни смыслового слоя рядом
 # больше нет: срез применяется позже, при сборке датасета, а
@@ -93,7 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     preprocess = subparsers.add_parser(
         "preprocess",
-        help="проверка выгрузки и очищенная группа в data/preprocessed/<group>",
+        help="проверка выгрузки и очищенная группа в data/02_preprocessed/<group>",
     )
     preprocess.add_argument("group", choices=GROUPS, help="группа: train, val или test")
     preprocess.add_argument("--config", type=Path, default=None, help="JSON с переопределениями конфига")

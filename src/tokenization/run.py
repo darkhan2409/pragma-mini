@@ -40,19 +40,19 @@ from .transform import TransformError, encode_group
 # с одним видимым файлом. Автоматической цепочки нет намеренно:
 # словарь это решение, а не побочный эффект запуска.
 #
-#   special-tokens  data/vocab/special_tokens.json  служебные токены
-#   key-vocab       data/vocab/key_vocab.json       поля модели
-#   value-vocab     data/vocab/value_vocab.json     категории train
-#   buckets         data/vocab/buckets.json         диапазоны чисел
-#   bpe             data/vocab/bpe.json             разбиение текста
-#   final-vocab     data/vocab/final_vocab.json     имя токена -> ID
-#   encode <group>  data/tokenized/<group>/         два файла группы
+#   special-tokens  data/03_vocab/special_tokens.json  служебные токены
+#   key-vocab       data/03_vocab/key_vocab.json       поля модели
+#   value-vocab     data/03_vocab/value_vocab.json     категории train
+#   buckets         data/03_vocab/buckets.json         диапазоны чисел
+#   bpe             data/03_vocab/bpe.json             разбиение текста
+#   final-vocab     data/03_vocab/final_vocab.json     имя токена -> ID
+#   encode <group>  data/04_tokenized/<group>/         два файла группы
 #
 # Для прода есть fit: он вызывает те же шесть функций подряд и
 # останавливается на первой же ошибке, называя этап.
 #
 # Учатся только value-vocab, buckets и bpe, и только на
-# data/preprocessed/train вместе с data/raw/train/profile.parquet.
+# data/02_preprocessed/train вместе с data/01_raw/train/profile.parquet.
 # Кодирование применяет готовый словарь и не меняет его.
 # ============================================================
 
@@ -272,7 +272,7 @@ def run_encode(args) -> int:
 
     counts = report["counts"]
 
-    print(f"[encode] группа {group} до {report['cutoff'][:10]} → data/tokenized/{group}")
+    print(f"[encode] группа {group} до {report['cutoff'][:10]} → data/04_tokenized/{group}")
     print(
         f"    клиентов {counts['clients']}, событий {counts['events']}, значений {counts['values']}, "
         f"токенов {counts['tokens']}"

@@ -18,8 +18,8 @@ from src.tokenization.transform import EVENTS_FILE, PROFILE_FILE
 #
 # Единственный вход датасета: закодированная группа.
 #
-#   data/tokenized/<group>/events.parquet
-#   data/tokenized/<group>/profile.parquet
+#   data/04_tokenized/<group>/events.parquet
+#   data/04_tokenized/<group>/profile.parquet
 #
 # Читается она потоково и по клиентам: строки одного клиента
 # лежат подряд, поэтому держать в памяти нужно ровно одного.
