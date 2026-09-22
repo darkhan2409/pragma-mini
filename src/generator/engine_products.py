@@ -527,7 +527,7 @@ def _gather_on_card(state: ClientState, ts: datetime, amount: int) -> bool:
     if account is None:
         return False
 
-    shortfall = max(0, amount - account.available)
+    shortfall = max(0, amount - state.ledger.available_at(account.account_id, ts))
 
     if shortfall <= 0:
         return True

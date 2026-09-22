@@ -811,10 +811,16 @@ def _emit_money(
     # Одобренное списание не может увести счёт в минус. Проверка
     # стоит ЗДЕСЬ, а не у каждого вызывающего: путей списания
     # полтора десятка, счёт выбирается заранее, а исполняется
-    # операция позже — за это время соседние события дня успевают
-    # снять деньги, и остаток уходил ниже нуля у обычной карты.
+    # операция позже.
     #
-    # available знает про кредитный лимит: по кредитной карте
+    # Считается остаток НА МОМЕНТ ОПЕРАЦИИ, а не на момент
+    # решения. Это не одно и то же: кешбэк месяца начисляется до
+    # выписки, а датируется после неё; деньги к сроку подтягивают
+    # задним числом; просроченный счёт платят прошедшим часом. В
+    # ленте строки лягут по своему времени, и списание, которое
+    # по остатку ledger проходило, оказывалось там ниже нуля.
+    #
+    # available_at знает про кредитный лимит: по кредитной карте
     # минус разрешён ровно до него, по дебетовому счёту лимита
     # нет и минуса быть не может.
     #
@@ -826,7 +832,7 @@ def _emit_money(
         and post
         and direction == "debit"
         and account is not None
-        and account.available < int(amount)
+        and state.ledger.available_at(account_id, ts) < int(amount)
     ):
         status = "declined"
         payload = dict(payload)
@@ -1114,6 +1120,11 @@ def _on_subscription(sim, state: ClientState, ts: datetime, payload: dict) -> No
         f"merchant:{subscription.outlet_id}", body,
     )
 
+    # Отказ покупкой не стал: возвращать нечего и в оборот
+    # месяца он не идёт.
+    if event.payload.get("status") != "approved":
+        return
+
     _schedule_refunds(sim, state, event)
     state.month_purchases += amount
 
@@ -1244,6 +1255,12 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         state, ts, "purchase", account.account_id, amount, "debit",
         f"merchant:{choice.outlet.outlet_id}", body,
     )
+
+    # Банк видел попытку, но денег не списал: ни возврата, ни
+    # оборота месяца, ни кешбэка у отказа нет.
+    if event.payload.get("status") != "approved":
+        _touch_client(state, ts)
+        return
 
     _schedule_refunds(sim, state, event)
     state.month_purchases += amount
@@ -1400,12 +1417,17 @@ def _on_cash(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     body["card_id"] = card.card_id if card else None
 
-    _emit_money(
+    taken = _emit_money(
         state, ts, "cash_withdrawal", account.account_id, amount, "debit",
         state.ledger.cash_id, body,
     )
 
     _touch_client(state, ts)
+
+    # Банкомат денег не выдал: ни комиссии, ни месячных счётчиков
+    # у неудавшегося снятия нет.
+    if taken.payload.get("status") != "approved":
+        return
 
     contract = state.contracts.get(account.contract_id) if account.contract_id else None
 
@@ -1418,7 +1440,7 @@ def _on_cash(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         state.monthly_atm += amount
         state.monthly_atm_count += 1
 
-        if fee > 0 and state.ledger.can_debit(account.account_id, fee):
+        if fee > 0 and state.ledger.can_debit(account.account_id, fee, ts + timedelta(seconds=5)):
             _emit_money(
                 state, ts + timedelta(seconds=5), "fee_charge", account.account_id, fee, "debit",
                 COUNTERPART_BANK,
@@ -1557,24 +1579,28 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     if internal:
 
-        _emit_money(
+        sent = _emit_money(
             state, ts, "p2p_out", account.account_id, amount, "debit",
             target.account_id, dict(body, transfer_id=transfer_id),
         )
 
-        # Деньги доходят немедленно и влияют на решения получателя.
-        _emit_money(
-            other, ts + timedelta(seconds=1), "p2p_in", target.account_id, amount, "credit",
-            account.account_id,
-            {
-                "channel": "system",
-                "counterparty": graph_counterpart_name(state),
-                "mcc": MCC_TRANSFER,
-                "merchant_country": "KZ",
-                "reason": "transfer",
-                "transfer_id": transfer_id,
-            },
-        )
+        # Деньги доходят немедленно и влияют на решения
+        # получателя. Но только если они ушли: зачисление за
+        # отказом создало бы деньги из ничего и оставило бы у
+        # перевода одну сторону.
+        if sent.payload.get("status") == "approved":
+            _emit_money(
+                other, ts + timedelta(seconds=1), "p2p_in", target.account_id, amount, "credit",
+                account.account_id,
+                {
+                    "channel": "system",
+                    "counterparty": graph_counterpart_name(state),
+                    "mcc": MCC_TRANSFER,
+                    "merchant_country": "KZ",
+                    "reason": "transfer",
+                    "transfer_id": transfer_id,
+                },
+            )
 
     else:
 
@@ -1584,12 +1610,16 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             else f"external:{counterpart.counterpart_id}"
         )
 
-        _emit_money(
+        sent = _emit_money(
             state, ts, "transfer_out", account.account_id, amount, "debit",
             destination, dict(body, transfer_id=transfer_id),
         )
 
     _touch_client(state, ts)
+
+    # Денег не ушло — не за что брать и комиссию.
+    if sent.payload.get("status") != "approved":
+        return
 
     contract = state.contracts.get(account.contract_id) if account.contract_id else None
 
@@ -1599,7 +1629,7 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
         state.monthly_transfer += amount
 
-        if fee > 0 and state.ledger.can_debit(account.account_id, fee):
+        if fee > 0 and state.ledger.can_debit(account.account_id, fee, ts + timedelta(seconds=4)):
             _emit_money(
                 state, ts + timedelta(seconds=4), "fee_charge", account.account_id, fee, "debit",
                 COUNTERPART_BANK,

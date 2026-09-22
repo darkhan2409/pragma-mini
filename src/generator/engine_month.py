@@ -249,12 +249,39 @@ def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_ev
     if rng.random() >= settings.on_time_payment_probability[band]:
         return False
 
+    # Момент списания по выписке. Счета и суммы выбираются по
+    # остатку ИМЕННО НА ЭТОТ МОМЕНТ: выписка закрывается в конце
+    # месяца, когда день клиента уже прожит, а кешбэк месяца хоть
+    # и начислен, но датирован получасом позже.
+    moment = day.replace(hour=23, minute=15)
+
     def own_sources(value: int) -> list:
         return [
             item
-            for item in state.ledger.payment_sources(day, value)
+            for item in state.ledger.payment_sources(moment, value)
             if item.kind != "credit_card"
         ]
+
+    def own_capacity() -> int:
+        """
+        Сколько клиент способен заплатить с обычного счёта в
+        момент списания: остаток самого полного из них.
+        """
+
+        return max(
+            (
+                state.ledger.available_at(item.account_id, moment)
+                for item in state.ledger.accounts.values()
+                if item.visible
+                and item.is_open_at(moment)
+                and item.kind not in (*NON_PAYMENT_KINDS, "credit_card")
+            ),
+            default=0,
+        )
+
+    # Минимальный платёж по выписке. От него считается порог
+    # частичной оплаты, даже если заплатят в итоге меньше.
+    minimum = payment
 
     sources = own_sources(payment)
 
@@ -272,16 +299,9 @@ def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_ev
     # уходит в просрочку с первого же тесного месяца.
     if not sources:
 
-        capacity = max(
-            (
-                item.available
-                for item in state.ledger.accounts.values()
-                if item.visible and item.is_open_at(day) and item.kind not in (*NON_PAYMENT_KINDS, "credit_card")
-            ),
-            default=0,
-        )
+        capacity = own_capacity()
 
-        if capacity >= settings.partial_payment_min_share * payment:
+        if capacity >= settings.partial_payment_min_share * minimum:
             payment = int(capacity)
             sources = own_sources(payment)
 
@@ -290,9 +310,30 @@ def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_ev
 
     source = sources[0]
 
-    moment = day.replace(hour=23, minute=15)
+    # Между выбором счёта и списанием успевают пройти и подтяжка
+    # денег к сроку, и частичный пересчёт. Остаток проверяется
+    # ЗАНОВО, непосредственно перед списанием: минус разрешён
+    # только там, где есть кредитный лимит.
+    if state.ledger.available_at(source.account_id, moment) < payment:
 
-    _emit_money(
+        capacity = own_capacity()
+
+        # Платят столько, сколько осталось, но только пока это
+        # всё ещё частичный платёж по правилам продукта. Ниже
+        # порога выписка считается пропущенной.
+        if capacity <= 0 or capacity < settings.partial_payment_min_share * minimum:
+            return False
+
+        payment = int(capacity)
+
+        sources = own_sources(payment)
+
+        if not sources:
+            return False
+
+        source = sources[0]
+
+    paid = _emit_money(
         state,
         moment,
         "loan_payment",
@@ -311,6 +352,13 @@ def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_ev
             "merchant_country": "KZ",
         },
     )
+
+    # Списание не прошло: денег на счёте уже нет. Встречного
+    # зачисления, погашения долга и отметки об исполнении у
+    # отказа быть не может — иначе долг по карте уменьшался бы
+    # без движения денег, а выписка считалась бы закрытой.
+    if paid.payload.get("status") != "approved":
+        return False
 
     _emit_money(
         state,
@@ -513,7 +561,7 @@ def month_end(sim, state: ClientState, day: datetime) -> None:
         if fee <= 0 or contract.account_id is None:
             continue
 
-        if not state.ledger.can_debit(contract.account_id, fee):
+        if not state.ledger.can_debit(contract.account_id, fee, ts):
             continue
 
         _emit_money(
