@@ -210,9 +210,9 @@ def check_chains(events_path: Path) -> dict:
 
     for index in range(parquet.num_row_groups):
 
-        chunk = parquet.read_row_group(index, columns=[*present, "event_type"])
+        chunk = parquet.read_row_group(index, columns=[*present, "type"])
 
-        types = chunk.column("event_type").to_pylist()
+        types = chunk.column("type").to_pylist()
 
         for field_name in present:
             for value, event_type in zip(chunk.column(field_name).to_pylist(), types):

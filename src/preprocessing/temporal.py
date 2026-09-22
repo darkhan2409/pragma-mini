@@ -418,7 +418,7 @@ def render_history_md(history: ClientHistory, tail: int = 15) -> str:
                 [
                     [
                         _fmt(row["event_time"]),
-                        row["event_type"],
+                        row["type"],
                         row["source"],
                         _fmt(row.get("amount")),
                         _fmt(row.get("merchant_name") or row.get("counterparty") or row.get("template")),

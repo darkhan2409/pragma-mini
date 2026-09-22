@@ -18,7 +18,6 @@ from .schema import (
     PAYLOAD_NULL,
     PAYLOAD_OK,
     PAYLOAD_UNPARSEABLE,
-    canonical_column,
     events_schema,
     payload_columns,
 )
@@ -242,17 +241,16 @@ def parse_batch(manifest: RawManifest, batch: pa.Table, payload_names: list[str]
     counts: dict[str, int] = {}
 
     if rows == 0:
-        empty = pa.table(
-            {canonical_column(name): pa.nulls(0, columns[canonical_column(name)]) for name in payload_names}
-        )
+        empty = pa.table({name: pa.nulls(0, columns[name]) for name in payload_names})
         return ParsedBatch(empty, status, violations, rejects, counts)
 
     order: list[np.ndarray] = []
     pieces: list[pa.Table] = []
 
-    # Тип события читается из payload: колонки event_type в
-    # выгрузке нет. Строка без разобранного типа уходит в
-    # unknown_event_type, а не получает выдуманный тип.
+    # Тип события читается из payload ключом type: отдельной
+    # колонки у него нет ни в выгрузке, ни в слое. Строка без
+    # разобранного типа уходит в unknown_event_type, а не
+    # получает выдуманный тип.
     event_type_column = event_types_of(batch.column("payload"))
 
     for event_type, _ in iter_event_types(batch):
@@ -276,7 +274,7 @@ def parse_batch(manifest: RawManifest, batch: pa.Table, payload_names: list[str]
                 rejects.append(
                     {
                         "client_id": rows_of_type.column("client_id")[local].as_py(),
-                        "event_type": event_type,
+                        "type": event_type,
                         "reason": "unknown_event_type",
                         "detail": "типа нет в каталоге ключей манифеста",
                         "payload": rows_of_type.column("payload")[local].as_py(),
@@ -286,12 +284,7 @@ def parse_batch(manifest: RawManifest, batch: pa.Table, payload_names: list[str]
                     }
                 )
             counts["unknown_event_type"] = counts.get("unknown_event_type", 0) + len(indices)
-            piece = pa.table(
-                {
-                    canonical_column(name): pa.nulls(len(indices), columns[canonical_column(name)])
-                    for name in payload_names
-                }
-            )
+            piece = pa.table({name: pa.nulls(len(indices), columns[name]) for name in payload_names})
             order.append(indices)
             pieces.append(piece)
             continue
@@ -311,7 +304,7 @@ def parse_batch(manifest: RawManifest, batch: pa.Table, payload_names: list[str]
                 rejects.append(
                     {
                         "client_id": rows_of_type.column("client_id")[local].as_py(),
-                        "event_type": event_type,
+                        "type": event_type,
                         "reason": items[0].split(":")[0],
                         "detail": "; ".join(items),
                         "payload": rows_of_type.column("payload")[local].as_py(),
@@ -323,10 +316,10 @@ def parse_batch(manifest: RawManifest, batch: pa.Table, payload_names: list[str]
 
         piece = pa.table(
             {
-                canonical_column(name): (
+                name: (
                     parsed.table.column(name)
                     if name in parsed.table.column_names
-                    else pa.nulls(len(indices), columns[canonical_column(name)])
+                    else pa.nulls(len(indices), columns[name])
                 )
                 for name in payload_names
             }
@@ -497,7 +490,7 @@ def build_batch(
     # становится; неизвестный тип уходит в конец секунды.
     priority_of = manifest.event_type_priority
     last_priority = len(priority_of)
-    event_type = parsed.table.column("event_type").to_pylist()
+    event_type = parsed.table.column("type").to_pylist()
     priority = np.asarray(
         [priority_of.get(name, last_priority) for name in event_type],
         dtype=np.int64,
@@ -644,11 +637,8 @@ def build_batch(
 
     columns.update(derived)
 
-    # parsed уже назвал колонки по-канонически: тип события
-    # приехал из payload["type"] колонкой event_type.
     for name in payload_names:
-        column = canonical_column(name)
-        columns[column] = parsed.table.column(column)
+        columns[name] = parsed.table.column(name)
 
     table = pa.table(columns).select(schema.names).cast(schema)
 

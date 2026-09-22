@@ -220,7 +220,7 @@ def note_limit(limits: dict[str, dict], row: dict) -> None:
 
 
 def income_moments(rows: list[dict], income_types: frozenset[str]) -> list[datetime]:
-    return [row["event_time"] for row in rows if row["event_type"] in income_types]
+    return [row["event_time"] for row in rows if row["type"] in income_types]
 
 
 __all__ = [

@@ -18,30 +18,15 @@ from ..rawdata import DTYPE_MAP, ENVELOPE_SCHEMA, RawManifest
 # него: задержек, опозданий, момента закрытия версии.
 #
 # Колонки payload называются по имени поля, а принадлежность
-# даёт event_type строки: dtype одного имени совпадает во всех
-# типах событий (проверяется, а не предполагается), поэтому
-# физические поля всех типов укладываются в общий набор колонок.
+# строки даёт её тип — ключ type: dtype одного имени совпадает
+# во всех типах событий (проверяется, а не предполагается),
+# поэтому физические поля всех типов укладываются в общий набор
+# колонок. Переименований между выгрузкой и слоем нет: как поле
+# названо в payload, так называется и колонка.
 # ============================================================
 
 
-SCHEMA_VERSION = 11
-
-# Имя поля payload -> имя колонки canonical.
-#
-# В выгрузке тип события называется ключом type: конверт у неё
-# из четырёх колонок, и это её контракт. Внутри слоя та же
-# величина зовётся event_type — так её называют каталог ключей,
-# приоритет типов, реестр полей и все отчёты. Переименование
-# ровно одно, объявлено здесь и нигде не повторяется.
-PAYLOAD_COLUMNS: dict[str, str] = {"type": "event_type"}
-
-
-def canonical_column(name: str) -> str:
-    """
-    Как поле payload называется колонкой canonical.
-    """
-
-    return PAYLOAD_COLUMNS.get(name, name)
+SCHEMA_VERSION = 12
 
 TS = pa.timestamp("us")
 
@@ -126,25 +111,7 @@ def payload_columns(manifest: RawManifest) -> list[tuple[str, pa.DataType]]:
                     "общая колонка невозможна"
                 )
 
-    return [(canonical_column(name), DTYPE_MAP[dtype]) for name, dtype in columns.items()]
-
-
-def payload_fields(manifest: RawManifest) -> list[str]:
-    """
-    Имена полей payload так, как они называются В ВЫГРУЗКЕ.
-
-    Разбор идёт по ним, а колонка canonical называется через
-    canonical_column: единственное расхождение — type/event_type.
-    """
-
-    names: list[str] = []
-
-    for info in manifest.catalogue.values():
-        for item in info.fields:
-            if item.name not in names:
-                names.append(item.name)
-
-    return names
+    return [(name, DTYPE_MAP[dtype]) for name, dtype in columns.items()]
 
 
 def events_schema(manifest: RawManifest) -> pa.Schema:
@@ -202,7 +169,7 @@ MENTIONS_SCHEMA = pa.schema(
         ("client_id", pa.string()),
         ("stable_event_index", pa.int64()),
         ("event_time", TS),
-        ("event_type", pa.string()),
+        ("type", pa.string()),
         ("source", pa.string()),
         ("field_name", pa.string()),
         ("is_transition", pa.bool_()),
@@ -224,7 +191,7 @@ TRANSFERS_SCHEMA = pa.schema(
         ("side", pa.string()),
         ("client_idx", pa.int64()),
         ("client_id", pa.string()),
-        ("event_type", pa.string()),
+        ("type", pa.string()),
         ("stable_event_index", pa.int64()),
         ("event_time", TS),
         ("amount", pa.int64()),
@@ -239,7 +206,7 @@ TRANSFERS_SCHEMA = pa.schema(
 REJECTS_SCHEMA = pa.schema(
     [
         ("client_id", pa.string()),
-        ("event_type", pa.string()),
+        ("type", pa.string()),
         ("reason", pa.string()),
         ("detail", pa.string()),
         ("payload", pa.string()),
@@ -251,9 +218,6 @@ REJECTS_SCHEMA = pa.schema(
 
 
 __all__ = [
-    "PAYLOAD_COLUMNS",
-    "payload_fields",
-    "canonical_column",
     "CLIENT_INDEX_SCHEMA",
     "DERIVED_COLUMNS",
     "DERIVED_NAMES",

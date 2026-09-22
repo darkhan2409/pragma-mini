@@ -10,7 +10,6 @@ from ..artifacts import _md_table, read_json, write_json, write_table, write_tex
 from ..canonical.build import REGISTRY_FILE as CANONICAL_REGISTRY_FILE
 from ..canonical.build import STAGE as CANONICAL_STAGE
 from ..canonical.registry import catalogue_from_registry
-from ..canonical.schema import canonical_column
 from ..history import CanonicalStore
 from ..projection import PROJECTION_VERSION, projection_registry
 from ..settings import CALENDAR_ENCODING, PreprocessingConfig
@@ -35,7 +34,7 @@ from .keys import DERIVED_KEYS, KEYS_VERSION, TIMING_KEYS, keys_registry
 
 
 STAGE = "semantic"
-STAGE_VERSION = "6.0.0"
+STAGE_VERSION = "7.0.0"
 SCHEMA_VERSION = 1
 
 REGISTRY_FILE = "semantic_registry.json"
@@ -239,19 +238,13 @@ class SemanticError(ValueError):
 
 
 def _payload_names(catalogue: dict) -> list[str]:
-    """
-    Имена полей payload так, как они называются колонками
-    canonical: тип события приезжает из payload["type"] и зовётся
-    здесь event_type.
-    """
 
     names: set[str] = set()
 
     for info in catalogue.values():
         fields = info["fields"] if isinstance(info, dict) else info.fields
         for item in fields:
-            name = item["name"] if isinstance(item, dict) else item.name
-            names.add(canonical_column(name))
+            names.add(item["name"] if isinstance(item, dict) else item.name)
 
     return sorted(names)
 

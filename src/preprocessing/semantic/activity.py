@@ -117,7 +117,7 @@ def activity_months(
     for row in rows:
         key = _month_key(row["event_time"])
         events[key] = events.get(key, 0) + 1
-        if row["event_type"] in CLIENT_ACTION_EVENT_TYPES:
+        if row["type"] in CLIENT_ACTION_EVENT_TYPES:
             actions[key] = actions.get(key, 0) + 1
 
     months = _months_before(observed_start, cutoff)

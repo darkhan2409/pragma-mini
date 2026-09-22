@@ -34,7 +34,7 @@ from ..rawdata import DTYPE_MAP, RawManifest
 # ============================================================
 
 
-REGISTRY_VERSION = "3.0.0"
+REGISTRY_VERSION = "4.0.0"
 
 # Владельцы полей.
 OWNER_ENVELOPE = "envelope"
@@ -181,9 +181,7 @@ def build_registry(manifest: RawManifest, extra: Iterable[tuple[str, str, str, s
                 nullable=nullable,
                 level=level,
                 role=role,
-                # Судьба поля решается по КОЛОНКЕ canonical:
-                # проекция читает очищенную строку, а не payload.
-                model_role=model_role(column or name),
+                model_role=model_role(name),
                 unit=UNITS.get(name),
                 reference_to=REFERENCE_FIELDS.get(name),
                 column=column or name,
@@ -209,8 +207,6 @@ def build_registry(manifest: RawManifest, extra: Iterable[tuple[str, str, str, s
 
     # --- payload по типам событий ---
 
-    from .schema import canonical_column
-
     for event_type, info in manifest.catalogue.items():
         for item in info.fields:
             add(
@@ -221,10 +217,6 @@ def build_registry(manifest: RawManifest, extra: Iterable[tuple[str, str, str, s
                 item.level,
                 ROLE_PAYLOAD,
                 item.description,
-                # Колонка называется по имени поля, кроме типа
-                # события: в выгрузке это ключ type, в canonical
-                # колонка event_type.
-                column=canonical_column(item.name),
                 source=info.source,
             )
 
@@ -263,7 +255,7 @@ def registry_as_dict(entries: list[FieldEntry], timezone: str | None = None) -> 
         "rules": {
             "identity": "физическое поле это пара (владелец, имя): dtype у одного имени совпадает, nullable и level различаются",
             "field_id": "устойчивый индекс трассировки, не словарь токенов и не вход модели",
-            "column": "колонка canonical называется по имени поля; исключение одно — ключ type выгрузки становится колонкой event_type",
+            "column": "колонка canonical называется по имени поля payload; переименований нет",
             "units": "взяты из описаний каталога ключей генератора; там, где единицы нет, стоит null",
             "reference_to": "поле связывает событие с сущностью этого вида",
             "model_role": "что происходит с полем на границе модели: см. блок model_projection",

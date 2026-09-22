@@ -79,7 +79,7 @@ MENTION_COLUMNS = (
     "client_id",
     "stable_event_index",
     "event_time",
-    "event_type",
+    "type",
     "source",
     "raw_row",
 )
@@ -92,7 +92,7 @@ def extract_mentions(table: pa.Table) -> pa.Table:
 
     pieces: list[pa.Table] = []
 
-    event_type = table.column("event_type")
+    event_type = table.column("type")
 
     for field_name, kind in ENTITY_FIELDS.items():
 
@@ -109,7 +109,7 @@ def extract_mentions(table: pa.Table) -> pa.Table:
 
         rows = table.filter(mask)
 
-        types = rows.column("event_type").to_pylist()
+        types = rows.column("type").to_pylist()
         transitions = [TRANSITIONS.get((kind, value)) for value in types]
 
         piece = pa.table(
@@ -156,11 +156,11 @@ def extract_transfers(table: pa.Table) -> list[dict]:
     комиссия становилась стороной без направления.
     """
 
-    if "event_type" not in table.column_names or "transfer_id" not in table.column_names:
+    if "type" not in table.column_names or "transfer_id" not in table.column_names:
         return []
 
     mask = pc.and_(
-        pc.is_in(table.column("event_type"), value_set=pa.array(sorted(TRANSFER_SIDES))),
+        pc.is_in(table.column("type"), value_set=pa.array(sorted(TRANSFER_SIDES))),
         pc.is_valid(table.column("transfer_id")),
     )
 
@@ -176,10 +176,10 @@ def extract_transfers(table: pa.Table) -> list[dict]:
         out.append(
             {
                 "transfer_id": row["transfer_id"],
-                "side": TRANSFER_SIDES.get(row["event_type"]),
+                "side": TRANSFER_SIDES.get(row["type"]),
                 "client_idx": row["client_idx"],
                 "client_id": row["client_id"],
-                "event_type": row["event_type"],
+                "type": row["type"],
                 "stable_event_index": row["stable_event_index"],
                 "event_time": row["event_time"],
                 "amount": row.get("amount"),
