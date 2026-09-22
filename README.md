@@ -14,8 +14,8 @@
 data/
 ├── raw/<group>/            выгрузка генератора: события и профиль
 ├── preprocessed/<group>/   очищенная лента: events.parquet
-├── tokenizer/              словарь по этапам и итоговый tokenizer.json
-├── tokenized/<group>/      закодированная группа: events.parquet, profile.parquet
+├── vocab/                  чем кодируются данные: шесть файлов словаря
+├── tokenized/<group>/      результат кодирования: events.parquet, profile.parquet
 └── dataset/<group>/        готовые примеры: samples.parquet
 ```
 
@@ -56,12 +56,12 @@ python -m src.preprocessing.run preprocess test
 `data/preprocessed/train/events.parquet`, анкета из `data/raw/train/profile.parquet`.
 
 ```bash
-python -m src.tokenization.run special-tokens   # data/tokenizer/special_tokens.json
-python -m src.tokenization.run key-vocab        # data/tokenizer/key_vocab.json
-python -m src.tokenization.run value-vocab      # data/tokenizer/value_vocab.json
-python -m src.tokenization.run buckets          # data/tokenizer/buckets.json
-python -m src.tokenization.run bpe              # data/tokenizer/bpe.json
-python -m src.tokenization.run final-vocab      # data/tokenizer/tokenizer.json
+python -m src.tokenization.run special-tokens   # data/vocab/special_tokens.json
+python -m src.tokenization.run key-vocab        # data/vocab/key_vocab.json
+python -m src.tokenization.run value-vocab      # data/vocab/value_vocab.json
+python -m src.tokenization.run buckets          # data/vocab/buckets.json
+python -m src.tokenization.run bpe              # data/vocab/bpe.json
+python -m src.tokenization.run final-vocab      # data/vocab/final_vocab.json
 ```
 
 Для прода те же шесть этапов запускаются одной командой:
@@ -72,22 +72,52 @@ python -m src.tokenization.run fit
 
 `fit` вызывает те же функции, что и отдельные команды, поэтому результат
 совпадает. При ошибке он останавливается и называет проблемный этап;
-`tokenizer.json` при этом не остаётся от прежней сборки.
+`final_vocab.json` при этом не остаётся от прежней сборки.
 
-Что в каком файле:
+Каждый файл решает ровно одну задачу и не повторяет содержимое соседних.
 
-| файл | что содержит |
-|---|---|
-| `special_tokens.json` | служебные токены, их ID и назначение |
-| `key_vocab.json` | все поля, поступающие в модель, и их ID |
-| `value_vocab.json` | категориальные значения train, их ID, частоты, связь с ключом |
-| `buckets.json` | метод, границы диапазонов и токены каждого числового ключа |
-| `bpe.json` | разбиение текста train со всем нужным для кодирования и декодирования |
-| `tokenizer.json` | единое пространство ID и таблица всех токенов |
+`special_tokens.json` — служебные токены и их ID. Их пять:
 
-Пространство ID непересекающимися диапазонами:
-`специальные → ключи → категории → диапазоны чисел → BPE`. После сборки
-`tokenizer.json` словарь не меняется.
+```json
+{"[PAD]": 0, "[UNK]": 1, "[MASK]": 2, "[EVT]": 3, "[USR]": 4}
+```
+
+`key_vocab.json` — название ключа и его ID:
+
+```json
+{"accrual_period": 5, "amount_due": 6, "event_type": 29}
+```
+
+`value_vocab.json` — категории train, сгруппированные по ключу. Идентификатор
+определяет связка ключ + значение: одинаковая запись у разных ключей это разные
+факты.
+
+```json
+{"app_domain": {"auth": 118, "home": 119}}
+```
+
+`buckets.json` — диапазоны каждого числового ключа. `min` включительно, `max`
+не включительно; `null` означает открытую сторону, а `min = max = 0` —
+отдельный нулевой диапазон, который проверяется первым.
+
+```json
+{"amount_due": {"amount_due_bucket_1": {"id": 283, "min": null, "max": 1000}}}
+```
+
+`bpe.json` — стандартный файл библиотеки `tokenizers`, записанный её же
+`Tokenizer.save`, и читаемый обратно `Tokenizer.from_file`. Настройки обучения
+живут в конфигурации, а не в файле.
+
+`final_vocab.json` — уникальное имя токена и его глобальный ID. Префикс отделяет
+виды токенов друг от друга:
+
+```json
+{"[PAD]": 0, "key:amount_due": 6, "value:app_domain=auth": 118,
+ "bucket:amount_due_bucket_1": 283, "bpe:a": 470}
+```
+
+ID идут подряд от нуля: специальные, ключи, категории, диапазоны, куски BPE.
+После сборки словарь не меняется.
 
 ## 4. Кодирование групп
 
@@ -98,11 +128,24 @@ python -m src.tokenization.run encode test
 ```
 
 Вход: `data/preprocessed/<group>/events.parquet`, `data/raw/<group>/profile.parquet`
-и `data/tokenizer/tokenizer.json`. Выход: `data/tokenized/<group>/events.parquet` и
-`profile.parquet` — здесь анкета уже закодирована токенами. Ничего не
-дообучается: значение, которого на train не было, кодируется специальным
-токеном. `client_id` и `event_time` сохраняются, границы записей едут
-массивами начал и длин.
+и словарь из `data/vocab/`. Выход: `data/tokenized/<group>/events.parquet` и
+`profile.parquet`.
+
+Ничего не дообучается: значение, которого на train не было, кодируется `[UNK]`.
+Отсутствующее поле в последовательность не попадает вовсе, пустой после
+нормализации текст — тоже.
+
+```
+events.parquet   client_id, event_time, key_ids, value_ids, positions,
+                 value_starts, value_lengths, calendar
+profile.parquet  client_id, key_ids, value_ids, positions,
+                 value_starts, value_lengths
+```
+
+`value_starts` и `value_lengths` обозначают границы одного значения, которое
+может состоять из нескольких кусков BPE; `positions` это номер куска внутри
+значения. Числа токенов и названия ключей не хранятся: первое считается по
+длине массивов, второе восстанавливается словарём.
 
 ## 5. Датасет
 
@@ -112,11 +155,34 @@ python -m src.dataset.run val
 python -m src.dataset.run test
 ```
 
+Вход: `data/tokenized/<group>/` и словарь из `data/vocab/`.
 Результат: `data/dataset/<group>/samples.parquet`. Строка это один клиент на
-конечный cutoff своей группы: токены событий по времени, токены профиля,
-границы событий и значений, каналы времени, маска допустимых целей, вес и
-служебные признаки. Длинная история усекается объявленной политикой контекста,
-и усечение названо в самой строке.
+конечный cutoff своей группы.
+
+```
+client_id
+key_ids, value_ids, positions          последовательность событий клиента
+event_starts, event_lengths            границы каждого события
+event_time, calendar                   время событий и календарный канал
+value_starts, value_lengths            границы значений, включая составные
+target_event_mask                      что разрешено маскировать и предсказывать
+profile_key_ids, profile_value_ids,    токены профиля
+profile_positions,
+profile_value_starts,
+profile_value_lengths                  границы значений профиля
+```
+
+Границы значений считаются от начала общей последовательности клиента, поэтому
+принадлежность значения событию видна по `event_starts`, а ключ значения берётся
+из `key_ids` по его первой позиции. Числа событий, токенов и значений это длины
+массивов, и отдельными колонками они не хранятся.
+
+`target_event_mask` это период целей СВОЕЙ группы: train разрешает свой период,
+val только свой, test только свой. Старая история остаётся видимым контекстом,
+но целью чужой группы не становится. Клиенты групп не пересекаются.
+
+Длинная история усекается объявленной политикой контекста; для оценочных групп
+потеря событий периода целей запрещена и останавливает сборку.
 
 Маскирование и обучение в конвейер не входят.
 

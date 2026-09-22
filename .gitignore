@@ -10,7 +10,7 @@ __pycache__/
 
 data/raw/
 data/preprocessed/
-data/tokenizer/
+data/vocab/
 data/tokenized/
 data/dataset/
 data/runs/

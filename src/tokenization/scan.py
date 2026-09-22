@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from src.preprocessing.canonical.events import normalize_text
-from src.preprocessing.rawdata import ContentDigest
 from src.preprocessing.read import ClientHistory
 from src.preprocessing.keys import CATEGORICAL, NUMERIC, REFERENCE, TEXT
 
@@ -255,8 +254,6 @@ class FitStatistics:
     profiles: int = 0
     limitations: dict[str, int] = field(default_factory=dict)
 
-    content = None
-
     def key_counter(self, key: str) -> KeyCounter:
         counter = self.key_counts.get(key)
         if counter is None:
@@ -358,7 +355,6 @@ def scan(
     """
 
     stats = FitStatistics()
-    digest = ContentDigest()
 
     for history in histories:
 
@@ -392,17 +388,6 @@ def scan(
                 if info is None:
                     stats.unknown_keys[key] = stats.unknown_keys.get(key, 0) + 1
                     continue
-
-                digest.add(
-                    {
-                        "unit": "event",
-                        "client_id": client_id,
-                        "stable_event_index": event.stable_event_index,
-                        "key": key,
-                        "type": value_type(value),
-                        "value": value_text(value),
-                    }
-                )
 
                 if info.value_kind == REFERENCE:
                     # Ссылка кодом не становится: считается только
@@ -461,16 +446,6 @@ def scan(
 
                 stats.values += 1
 
-                digest.add(
-                    {
-                        "unit": "profile",
-                        "client_id": client_id,
-                        "key": key,
-                        "type": value_type(value),
-                        "value": value_text(value),
-                    }
-                )
-
                 _note_key(stats, key, value_type(value), client_id)
 
                 if info.value_kind == NUMERIC:
@@ -484,8 +459,6 @@ def scan(
 
         for item in history.limitations:
             stats.limitations[item] = stats.limitations.get(item, 0) + 1
-
-    stats.content = digest
 
     return stats
 

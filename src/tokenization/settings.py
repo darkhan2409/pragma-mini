@@ -33,12 +33,12 @@ from .version import SCHEMA_VERSION
 
 # Пути стандартны и в командах не задаются.
 #
-#   data/tokenizer/           словарь по этапам и итоговый tokenizer.json
-#   data/tokenized/<group>/   закодированная группа, два файла
+#   data/vocab/               чем кодируются данные: шесть файлов словаря
+#   data/tokenized/<group>/   результат кодирования, два файла
 #
 # Словарь один на весь конвейер и учится только на train,
 # поэтому лежит отдельно от групп.
-TOKENIZER_DIR = DATA_DIR / "tokenizer"
+VOCAB_DIR = DATA_DIR / "vocab"
 TOKENIZED_DIR = DATA_DIR / "tokenized"
 
 SPECIAL_TOKENS_FILE = "special_tokens.json"
@@ -46,7 +46,7 @@ KEY_VOCAB_FILE = "key_vocab.json"
 VALUE_VOCAB_FILE = "value_vocab.json"
 BUCKETS_FILE = "buckets.json"
 BPE_FILE = "bpe.json"
-TOKENIZER_FILE = "tokenizer.json"
+FINAL_VOCAB_FILE = "final_vocab.json"
 
 
 # ------------------------------------------------------------
@@ -571,12 +571,12 @@ class TokenizerConfig:
         return TokenizerConfig.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
-def tokenizer_path(name: str) -> Path:
+def vocab_path(name: str) -> Path:
     """
-    Путь к файлу словаря в data/tokenizer.
+    Путь к файлу словаря в data/vocab.
     """
 
-    return TOKENIZER_DIR / name
+    return VOCAB_DIR / name
 
 
 def tokenized_dir(group: str) -> Path:
@@ -593,8 +593,8 @@ __all__ = [
     "KEY_VOCAB_FILE",
     "SPECIAL_TOKENS_FILE",
     "TOKENIZED_DIR",
-    "TOKENIZER_DIR",
-    "TOKENIZER_FILE",
+    "VOCAB_DIR",
+    "FINAL_VOCAB_FILE",
     "VALUE_VOCAB_FILE",
     "BpeConfig",
     "ConfigError",
@@ -612,5 +612,5 @@ __all__ = [
     "default_numeric_encoders",
     "default_value_domains",
     "tokenized_dir",
-    "tokenizer_path",
+    "vocab_path",
 ]

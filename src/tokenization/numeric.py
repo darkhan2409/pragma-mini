@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import bisect
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +9,7 @@ import numpy as np
 from src.preprocessing.artifacts import read_json
 
 from .fit import TrainCorpus
+from .keyvocab import next_id
 from .scan import FitStatistics
 from .schema import SemanticSchema
 from .settings import (
@@ -20,33 +20,44 @@ from .settings import (
     NEGATIVE_INVALID,
     ZERO_SEPARATE,
     TokenizerConfig,
-    tokenizer_path,
+    vocab_path,
 )
-from .version import FORMAT_VERSION, IMPLEMENTATION_VERSION, SCHEMA_VERSION
 
 
 # ============================================================
-# ИДЕЯ
+# ЭТАП 4: ЧИСЛОВЫЕ ДИАПАЗОНЫ
 # ============================================================
 #
-# Бакетизация заменяет точные числа диапазонами и объясняет каждый
-# из них.
+# Бакетизация заменяет точные числа диапазонами.
 #
 # Границы считает train и только train. Там, где наблюдений
 # слишком мало, берётся заранее объявленная шкала, а не «лучшие»
 # границы по маленькой выборке и тем более не границы по
 # validation или test.
 #
-# Интервал это [lower, upper): значение на границе принадлежит
-# следующему диапазону. Последний диапазон открыт сверху,
-# первый покрывает всё, что ниже наблюдавшегося на train.
+# Файл отвечает на один вопрос:
 #
-# Ноль, пропуск, невозможное значение и число вне шкалы это
-# четыре разные вещи, и одинаково они не кодируются.
+#   ключ -> <ключ>_bucket_<номер> -> ID, min, max
 #
-# Метка диапазона несёт ключ, границы и единицу, поэтому чужие
-# B7 склеить по номеру нельзя: transaction_amount[200000,inf)KZT
-# ни с чем не спутаешь.
+# Правило диапазона: min включительно, max не включительно.
+# null в min означает, что диапазон открыт снизу, null в max —
+# что открыт сверху. Отдельный нулевой диапазон записан как
+# min = max = 0 и проверяется ДО обычных полуоткрытых: ноль там,
+# где он объявлен событием, принадлежит ему, а не диапазону
+# вокруг нуля.
+#
+# Значение ниже самой нижней границы попадает в первый диапазон,
+# выше самой верхней — в последний: крайние диапазоны открыты, и
+# ничего не теряется.
+#
+# Объявленная невозможность минуса влияет только на ОБУЧЕНИЕ
+# границ: отрицательное значение у суммы это дефект данных, и в
+# шкалу оно не входит. Отбрасывать такие числа обязан
+# препроцессинг, а не словарь.
+#
+# Имя диапазона это его читаемое название в словаре:
+# amount_due_bucket_3 ни с чем не спутаешь, и чужие номера по
+# порядковому номеру не склеиваются.
 # ============================================================
 
 
@@ -57,166 +68,106 @@ SOURCE_NONE = "none"
 
 # Исход поиска диапазона.
 FOUND_BUCKET = "bucket"
-FOUND_INVALID = "invalid"
 FOUND_UNKNOWN = "unknown"
 
 
 class BucketsError(ValueError):
     """
-    Числовые границы построить нельзя.
+    Числовые границы построить или прочитать нельзя.
     """
-
-
-def format_number(value: float) -> str:
-    """
-    Запись числа в метке: целое остаётся целым, дробное
-    записывается так, чтобы читаться обратно.
-    """
-
-    if value == int(value) and abs(value) < 1e15:
-        return str(int(value))
-
-    return repr(value)
 
 
 @dataclass(frozen=True)
 class Bucket:
-    index: int
-    label: str
-    lower: float | None
-    upper: float | None
-    zero: bool = False
+    """
+    Один диапазон: имя, границы и номер токена.
+
+    minimum включительно, maximum не включительно; None означает
+    открытую сторону. Нулевой диапазон это minimum == maximum == 0.
+    """
+
+    name: str
+    minimum: float | None
+    maximum: float | None
+    token_id: int = -1
+
+    @property
+    def zero(self) -> bool:
+        return self.minimum == 0.0 and self.maximum == 0.0
+
+    def contains(self, value: float) -> bool:
+
+        if self.zero:
+            return value == 0.0
+
+        if self.minimum is not None and value < self.minimum:
+            return False
+
+        if self.maximum is not None and value >= self.maximum:
+            return False
+
+        return True
 
     def as_dict(self) -> dict:
-        return {
-            "index": self.index,
-            "label": self.label,
-            "lower": self.lower,
-            "upper": self.upper,
-            "zero": self.zero,
-        }
+        return {"id": self.token_id, "min": self.minimum, "max": self.maximum}
 
 
-def _label(key: str, unit: str | None, lower: float | None, upper: float | None, zero: bool) -> str:
-
-    suffix = unit or ""
-
-    if zero:
-        return f"{key}=0{suffix}"
-
-    left = "(-inf" if lower is None else f"[{format_number(lower)}"
-    right = "inf)" if upper is None else f"{format_number(upper)})"
-
-    return f"{key}{left},{right}{suffix}"
-
-
-def build_buckets_list(key: str, unit: str | None, boundaries: tuple[float, ...],
-                       zero_policy: str) -> tuple[Bucket, ...]:
+def bucket_name(key: str, number: int) -> str:
     """
-    Диапазоны ключа по его границам.
+    Устойчивое имя диапазона: <ключ>_bucket_<номер с единицы>.
+    """
+
+    return f"{key}_bucket_{number}"
+
+
+def build_bucket_list(key: str, boundaries: tuple[float, ...], zero_policy: str) -> list[Bucket]:
+    """
+    Диапазоны ключа по его границам, без номеров токенов.
     """
 
     buckets: list[Bucket] = []
 
     if zero_policy == ZERO_SEPARATE:
-        buckets.append(Bucket(0, _label(key, unit, 0.0, 0.0, True), 0.0, 0.0, True))
+        buckets.append(Bucket(bucket_name(key, 1), 0.0, 0.0))
 
     edges: list[float | None] = [None, *boundaries, None]
 
     for position in range(len(edges) - 1):
-        lower, upper = edges[position], edges[position + 1]
         buckets.append(
-            Bucket(len(buckets), _label(key, unit, lower, upper, False), lower, upper, False)
+            Bucket(bucket_name(key, len(buckets) + 1), edges[position], edges[position + 1])
         )
 
-    return tuple(buckets)
+    return buckets
 
 
-@dataclass(frozen=True)
-class FittedEncoder:
+def locate(buckets: tuple[Bucket, ...], value: float) -> tuple[str, Bucket | None]:
     """
-    Готовое правило кодирования одного числового ключа.
+    Куда попадает значение: в диапазон или в неизвестное.
 
-    Тот же объект работает и при сборке границ, и при
-    кодировании: второй реализации правила «куда попало
-    значение» не существует.
+    Нулевой диапазон проверяется первым: он существует по решению
+    о смысле нуля, а не по наблюдениям.
     """
 
-    key: str
-    unit: str | None
-    method: str
-    boundaries: tuple[float, ...]
-    zero_policy: str
-    negative_policy: str
-    buckets: tuple[Bucket, ...]
+    number = float(value)
 
-    @property
-    def has_zero_bucket(self) -> bool:
-        return bool(self.buckets) and self.buckets[0].zero
-
-    def locate(self, value: float) -> tuple[str, int | None]:
-        """
-        Куда попадает значение: в диапазон, в невозможное или в
-        неизвестное.
-        """
-
-        number = float(value)
-
-        if math.isnan(number) or math.isinf(number):
-            return FOUND_INVALID, None
-
-        if self.method == METHOD_UNFITTED or not self.buckets:
-            return FOUND_UNKNOWN, None
-
-        if self.negative_policy == NEGATIVE_INVALID and number < 0.0:
-            return FOUND_INVALID, None
-
-        if self.has_zero_bucket and number == 0.0:
-            return FOUND_BUCKET, 0
-
-        offset = 1 if self.has_zero_bucket else 0
-
-        return FOUND_BUCKET, offset + bisect.bisect_right(self.boundaries, number)
-
-    def as_dict(self) -> dict:
-        return {
-            "key": self.key,
-            "unit": self.unit,
-            "method": self.method,
-            "boundaries": list(self.boundaries),
-            "zero_policy": self.zero_policy,
-            "negative_policy": self.negative_policy,
-            "buckets": [bucket.as_dict() for bucket in self.buckets],
-        }
-
-    @staticmethod
-    def from_dict(data: dict) -> "FittedEncoder":
-
-        boundaries = tuple(float(value) for value in data["boundaries"])
-
-        if list(boundaries) != sorted(set(boundaries)):
-            raise BucketsError(f"границы ключа {data['key']} не возрастают строго: {boundaries}")
-
-        buckets = tuple(
-            Bucket(
-                index=int(item["index"]),
-                label=item["label"],
-                lower=None if item["lower"] is None else float(item["lower"]),
-                upper=None if item["upper"] is None else float(item["upper"]),
-                zero=bool(item["zero"]),
-            )
-            for item in data["buckets"]
+    if math.isnan(number) or math.isinf(number):
+        raise BucketsError(
+            f"значение {value!r} не число: такие значения обязан отбрасывать препроцессинг, "
+            "до словаря они доходить не должны"
         )
 
-        return FittedEncoder(
-            key=data["key"],
-            unit=data["unit"],
-            method=data["method"],
-            boundaries=boundaries,
-            zero_policy=data["zero_policy"],
-            negative_policy=data["negative_policy"],
-            buckets=buckets,
-        )
+    if not buckets:
+        return FOUND_UNKNOWN, None
+
+    for bucket in buckets:
+        if bucket.zero and bucket.contains(number):
+            return FOUND_BUCKET, bucket
+
+    for bucket in buckets:
+        if not bucket.zero and bucket.contains(number):
+            return FOUND_BUCKET, bucket
+
+    return FOUND_UNKNOWN, None
 
 
 def quantile_boundaries(values: list[float], bins: int, algorithm: str) -> tuple[float, ...]:
@@ -252,21 +203,21 @@ def _samples(stats: FitStatistics) -> dict[str, list[float]]:
     return {key: stats.numeric[key].values() for key in sorted(stats.numeric)}
 
 
-def _distribution(encoder: FittedEncoder, values: list[float]) -> tuple[list[int], dict[str, int]]:
+def _counts(buckets: list[Bucket], values: list[float]) -> dict[str, int]:
+    """
+    Сколько значений попало в каждый диапазон.
+    """
 
-    counts = [0] * len(encoder.buckets)
-    other = {"invalid": 0, "unknown": 0}
+    counts = {bucket.name: 0 for bucket in buckets}
 
     for value in values:
 
-        found, index = encoder.locate(value)
+        found, bucket = locate(tuple(buckets), value)
 
-        if found == FOUND_BUCKET:
-            counts[index] += 1
-        else:
-            other[found] += 1
+        if found == FOUND_BUCKET and bucket is not None:
+            counts[bucket.name] += 1
 
-    return counts, other
+    return counts
 
 
 def build_buckets(
@@ -274,9 +225,12 @@ def build_buckets(
     value_vocab: dict,
     config: TokenizerConfig,
     schema: SemanticSchema,
-) -> dict:
+) -> tuple[dict[str, dict[str, dict]], list[str]]:
     """
-    Границы, политики и токены каждого числового ключа.
+    Диапазоны и их токены для каждого числового ключа.
+
+    Возвращает сам словарь и предупреждения для терминала: в файл
+    предупреждения не едут.
     """
 
     stats = train.statistics
@@ -284,19 +238,17 @@ def build_buckets(
     summary = {key: stats.numeric[key].summary() for key in sorted(stats.numeric)}
     samples = _samples(stats)
 
-    entries: dict[str, dict] = {}
-    encoders: dict[str, FittedEncoder] = {}
     warnings: list[str] = []
+
+    prepared: dict[str, list[Bucket]] = {}
 
     for key in sorted(schema.numeric_keys):
 
         spec = config.numeric_encoders[key]
-        info = schema.info(key)
 
         source_key = spec.fit_source or key
         measured = summary.get(source_key, {})
 
-        observed = measured.get("n", 0)
         clients = measured.get("clients", 0)
 
         # Значения, по которым учатся границы: ноль исключается,
@@ -312,12 +264,10 @@ def build_buckets(
         boundaries: tuple[float, ...] = ()
         method = spec.method
         source = SOURCE_NONE
-        note = ""
 
         if spec.method == METHOD_FIXED:
             boundaries = tuple(float(value) for value in spec.boundaries)
             source = SOURCE_CONFIG
-            note = "шкала задана бизнесом и от выборки не зависит"
 
         elif spec.method == METHOD_QUANTILE:
 
@@ -329,7 +279,6 @@ def build_buckets(
             if enough:
                 boundaries = quantile_boundaries(usable, spec.bins, config.quantile_algorithm)
                 source = SOURCE_TRAIN
-                note = f"границы по {len(usable)} значениям train у {clients} клиентов"
 
             if not boundaries:
 
@@ -337,54 +286,33 @@ def build_buckets(
                     boundaries = tuple(float(value) for value in spec.fallback)
                     method = METHOD_FIXED
                     source = SOURCE_FALLBACK
-                    note = (
-                        f"наблюдений {len(usable)} у {clients} клиентов, порог "
-                        f"{config.numeric_min_values}/{config.numeric_min_clients}: "
-                        "взята заранее объявленная шкала, по test границы не считаются"
+                    warnings.append(
+                        f"{key}: объявленная шкала вместо квантилей (наблюдений {len(usable)} "
+                        f"у {clients} клиентов, порог {config.numeric_min_values}/"
+                        f"{config.numeric_min_clients})"
                     )
-                    warnings.append(f"{key}: объявленная шкала вместо квантилей ({note})")
                 else:
                     method = METHOD_UNFITTED
-                    source = SOURCE_NONE
-                    note = "шкалы нет: значение получит числовое [UNK]"
-                    warnings.append(f"{key}: кодировщика нет, значения станут [UNK]")
-
-        else:
-            note = spec.reason or "кодировщик объявлен отсутствующим"
+                    warnings.append(f"{key}: шкалы нет, значения станут [UNK]")
 
         if method == METHOD_UNFITTED:
-            buckets: tuple[Bucket, ...] = ()
-        else:
-            buckets = build_buckets_list(key, info.unit, boundaries, spec.zero_policy)
+            prepared[key] = []
+            continue
 
-        encoder = FittedEncoder(
-            key=key,
-            unit=info.unit,
-            method=method,
-            boundaries=boundaries,
-            zero_policy=spec.zero_policy,
-            negative_policy=spec.negative_policy,
-            buckets=buckets,
-        )
-
-        encoders[key] = encoder
-
-        own = samples.get(key, [])
-        counts, other = _distribution(encoder, own)
+        buckets = build_bucket_list(key, boundaries, spec.zero_policy)
 
         # Пустых диапазонов после квантилей быть не может, и это
         # проверяется на тех значениях, по которым границы и
         # считались. Объявленный нулевой диапазон в проверку не
-        # входит: он существует по решению о смысле нуля, а не
-        # по наблюдениям, и пустым быть вправе.
+        # входит: он существует по решению о смысле нуля.
         if source == SOURCE_TRAIN:
 
-            fitted_counts, _ = _distribution(encoder, usable)
+            counted = _counts(buckets, usable)
 
             empty = [
-                bucket.label
-                for bucket, count in zip(encoder.buckets, fitted_counts)
-                if count == 0 and not bucket.zero
+                bucket.name
+                for bucket in buckets
+                if not bucket.zero and counted[bucket.name] == 0
             ]
 
             if empty:
@@ -393,111 +321,36 @@ def build_buckets(
                     "такого быть не может, проверьте алгоритм квантилей"
                 )
 
-        entries[key] = {
-            **encoder.as_dict(),
-            "requested_method": spec.method,
-            "requested_bins": spec.bins,
-            "actual_bins": len(encoder.buckets),
-            "boundary_source": source,
-            "note": note,
-            "fit_source": spec.fit_source,
-            "weight_rule": info.weight_rule,
-            "missing_policy": "пары нет; у расчётного ключа отсутствие объясняет причина",
-            "invalid_policy": "[INVALID]",
-            "below_range_policy": "первый диапазон",
-            "above_range_policy": "последний диапазон, открытый сверху",
-            "fallback": list(spec.fallback),
-            "reason": spec.reason,
-            "fit": {
-                "values": len(usable),
-                "clients": clients,
-                "observed": observed,
-                "sampled": bool(measured.get("sampled")),
-                "sample_k": measured.get("sample_k"),
-                "minimum": measured.get("minimum"),
-                "maximum": measured.get("maximum"),
-                "zeros": measured.get("n_zero", 0),
-                "negatives": measured.get("n_negative", 0),
-                "invalid": measured.get("n_invalid", 0),
-                "algorithm": config.quantile_algorithm if source == SOURCE_TRAIN else None,
-            },
-            "distribution": {
-                "buckets": counts,
-                "invalid": other["invalid"],
-                "unknown": other["unknown"],
-                "rule": "распределение считается по выборке train этого же ключа",
-            },
-        }
+        prepared[key] = buckets
 
-    # --- токены диапазонов ---
+    # --- номера ---
     #
-    # Диапазоны продолжают пространство ID сразу за
-    # категориальными значениями: порядок — ключ по имени,
-    # внутри ключа номер диапазона.
+    # Диапазоны продолжают пространство ID сразу за категориями:
+    # порядок — ключ по имени, внутри ключа номер диапазона.
 
-    first_bucket_id = int(value_vocab["next_id"])
+    number = next_id(value_vocab)
 
-    next_id = first_bucket_id
+    out: dict[str, dict[str, dict]] = {}
 
-    by_key: dict[str, list[int]] = {}
+    for key in sorted(prepared):
 
-    for key in sorted(entries):
+        entries: dict[str, dict] = {}
 
-        ids: list[int] = []
+        for bucket in prepared[key]:
+            entries[bucket.name] = Bucket(bucket.name, bucket.minimum, bucket.maximum, number).as_dict()
+            number += 1
 
-        for bucket in entries[key]["buckets"]:
-            bucket["id"] = next_id
-            ids.append(next_id)
-            next_id += 1
+        out[key] = entries
 
-        by_key[key] = ids
-
-    report = {
-        "schema_version": SCHEMA_VERSION,
-        "format_version": FORMAT_VERSION,
-        "implementation_version": IMPLEMENTATION_VERSION,
-        "fit": train.as_dict(),
-        "config_sha256": config.sha256(),
-        "first_bucket_id": first_bucket_id,
-        "size": next_id - first_bucket_id,
-        "next_id": next_id,
-        "fit_period": {"until": train.fit_end.isoformat(), "rule": "граница исключительная"},
-        "rules": {
-            "interval": "[lower, upper): значение на границе принадлежит следующему диапазону",
-            "last": "последний диапазон открыт сверху",
-            "first": "первый диапазон покрывает допустимые значения ниже наблюдавшихся на train",
-            "empty": "совпавшие границы схлопываются, пустых train-диапазонов не остаётся",
-            "label": "метка несёт ключ, границы и единицу: чужие диапазоны по номеру не склеиваются",
-            "quantile": f"{config.quantile_algorithm} по выборке bottom-k, без seed и без влияния порядка",
-            "threshold": (
-                f"квантили считаются от {config.numeric_min_values} значений у "
-                f"{config.numeric_min_clients} клиентов, иначе объявленная шкала или [UNK]"
-            ),
-        },
-        "counts": {
-            "keys": len(entries),
-            "by_source": _by(entries, "boundary_source"),
-            "by_method": _by(entries, "method"),
-            "buckets": sum(item["actual_bins"] for item in entries.values()),
-            "buckets_without_observations": sum(
-                sum(1 for count in item["distribution"]["buckets"] if count == 0)
-                for item in entries.values()
-            ),
-        },
-        "encoders": {key: entries[key] for key in sorted(entries)},
-        "by_key": by_key,
-        "warnings": warnings,
-    }
-
-    return report
+    return out, warnings
 
 
-def load_buckets(directory: Path | None = None) -> dict:
+def load_buckets(directory: Path | None = None) -> dict[str, dict[str, dict]]:
     """
     Числовые диапазоны предыдущего этапа.
     """
 
-    path = (Path(directory) / BUCKETS_FILE) if directory else tokenizer_path(BUCKETS_FILE)
+    path = (Path(directory) / BUCKETS_FILE) if directory else vocab_path(BUCKETS_FILE)
 
     if not path.exists():
         raise BucketsError(f"нет {path}: выполните python -m src.tokenization.run buckets")
@@ -505,27 +358,69 @@ def load_buckets(directory: Path | None = None) -> dict:
     return read_json(path)
 
 
-def _by(entries: dict[str, dict], field_name: str) -> dict[str, int]:
-
-    counts: dict[str, int] = {}
-
-    for item in entries.values():
-        counts[item[field_name]] = counts.get(item[field_name], 0) + 1
-
-    return dict(sorted(counts.items()))
-
-
-def load_encoders(registry: dict) -> dict[str, FittedEncoder]:
+def read_buckets(data: dict[str, dict[str, dict]]) -> dict[str, tuple[Bucket, ...]]:
     """
-    Замороженные кодировщики из реестра.
+    Диапазоны словаря в виде, которым кодируют.
     """
 
-    return {key: FittedEncoder.from_dict(item) for key, item in registry["encoders"].items()}
+    out: dict[str, tuple[Bucket, ...]] = {}
+
+    for key, entries in data.items():
+
+        buckets = [
+            Bucket(
+                name=name,
+                minimum=None if item["min"] is None else float(item["min"]),
+                maximum=None if item["max"] is None else float(item["max"]),
+                token_id=int(item["id"]),
+            )
+            for name, item in entries.items()
+        ]
+
+        _check_order(key, buckets)
+
+        out[key] = tuple(buckets)
+
+    return out
+
+
+def _check_order(key: str, buckets: list[Bucket]) -> None:
+    """
+    Диапазоны ключа идут подряд, не перекрываются и покрывают всю
+    шкалу.
+
+    Иначе два диапазона приняли бы одно значение, и результат
+    зависел бы от порядка чтения файла.
+    """
+
+    ordinary = [bucket for bucket in buckets if not bucket.zero]
+
+    if not ordinary:
+        return
+
+    if ordinary[0].minimum is not None:
+        raise BucketsError(
+            f"ключ {key}: первый диапазон {ordinary[0].name} закрыт снизу, "
+            "и значения ниже него потерялись бы"
+        )
+
+    if ordinary[-1].maximum is not None:
+        raise BucketsError(
+            f"ключ {key}: последний диапазон {ordinary[-1].name} закрыт сверху, "
+            "и значения выше него потерялись бы"
+        )
+
+    for previous, following in zip(ordinary, ordinary[1:]):
+
+        if previous.maximum != following.minimum:
+            raise BucketsError(
+                f"ключ {key}: диапазон {following.name} начинается с {following.minimum}, "
+                f"а {previous.name} закончился на {previous.maximum}"
+            )
 
 
 __all__ = [
     "FOUND_BUCKET",
-    "FOUND_INVALID",
     "FOUND_UNKNOWN",
     "SOURCE_CONFIG",
     "SOURCE_FALLBACK",
@@ -533,11 +428,11 @@ __all__ = [
     "SOURCE_TRAIN",
     "Bucket",
     "BucketsError",
-    "FittedEncoder",
+    "bucket_name",
+    "build_bucket_list",
     "build_buckets",
-    "build_buckets_list",
     "load_buckets",
-    "format_number",
-    "load_encoders",
+    "locate",
     "quantile_boundaries",
+    "read_buckets",
 ]

@@ -6,19 +6,20 @@ from pathlib import Path
 
 import pyarrow as pa
 
-from src.preprocessing.artifacts import TableWriter, dumps_json
+from src.preprocessing.artifacts import TableWriter
 from src.preprocessing.keys import KeysError
 from src.preprocessing.read import Group, ReadError
 from src.preprocessing.settings import PreprocessingConfig
 
-from .encode import EncodeError, encode_event, encode_profile, profile_known, references
-from .layout import FrozenArtifacts
+from .encode import EncodeError, encode_event, encode_profile
+from .finalvocab import FrozenArtifacts
+from .schema import SemanticSchema
 from .settings import TokenizerConfig, tokenized_dir
-from .specials import EMPTY, INVALID, MISSING, UNK
+from .specials import UNK
 
 
 # ============================================================
-# ЭТАП 6: КОДИРОВАНИЕ ГРУППЫ
+# ЭТАП 7: КОДИРОВАНИЕ ГРУППЫ
 # ============================================================
 #
 # Словарь уже построен на train, и здесь он только применяется:
@@ -48,47 +49,31 @@ from .specials import EMPTY, INVALID, MISSING, UNK
 EVENTS_FILE = "events.parquet"
 PROFILE_FILE = "profile.parquet"
 
-# Момент, до которого взята история группы, и имя группы едут
-# метаданными файла: колонкой одно и то же значение повторять по
-# всем строкам незачем.
-CUTOFF_KEY = b"cutoff"
-GROUP_KEY = b"group"
-
+# В файлах лежит только то, что нужно модели. Число токенов
+# и значений не хранится: это длины массивов. Названия
+# ключей рядом с их номерами тоже: их восстанавливает словарь.
+# Тип события и его источник уже лежат внутри пар ключ/значение.
 EVENTS_SCHEMA = pa.schema(
     [
         ("client_id", pa.string()),
         ("event_time", pa.timestamp("us")),
-        ("stable_event_index", pa.int64()),
-        ("source", pa.string()),
-        ("event_type", pa.string()),
-        ("n_values", pa.int32()),
-        ("n_tokens", pa.int32()),
         ("key_ids", pa.list_(pa.int32())),
         ("value_ids", pa.list_(pa.int32())),
         ("positions", pa.list_(pa.int32())),
         ("value_starts", pa.list_(pa.int32())),
         ("value_lengths", pa.list_(pa.int32())),
-        ("value_keys", pa.list_(pa.string())),
-        ("refs", pa.string()),
-        ("unknown_keys", pa.list_(pa.string())),
-        ("calendar", pa.list_(pa.float64())),
+        ("calendar", pa.list_(pa.float32())),
     ]
 )
 
 PROFILE_SCHEMA = pa.schema(
     [
         ("client_id", pa.string()),
-        ("has_profile", pa.bool_()),
-        ("n_events", pa.int64()),
-        ("n_values", pa.int32()),
-        ("n_tokens", pa.int32()),
         ("key_ids", pa.list_(pa.int32())),
         ("value_ids", pa.list_(pa.int32())),
         ("positions", pa.list_(pa.int32())),
         ("value_starts", pa.list_(pa.int32())),
         ("value_lengths", pa.list_(pa.int32())),
-        ("value_keys", pa.list_(pa.string())),
-        ("limitations", pa.list_(pa.string())),
     ]
 )
 
@@ -106,29 +91,21 @@ class Counters:
     values: int = 0
     tokens: int = 0
     profiles: int = 0
-    without_profile: int = 0
+    empty_profiles: int = 0
     silent_clients: int = 0
-    missing: int = 0
     unknown: int = 0
-    invalid: int = 0
-    empty: int = 0
     unknown_keys: dict[str, int] = field(default_factory=dict)
     max_event_tokens: int = 0
 
 
-def _count_specials(artifacts: FrozenArtifacts, record, counters: Counters) -> None:
+def _count_unknown(artifacts: FrozenArtifacts, record, counters: Counters) -> None:
+    """
+    Сколько значений словарь не знает.
+    """
 
-    specials = {
-        artifacts.special(MISSING): "missing",
-        artifacts.special(UNK): "unknown",
-        artifacts.special(INVALID): "invalid",
-        artifacts.special(EMPTY): "empty",
-    }
+    unknown = artifacts.special(UNK)
 
-    for value_id in record.value_ids:
-        name = specials.get(value_id)
-        if name is not None:
-            setattr(counters, name, getattr(counters, name) + 1)
+    counters.unknown += sum(1 for value_id in record.value_ids if value_id == unknown)
 
 
 def group_cutoff(group: str) -> datetime:
@@ -163,19 +140,16 @@ def encode_group(
     except ReadError as error:
         raise TransformError(str(error)) from error
 
-    metadata = {
-        CUTOFF_KEY: cutoff.isoformat().encode("utf-8"),
-        GROUP_KEY: group.encode("utf-8"),
-    }
-
     _clear(directory)
+
+    # Ссылки на сущности кода не получают: их состав знает
+    # смысловой реестр, а не словарь.
+    links = frozenset(SemanticSchema.open().link_keys)
 
     counters = Counters()
 
-    events_writer = TableWriter(directory / EVENTS_FILE, EVENTS_SCHEMA.with_metadata(metadata))
-    profile_writer = TableWriter(directory / PROFILE_FILE, PROFILE_SCHEMA.with_metadata(metadata))
-
-    limitations: set[str] = set()
+    events_writer = TableWriter(directory / EVENTS_FILE, EVENTS_SCHEMA)
+    profile_writer = TableWriter(directory / PROFILE_FILE, PROFILE_SCHEMA)
 
     try:
         for client_id in source.client_ids:
@@ -192,13 +166,13 @@ def encode_group(
             for event in history.events:
 
                 try:
-                    record = encode_event(artifacts, event, config.max_pieces_per_value)
+                    record = encode_event(artifacts, event, config.max_pieces_per_value, links)
                 except EncodeError as error:
                     raise TransformError(
                         f"клиент {client_id}, событие {event.stable_event_index}: {error}"
                     ) from error
 
-                _count_specials(artifacts, record, counters)
+                _count_unknown(artifacts, record, counters)
 
                 counters.events += 1
                 counters.values += record.n_values
@@ -212,19 +186,11 @@ def encode_group(
                     {
                         "client_id": history.client_id,
                         "event_time": event.event_time,
-                        "stable_event_index": event.stable_event_index,
-                        "source": event.source,
-                        "event_type": event.values.get("event_type"),
-                        "n_values": record.n_values,
-                        "n_tokens": record.n_tokens,
                         "key_ids": record.key_ids,
                         "value_ids": record.value_ids,
                         "positions": record.positions,
                         "value_starts": record.value_starts,
                         "value_lengths": record.value_lengths,
-                        "value_keys": record.value_keys,
-                        "refs": dumps_json(references(artifacts, event)).strip(),
-                        "unknown_keys": record.unknown_keys,
                         "calendar": list(event.calendar),
                     }
                 )
@@ -236,16 +202,14 @@ def encode_group(
 
             # --- профиль ---
 
-            record = encode_profile(artifacts, history, config.max_pieces_per_value)
+            record = encode_profile(artifacts, history, config.max_pieces_per_value, links)
 
-            _count_specials(artifacts, record, counters)
+            _count_unknown(artifacts, record, counters)
 
-            known = profile_known(history)
-
-            if known:
+            if record.n_values:
                 counters.profiles += 1
             else:
-                counters.without_profile += 1
+                counters.empty_profiles += 1
 
             counters.values += record.n_values
             counters.tokens += record.n_tokens
@@ -255,32 +219,20 @@ def encode_group(
                     [
                         {
                             "client_id": history.client_id,
-                            "has_profile": known,
-                            "n_events": history.n_events,
-                            "n_values": record.n_values,
-                            "n_tokens": record.n_tokens,
                             "key_ids": record.key_ids,
                             "value_ids": record.value_ids,
                             "positions": record.positions,
                             "value_starts": record.value_starts,
                             "value_lengths": record.value_lengths,
-                            "value_keys": record.value_keys,
-                            "limitations": list(history.limitations),
                         }
                     ],
                     schema=PROFILE_SCHEMA,
                 )
             )
 
-            limitations.update(history.limitations)
-
     finally:
         events_rows = events_writer.close()
         profile_rows = profile_writer.close()
-
-    # Словарь обязан быть тем же и ПОСЛЕ работы: кодирование
-    # ничего не дообучает, и это проверяется, а не обещается.
-    artifacts.verify()
 
     return {
         "group": group,
@@ -292,18 +244,12 @@ def encode_group(
             "values": counters.values,
             "tokens": counters.tokens,
             "profiles": counters.profiles,
-            "clients_without_profile": counters.without_profile,
+            "empty_profiles": counters.empty_profiles,
             "silent_clients": counters.silent_clients,
             "max_event_tokens": counters.max_event_tokens,
         },
-        "specials": {
-            "missing": counters.missing,
-            "unknown": counters.unknown,
-            "invalid": counters.invalid,
-            "empty": counters.empty,
-        },
+        "unknown_values": counters.unknown,
         "unknown_keys": dict(sorted(counters.unknown_keys.items())),
-        "limitations": sorted(limitations),
     }
 
 
@@ -322,10 +268,8 @@ def _clear(directory: Path) -> None:
 
 
 __all__ = [
-    "CUTOFF_KEY",
     "EVENTS_FILE",
     "EVENTS_SCHEMA",
-    "GROUP_KEY",
     "PROFILE_FILE",
     "PROFILE_SCHEMA",
     "TransformError",

@@ -49,24 +49,6 @@ class TrainCorpus:
     fit_end: datetime
     statistics: FitStatistics
 
-    @property
-    def content_sha256(self) -> str:
-        return self.statistics.content.value()
-
-    def as_dict(self) -> dict:
-        stats = self.statistics
-
-        return {
-            "group": self.group,
-            "fit_end": self.fit_end.isoformat(),
-            "fit_content_sha256": self.content_sha256,
-            "clients": stats.clients,
-            "events": stats.events,
-            "values": stats.values,
-            "profiles": stats.profiles,
-            "clients_without_profile": stats.clients_without_profile,
-        }
-
 
 def read_train(config: TokenizerConfig, schema: SemanticSchema) -> TrainCorpus:
     """

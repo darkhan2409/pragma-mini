@@ -1,41 +1,40 @@
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-from src.preprocessing.artifacts import read_json, sha256_bytes
-from src.preprocessing.canonical.events import TEXT_NORMALIZATION
 from src.preprocessing.keys import TEXT
 
 from .fit import TrainCorpus
 from .scan import FitStatistics
-from .settings import BPE_FILE, BpeConfig, TokenizerConfig, tokenizer_path
+from .settings import BPE_FILE, BpeConfig, TokenizerConfig, vocab_path
 
 
 # ============================================================
-# ИДЕЯ
+# ЭТАП 5: РАЗБИЕНИЕ ТЕКСТА
 # ============================================================
 #
 # BPE применяется только к тем полям, которые смысловой реестр
-# объявил свободным текстом. Новых текстовых полей ради BPE не
-# придумывается, а структурированный код текстом не становится:
-# если реестр в этом ошибается, этап 1 называет противоречие, а
-# решение принимает человек.
+# объявил свободным текстом: сейчас это merchant_name и
+# counterparty. Новых текстовых полей ради BPE не придумывается,
+# а структурированный код текстом не становится.
 #
 # Алфавит байтовый и полный: 256 байт лежат в словаре с самого
 # начала, поэтому невиданная казахская буква, эмодзи или
-# китайский иероглиф кодируются и раскодируются без потерь и
-# без переобучения.
+# китайский иероглиф кодируются и раскодируются без потерь и без
+# переобучения.
 #
 # Нормализация не своя: берётся та же функция, что делает
 # нормализованную копию текста в canonical. Двух правил
 # нормализации у одного текста быть не должно.
 #
-# Пустая строка отличается от отсутствия значения: это отдельный
-# служебный токен, а не пропуск.
+# Файл bpe.json это СТАНДАРТНЫЙ файл библиотеки tokenizers,
+# записанный её же Tokenizer.save: никакой своей обёртки, чтобы
+# он читался обратно Tokenizer.from_file и не зависел от нашего
+# формата. Настройки обучения живут в конфигурации, а не в
+# выходном файле.
 # ============================================================
 
 
@@ -63,24 +62,40 @@ PROBES: tuple[str, ...] = (
 
 class TextError(ValueError):
     """
-    Разбиение текста построить нельзя.
+    Разбиение текста построить или прочитать нельзя.
     """
 
 
 @dataclass
 class BpeModel:
     """
-    Обученное разбиение вместе с тем, как оно получено.
+    Обученное разбиение: тонкая обёртка над Tokenizer.
     """
 
-    enabled: bool
-    keys: tuple[str, ...]
-    info: dict
     tokenizer: object | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return self.tokenizer is not None
 
     @property
     def size(self) -> int:
         return 0 if self.tokenizer is None else self.tokenizer.get_vocab_size()
+
+    @property
+    def merges(self) -> int:
+        """
+        Сколько слияний выучено сверх байтового алфавита.
+        """
+
+        return max(self.size - 256, 0)
+
+    def vocab(self) -> dict[str, int]:
+        """
+        Кусок -> его номер внутри модели.
+        """
+
+        return {} if self.tokenizer is None else dict(self.tokenizer.get_vocab())
 
     def pieces(self, text: str) -> list[int]:
         """
@@ -106,6 +121,28 @@ class BpeModel:
 
         return self.tokenizer.id_to_token(index)
 
+    def save(self, path: Path) -> None:
+
+        if self.tokenizer is None:
+            raise TextError("BPE выключен: сохранять нечего")
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        self.tokenizer.save(str(path), pretty=True)
+
+
+def text_keys(key_vocab: dict[str, int], config: TokenizerConfig, schema) -> tuple[str, ...]:
+    """
+    Ключи, которые кодируются разбиением: объявленные текстом и
+    не переведённые решением человека в категории.
+    """
+
+    return tuple(
+        key
+        for key in sorted(key_vocab)
+        if schema.info(key).value_kind == TEXT and key not in config.text_keys_as_categorical
+    )
+
 
 def corpus_rows(stats: FitStatistics, keys: tuple[str, ...]) -> list[tuple[str, str, int]]:
     """
@@ -126,10 +163,6 @@ def corpus_rows(stats: FitStatistics, keys: tuple[str, ...]) -> list[tuple[str, 
     return sorted(rows)
 
 
-def corpus_digest(rows: list[tuple[str, str, int]]) -> str:
-    return sha256_bytes("\n".join(f"{key}\t{text}\t{count}" for key, text, count in rows).encode("utf-8"))
-
-
 def _iterator(rows: list[tuple[str, str, int]]) -> Iterator[str]:
     """
     Частотное взвешивание: у тренера весов нет, поэтому текст
@@ -147,20 +180,14 @@ def train_bpe(stats: FitStatistics, config: BpeConfig, keys: tuple[str, ...]) ->
     """
 
     if not keys:
-        return BpeModel(
-            enabled=False,
-            keys=(),
-            info={
-                "enabled": False,
-                "reason": "разрешённых текстовых ключей нет: текст ради BPE не придумывается",
-            },
+        raise TextError(
+            "разрешённых текстовых ключей нет: текст ради BPE не придумывается"
         )
 
     # Многопоточность тренера результат не меняет, но её
     # предупреждение в логе только мешает.
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-    import tokenizers
     from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
     rows = corpus_rows(stats, keys)
@@ -183,40 +210,36 @@ def train_bpe(stats: FitStatistics, config: BpeConfig, keys: tuple[str, ...]) ->
 
     model.train_from_iterator(_iterator(rows), trainer=trainer)
 
-    texts = sorted({text for _key, text, _count in rows})
+    return BpeModel(tokenizer=model)
 
-    lengths = sorted(len(model.encode(text, add_special_tokens=False).ids) for text in texts)
 
-    info = {
-        "enabled": True,
-        "pieces_per_text": {
-            "texts": len(lengths),
-            "mean": round(sum(lengths) / len(lengths), 2) if lengths else 0,
-            "median": lengths[len(lengths) // 2] if lengths else 0,
-            "max": lengths[-1] if lengths else 0,
-            "note": (
-                "на маленьком корпусе слияний мало, и текст остаётся почти побайтовым: "
-                "это свойство корпуса, а не ошибка разбиения"
-            ),
-        },
-        "keys": list(keys),
-        "library": {"name": "tokenizers", "version": tokenizers.__version__},
-        "model": "byte_level_bpe",
-        "config": config.as_dict(),
-        "normalization": dict(TEXT_NORMALIZATION),
-        "corpus": {
-            "values": len(rows),
-            "texts": len(texts),
-            "occurrences": sum(count for _key, _text, count in rows),
-            "longest_bytes": max((len(text.encode("utf-8")) for text in texts), default=0),
-            "sha256": corpus_digest(rows),
-            "rule": "отсортированные нормализованные тексты, каждый повторён по числу вхождений",
-        },
-        "vocab_size": {"requested": config.vocab_size, "actual": model.get_vocab_size()},
-        "trained_on_empty": not texts,
-    }
+def build_bpe(train: TrainCorpus, key_vocab: dict[str, int], config: TokenizerConfig,
+              schema) -> tuple[BpeModel, list[str]]:
+    """
+    Разбиение текста train и предупреждения для терминала.
+    """
 
-    return BpeModel(enabled=True, keys=tuple(keys), info=info, tokenizer=model)
+    keys = text_keys(key_vocab, config, schema)
+
+    model = train_bpe(train.statistics, config.bpe, keys)
+
+    texts = sorted({text for _key, text, _count in corpus_rows(train.statistics, keys)})
+
+    broken = check_roundtrip(model, [*PROBES, *texts])
+
+    if broken:
+        raise TextError(
+            "разбиение текста не обратимо на "
+            + ", ".join(repr(item) for item in broken[:3])
+            + ": байтовый алфавит обязан кодировать любой текст без потерь"
+        )
+
+    warnings: list[str] = []
+
+    if not model.merges:
+        warnings.append("BPE обучен на слишком маленьком корпусе: merges отсутствуют")
+
+    return model, warnings
 
 
 def check_roundtrip(model: BpeModel, texts: list[str]) -> list[str]:
@@ -239,96 +262,29 @@ def check_roundtrip(model: BpeModel, texts: list[str]) -> list[str]:
     return broken
 
 
-def dump_bpe(model: BpeModel) -> dict:
+def load_bpe(path: Path | None = None) -> BpeModel:
     """
-    Разбиение в виде, пригодном для tokenizer.json.
-
-    Отдельного файла разбиения больше нет: оно едет разделом
-    внутри одного замороженного комплекта.
+    Замороженное разбиение из стандартного bpe.json.
     """
 
-    if model.tokenizer is None:
-        raise TextError("BPE выключен: сохранять нечего")
-
-    return json.loads(model.tokenizer.to_str())
-
-
-def load_bpe(data: dict) -> BpeModel:
-    """
-    Замороженное разбиение из записи tokenizer.json.
-    """
-
-    from tokenizers import Tokenizer
-
-    model = Tokenizer.from_str(json.dumps(data))
-
-    return BpeModel(enabled=True, keys=(), info={"enabled": True}, tokenizer=model)
-
-
-def build_bpe(train: TrainCorpus, key_vocab: dict, config: TokenizerConfig) -> dict:
-    """
-    Разбиение текста, обученное на train, со всем, что
-    нужно для кодирования и раскодирования.
-
-    Номеров в общем пространстве ID здесь нет: куски
-    нумеруются внутри модели, а сдвиг назначает финальный
-    словарь, когда известны все остальные виды токенов.
-    """
-
-    text_keys = tuple(
-        row["key"]
-        for row in key_vocab["keys"]
-        if row["value_kind"] == TEXT and row["key"] not in config.text_keys_as_categorical
-    )
-
-    model = train_bpe(train.statistics, config.bpe, text_keys)
-
-    if model.enabled:
-
-        texts = sorted({text for _key, text, _count in corpus_rows(train.statistics, text_keys)})
-
-        broken = check_roundtrip(model, [*PROBES, *texts])
-
-        if broken:
-            raise TextError(
-                "разбиение текста не обратимо на "
-                + ", ".join(repr(item) for item in broken[:3])
-                + ": байтовый алфавит обязан кодировать любой текст без потерь"
-            )
-
-    return {
-        **model.info,
-        "fit": train.as_dict(),
-        "config_sha256": config.sha256(),
-        "size": model.size,
-        "model": dump_bpe(model) if model.enabled else None,
-    }
-
-
-def load_bpe_file(directory: Path | None = None) -> dict:
-    """
-    Разбиение предыдущего этапа.
-    """
-
-    path = (Path(directory) / BPE_FILE) if directory else tokenizer_path(BPE_FILE)
+    path = Path(path) if path is not None else vocab_path(BPE_FILE)
 
     if not path.exists():
         raise TextError(f"нет {path}: выполните python -m src.tokenization.run bpe")
 
-    return read_json(path)
+    from tokenizers import Tokenizer
 
+    return BpeModel(tokenizer=Tokenizer.from_file(str(path)))
 
 
 __all__ = [
     "PROBES",
     "BpeModel",
     "TextError",
-    "check_roundtrip",
-    "corpus_digest",
     "build_bpe",
+    "check_roundtrip",
     "corpus_rows",
-    "dump_bpe",
     "load_bpe",
-    "load_bpe_file",
+    "text_keys",
     "train_bpe",
 ]

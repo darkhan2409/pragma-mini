@@ -6,8 +6,7 @@ from src.preprocessing.artifacts import read_json
 from src.preprocessing.keys import CATEGORICAL
 
 from .schema import SemanticSchema
-from .settings import KEY_VOCAB_FILE, TokenizerConfig, tokenizer_path
-from .version import FORMAT_VERSION, IMPLEMENTATION_VERSION, SCHEMA_VERSION
+from .settings import KEY_VOCAB_FILE, TokenizerConfig, vocab_path
 
 
 # ============================================================
@@ -17,16 +16,20 @@ from .version import FORMAT_VERSION, IMPLEMENTATION_VERSION, SCHEMA_VERSION
 # Ключ отвечает на вопрос «что это», значение — «чему равно».
 # Список ключей известен ДО чтения данных: его объявляет
 # смысловой реестр, собранный из каталога полей payload.
-# Поэтому этап 1 не читает ни одного клиента и не может ничему
+# Поэтому этап не читает ни одного клиента и не может ничему
 # научиться у test: он только называет поля и выдаёт им номера.
 #
-# Номера идут сразу за специальными токенами и назначаются в
-# порядке имени ключа. Порядок имени выбран потому, что он не
-# зависит ни от частот, ни от порядка чтения: тот же реестр
-# даёт те же номера.
+# Файл решает ровно одну задачу:
 #
-# Ссылки на сущности перечислены рядом, но кода не получают:
-# это связь, а не значение, и в embedding она не входит.
+#   название ключа -> ID
+#
+# Ни вида значения, ни единицы, ни происхождения в нём нет: всё
+# это живёт в реестре смыслов, и второй копии рядом с данными
+# быть не должно.
+#
+# Номера идут сразу за специальными токенами в порядке имени
+# ключа. Порядок имени выбран потому, что он не зависит ни от
+# частот, ни от порядка чтения: тот же реестр даёт те же номера.
 # ============================================================
 
 
@@ -36,17 +39,17 @@ class KeyVocabError(ValueError):
     """
 
 
-def domains_of(config: TokenizerConfig, schema: SemanticSchema) -> tuple[dict[str, str], dict[str, dict]]:
+def domains_of(config: TokenizerConfig, schema: SemanticSchema) -> dict[str, str]:
     """
-    Ключ -> имя домена и описание каждого домена.
+    Ключ -> имя домена значений.
 
     По умолчанию домен у ключа свой: одинаковое написание ничего
     не доказывает, и active у карты не то же самое, что active у
     обращения. Объединение делается только явным списком с
-    причиной.
+    причиной, и тогда ключи домена делят одни и те же номера
+    значений.
     """
 
-    declared: dict[str, dict] = {}
     domain_of: dict[str, str] = {}
 
     for domain in config.value_domains:
@@ -63,30 +66,13 @@ def domains_of(config: TokenizerConfig, schema: SemanticSchema) -> tuple[dict[st
 
             domain_of[key] = domain.name
 
-        declared[domain.name] = {
-            "name": domain.name,
-            "keys": list(domain.keys),
-            "shared": True,
-            "reason": domain.reason,
-        }
-
     for key in sorted(schema.categorical_keys):
+        domain_of.setdefault(key, key)
 
-        if key in domain_of:
-            continue
-
-        domain_of[key] = key
-        declared[key] = {
-            "name": key,
-            "keys": [key],
-            "shared": False,
-            "reason": "домен по умолчанию: значения ключа ни с кем не делятся",
-        }
-
-    return domain_of, declared
+    return domain_of
 
 
-def build_key_vocab(specials: dict, config: TokenizerConfig, schema: SemanticSchema) -> dict:
+def build_key_vocab(specials: dict[str, int], schema: SemanticSchema) -> dict[str, int]:
     """
     Все поля, поступающие в модель, и их ID.
 
@@ -95,67 +81,52 @@ def build_key_vocab(specials: dict, config: TokenizerConfig, schema: SemanticSch
     здесь.
     """
 
-    first_key_id = int(specials["next_id"])
-
-    domain_of, _domains = domains_of(config, schema)
+    first_id = next_id(specials)
 
     keys = sorted(key for key, info in schema.keys.items() if info.is_model_feature)
 
-    rows: list[dict] = []
-
-    for index, key in enumerate(keys):
-
-        info = schema.info(key)
-
-        rows.append(
-            {
-                "key": key,
-                "id": first_key_id + index,
-                "value_kind": info.value_kind,
-                "unit": info.unit,
-                "origin": info.origin,
-                "weight_rule": info.weight_rule,
-                "domain": domain_of.get(key),
-                "physical_fields": list(info.physical_fields),
-                "description": info.description,
-            }
-        )
-
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "format_version": FORMAT_VERSION,
-        "implementation_version": IMPLEMENTATION_VERSION,
-        "keys_version": schema.keys_version,
-        "projection_version": schema.projection_version,
-        "first_key_id": first_key_id,
-        "size": len(rows),
-        "next_id": first_key_id + len(rows),
-        "rule": (
-            "ключи идут сразу за специальными токенами в порядке имени; "
-            "состав объявлен смысловым реестром, а не наблюдениями"
-        ),
-        "specials": int(specials["size"]),
-        "keys": rows,
-        # Ссылки названы намеренно: кода у них нет, но потребитель
-        # обязан знать, что они существуют и приходят метаданными.
-        "link_keys": sorted(schema.link_keys),
-        "declared_by_event_type": {
-            event_type: list(item) for event_type, item in schema.declared_payload.items()
-        },
-    }
+    return {key: first_id + index for index, key in enumerate(keys)}
 
 
-def load_key_vocab(directory: Path | None = None) -> dict:
+def next_id(mapping: dict) -> int:
+    """
+    Первый свободный номер после уже выданных.
+
+    Считается по самим номерам, а не по отдельному полю рядом с
+    ними: такое поле однажды разошлось бы с содержимым файла.
+    """
+
+    numbers = _ids(mapping)
+
+    return max(numbers) + 1 if numbers else 0
+
+
+def _ids(value) -> list[int]:
+    """
+    Все номера внутри вложенных словарей файла.
+    """
+
+    if isinstance(value, bool):
+        return []
+
+    if isinstance(value, int):
+        return [value]
+
+    if isinstance(value, dict):
+        return [number for item in value.values() for number in _ids(item)]
+
+    return []
+
+
+def load_key_vocab(directory: Path | None = None) -> dict[str, int]:
     """
     Словарь ключей предыдущего этапа.
     """
 
-    path = (Path(directory) / KEY_VOCAB_FILE) if directory else tokenizer_path(KEY_VOCAB_FILE)
+    path = (Path(directory) / KEY_VOCAB_FILE) if directory else vocab_path(KEY_VOCAB_FILE)
 
     if not path.exists():
-        raise KeyVocabError(
-            f"нет {path}: выполните python -m src.tokenization.run key-vocab"
-        )
+        raise KeyVocabError(f"нет {path}: выполните python -m src.tokenization.run key-vocab")
 
     return read_json(path)
 
@@ -165,4 +136,5 @@ __all__ = [
     "build_key_vocab",
     "domains_of",
     "load_key_vocab",
+    "next_id",
 ]
