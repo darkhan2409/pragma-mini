@@ -47,13 +47,10 @@ from .canonical.entities import ENTITY_FIELDS, TRANSFER_SIDES, TRANSITIONS
 
 
 STAGE = "history"
-STAGE_VERSION = "7.0.0"
+STAGE_VERSION = "8.0.0"
 
 # Колонки canonical, которые НЕ выдаются как знание клиента.
-#
-# В видимом наборе повторов идентификатора нет, поэтому флаг
-# там всегда пуст и только сбивал бы с толку.
-INTERNAL_COLUMNS: tuple[str, ...] = ("is_repeated_event_id",)
+INTERNAL_COLUMNS: tuple[str, ...] = ()
 
 # Состояние сущности после перехода. Переходы обслуживания
 # (платежи, просрочка, смена условий) состояния не меняют и
@@ -122,7 +119,6 @@ class EntityState:
 class TransferSide:
     transfer_id: str
     side: str | None
-    event_id: str
     event_time: datetime
     amount: int | None
     direction: str | None
@@ -133,7 +129,6 @@ class TransferSide:
         return {
             "transfer_id": self.transfer_id,
             "side": self.side,
-            "event_id": self.event_id,
             "event_time": self.event_time,
             "amount": self.amount,
             "direction": self.direction,
@@ -322,10 +317,8 @@ class CanonicalStore:
             columns = [
                 "transfer_id",
                 "client_id",
-                "event_id",
                 "event_type",
                 "event_time",
-                "is_repeated_event_id",
                 "raw_row",
                 "amount",
                 "direction",
@@ -396,7 +389,6 @@ def visible_events(table: pa.Table, cutoff: datetime) -> tuple[pa.Table, dict[st
         "rows": table.num_rows,
         "visible": 0,
         "event_not_happened": 0,
-        "repeated": 0,
     }
 
     if table.num_rows == 0:
@@ -405,14 +397,12 @@ def visible_events(table: pa.Table, cutoff: datetime) -> tuple[pa.Table, dict[st
     moment = np.datetime64(cutoff, "us")
 
     event_time = _as_datetime64(table.column("event_time"))
-    repeated = np.asarray(table.column("is_repeated_event_id").to_pylist(), dtype=bool)
 
     happened = event_time < moment
 
     counts["event_not_happened"] = int((~happened).sum())
-    counts["repeated"] = int((happened & repeated).sum())
 
-    indices = np.flatnonzero(happened & ~repeated)
+    indices = np.flatnonzero(happened)
 
     if indices.size == 0:
         return _client_view(table.slice(0, 0)), counts, []
@@ -584,28 +574,15 @@ def entity_states_as_of(events: pa.Table, cutoff: datetime) -> list[EntityState]
 # ============================================================
 
 
-def _acting_sides(rows: list[dict], cutoff: datetime) -> dict[str, dict]:
+def _acting_sides(rows: list[dict], cutoff: datetime) -> list[dict]:
     """
-    Стороны перевода, произошедшие до cutoff.
-
-    Правило то же, что и в истории событий: повтор
-    идентификатора пропускается, из оставшихся берётся первая
-    строка ленты.
+    Стороны перевода, произошедшие до cutoff, в порядке ленты.
     """
 
-    chosen: dict[str, dict] = {}
-
-    for row in rows:
-
-        if row["is_repeated_event_id"] or row["event_time"] >= cutoff:
-            continue
-
-        known = chosen.get(row["event_id"])
-
-        if known is None or -row["raw_row"] > -known["raw_row"]:
-            chosen[row["event_id"]] = row
-
-    return chosen
+    return sorted(
+        (row for row in rows if row["event_time"] < cutoff),
+        key=lambda row: row["raw_row"],
+    )
 
 
 def _matching_side(row: dict, other: dict) -> bool:
@@ -618,7 +595,9 @@ def _matching_side(row: dict, other: dict) -> bool:
     не перевод, а две записи об одном.
     """
 
-    if other["event_id"] == row["event_id"]:
+    # Другая строка, а не та же самая: идентификатора записи
+    # нет, поэтому строки различаются местом в RAW.
+    if other["raw_row"] == row["raw_row"]:
         return False
 
     mine = TRANSFER_SIDES.get(row["event_type"])
@@ -656,7 +635,7 @@ def transfers_as_of(index: tuple[dict, dict], client_id: str, cutoff: datetime) 
 
     out: list[TransferSide] = []
 
-    for row in mine.values():
+    for row in mine:
 
         transfer_id = row["transfer_id"]
 
@@ -677,7 +656,7 @@ def transfers_as_of(index: tuple[dict, dict], client_id: str, cutoff: datetime) 
         holders = sorted(
             {
                 item["client_id"]
-                for item in counterparts.values()
+                for item in counterparts
                 if _matching_side(row, item)
             }
         )
@@ -698,7 +677,6 @@ def transfers_as_of(index: tuple[dict, dict], client_id: str, cutoff: datetime) 
             TransferSide(
                 transfer_id=transfer_id,
                 side=TRANSFER_SIDES.get(row["event_type"]),
-                event_id=row["event_id"],
                 event_time=row["event_time"],
                 amount=row["amount"],
                 direction=row["direction"],
@@ -707,7 +685,7 @@ def transfers_as_of(index: tuple[dict, dict], client_id: str, cutoff: datetime) 
             )
         )
 
-    return sorted(out, key=lambda item: (item.event_time, item.event_id))
+    return sorted(out, key=lambda item: (item.event_time, item.transfer_id))
 
 
 # ============================================================

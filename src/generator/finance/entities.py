@@ -192,7 +192,6 @@ class Installment:
     principal_paid: int = 0
     paid_at: datetime | None = None
     status: str = "scheduled"
-    due_event_id: str | None = None
 
     @property
     def outstanding(self) -> int:
@@ -243,7 +242,8 @@ class CardCreditState:
     installment_months: int
     purchase_rate: float
     cash_rate: float
-    # Части рассрочки: (месяц срока, сумма, event_id покупки).
+    # Части рассрочки: (месяц срока, сумма, внутренняя ссылка
+    # на покупку; в выгрузку она не попадает).
     # Часть помнит свою покупку: возврат снимает долг только по
     # ней, а не по чужой покупке и не по наличному долгу.
     parts: list = field(default_factory=list)
@@ -304,7 +304,6 @@ class SupportCase:
     status: str = "open"
     resolution: str | None = None
     resolved_at: datetime | None = None
-    cause_event_id: str | None = None
 
 
 __all__ = [

@@ -41,7 +41,6 @@ COUNTERPART_GOVERNMENT = "government"
 @dataclass(frozen=True)
 class Posting:
     posting_id: str
-    event_id: str
     ts: datetime
     debit: str
     credit: str
@@ -142,7 +141,6 @@ class Ledger:
     def post(
         self,
         ts: datetime,
-        event_id: str,
         debit: str,
         credit: str,
         amount: int,
@@ -162,7 +160,6 @@ class Ledger:
 
         posting = Posting(
             posting_id=f"pst_{self.client_id}_{self._counter}",
-            event_id=event_id,
             ts=ts,
             debit=debit,
             credit=credit,

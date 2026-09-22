@@ -338,7 +338,6 @@ def _show_banners(state: ClientState, ts: datetime, session, rng, shown_offers: 
             "product_id": None,
             "campaign_code": campaign,
             "session_id": session.session_id,
-            "cause_event_id": None,
         }
 
         shown = state.emit(
@@ -367,7 +366,7 @@ def _show_banners(state: ClientState, ts: datetime, session, rng, shown_offers: 
             state.factory.make(
                 "banner_clicked",
                 shown_at + timedelta(seconds=int(rng.integers(2, 25))),
-                dict(body, cause_event_id=shown.event_id),
+                dict(body),
             )
         )
 
@@ -738,7 +737,6 @@ def _own_transfer(
                 contract_id if credit_contract_id is _SAME_CONTRACT else credit_contract_id
             ),
             "counterparty": "own_account",
-            "cause_event_id": debit.event_id,
             "reason": reason,
             "merchant_country": "KZ",
             "transfer_id": transfer_id,

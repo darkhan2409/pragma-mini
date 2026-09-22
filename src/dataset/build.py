@@ -9,14 +9,13 @@ import pyarrow as pa
 
 from src.preprocessing.artifacts import write_json, write_table, write_text
 from src.preprocessing.history import HistoryError
-from src.preprocessing.semantic.chains import ChainsError
 from src.preprocessing.semantic.keys import KeysError
 from src.tokenization.layout import EMPTY, INVALID, MISSING, UNK
 
 from .collate import collate
 from .context import ContextError
-from .dependencies import DEP_STATUSES, NOT_TRACKED, RELATION_FEATURES, DependencyError
-from .encoding import EncodingError, causes_as_of, encode_history
+from .dependencies import DEP_STATUSES, NOT_TRACKED, DependencyError
+from .encoding import EncodingError, encode_history
 from .inputs import DatasetInputs
 from .report import render_golden_md, render_report_md
 from .sample import Sample, SampleError, build_sample
@@ -67,7 +66,6 @@ class BuildError(ValueError):
 
 
 FAILURES = (
-    ChainsError,
     ContextError,
     DependencyError,
     EncodingError,
@@ -371,9 +369,7 @@ def _one(inputs: DatasetInputs, group: str, client_id: str, cutoff: datetime,
     try:
         history = entry.history(client_id, cutoff)
 
-        causes = causes_as_of(entry.corpus.store, client_id, cutoff)
-
-        encoded = encode_history(inputs.artifacts, history, limit, cause_of=causes)
+        encoded = encode_history(inputs.artifacts, history, limit)
 
         sample = build_sample(
             artifacts=inputs.artifacts,
@@ -474,7 +470,6 @@ def _golden_entry(sample: Sample, trait: str) -> dict:
                 "event_index": row["event_index"],
                 "event_type": row["event_type"],
                 "event_time": row["event_time"].isoformat(),
-                "event_id": row["event_id"],
                 "n_tokens": row["n_tokens"],
                 "eligible": row["eligible"],
                 "selection_reason": row["selection_reason"],
@@ -602,11 +597,9 @@ def _manifest(inputs: DatasetInputs, config: DatasetConfig, dataset_id: str,
                 "в одиночном примере и после сборки batch"
             ),
             "dependencies": (
-                "in_context обещает адрес события И значения, cause_event только адрес события, "
-                "остальные статусы адреса не дают"
+                "in_context обещает адрес события И значения, остальные статусы адреса не дают"
             ),
             "not_tracked": list(NOT_TRACKED),
-            "relation_features": list(RELATION_FEATURES),
             "dependency_statuses": list(DEP_STATUSES),
             "weight": (
                 "вес примера равен единице, делённой на число срезов клиента; применять его "

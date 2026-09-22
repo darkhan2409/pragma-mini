@@ -27,13 +27,15 @@ PRODUCT_TIMELINE_PATH = REFERENCE_DIR / "home_product_timeline.json"
 # его даёт внутренняя категория генератора.
 MERCHANT_REFERENCE_PATH = REFERENCE_DIR / "merchants_2gis.json"
 
-# Контракт v10: выгрузка это ДВЕ таблицы, events.parquet и
-# profile.parquet. Каталогов рядом с выгрузкой больше нет:
-# справочники мерчантов, продуктов и географии остались входом
-# генератора, а в событие попадают только поля выбранного
-# объекта. Выгрузка v9 под эти правила не подходит.
-GENERATOR_VERSION = "8.0"
-SCHEMA_VERSION = 10
+# Контракт v12: конверт из ЧЕТЫРЁХ колонок — client_id,
+# event_time, source, payload, — а тип события лежит внутри
+# payload под ключом type. Идентификатора записи и причинных
+# ссылок нет. Выгрузка это две таблицы, events.parquet и
+# profile.parquet; справочники остались входом генератора, а в
+# событие попадают только поля выбранного объекта. Выгрузка v11
+# под эти правила не подходит.
+GENERATOR_VERSION = "10.0"
+SCHEMA_VERSION = 12
 
 SEED = 42
 
@@ -127,14 +129,17 @@ def activate_horizon(start: datetime, end: datetime) -> None:
 # КОНВЕРТ
 # ============================================================
 #
-# Конверт состоит из шести колонок: event_id, client_id,
-# event_type, source, event_time, payload. Ни точности времени,
-# ни версии, ни метки связи в нём нет.
+# Конверт состоит из четырёх колонок: client_id, event_time,
+# source, payload. Что именно произошло, говорит ключ type
+# внутри payload: отдельной колонки у типа события нет.
+# Идентификатора записи в конверте нет, как нет ни точности
+# времени, ни версии, ни метки связи.
 #
 # event_time — точное время события. Деловая связь живёт
-# ключами payload: cause_event_id называет событие-причину, а
-# contract_id, application_id, case_id, offer_id, session_id и
-# transfer_id — сущность, частью которой запись является.
+# деловыми ключами payload: contract_id, account_id, card_id,
+# application_id, case_id, offer_id, session_id, transfer_id и
+# merchant_id называют сущность, частью которой запись
+# является. Ссылки на событие-причину нет вовсе.
 
 
 # ============================================================
@@ -273,6 +278,7 @@ EVENT_TYPE_PRIORITY: dict[str, int] = {
 # кода, а не из копии в манифесте каждой выгрузки.
 # ============================================================
 
+LEVEL_EVENT = "event"
 LEVEL_CLIENT = "client"
 LEVEL_PRODUCT = "product"
 LEVEL_CONTRACT = "contract"
@@ -318,7 +324,6 @@ MONEY_FIELDS: tuple[FieldSpec, ...] = (
     _f("account_id", "str", True, LEVEL_CONTRACT, "счёт клиента, по которому прошли деньги"),
     _f("card_id", "str", True, LEVEL_CONTRACT, "карта, если операция картой"),
     _f("contract_id", "str", True, LEVEL_CONTRACT, "договор, если операция относится к договору"),
-    _f("cause_event_id", "str", True, LEVEL_OPERATION, "event_id события-причины, либо null"),
     _f("transfer_id", "str", True, LEVEL_OPERATION, "перевод, если у операции есть вторая нога"),
     _f("session_id", "str", True, LEVEL_SESSION, "сессия приложения, если операция сделана в нём"),
     _f("accrual_period", "str", True, LEVEL_CONTRACT, "период начисления YYYY-MM для периодических сумм"),
@@ -372,7 +377,6 @@ LOAN_FIELDS: tuple[FieldSpec, ...] = (
     _f("principal_outstanding", "int", True, LEVEL_CONTRACT, "остаток основного долга"),
     _f("days_past_due", "int", True, LEVEL_CONTRACT, "дней просрочки"),
     _f("due_date", "str", True, LEVEL_CONTRACT, "плановая дата платежа"),
-    _f("cause_event_id", "str", True, LEVEL_CONTRACT, "event_id события-причины, либо null"),
     _f("reason", "str", True, LEVEL_CONTRACT, "основание события"),
 )
 
@@ -404,12 +408,18 @@ SNAPSHOT_FIELDS: tuple[FieldSpec, ...] = (
 
 EVENT_SPECS: dict[str, dict] = {}
 
+# Тип события это ПЕРВЫЙ ключ payload каждого события: колонки
+# event_type в конверте нет, и что произошло, говорит сама
+# запись. Ключ обязателен везде и добавляется каталогу здесь, а
+# не переписывается в каждом объявлении.
+TYPE_FIELD: FieldSpec = _f("type", "str", False, LEVEL_EVENT, "что произошло")
+
 
 def _spec(event_type: str, source: str, fields: tuple[FieldSpec, ...], description: str) -> None:
     EVENT_SPECS[event_type] = {
         "source": source,
         "description": description,
-        "fields": fields,
+        "fields": (TYPE_FIELD,) + fields,
     }
 
 
@@ -500,7 +510,6 @@ _spec(
         _f("account_id", "str", True, LEVEL_CONTRACT, "счёт"),
         _f("score_band", "str", False, LEVEL_OPERATION, "полоса риска: low, medium, high"),
         _f("rule_code", "str", True, LEVEL_OPERATION, "сработавшее правило"),
-        _f("cause_event_id", "str", True, LEVEL_OPERATION, "event_id операции, вызвавшей проверку"),
     ),
     "антифрод зафиксировал подозрение",
 )
@@ -514,7 +523,6 @@ _spec(
         _f("account_id", "str", True, LEVEL_CONTRACT, "счёт"),
         _f("decision", "str", False, LEVEL_OPERATION, "monitor, confirm_request или block"),
         _f("resolution", "str", True, LEVEL_OPERATION, "confirmed_by_client, disputed, false_positive"),
-        _f("cause_event_id", "str", True, LEVEL_OPERATION, "event_id проверки"),
     ),
     "решение антифрода",
 )
@@ -546,7 +554,6 @@ for _banner_event, _text in (("banner_shown", "показ баннера"), ("ba
             _f("product_id", "str", True, LEVEL_PRODUCT, "продукт оффера"),
             _f("campaign_code", "str", True, LEVEL_COMMUNICATION, "код кампании"),
             _f("session_id", "str", True, LEVEL_SESSION, "сессия приложения, в которой показан баннер"),
-            _f("cause_event_id", "str", True, LEVEL_SESSION, "показ, за которым последовал клик"),
         ),
         _text,
     )
@@ -596,7 +603,6 @@ for _case_event, _text in (
             _f("topic", "str", False, LEVEL_CASE, "тема обращения"),
             _f("status", "str", False, LEVEL_CASE, "статус обращения"),
             _f("resolution", "str", True, LEVEL_CASE, "исход обращения"),
-            _f("cause_event_id", "str", True, LEVEL_CASE, "event_id события-причины"),
         ),
         _text,
     )

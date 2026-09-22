@@ -179,7 +179,7 @@ def open_credit(contract, terms: dict) -> "CardCreditState":
     )
 
 
-def add_purchase(state: "CardCreditState", amount: int, month_index: int, cause_event_id: str) -> None:
+def add_purchase(state: "CardCreditState", amount: int, month_index: int, purchase_ref: int) -> None:
     """
     Покупка делится на равные части по числу месяцев рассрочки.
     Части встают в график, начиная со следующего месяца, и каждая
@@ -198,7 +198,7 @@ def add_purchase(state: "CardCreditState", amount: int, month_index: int, cause_
     for number in range(months):
         value = remainder if number == months - 1 else part
         if value > 0:
-            state.parts.append((month_index + 1 + number, int(value), cause_event_id))
+            state.parts.append((month_index + 1 + number, int(value), purchase_ref))
 
 
 def add_cash(state: "CardCreditState", amount: int) -> None:
@@ -210,7 +210,7 @@ def add_cash(state: "CardCreditState", amount: int) -> None:
         state.cash_principal += int(amount)
 
 
-def reverse_purchase(state: "CardCreditState", amount: int, cause_event_id: str | None) -> int:
+def reverse_purchase(state: "CardCreditState", amount: int, purchase_ref: int | None) -> int:
     """
     Возврат покупки снимает долг ЭТОЙ покупки.
 
@@ -230,7 +230,7 @@ def reverse_purchase(state: "CardCreditState", amount: int, cause_event_id: str 
 
     remaining = int(amount)
 
-    if remaining <= 0 or not cause_event_id:
+    if remaining <= 0 or purchase_ref is None:
         return 0
 
     released = 0
@@ -238,7 +238,7 @@ def reverse_purchase(state: "CardCreditState", amount: int, cause_event_id: str 
 
     for due, value, cause in sorted(state.parts, key=lambda part: part[0], reverse=True):
 
-        if cause == cause_event_id and remaining > 0:
+        if cause == purchase_ref and remaining > 0:
             take = min(remaining, value)
             remaining -= take
             released += take

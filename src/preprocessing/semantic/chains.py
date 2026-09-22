@@ -14,18 +14,17 @@ from datetime import datetime
 # незавершённой: у заявки без решения исход in_progress, и
 # придумывать ему конец нельзя.
 #
-# Связи берутся из деловых ключей payload — cause_event_id и
-# идентификаторов заявки, договора, обращения, сессии и
-# перевода, — но наружу они не выходят. В признаки идут
-# смысловые следствия: тип связанного события, вид связи, сколько
-# прошло между ними и та же ли это точка.
+# Цепочки собираются по деловым ключам payload: заявке,
+# договору, обращению, сессии и переводу. Ссылки на
+# событие-причину в данных нет, и признаков связи с ней тоже:
+# причинность не восстанавливается ни полем, ни догадкой.
 #
 # Всё считается по событиям, видимым на cutoff. Более поздний шаг
 # цепочки в неё не попадает, даже если в выгрузке он есть.
 # ============================================================
 
 
-CHAINS_VERSION = "2.0.0"
+CHAINS_VERSION = "3.0.0"
 
 IN_PROGRESS = "in_progress"
 
@@ -61,21 +60,6 @@ TERMINAL_TYPES: dict[str, frozenset[str]] = {
     "session": frozenset(),
 }
 
-# Вид связи по типу события-следствия.
-RELATION_OF_TYPE: dict[str, str] = {
-    "refund": "refund",
-    "reversal": "reversal",
-    "chargeback": "chargeback",
-    "application_decision": "decision",
-    "product_opened": "contract",
-    "installment_paid": "payment",
-    "installment_due": "schedule",
-    "case_resolved": "resolution",
-    "case_updated": "update",
-    "fraud_decision": "decision",
-}
-
-
 @dataclass(frozen=True)
 class Chain:
     kind: str
@@ -96,66 +80,6 @@ class Chain:
             "last_event_type": self.last_event_type,
             "outcome": self.outcome,
         }
-
-
-@dataclass(frozen=True)
-class Relation:
-    """
-    Смысловая связь события с его причиной. Идентификаторы
-    остаются внутри слоя, наружу идёт смысл.
-
-    days_since_related_event пусто, когда порядок двух записей
-    неизвестен: источник объявил время грубее их разницы. Само
-    наблюдение при этом сохраняется как есть — observed_days не
-    обнуляется и не переворачивается, он объясняет причину.
-    """
-
-    stable_event_index: int
-    related_event_type: str
-    relation_type: str
-    days_since_related_event: float | None
-    same_merchant: bool | None
-    observed_days: float
-    reason: str | None = None
-
-    def as_dict(self) -> dict:
-        return {
-            "stable_event_index": self.stable_event_index,
-            "related_event_type": self.related_event_type,
-            "relation_type": self.relation_type,
-            "days_since_related_event": self.days_since_related_event,
-            "same_merchant": self.same_merchant,
-            "observed_days": self.observed_days,
-            "reason": self.reason,
-        }
-
-
-class ChainsError(ValueError):
-    """
-    Связь событий противоречит времени, и точностью источника это
-    не объясняется.
-    """
-
-
-def _interval(row: dict, cause: dict) -> tuple[float | None, float, str | None]:
-    """
-    Интервал между причиной и следствием как признак модели и
-    само наблюдение.
-
-    Время события точное, поэтому отрицательный интервал больше
-    ничем не объясняется: причина не может произойти после
-    следствия, и это противоречие данных.
-    """
-
-    observed = (row["event_time"] - cause["event_time"]).total_seconds() / 86400.0
-
-    if observed >= 0:
-        return observed, observed, None
-
-    raise ChainsError(
-        f"причина {cause['event_type']} записана позже следствия {row['event_type']} "
-        f"на {abs(observed):.4f} суток: время событий точное, и порядок противоречит данным"
-    )
 
 
 def chains(rows: list[dict]) -> list[Chain]:
@@ -219,57 +143,6 @@ def chains(rows: list[dict]) -> list[Chain]:
     return out
 
 
-def relations(rows: list[dict]) -> list[Relation]:
-    """
-    Смысловые признаки связи вместо сырого cause_event_id.
-
-    На вход идут строки вместе с их смыслом: точка сравнивается
-    по локальной ссылке, а не по сырому идентификатору.
-
-    Причина, которой не видно на cutoff, связью не становится:
-    цепочка остаётся оборванной честно.
-    """
-
-    by_id = {row["event_id"]: row for row in rows}
-
-    out: list[Relation] = []
-
-    for row in rows:
-
-        cause_id = row.get("cause_event_id")
-
-        if cause_id is None:
-            continue
-
-        cause = by_id.get(cause_id)
-
-        if cause is None:
-            continue
-
-        # Сравнивается сеть: отдельной ссылки на торговую точку
-        # в событии больше нет.
-        same_merchant: bool | None = None
-
-        if row.get("merchant_ref") is not None or cause.get("merchant_ref") is not None:
-            same_merchant = row.get("merchant_ref") == cause.get("merchant_ref")
-
-        days, observed, reason = _interval(row, cause)
-
-        out.append(
-            Relation(
-                stable_event_index=row["stable_event_index"],
-                related_event_type=cause["event_type"],
-                relation_type=RELATION_OF_TYPE.get(row["event_type"], "caused_by"),
-                days_since_related_event=days,
-                same_merchant=same_merchant,
-                observed_days=observed,
-                reason=reason,
-            )
-        )
-
-    return out
-
-
 def chain_summary(items: list[Chain]) -> dict:
 
     by_kind: dict[str, int] = {}
@@ -291,12 +164,8 @@ def chain_summary(items: list[Chain]) -> dict:
 __all__ = [
     "CHAINS_VERSION",
     "IN_PROGRESS",
-    "ChainsError",
-    "RELATION_OF_TYPE",
     "TERMINAL_TYPES",
     "Chain",
-    "Relation",
     "chain_summary",
     "chains",
-    "relations",
 ]

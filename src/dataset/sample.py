@@ -358,7 +358,7 @@ def build_sample(
 
         if len(item.calendar) != 6:
             raise SampleError(
-                f"событие {item.event_id}: календарь из {len(item.calendar)} чисел вместо шести"
+                f"событие {item.stable_event_index}: календарь из {len(item.calendar)} чисел вместо шести"
             )
 
         calendar.extend(item.calendar)
@@ -375,7 +375,6 @@ def build_sample(
         kept=selection.kept,
         value_offsets=value_offsets,
         profile=profile,
-        cause_of=encoded.cause_of,
     )
 
     identifier = sample_id_of(encoded.client_id, cutoff)
@@ -481,7 +480,6 @@ def _service_rows(encoded: EncodedHistory, selection: Selection, flags: list[boo
                 "kept": kept,
                 "selection_reason": reason_of.get(position),
                 "exclusion_reason": excluded_of.get(position),
-                "event_id": item.event_id,
                 "stable_event_index": item.stable_event_index,
                 "event_time": item.event_time,
                 "source": item.source,

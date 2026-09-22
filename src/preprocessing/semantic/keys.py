@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..canonical.registry import UNITS
+from ..canonical.schema import canonical_column
 from ..projection import ENTITY_REFS, EVENT_TYPE_FIELD, SEMANTIC_PAYLOAD_FIELDS
 
 
@@ -36,7 +37,7 @@ from ..projection import ENTITY_REFS, EVENT_TYPE_FIELD, SEMANTIC_PAYLOAD_FIELDS
 # ============================================================
 
 
-KEYS_VERSION = "3.0.0"
+KEYS_VERSION = "5.0.0"
 
 # Вид значения. Их ровно три. Служебные поля сюда не попадают
 # вовсе: их отсеяла модельная проекция.
@@ -96,6 +97,12 @@ def _k(key: str, kind: str, description: str, temporal: str | None = None) -> Se
 # ------------------------------------------------------------
 
 DIRECT_KEYS: dict[str, SemanticKey] = {
+    # --- что произошло ---
+    #
+    # В выгрузке это ключ payload type, в canonical — колонка
+    # event_type. Отдельной колонки конверта у типа больше нет,
+    # поэтому и ключ здесь, вместе с остальными полями payload.
+    EVENT_TYPE_FIELD: _k("event_type", CATEGORICAL, "что произошло"),
     # --- деньги операции ---
     "currency": _k("currency", CATEGORICAL, "валюта счёта операции"),
     "original_amount": SemanticKey("original_amount", NUMERIC, "сумма в валюте страны покупки",
@@ -213,14 +220,6 @@ BY_SOURCE_KEYS: dict[str, dict[str, SemanticKey]] = {
 }
 
 
-# ------------------------------------------------------------
-# КОНВЕРТ
-# ------------------------------------------------------------
-
-ENVELOPE_KEYS: dict[str, SemanticKey] = {
-    EVENT_TYPE_FIELD: _k("event_type", CATEGORICAL, "что произошло"),
-}
-
 # Локальные ссылки: смысла значения не несут, но связывают события
 # одного клиента. Роль отдельная, значением модели они не
 # становятся автоматически.
@@ -335,36 +334,6 @@ def _change_pair(base: SemanticKey) -> tuple[SemanticKey, SemanticKey]:
 PROFILE_CHANGE_KEYS: dict[str, tuple[SemanticKey, SemanticKey]] = {
     name: _change_pair(PROFILE_KEYS[name] if name in PROFILE_KEYS else PROFILE_CHANGE_EXTRA[name])
     for name in CHANGEABLE_PROFILE_FIELDS
-}
-
-
-# ------------------------------------------------------------
-# СВЯЗЬ С СОБЫТИЕМ-ПРИЧИНОЙ
-# ------------------------------------------------------------
-#
-# cause_event_id наружу не выходит. Вместо него событие-следствие
-# получает смысл связи: что было причиной, какого рода связь,
-# сколько прошло и та же ли это точка.
-# ------------------------------------------------------------
-
-RELATION_KEYS: dict[str, SemanticKey] = {
-    "related_event_type": SemanticKey(
-        "related_event_type", CATEGORICAL, "тип события-причины вместо его идентификатора",
-        derived_from=("event_type",),
-    ),
-    "relation_type": SemanticKey(
-        "relation_type", CATEGORICAL, "вид связи со своим событием-причиной",
-        derived_from=("event_type",),
-    ),
-    "days_since_related_event": SemanticKey(
-        "days_since_related_event", NUMERIC,
-        "дней между причиной и следствием; при неизвестном порядке признак не передаётся",
-        unit="days", derived_from=("event_time",),
-    ),
-    "same_merchant": SemanticKey(
-        "same_merchant", CATEGORICAL, "та же ли сеть, что у события-причины",
-        derived_from=("merchant_ref",),
-    ),
 }
 
 
@@ -563,7 +532,7 @@ def validate_keys(catalogue: dict) -> None:
 
         for item in fields:
 
-            name = item["name"] if isinstance(item, dict) else item.name
+            name = canonical_column(item["name"] if isinstance(item, dict) else item.name)
 
             if name not in SEMANTIC_PAYLOAD_FIELDS or name in DYNAMIC_FIELDS:
                 continue
@@ -597,10 +566,8 @@ def _all_declared_keys() -> list[SemanticKey]:
     """
 
     out: list[SemanticKey] = [
-        *ENVELOPE_KEYS.values(),
         *REFERENCE_KEYS.values(),
         *PROFILE_KEYS.values(),
-        *RELATION_KEYS.values(),
         *TIMING_KEYS.values(),
         *DERIVED_KEYS.values(),
     ]
@@ -627,7 +594,11 @@ def keys_registry(catalogue: dict) -> dict:
 
         for item in fields:
 
-            name = item["name"] if isinstance(item, dict) else item.name
+            # Имя поля так, как оно записано в выгрузке, и оно же
+            # именем колонки canonical: смысл ищется по колонке,
+            # а трассировка ведёт к физическому полю payload.
+            raw_name = item["name"] if isinstance(item, dict) else item.name
+            name = canonical_column(raw_name)
 
             if name not in SEMANTIC_PAYLOAD_FIELDS or name in DYNAMIC_FIELDS:
                 continue
@@ -635,10 +606,7 @@ def keys_registry(catalogue: dict) -> dict:
             key = key_for(name, source)
 
             row = rows.setdefault(key.key, {**key.as_dict(), "physical_fields": []})
-            row["physical_fields"].append(f"{event_type}.{name}")
-
-    for key in ENVELOPE_KEYS.values():
-        rows.setdefault(key.key, {**key.as_dict(), "physical_fields": ["envelope"]})
+            row["physical_fields"].append(f"{event_type}.{raw_name}")
 
     for key in REFERENCE_KEYS.values():
         rows.setdefault(key.key, {**key.as_dict(), "physical_fields": ["derived:local_ref"]})
@@ -649,9 +617,6 @@ def keys_registry(catalogue: dict) -> dict:
     for field_name, (old, new) in PROFILE_CHANGE_KEYS.items():
         rows.setdefault(old.key, {**old.as_dict(), "physical_fields": [f"profile_change[{field_name}].old_value"]})
         rows.setdefault(new.key, {**new.as_dict(), "physical_fields": [f"profile_change[{field_name}].new_value"]})
-
-    for key in RELATION_KEYS.values():
-        rows.setdefault(key.key, {**key.as_dict(), "physical_fields": ["derived:relation"]})
 
     for key in TIMING_KEYS.values():
         rows.setdefault(key.key, {**key.as_dict(), "physical_fields": ["derived:timing"]})
@@ -700,7 +665,6 @@ __all__ = [
     "DERIVED_KEYS",
     "DIRECT_KEYS",
     "DYNAMIC_FIELDS",
-    "ENVELOPE_KEYS",
     "KEYS_VERSION",
     "NUMERIC",
     "PROFILE_CATEGORICAL",
@@ -709,7 +673,6 @@ __all__ = [
     "PROFILE_NUMERIC",
     "REFERENCE",
     "REFERENCE_KEYS",
-    "RELATION_KEYS",
     "TEXT",
     "TIMING_KEYS",
     "VALUE_KINDS",

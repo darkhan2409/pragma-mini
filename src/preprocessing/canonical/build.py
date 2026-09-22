@@ -24,13 +24,12 @@ from .links import build_link_report, scan_entities
 from .registry import build_registry, registry_as_dict, registry_digest
 from .schema import (
     CLIENT_INDEX_SCHEMA,
-    REPEATS_SCHEMA,
     DERIVED_COLUMNS,
     MENTIONS_SCHEMA,
     REJECTS_SCHEMA,
     SCHEMA_VERSION,
     TRANSFERS_SCHEMA,
-    payload_columns,
+    payload_fields,
 )
 from .sidecars import build_profile
 
@@ -53,7 +52,7 @@ from .sidecars import build_profile
 
 
 STAGE = "canonical"
-STAGE_VERSION = "7.0.0"
+STAGE_VERSION = "9.0.0"
 
 STATUS_OK = "ok"
 STATUS_ROW_COUNT_MISMATCH = "row_count_mismatch"
@@ -63,7 +62,6 @@ PROFILE_FILE = "profile.parquet"
 CLIENT_INDEX_FILE = "client_index.parquet"
 MENTIONS_FILE = "entities/mentions.parquet"
 TRANSFERS_FILE = "entities/transfers.parquet"
-REPEATS_FILE = "repeated_ids.parquet"
 REJECTS_FILE = "rejects.parquet"
 REGISTRY_FILE = "field_registry.json"
 REPORT_JSON_FILE = "canonical_report.json"
@@ -140,7 +138,10 @@ def build_group(
     out_dir = Path(out_dir)
 
     schema = canonical_schema(manifest)
-    payload_names = [name for name, _ in payload_columns(manifest)]
+    # Разбор идёт по именам полей выгрузки, а колонки canonical
+    # называет canonical_column: тип события приезжает ключом
+    # type и ложится колонкой event_type.
+    payload_names = payload_fields(manifest)
 
     client_index = build_client_index(raw)
 
@@ -153,7 +154,6 @@ def build_group(
     # упоминаний обратно значит держать в памяти целую группу.
     entity_scan: dict[tuple[str, str], dict] = {}
 
-    dedupe: list[dict] = []
     rejects: list[dict] = []
     clients: list[dict] = []
     transfers: list[dict] = []
@@ -186,7 +186,6 @@ def build_group(
 
         transfers.extend(extract_transfers(result.table))
 
-        dedupe.extend(result.dedupe_log)
         rejects.extend(result.rejects)
         clients.extend(result.clients)
 
@@ -194,7 +193,6 @@ def build_group(
             counts[key] += value
 
         for name in (
-            "is_repeated_event_id",
             "before_window",
             "at_or_after_extract",
             "ambiguous_local_time",
@@ -222,12 +220,6 @@ def build_group(
 
     transfers_table = order_transfers(transfers)
     write_table(out_dir / TRANSFERS_FILE, transfers_table, TRANSFERS_SCHEMA)
-
-    write_table(
-        out_dir / REPEATS_FILE,
-        pa.Table.from_pylist(dedupe, schema=REPEATS_SCHEMA) if dedupe else REPEATS_SCHEMA.empty_table(),
-        REPEATS_SCHEMA,
-    )
 
     write_table(
         out_dir / REJECTS_FILE,
@@ -305,17 +297,9 @@ def build_group(
             "profile": profile_table.num_rows,
             "mentions": mentions_rows,
             "transfer_sides": transfers_table.num_rows,
-            "repeated_ids": len(dedupe),
             "rejects": len(rejects),
             "clients": len(clients),
             "clients_without_events": sum(1 for item in clients if not item["row_count"]),
-        },
-        "repeats": {
-            "rows": len(dedupe),
-            "rule": (
-                "event_id приходит в выгрузку ровно один раз; повтор это поломка контракта, "
-                "строка сохраняется с пометкой и в цепочку остатков не входит"
-            ),
         },
         "flags": dict(sorted(flags.items())),
         "payload": {
@@ -347,7 +331,6 @@ def build_group(
         out_dir / CLIENT_INDEX_FILE,
         out_dir / MENTIONS_FILE,
         out_dir / TRANSFERS_FILE,
-        out_dir / REPEATS_FILE,
         out_dir / REJECTS_FILE,
         out_dir / REGISTRY_FILE,
     ]
@@ -389,7 +372,6 @@ def render_canonical_md(report: dict) -> str:
                 ["версии профиля", rows["profile"]],
                 ["упоминания сущностей", rows["mentions"]],
                 ["стороны переводов", rows["transfer_sides"]],
-                ["повторов event_id", rows["repeated_ids"]],
                 ["неразобранные строки", rows["rejects"]],
                 ["клиентов", rows["clients"]],
                 ["из них без событий", rows["clients_without_events"]],
@@ -398,13 +380,6 @@ def render_canonical_md(report: dict) -> str:
         )
     )
     out.append(f"\n{rows['rule']}.\n")
-
-    repeats = report["repeats"]
-
-    out.append("\n## Повторы идентификаторов\n")
-    out.append(
-        f"\nСтрок с повторным event_id: {repeats['rows']}. {repeats['rule']}.\n"
-    )
 
     out.append("\n## Наблюдаемость\n")
     out.append(
@@ -563,7 +538,6 @@ __all__ = [
     "REPORT_JSON_FILE",
     "REPORT_MD_FILE",
     "locate_clients",
-    "REPEATS_FILE",
     "EVENTS_FILE",
     "MENTIONS_FILE",
     "PROFILE_FILE",

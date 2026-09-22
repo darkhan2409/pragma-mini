@@ -68,7 +68,6 @@ class CasePlan:
     updated_at: datetime | None
     resolved_at: datetime
     resolution: str
-    cause_event_id: str | None
 
 
 def contact_probability(persona: Persona, cause: str, ts: datetime, stress: float) -> float:
@@ -103,7 +102,6 @@ def open_case(
     persona: Persona,
     cause: str,
     ts: datetime,
-    cause_event_id: str | None,
     index: int,
 ) -> CasePlan:
     """
@@ -146,7 +144,6 @@ def open_case(
         updated_at=updated if rng.random() < 0.55 else None,
         resolved_at=ts + timedelta(hours=int(hours)),
         resolution=resolution,
-        cause_event_id=cause_event_id,
     )
 
 

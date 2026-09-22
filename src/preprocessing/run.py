@@ -437,7 +437,7 @@ def run_canonical(args) -> int:
         print(f"[{STAGE}] группа {label}: статус {report['status']} → {md_path}")
         print(
             f"    строк RAW {rows['raw_events']} → canonical {rows['canonical_events']}, "
-            f"повторов event_id {rows['repeated_ids']}, неразобранных {rows['rejects']}"
+            f"неразобранных {rows['rejects']}"
         )
         print(
             f"    упоминаний сущностей {rows['mentions']}, сторон переводов {rows['transfer_sides']}, "
@@ -900,8 +900,7 @@ def run_semantic(args) -> int:
     )
     print(
         f"    активность по месяцам: {report['activity']['by_state']}; "
-        f"цепочек {report['chains']['chains']} (незавершённых {report['chains']['unfinished']}), "
-        f"связей {report['relations']}"
+        f"цепочек {report['chains']['chains']} (незавершённых {report['chains']['unfinished']})"
     )
 
     for item in report["limitations"][:5]:

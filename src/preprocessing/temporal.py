@@ -37,7 +37,7 @@ from .history import (
 
 CHECKS = {
     "no_future_rows": "во входе нет строк с event_time на границе cutoff либо позже",
-    "one_row_per_event": "у каждого event_id ровно одна строка",
+    "one_row_per_event": "у каждого номера события клиента ровно одна строка",
     "business_order_non_decreasing": "бизнес-порядок не убывает по времени события",
     "internal_columns_hidden": "служебные поля наружу не выдаются",
     "one_profile_row": "у клиента не больше одной строки профиля",
@@ -106,10 +106,14 @@ def choose_cutoffs(window_start: datetime, final_cutoff: datetime, period_end: d
 
 def _content_key(table: pa.Table, columns: Sequence[str]) -> dict[str, tuple]:
 
+    # Тождество строки между срезами держит номер события внутри
+    # клиента: идентификатора записи в выгрузке нет, а номер
+    # canonical считает по времени, приоритету типа и месту в RAW
+    # и от cutoff не зависит.
     rows = table.select(list(columns)).to_pylist()
-    ids = table.column("event_id").to_pylist()
+    ids = table.column("stable_event_index").to_pylist()
 
-    return {event_id: tuple(sorted(row.items(), key=lambda item: item[0])) for event_id, row in zip(ids, rows)}
+    return {key: tuple(sorted(row.items(), key=lambda item: item[0])) for key, row in zip(ids, rows)}
 
 
 def check_single(history: ClientHistory) -> list[str]:
@@ -129,9 +133,9 @@ def check_single(history: ClientHistory) -> list[str]:
         if any(value >= cutoff for value in event_time):
             problems.append("no_future_rows: событие не раньше cutoff")
 
-        ids = events.column("event_id").to_pylist()
+        ids = events.column("stable_event_index").to_pylist()
         if len(ids) != len(set(ids)):
-            problems.append("one_row_per_event: событие встречается дважды")
+            problems.append("one_row_per_event: номер события встречается дважды")
 
         if any(later < earlier for earlier, later in zip(event_time, event_time[1:])):
             problems.append("business_order_non_decreasing: порядок убывает по времени события")
@@ -153,8 +157,8 @@ def check_across(previous: ClientHistory, current: ClientHistory, columns: Seque
 
     problems: list[str] = []
 
-    before = set(previous.events.column("event_id").to_pylist())
-    after = set(current.events.column("event_id").to_pylist())
+    before = set(previous.events.column("stable_event_index").to_pylist())
+    after = set(current.events.column("stable_event_index").to_pylist())
 
     lost = before - after
     if lost:
@@ -274,7 +278,7 @@ def temporal_report(
         "limitations": dict(sorted(limitations.items())),
         "rules": {
             "cutoff": "исключительная граница: событие обязано быть строго раньше",
-            "rows": "event_id приходит в выгрузку один раз; запись сразу окончательна",
+            "rows": "запись приходит в выгрузку один раз и сразу окончательной",
             "order": "бизнес-порядок по времени события и приоритету типа",
             "profile": "одна итоговая строка на клиента; версий и границ действия нет",
             "transitions": (
@@ -322,7 +326,6 @@ def render_history_md(history: ClientHistory, tail: int = 15) -> str:
                 ["строк у клиента всего", counts["rows"]],
                 ["видно событий", counts["visible"]],
                 ["ещё не произошло", counts["event_not_happened"]],
-                ["повторов event_id отброшено", counts["repeated"]],
             ],
             ["показатель", "значение"],
         )

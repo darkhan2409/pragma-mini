@@ -36,6 +36,7 @@ from .world import communities
 # числа воркеров, ни от размера чанка, ни от порядка завершения.
 #
 # Выгрузка это ДВЕ таблицы: events.parquet и profile.parquet.
+# Конверт события — четыре колонки, тип события внутри payload.
 # Справочники мерчантов, продуктов и географии рядом не
 # выкладываются: они вход генератора, а в событие попадают
 # только поля выбранного объекта.
@@ -48,11 +49,9 @@ from .world import communities
 
 EVENTS_SCHEMA = pa.schema(
     [
-        ("event_id", pa.string()),
         ("client_id", pa.string()),
-        ("event_type", pa.string()),
-        ("source", pa.string()),
         ("event_time", pa.timestamp("us")),
+        ("source", pa.string()),
         ("payload", pa.string()),
     ]
 )

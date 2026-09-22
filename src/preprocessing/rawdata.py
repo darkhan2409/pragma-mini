@@ -28,7 +28,7 @@ from .artifacts import sha256_file
 # ИДЕЯ
 # ============================================================
 #
-# Доступ к RAW v10 без pandas и без загрузки всего датасета:
+# Доступ к RAW v12 без pandas и без загрузки всего датасета:
 # лента читается по одному row group, payload разбирается
 # pyarrow.json по каталогу ключей.
 #
@@ -49,7 +49,7 @@ from .artifacts import sha256_file
 
 MANIFEST_NAME = "manifest.json"
 
-EXPECTED_SCHEMA_VERSION = 10
+EXPECTED_SCHEMA_VERSION = 12
 
 # Файлы, без которых группа не обрабатывается. Справочников
 # рядом с выгрузкой нет: они остались входом генератора.
@@ -77,16 +77,19 @@ REQUIRED_MANIFEST_KEYS: tuple[str, ...] = (
     "profile_sha256",
 )
 
+# Конверт выгрузки: четыре колонки. Тип события лежит внутри
+# payload под ключом type, и читается он оттуда.
 ENVELOPE_SCHEMA = pa.schema(
     [
-        ("event_id", pa.string()),
         ("client_id", pa.string()),
-        ("event_type", pa.string()),
-        ("source", pa.string()),
         ("event_time", pa.timestamp("us")),
+        ("source", pa.string()),
         ("payload", pa.string()),
     ]
 )
+
+# Ключ payload, который называет тип события.
+TYPE_KEY = "type"
 
 EXPECTED_SCHEMAS: dict[str, pa.Schema] = {
     "events": ENVELOPE_SCHEMA,
@@ -680,7 +683,10 @@ def parse_payloads(info: EventTypeInfo, payload: pa.Array | pa.ChunkedArray) -> 
 
     try:
         table = _fast_parse(schema, payload)
-    except pa.ArrowInvalid:
+    except (pa.ArrowInvalid, TypeError):
+        # Пустой payload рвёт склейку одного буфера, и разбор
+        # уходит на построчный путь, который такую строку
+        # объясняет причиной, а не падением.
         table = _slow_parse(info, payload, result)
 
     result.table = table
@@ -705,20 +711,68 @@ def parse_payloads(info: EventTypeInfo, payload: pa.Array | pa.ChunkedArray) -> 
     return result
 
 
+def event_types_of(payload: pa.Array | pa.ChunkedArray) -> pa.Array:
+    """
+    Тип события каждой строки, прочитанный из payload.
+
+    Колонки event_type в конверте нет: что произошло, говорит
+    ключ type самой записи. Разбирается только он — остальные
+    поля payload разбираются позже, уже по каталогу своего типа.
+
+    Неразобранная строка и запись без ключа type получают null:
+    выдумывать тип нельзя, и дальше такая строка честно уходит в
+    unknown_event_type.
+    """
+
+    if len(payload) == 0:
+        return pa.array([], pa.string())
+
+    schema = pa.schema([(TYPE_KEY, pa.string())])
+
+    try:
+        parsed = pj.read_json(
+            pa.BufferReader(_joined_buffer(payload)),
+            parse_options=pj.ParseOptions(explicit_schema=schema, unexpected_field_behavior="ignore"),
+        )
+        if parsed.num_rows == len(payload):
+            return parsed.column(TYPE_KEY).combine_chunks()
+    except (pa.ArrowInvalid, TypeError):
+        # TypeError приходит от склейки буфера, когда payload
+        # пуст: строка без записи законна и разбирается построчно.
+        pass
+
+    # Медленный путь: хотя бы одна строка не разобралась целиком.
+    values: list[str | None] = []
+
+    for text in payload.to_pylist():
+
+        if not text:
+            values.append(None)
+            continue
+
+        try:
+            record = json.loads(text)
+        except (ValueError, TypeError):
+            values.append(None)
+            continue
+
+        value = record.get(TYPE_KEY) if isinstance(record, dict) else None
+
+        values.append(value if isinstance(value, str) else None)
+
+    return pa.array(values, pa.string())
+
+
 def iter_event_types(table: pa.Table) -> Iterator[tuple[str, pa.Table]]:
     """
     Строки row group по типам событий, в порядке первого
     появления типа. Порядок строк внутри типа сохраняется.
     """
 
-    types = table.column("event_type")
+    types = event_types_of(table.column("payload"))
 
-    seen: list[str] = []
-    for value in pc.unique(types).to_pylist():
-        seen.append(value)
-
-    for event_type in seen:
-        mask = pc.equal(types, event_type)
+    for event_type in pc.unique(types).to_pylist():
+        mask = pc.equal(types, event_type) if event_type is not None else pc.is_null(types)
         yield event_type, table.filter(mask)
 
 
@@ -738,6 +792,8 @@ __all__ = [
     "RawManifest",
     "SourceInfo",
     "TABLE_FILES",
+    "TYPE_KEY",
+    "event_types_of",
     "iter_event_types",
     "parse_payloads",
     "read_manifest",

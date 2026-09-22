@@ -24,8 +24,6 @@ import pyarrow.parquet as pq
 # ============================================================
 
 
-CAUSE_FIELD = "cause_event_id"
-
 REASON_NOT_IN_DATASET = "target_not_in_dataset"
 REASON_BEFORE_WINDOW = "first_mention_before_history_start"
 REASON_PRE_WINDOW_CONTRACTS = "client_has_contracts_before_window"
@@ -44,71 +42,6 @@ def _quantiles(counter: Counter) -> dict:
     if not counter:
         return {}
     return {str(size): count for size, count in sorted(counter.items())}
-
-
-def check_causes(events_path: Path) -> dict:
-    """
-    cause_event_id: существует ли цель, у того ли клиента и не
-    позже ли она следствия.
-    """
-
-    parquet = pq.ParquetFile(events_path)
-
-    referenced: set[str] = set()
-
-    for index in range(parquet.num_row_groups):
-        column = parquet.read_row_group(index, columns=[CAUSE_FIELD]).column(CAUSE_FIELD)
-        referenced.update(value for value in column.to_pylist() if value)
-
-    if not referenced:
-        return {"references": 0, "rule": "ссылок на событие-причину в выгрузке нет"}
-
-    known: dict[str, dict] = {}
-
-    columns = ["event_id", "client_id", "event_time"]
-
-    for index in range(parquet.num_row_groups):
-        chunk = parquet.read_row_group(index, columns=columns)
-        for row in chunk.to_pylist():
-            if row["event_id"] in referenced and row["event_id"] not in known:
-                known[row["event_id"]] = row
-
-    total = 0
-    resolved = 0
-    cross_client = 0
-    cause_after_effect = 0
-    missing: Counter = Counter()
-
-    for index in range(parquet.num_row_groups):
-        chunk = parquet.read_row_group(
-            index, columns=["client_id", "event_time", CAUSE_FIELD, "event_type"]
-        )
-        for row in chunk.to_pylist():
-            cause = row[CAUSE_FIELD]
-            if not cause:
-                continue
-            total += 1
-            target = known.get(cause)
-            if target is None:
-                missing[REASON_NOT_IN_DATASET] += 1
-                continue
-            resolved += 1
-            if target["client_id"] != row["client_id"]:
-                cross_client += 1
-            if target["event_time"] > row["event_time"]:
-                cause_after_effect += 1
-
-    return {
-        "references": total,
-        "resolved": resolved,
-        "unresolved": dict(missing),
-        "cross_client": cross_client,
-        "cause_after_effect": cause_after_effect,
-        "rule": (
-            "цель ищется среди событий той же группы; время событий точное, поэтому причина "
-            "позже следствия это поломка данных, а не потерянный час"
-        ),
-    }
 
 
 def check_transfers(transfers: pa.Table) -> dict:
@@ -317,7 +250,6 @@ def build_link_report(
 ) -> dict:
 
     return {
-        "causes": check_causes(events_path),
         "transfers": check_transfers(transfers),
         "entities": check_entities(entity_scan, history_start),
         "chains": check_chains(events_path),
@@ -325,13 +257,11 @@ def build_link_report(
 
 
 __all__ = [
-    "CAUSE_FIELD",
     "OPENING_TRANSITIONS",
     "REASON_NOT_IN_DATASET",
     "REASON_PRE_WINDOW_CONTRACTS",
     "REASON_UNKNOWN",
     "build_link_report",
-    "check_causes",
     "check_chains",
     "check_entities",
     "scan_entities",

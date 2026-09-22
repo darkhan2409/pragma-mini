@@ -12,7 +12,7 @@ from src.preprocessing.semantic.build import STAGE as SEMANTIC_STAGE
 from src.preprocessing.semantic.keys import (
     CATEGORICAL,
     DYNAMIC_FIELDS,
-    ENVELOPE_KEYS,
+    DIRECT_KEYS,
     NUMERIC,
     REFERENCE,
     TEXT,
@@ -222,7 +222,7 @@ class SemanticSchema:
         if problems:
             raise SchemaError("; ".join(sorted(set(problems))))
 
-        event_type_key = ENVELOPE_KEYS[EVENT_TYPE_FIELD].key
+        event_type_key = DIRECT_KEYS[EVENT_TYPE_FIELD].key
 
         for owner, keys in declared.items():
             keys.add(event_type_key)

@@ -60,7 +60,7 @@ from .settings import GroupWindow, PreprocessingConfig
 
 
 STAGE = "corpus"
-STAGE_VERSION = "7.0.0"
+STAGE_VERSION = "8.0.0"
 SCHEMA_VERSION = 1
 
 CORPUS_MANIFEST_FILE = "corpus_manifest.json"
@@ -75,13 +75,11 @@ STATUS_BLOCKED = "blocked"
 
 # Поля конверта, входящие в контрольную сумму содержимого.
 # Это весь конверт, кроме payload: он идёт в сумму отдельно,
-# разобранными колонками.
+# разобранными колонками, и тип события среди них.
 CHECKSUM_ENVELOPE: tuple[str, ...] = (
-    "event_id",
     "client_id",
-    "event_type",
-    "source",
     "event_time",
+    "source",
 )
 
 # Поля профиля, которые в сумму НЕ входят: служебный индекс и
