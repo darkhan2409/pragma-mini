@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..canonical.registry import UNITS
-from ..projection import ENTITY_REFS, EVENT_TYPE_FIELD, SEMANTIC_PAYLOAD_FIELDS
+from .projection import ENTITY_REFS, EVENT_TYPE_FIELD, SEMANTIC_PAYLOAD_FIELDS, validate_projection
 
 
 # ============================================================
@@ -25,25 +24,69 @@ from ..projection import ENTITY_REFS, EVENT_TYPE_FIELD, SEMANTIC_PAYLOAD_FIELDS
 # принято поимённо. Ещё два имени, old_value и new_value, смысла
 # сами по себе не имеют: его задаёт изменившееся поле профиля.
 #
-# Ключи объявляются не только для физических полей. Расшифровка
-# справочника, признаки связи, интервалы времени и расчётные
-# отношения объявляются здесь же и теми же правилами: иначе
-# следующий этап не узнает, чем их кодировать и вместе с чем
-# маскировать.
+# Ключи объявляются не только для полей события: анкета,
+# её изменения и локальные ссылки объявляются здесь же и теми
+# же правилами. Расчётных признаков среди ключей нет: их
+# никто не считает.
 #
 # Здесь нет словарей, бакетов, частот и порогов: ключ обозначает
 # смысл поля, а не идентификатор токена.
 # ============================================================
 
 
-KEYS_VERSION = "6.0.0"
+KEYS_VERSION = "9.0.0"
+
+
+# ------------------------------------------------------------
+# ЕДИНИЦЫ ИЗМЕРЕНИЯ
+# ------------------------------------------------------------
+#
+# Только то, что прямо сказано в описании поля каталогом ключей.
+# Там, где единицы нет (код, идентификатор, категория), стоит
+# None.
+# ------------------------------------------------------------
+
+UNITS: dict[str, str] = {
+    # деньги: генератор объявляет тенге и хранит целые
+    "amount": "KZT",
+    "amount_or_limit": "KZT",
+    "amount_due": "KZT",
+    "amount_paid": "KZT",
+    "principal_outstanding": "KZT",
+    "balance_after": "KZT",
+    "requested_amount": "KZT",
+    "approved_amount": "KZT",
+    "declared_income": "KZT",
+    "credit_limit": "KZT",
+    # сумма в валюте страны покупки: единица лежит в original_currency
+    "original_amount": "original_currency",
+    # сроки
+    "term": "months",
+    "requested_term": "months",
+    "approved_term": "months",
+    "relationship_months": "months",
+    "days_past_due": "days",
+    # доли
+    "rate": "fraction_per_year",
+    "credit_utilization": "fraction",
+    # счётчики
+    "children": "count",
+    "contracts_count": "count",
+    "active_contracts": "count",
+    "installment_no": "count",
+    "age": "years",
+    # код календаря: число это код, а не величина. Час и день
+    # недели события сюда не входят: они не поля выгрузки, а
+    # отдельный временной канал, считаемый из event_time.
+    "income_day": "day_of_month_code",
+}
 
 # Вид значения. Их ровно три. Служебные поля сюда не попадают
 # вовсе: их отсеяла модельная проекция.
 #
 # Отдельного вида «дата» нет намеренно: календарь дат словарём не
-# кодируется. Плановая дата платежа остаётся в canonical, а модель
-# получает число дней до неё (days_to_due).
+# кодируется. Плановая дата платежа остаётся в canonical и в модель
+# не выходит: числа дней до неё больше никто не считает.
 NUMERIC = "numeric"
 CATEGORICAL = "categorical"
 TEXT = "text"
@@ -336,78 +379,18 @@ PROFILE_CHANGE_KEYS: dict[str, tuple[SemanticKey, SemanticKey]] = {
 
 
 # ------------------------------------------------------------
-# ВРЕМЕННЫЕ ПРИЗНАКИ
+# ЧЕГО ЗДЕСЬ НЕТ
 # ------------------------------------------------------------
 #
-# Интервалы, которых нет ни в календаре, ни в самом событии.
-# Календарь сюда не входит: час суток и день недели это отдельный
-# числовой канал, он словарём не кодируется.
+# Расчётных и временных признаков больше нет ни одного:
+# ни интервалов между событиями, ни отношений суммы к доходу
+# или к лимиту, ни возраста истории. Их никто не считает, и
+# объявленный ключ без источника был бы обещанием поля,
+# которого модель никогда не увидит.
 #
-# days_to_due стоит здесь вместо плановой даты платежа: сама дата
-# остаётся в canonical, модель получает число дней до неё.
+# Календарь сюда не относится: час суток и день недели это
+# отдельный числовой канал, он словарём не кодируется.
 # ------------------------------------------------------------
-
-TIMING_KEYS: dict[str, SemanticKey] = {
-    "since_previous_hours": SemanticKey(
-        "since_previous_hours", NUMERIC, "часов с прошлого видимого события клиента", unit="hours",
-        derived_from=("event_time",),
-    ),
-    "since_same_type_hours": SemanticKey(
-        "since_same_type_hours", NUMERIC, "часов с прошлого события того же типа", unit="hours",
-        derived_from=("event_time", "type"),
-    ),
-    "since_last_income_hours": SemanticKey(
-        "since_last_income_hours", NUMERIC, "часов с последнего видимого поступления дохода", unit="hours",
-        derived_from=("event_time", "type"),
-    ),
-    "age_of_history_days": SemanticKey(
-        "age_of_history_days", NUMERIC, "дней от начала наблюдаемой истории клиента", unit="days",
-        derived_from=("event_time",),
-    ),
-    "days_to_due": SemanticKey(
-        "days_to_due", NUMERIC, "дней до планового платежа по известному графику", unit="days",
-        temporal="будущая дата, известная из графика",
-        derived_from=("event_time", "due_date"),
-    ),
-}
-
-
-# ------------------------------------------------------------
-# РАСЧЁТНЫЕ ПРИЗНАКИ
-# ------------------------------------------------------------
-#
-# Отношения считаются из исходных чисел и объявляются такими же
-# ключами, как физические поля: иначе следующий этап не будет
-# знать, чем их кодировать и вместе с чем маскировать.
-#
-# derived_from называет слагаемые расчёта. Маскировать значение и
-# его производную по отдельности нельзя: это утечка.
-# ------------------------------------------------------------
-
-DERIVED_KEYS: dict[str, SemanticKey] = {
-    "amount_to_declared_income": SemanticKey(
-        "amount_to_declared_income", NUMERIC,
-        "сумма операции к заявленному доходу той версии профиля, которая действовала в момент операции",
-        unit="ratio",
-        derived_from=("transaction_amount", "profile_declared_income"),
-    ),
-    "amount_to_limit": SemanticKey(
-        "amount_to_limit", NUMERIC,
-        "сумма операции к кредитному лимиту карты; лимитом считается amount_or_limit договора, "
-        "назначенный вместе с картой, а сумма вклада или тело кредита лимитом не считается",
-        unit="ratio",
-        derived_from=("transaction_amount", "amount_or_limit"),
-    ),
-    "amount_to_balance_after": SemanticKey(
-        "amount_to_balance_after", NUMERIC, "сумма операции к остатку счёта после неё", unit="ratio",
-        derived_from=("transaction_amount", "balance_after"),
-    ),
-    "amount_to_client_average": SemanticKey(
-        "amount_to_client_average", NUMERIC, "во сколько раз сумма отличается от среднего по прошлым "
-        "видимым операциям того же типа", unit="ratio",
-        derived_from=("transaction_amount", "type"),
-    ),
-}
 
 
 # ------------------------------------------------------------
@@ -517,11 +500,22 @@ def validate_keys(catalogue: dict) -> None:
     смысл; у ключа один вид значения во всех своих полях.
 
     catalogue: event_type -> {"source": ..., "fields": [...]} из
-    манифеста выгрузки.
+    каталога ключей выгрузки.
+
+    Сначала проверяется сама граница модели: новое поле
+    выгрузки обязано быть названо либо смысловым, либо
+    ссылкой, либо внутренним, иначе оно молча пропало бы по
+    дороге к модели.
     """
 
     kinds: dict[str, set[str]] = {}
     missing: list[str] = []
+
+    validate_projection(
+        item["name"] if isinstance(item, dict) else item.name
+        for info in catalogue.values()
+        for item in (info["fields"] if isinstance(info, dict) else info.fields)
+    )
 
     for event_type, info in sorted(catalogue.items()):
 
@@ -566,8 +560,6 @@ def _all_declared_keys() -> list[SemanticKey]:
     out: list[SemanticKey] = [
         *REFERENCE_KEYS.values(),
         *PROFILE_KEYS.values(),
-        *TIMING_KEYS.values(),
-        *DERIVED_KEYS.values(),
     ]
 
     for old, new in PROFILE_CHANGE_KEYS.values():
@@ -612,12 +604,6 @@ def keys_registry(catalogue: dict) -> dict:
         rows.setdefault(old.key, {**old.as_dict(), "physical_fields": [f"profile_change[{field_name}].old_value"]})
         rows.setdefault(new.key, {**new.as_dict(), "physical_fields": [f"profile_change[{field_name}].new_value"]})
 
-    for key in TIMING_KEYS.values():
-        rows.setdefault(key.key, {**key.as_dict(), "physical_fields": ["derived:timing"]})
-
-    for key in DERIVED_KEYS.values():
-        rows.setdefault(key.key, {**key.as_dict(), "physical_fields": ["derived:formula"]})
-
     for row in rows.values():
         row["physical_fields"] = sorted(row["physical_fields"])
 
@@ -633,9 +619,8 @@ def keys_registry(catalogue: dict) -> dict:
                           "категории, а не величины, а календарных дат словарём не кодируют",
             "references": "reference это не четвёртый вид значения, а отдельная роль: "
                           "локальная ссылка связывает события клиента и значением модели не становится",
-            "derived": "расчётные, временные и справочные признаки объявлены такими же ключами, "
-                       "как физические поля; derived_from называет слагаемые, которые нельзя "
-                       "маскировать по отдельности",
+            "derived": "расчётных признаков среди ключей нет: модель получает фактические "
+                       "поля события и анкеты, а не выведенные из них отношения",
             "profile_change": "old_value и new_value наследуют смысл изменённого поля профиля: "
                               "доход остаётся числом, город категорией",
             "no_fit": "здесь нет словарей, бакетов, частот и порогов: ключ обозначает смысл, а не токен",
@@ -656,7 +641,6 @@ __all__ = [
     "BY_SOURCE_KEYS",
     "CATEGORICAL",
     "CHANGEABLE_PROFILE_FIELDS",
-    "DERIVED_KEYS",
     "DIRECT_KEYS",
     "DYNAMIC_FIELDS",
     "KEYS_VERSION",
@@ -668,7 +652,6 @@ __all__ = [
     "REFERENCE",
     "REFERENCE_KEYS",
     "TEXT",
-    "TIMING_KEYS",
     "VALUE_KINDS",
     "KeysError",
     "SemanticKey",

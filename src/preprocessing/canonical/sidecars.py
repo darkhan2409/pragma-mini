@@ -26,7 +26,7 @@ def _trace(rows: int, group_index: int, offset: int, name: str) -> dict[str, pa.
     }
 
 
-def build_profile(raw: RawDataset, client_index: dict[str, int]) -> tuple[pa.Table, dict]:
+def build_profile(raw: RawDataset, client_index: dict[str, int]) -> pa.Table:
     """
     Версии профиля с внутренним индексом клиента и трассировкой.
     """
@@ -35,7 +35,6 @@ def build_profile(raw: RawDataset, client_index: dict[str, int]) -> tuple[pa.Tab
 
     pieces: list[pa.Table] = []
     offset = 0
-    unknown_clients: set[str] = set()
 
     for group_index, chunk in raw.iter_row_groups("profile"):
 
@@ -43,11 +42,7 @@ def build_profile(raw: RawDataset, client_index: dict[str, int]) -> tuple[pa.Tab
 
         client_id = chunk.column("client_id").to_pylist()
 
-        idx = []
-        for value in client_id:
-            if value not in client_index:
-                unknown_clients.add(value)
-            idx.append(client_index.get(value))
+        idx = [client_index.get(value) for value in client_id]
 
         columns = {name: chunk.column(name) for name in chunk.column_names}
         columns["client_idx"] = pa.array(idx, pa.int64())
@@ -57,16 +52,7 @@ def build_profile(raw: RawDataset, client_index: dict[str, int]) -> tuple[pa.Tab
 
         offset += rows
 
-    table = pa.concat_tables(pieces) if pieces else schema.empty_table()
-
-    report = {
-        "rows": table.num_rows,
-        "clients": len(set(table.column("client_id").to_pylist())),
-        "clients_unknown_to_index": sorted(unknown_clients),
-        "rule": "одна итоговая строка на клиента: версий у профиля нет",
-    }
-
-    return table, report
+    return pa.concat_tables(pieces) if pieces else schema.empty_table()
 
 
 __all__ = ["build_profile"]

@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
-from src.generator.config import DATA_DIR
+from src.generator.config import DATA_DIR, RAW_DIR
 
 from .artifacts import dumps_json, sha256_bytes
 
@@ -20,13 +20,20 @@ from .artifacts import dumps_json, sha256_bytes
 # групп, пороги. Значения по умолчанию — договорённости плана;
 # JSON-файл переопределяет отдельные поля.
 #
-# Отпечаток конфига входит в отпечаток каждого этапа, поэтому
-# смена настройки пересчитывает затронутые этапы, а не оставляет
-# старые результаты незаметно.
+# Состояния между запусками у препроцессинга нет: смена
+# настройки действует со следующего запуска этапа, а прежние
+# результаты просто перезаписываются.
 # ============================================================
 
 
-PROCESSED_DIR = DATA_DIR / "processed"
+# Пути стандартны и в командах не задаются.
+#
+#   data/raw/<group>/            выгрузка генератора
+#   data/preprocessed/<group>/   очищенная лента и профиль, два файла
+#
+# Каталог группы держит ТОЛЬКО два файла, и отчётов рядом с
+# данными нет: что случилось на этапе, говорит сама команда.
+PREPROCESSED_DIR = DATA_DIR / "preprocessed"
 
 # Имена групп совпадают с именами подкаталогов RAW.
 GROUPS: tuple[str, ...] = ("train", "val", "test")
@@ -53,9 +60,8 @@ SCHEMA_VERSION = 1
 # Отдельный временной канал модели: час суток, день недели и день
 # месяца события на единичной окружности, шесть чисел на событие.
 #
-# Правила лежат здесь, а не в коде модели, потому что входят в
-# отпечаток этапа и в манифест: смена пояса, длины цикла или
-# порядка колонок требует пересборки данных.
+# Правила лежат здесь, а не в коде модели: смена пояса, длины
+# цикла или порядка колонок требует пересборки данных.
 #
 # Календарных полей нет ни в RAW, ни в canonical: значения
 # считаются из event_time при подготовке входа модели. В словари,
@@ -213,63 +219,8 @@ class PreprocessingConfig:
             "semantic_sample_clients": self.semantic_sample_clients,
         }
 
-    def section(self, stage: str) -> dict:
-        """
-        Часть конфига, от которой зависит этап. Только она входит
-        в его отпечаток: смена настройки чужого этапа ничего не
-        пересчитывает.
-        """
-
-        whole = self.as_dict()
-
-        sections = {
-            "passport": (
-                "schema_version",
-                "timezone",
-                "required_history_start",
-                "windows",
-                "base_sources",
-            ),
-            "canonical": (
-                "schema_version",
-                "timezone",
-                "ambiguous_local_intervals",
-                "batch_clients",
-                # Правила календаря описывают границу модели, а её
-                # реестр пишет этот этап: смена правил обязана
-                # пересобрать слой.
-                "calendar",
-            ),
-            "history": (
-                "schema_version",
-                "windows",
-                "history_sample_clients",
-                "history_report_cutoffs",
-            ),
-            "corpus": (
-                "schema_version",
-                "windows",
-                "required_history_start",
-            ),
-            "semantic": (
-                "schema_version",
-                "timezone",
-                "windows",
-                "calendar",
-                "semantic_sample_clients",
-            ),
-        }
-
-        if stage not in sections:
-            raise KeyError(f"неизвестный этап конфигурации: {stage}")
-
-        return {key: whole[key] for key in sections[stage]}
-
     def sha256(self) -> str:
         return sha256_bytes(dumps_json(self.as_dict()).encode("utf-8"))
-
-    def section_sha256(self, stage: str) -> str:
-        return sha256_bytes(dumps_json(self.section(stage)).encode("utf-8"))
 
     # --------------------------------------------------------
     # ЗАГРУЗКА
@@ -328,8 +279,20 @@ def normalize_group(name: str) -> str:
     return key
 
 
-def processed_dir(name: str) -> Path:
-    return PROCESSED_DIR / name
+def group_dir(group: str) -> Path:
+    """
+    Каталог очищенной группы: data/preprocessed/<group>.
+    """
+
+    return PREPROCESSED_DIR / normalize_group(group)
+
+
+def raw_group_dir(group: str) -> Path:
+    """
+    Каталог выгрузки группы: data/raw/<group>.
+    """
+
+    return RAW_DIR / normalize_group(group)
 
 
 DEFAULT_CONFIG = PreprocessingConfig()

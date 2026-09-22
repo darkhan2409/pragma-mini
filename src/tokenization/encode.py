@@ -3,25 +3,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from src.preprocessing.canonical.events import normalize_text
-from src.preprocessing.semantic.as_of import SemanticEvent, SemanticHistory
-from src.preprocessing.semantic.keys import CATEGORICAL, NUMERIC, TEXT
+from src.preprocessing.read import ClientEvent, ClientHistory
+from src.preprocessing.keys import CATEGORICAL, NUMERIC, TEXT
 
-from .layout import EMPTY, EVT, INVALID, MISSING, UNK, USR, FrozenArtifacts
+from .layout import FrozenArtifacts
 from .numeric import FOUND_BUCKET, FOUND_INVALID
 from .scan import value_text, value_type
-
-
-# Состояние профиля, при котором версия анкеты известна на
-# cutoff. Имя приходит из истории на дату, а не выдумывается
-# здесь.
-PROFILE_KNOWN = "known"
+from .specials import EMPTY, EVT, INVALID, MISSING, UNK, USR
 
 
 # ============================================================
 # ИДЕЯ
 # ============================================================
 #
-# Этап 5 применяет готовые словари и ничего больше не обучает.
+# Кодирование применяет готовый словарь и ничего не обучает.
 #
 # Содержательная позиция это связанная пара ключ/значение.
 # Число и категория занимают одну позицию, текст — столько,
@@ -35,9 +30,8 @@ PROFILE_KNOWN = "known"
 # объявленный предел кусков, это явная ошибка, а не молчаливо
 # укороченный текст.
 #
-# Ссылки на сущности, причины отсутствия расчётов и
-# происхождение значений в embedding не входят: они едут рядом
-# служебными колонками для будущего Masker и датасета.
+# Ссылки на сущности в embedding не входят: они едут рядом
+# служебной колонкой для будущего Masker и датасета.
 # ============================================================
 
 
@@ -273,7 +267,7 @@ def encode_values(
     return record
 
 
-def encode_event(artifacts: FrozenArtifacts, event: SemanticEvent, limit: int) -> EncodedRecord:
+def encode_event(artifacts: FrozenArtifacts, event: ClientEvent, limit: int) -> EncodedRecord:
     """
     Одно событие: ведущий [EVT] и пары его значений.
     """
@@ -287,7 +281,7 @@ def encode_event(artifacts: FrozenArtifacts, event: SemanticEvent, limit: int) -
     return encode_values(artifacts, values, declared, EVT, limit)
 
 
-def encode_profile(artifacts: FrozenArtifacts, history: SemanticHistory, limit: int) -> EncodedRecord:
+def encode_profile(artifacts: FrozenArtifacts, history: ClientHistory, limit: int) -> EncodedRecord:
     """
     Представление профиля на cutoff: ведущий [USR] и пары его
     значений.
@@ -309,18 +303,18 @@ def encode_profile(artifacts: FrozenArtifacts, history: SemanticHistory, limit: 
     return encode_values(artifacts, history.profile or {}, declared, USR, limit)
 
 
-def profile_known(history: SemanticHistory) -> bool:
+def profile_known(history: ClientHistory) -> bool:
     """
-    Есть ли у клиента версия профиля, действующая на cutoff.
+    Есть ли у клиента анкета вообще.
 
     Пустой словарь значений ответом не является: у известной
-    версии все поля могут оказаться незаполненными.
+    анкеты все поля могут оказаться незаполненными.
     """
 
-    return (history.profile_meta or {}).get("state") == PROFILE_KNOWN
+    return history.has_profile
 
 
-def references(artifacts: FrozenArtifacts, event: SemanticEvent) -> dict[str, str]:
+def references(artifacts: FrozenArtifacts, event: ClientEvent) -> dict[str, str]:
     """
     Локальные ссылки события: связь, а не значение.
     """
@@ -330,45 +324,6 @@ def references(artifacts: FrozenArtifacts, event: SemanticEvent) -> dict[str, st
         for key, value in sorted(event.values.items())
         if key in artifacts.link_keys
     }
-
-
-def absent_reasons(event: SemanticEvent) -> dict[str, str]:
-    """
-    Почему расчётного значения нет. Причина едет метаданными и
-    токеном не становится.
-    """
-
-    out = {item.key: item.reason for item in event.derived if item.value is None and item.reason}
-
-    return dict(sorted(out.items()))
-
-
-def provenance(event: SemanticEvent) -> dict[str, list[dict]]:
-    """
-    Происхождение расчётных значений.
-
-    Событие-источник называется своим номером в истории клиента:
-    идентификатора записи в выгрузке нет, а номер canonical
-    считает по времени, приоритету типа и месту в RAW.
-    """
-
-    out: dict[str, list[dict]] = {}
-
-    for item in event.derived:
-
-        if item.value is None:
-            continue
-
-        sources: list[dict] = []
-
-        for source in item.derived_from:
-
-            sources.append(dict(source))
-
-        if sources:
-            out[item.key] = sources
-
-    return dict(sorted(out.items()))
 
 
 def decode_record(artifacts: FrozenArtifacts, record: EncodedRecord) -> list[dict]:
@@ -416,11 +371,10 @@ def decode_record(artifacts: FrozenArtifacts, record: EncodedRecord) -> list[dic
 __all__ = [
     "EncodeError",
     "EncodedRecord",
-    "absent_reasons",
     "decode_record",
     "encode_event",
     "encode_profile",
     "encode_values",
-    "provenance",
+    "profile_known",
     "references",
 ]

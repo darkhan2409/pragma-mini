@@ -46,7 +46,10 @@ def load(raw_dir: Path, client_id: str | None) -> dict:
     events = [row for row in _read(raw_dir / "events.parquet") if row["client_id"] == client_id]
 
     for row in events:
+        # Тип события лежит в payload: отдельной колонки у него
+        # нет. Читателю он нужен строкой, поэтому достаётся здесь.
         row["payload"] = json.loads(row["payload"])
+        row["type"] = row["payload"].get("type", "—")
 
     # Строки уже лежат в порядке ленты; сортировка только по
     # времени события, устойчиво, чтобы порядок не менялся.
@@ -153,7 +156,7 @@ def render(data: dict, limit: int | None, since: datetime | None,
 
         out.append(
             f"  {row['event_time'].strftime('%d.%m %H:%M')}  "
-            f"{row['event_type']:<24} {_describe(row)}"
+            f"{row['type']:<24} {_describe(row)}"
         )
 
         if full_payload:
@@ -174,7 +177,7 @@ def render(data: dict, limit: int | None, since: datetime | None,
 
     # --- сводка ---
 
-    types = Counter(row["event_type"] for row in data["events"])
+    types = Counter(row["type"] for row in data["events"])
 
     out.append("ИТОГО ПО ТИПАМ")
 

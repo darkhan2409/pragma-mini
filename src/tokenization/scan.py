@@ -7,8 +7,8 @@ from typing import Iterable
 
 from src.preprocessing.canonical.events import normalize_text
 from src.preprocessing.rawdata import ContentDigest
-from src.preprocessing.semantic.as_of import SemanticHistory
-from src.preprocessing.semantic.keys import CATEGORICAL, NUMERIC, REFERENCE, TEXT
+from src.preprocessing.read import ClientHistory
+from src.preprocessing.keys import CATEGORICAL, NUMERIC, REFERENCE, TEXT
 
 from .schema import SemanticSchema, WEIGHT_PER_CLIENT
 
@@ -244,7 +244,6 @@ class FitStatistics:
     event_types: dict[str, int] = field(default_factory=dict)
     unknown_event_types: dict[str, int] = field(default_factory=dict)
     missing: dict[tuple[str, str], int] = field(default_factory=dict)
-    absent_reasons: dict[str, dict[str, int]] = field(default_factory=dict)
     unknown_keys: dict[str, int] = field(default_factory=dict)
 
     reference_values: dict[str, int] = field(default_factory=dict)
@@ -346,7 +345,7 @@ def _add_numeric(stats: FitStatistics, key: str, value: object, unit: str, clien
 
 
 def scan(
-    histories: Iterable[SemanticHistory],
+    histories: Iterable[ClientHistory],
     schema: SemanticSchema,
     sample_k: int,
     distinct_cap: int,
@@ -436,13 +435,6 @@ def scan(
                 if key not in values:
                     slot = (event_type, key)
                     stats.missing[slot] = stats.missing.get(slot, 0) + 1
-
-            # --- причины, по которым расчёта нет ---
-
-            for item in event.derived:
-                if item.value is None and item.reason:
-                    bucket = stats.absent_reasons.setdefault(item.key, {})
-                    bucket[item.reason] = bucket.get(item.reason, 0) + 1
 
         # --- профиль ---
 

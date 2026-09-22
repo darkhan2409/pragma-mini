@@ -14,18 +14,17 @@ from __future__ import annotations
 #
 # IMPLEMENTATION_VERSION — версия кода пакета. Поднимается при
 # ЛЮБОЙ правке модуля, даже если формат не тронут: иначе
-# прежний набор считался бы собранным этим кодом. Сверяется
-# тестом по sha256 модулей.
+# прежний набор считался бы собранным этим кодом.
 #
 # SCHEMA_VERSION — схема файлов на диске.
 # ============================================================
 
 
-FORMAT_VERSION = "4.0.0"
+FORMAT_VERSION = "5.0.0"
 
-IMPLEMENTATION_VERSION = "4.0.0"
+IMPLEMENTATION_VERSION = "5.0.0"
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 __all__ = ["FORMAT_VERSION", "IMPLEMENTATION_VERSION", "SCHEMA_VERSION"]

@@ -763,6 +763,172 @@ def event_types_of(payload: pa.Array | pa.ChunkedArray) -> pa.Array:
     return pa.array(values, pa.string())
 
 
+# ============================================================
+# ПРИГОДНОСТЬ ВЫГРУЗКИ
+# ============================================================
+#
+# Проверка входа живёт ВНУТРИ обработки: отдельного этапа с
+# отчётом у неё больше нет. Она отвечает ровно на один вопрос —
+# можно ли строить canonical на этих файлах, — и либо молча
+# пропускает дальше, либо останавливает работу первой найденной
+# поломкой с указанием файла, строки и значения.
+#
+# Отчёта она не пишет: вердикт нужен обработке, а не читателю.
+# ============================================================
+
+
+def _fail(problem: str) -> None:
+    raise RawContractError(problem)
+
+
+def _check_schema(raw: "RawDataset", table: str) -> None:
+
+    expected = EXPECTED_SCHEMAS[table]
+    actual = raw.schema(table)
+
+    if actual.names != expected.names:
+        _fail(
+            f"{TABLE_FILES[table]}: колонки {actual.names}, "
+            f"контракт требует {expected.names}"
+        )
+
+    for column in expected:
+        if not actual.field(column.name).type.equals(column.type):
+            _fail(
+                f"{TABLE_FILES[table]}: колонка {column.name} имеет тип "
+                f"{actual.field(column.name).type}, контракт требует {column.type}"
+            )
+
+
+def _check_payloads(chunk: pa.Table, offset: int) -> None:
+    """
+    payload разбирается и называет тип события.
+    """
+
+    types = event_types_of(chunk.column("payload"))
+
+    bad = pc.indices_nonzero(pc.is_null(types)).to_pylist()
+
+    if not bad:
+        return
+
+    position = int(bad[0])
+    text = chunk.column("payload")[position].as_py()
+    row = offset + position
+
+    if not text:
+        _fail(f"events.parquet, строка {row}: payload пуст")
+
+    try:
+        record = json.loads(text)
+    except (ValueError, TypeError) as error:
+        _fail(f"events.parquet, строка {row}: payload не разбирается как JSON ({error})")
+        return
+
+    if not isinstance(record, dict):
+        _fail(f"events.parquet, строка {row}: payload не объект, а {type(record).__name__}")
+
+    _fail(f"events.parquet, строка {row}: в payload нет ключа {TYPE_KEY!r}")
+
+
+def check_raw(raw_dir: Path) -> "RawDataset":
+    """
+    Пригодна ли выгрузка к обработке.
+
+    Возвращает открытый набор либо останавливает этап ошибкой
+    RawContractError. Ничего не пишет на диск.
+    """
+
+    raw = RawDataset(raw_dir)
+
+    missing = raw.missing_required_files()
+
+    if missing:
+        _fail(f"в выгрузке {raw_dir} нет файлов: {', '.join(missing)}")
+
+    for table in EXPECTED_SCHEMAS:
+        _check_schema(raw, table)
+
+    manifest = raw.manifest
+
+    for table, promised in (("events", manifest.events_rows), ("profile", manifest.profile_rows)):
+        actual = raw.num_rows(table)
+        if actual != promised:
+            _fail(
+                f"{TABLE_FILES[table]}: строк {actual}, "
+                f"а {MANIFEST_NAME} обещает {promised}"
+            )
+
+    allowed_sources = set(manifest.sources)
+
+    offset = 0
+
+    for _, chunk in raw.iter_row_groups("events", columns=["client_id", "event_time", "source", "payload"]):
+
+        rows = chunk.num_rows
+
+        if rows == 0:
+            continue
+
+        client_id = chunk.column("client_id")
+
+        empty = pc.indices_nonzero(
+            pc.or_(pc.is_null(client_id), pc.equal(pc.utf8_trim_whitespace(client_id), ""))
+        ).to_pylist()
+
+        if empty:
+            _fail(f"events.parquet, строка {offset + int(empty[0])}: пустой client_id")
+
+        moments = chunk.column("event_time")
+
+        undated = pc.indices_nonzero(pc.is_null(moments)).to_pylist()
+
+        if undated:
+            _fail(f"events.parquet, строка {offset + int(undated[0])}: пустое event_time")
+
+        unknown = sorted(
+            {
+                value
+                for value in pc.unique(chunk.column("source")).to_pylist()
+                if value not in allowed_sources
+            },
+            key=str,
+        )
+
+        if unknown:
+            _fail(
+                f"events.parquet: источники вне контракта: {unknown}; "
+                f"объявлены {sorted(allowed_sources)}"
+            )
+
+        _check_payloads(chunk, offset)
+
+        offset += rows
+
+    # --- профиль: одна строка на клиента ---
+
+    holders = raw.read("profile", columns=["client_id"]).column("client_id")
+
+    empty = pc.indices_nonzero(pc.is_null(holders)).to_pylist()
+
+    if empty:
+        _fail(f"profile.parquet, строка {int(empty[0])}: пустой client_id")
+
+    counts = Counter(holders.to_pylist())
+
+    repeated = sorted(name for name, count in counts.items() if count > 1)
+
+    if repeated:
+        shown = ", ".join(repeated[:5])
+        _fail(
+            f"profile.parquet: у клиента больше одной строки профиля ({shown}"
+            + (" и других" if len(repeated) > 5 else "")
+            + "); профиль это одна итоговая строка на клиента"
+        )
+
+    return raw
+
+
 def iter_event_types(table: pa.Table) -> Iterator[tuple[str, pa.Table]]:
     """
     Строки row group по типам событий, в порядке первого
@@ -793,6 +959,7 @@ __all__ = [
     "SourceInfo",
     "TABLE_FILES",
     "TYPE_KEY",
+    "check_raw",
     "event_types_of",
     "iter_event_types",
     "parse_payloads",

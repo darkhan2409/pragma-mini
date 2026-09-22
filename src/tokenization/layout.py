@@ -1,283 +1,114 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
-from src.preprocessing.artifacts import dumps_json, read_json, sha256_bytes, sha256_file, write_json, write_text
+from src.preprocessing.artifacts import read_json
 
-from .categorical import CATALOG_FILE
-from .contract import CONFIG_FILE, FIT_MANIFEST_FILE
-from .numeric import REGISTRY_FILE as NUMERIC_REGISTRY_FILE
 from .numeric import FittedEncoder, load_encoders
-from .report import render_vocab_md
-from .settings import TokenizerConfig
-from .text import BPE_FILE, PROBES, BpeModel, TextError, check_roundtrip, corpus_rows, load_bpe, train_bpe
+from .settings import TOKENIZER_FILE, tokenizer_path
+from .specials import KIND_BUCKET, KIND_CATEGORICAL, SPECIAL_ROLES, SPECIAL_TOKENS
+from .text import BpeModel, load_bpe
 from .version import FORMAT_VERSION, IMPLEMENTATION_VERSION, SCHEMA_VERSION
 
 
 # ============================================================
-# ИДЕЯ
+# ЭТАП 6: ФИНАЛЬНЫЙ СЛОВАРЬ
 # ============================================================
 #
-# Этап 4 назначает номера. Все виды токенов живут в одном
-# пространстве ID непересекающимися диапазонами:
+# Все виды токенов живут в одном пространстве ID непересекающимися
+# диапазонами, и порядок диапазонов задан раз и навсегда:
 #
-#   специальные -> ключи -> смысловые значения -> куски BPE
+#   специальные -> ключи -> категории -> диапазоны чисел -> BPE
 #
 # Логически словари ключей и значений раздельны: ключ отвечает
 # на вопрос «что это», значение — «чему равно». Физически их ID
 # могут лежать в одной таблице embedding, и ровно поэтому
 # диапазоны обязаны не пересекаться.
 #
-# Третьего словаря, который переучивал бы значения заново, нет:
-# итог этапа это замороженный комплект и карта диапазонов.
-#
-# Назначение ID детерминировано: ключи в порядке имени, значения
-# в порядке домена и типизированного значения, диапазоны в
-# порядке своего номера, куски BPE в порядке модели. Новый fit
-# вправе переставить номера и обязан получить новую версию.
+# Номера здесь не назначаются заново: каждый этап уже выдал их
+# своим токенам, а финальный словарь только складывает части
+# вместе и проверяет, что ни один номер не повторился и ни один
+# не потерялся. После этого словарь не меняется.
 # ============================================================
-
-
-STAGE = "freeze"
-
-SPECIAL_FILE = "special_tokens.json"
-KEY_VOCAB_FILE = "key_vocab.json"
-VALUE_VOCAB_FILE = "value_vocab.json"
-KEY_VALUE_IDS_FILE = "key_value_ids.json"
-LAYOUT_FILE = "vocab_layout.json"
-MANIFEST_FILE = "tokenizer_manifest.json"
-REPORT_FILE = "vocab_report.md"
-
-PAD = "[PAD]"
-UNK = "[UNK]"
-MASK = "[MASK]"
-EVT = "[EVT]"
-USR = "[USR]"
-MISSING = "[MISSING]"
-INVALID = "[INVALID]"
-EMPTY = "[EMPTY]"
-
-# Порядок первых шести повторяет прежний словарь намеренно: это
-# ничего не стоит и снимает один источник путаницы при чтении
-# старого кода рядом с новым.
-SPECIAL_TOKENS: tuple[str, ...] = (PAD, UNK, MASK, EVT, USR, MISSING, INVALID, EMPTY)
-
-SPECIAL_ROLES: dict[str, str] = {
-    PAD: "выравнивание batch; токенизатор его не пишет никогда",
-    UNK: "значение, которого на train не было, и число без шкалы",
-    MASK: "зарезервирован для Masker; в сохранённых данных не встречается никогда",
-    EVT: "начало события, один на событие, ставит токенизатор",
-    USR: "начало представления профиля, один на профиль, ставит токенизатор",
-    MISSING: "объявленный у этого типа события ключ без значения",
-    INVALID: "невозможное число: NaN, бесконечность или запрещённый доменом знак",
-    EMPTY: "текст, в котором после нормализации не осталось ни одного символа",
-}
-
-KIND_CATEGORICAL = "categorical"
-KIND_BUCKET = "bucket"
-
-# Файлы, которые и есть словарь. Отпечаток по ним отвечает на
-# вопрос «тот же ли это словарь», отдельно от вопроса «те же ли
-# у него входы».
-VOCABULARY_FILES: frozenset[str] = frozenset(
-    {
-        SPECIAL_FILE,
-        KEY_VOCAB_FILE,
-        VALUE_VOCAB_FILE,
-        KEY_VALUE_IDS_FILE,
-        LAYOUT_FILE,
-        BPE_FILE,
-        NUMERIC_REGISTRY_FILE,
-        CATALOG_FILE,
-        CONFIG_FILE,
-    }
-)
 
 
 class LayoutError(ValueError):
     """
-    Пространство ID собрать нельзя.
+    Финальный словарь собрать или прочитать нельзя.
     """
 
 
-def manifest_id(manifest: dict) -> str:
+def build_tokenizer(specials: dict, key_vocab: dict, value_vocab: dict, buckets: dict,
+                    bpe: dict) -> dict:
     """
-    Тождество замороженного комплекта: отпечаток всего манифеста
-    без самого номера.
-
-    Считается и при заморозке, и при загрузке одной функцией:
-    второго правила «что такое этот словарь» быть не должно.
+    Один словарь из пяти видов токенов.
     """
 
-    core = {name: value for name, value in manifest.items() if name != "artifact_id"}
+    _check_chain(specials, key_vocab, value_vocab, buckets)
 
-    return sha256_bytes(dumps_json(core).encode("utf-8"))[:12]
+    first_key_id = int(key_vocab["first_key_id"])
+    first_value_id = int(value_vocab["first_value_id"])
+    first_bucket_id = int(buckets["first_bucket_id"])
+    bpe_offset = int(buckets["next_id"])
 
+    size = bpe_offset + int(bpe.get("size") or 0)
 
-@dataclass
-class LayoutResult:
-    report: dict
-    outputs: list[Path] = field(default_factory=list)
+    # --- значения одним списком в порядке ID ---
 
+    values: list[dict] = list(value_vocab["values"])
 
-# ------------------------------------------------------------
-# СБОРКА
-# ------------------------------------------------------------
+    for key in sorted(buckets["encoders"]):
 
+        entry = buckets["encoders"][key]
 
-def _key_rows(catalog: dict) -> list[dict]:
-    """
-    Ключи, получающие код, в устойчивом порядке.
-    """
-
-    return sorted(catalog["keys"], key=lambda row: row["key"])
-
-
-def _value_rows(catalog: dict, registry: dict) -> list[dict]:
-    """
-    Значения в порядке: сначала категории по доменам, затем
-    числовые диапазоны по ключам.
-    """
-
-    rows: list[dict] = []
-
-    for domain in sorted(catalog["domains"], key=lambda item: item["name"]):
-
-        for value in domain["values"]:
-            rows.append(
+        for bucket in entry["buckets"]:
+            values.append(
                 {
-                    "kind": KIND_CATEGORICAL,
-                    "domain": domain["name"],
-                    "key": None,
-                    "value_type": value["value_type"],
-                    "value": value["value"],
-                    "label": f"{domain['name']}={value['value']}",
-                    "lower": None,
-                    "upper": None,
-                    "train_count": value["count"],
-                    "rare": value["rare"],
-                }
-            )
-
-    for key in sorted(registry["encoders"]):
-
-        entry = registry["encoders"][key]
-
-        for bucket, count in zip(entry["buckets"], entry["distribution"]["buckets"]):
-            rows.append(
-                {
+                    "id": bucket["id"],
                     "kind": KIND_BUCKET,
                     "domain": None,
                     "key": key,
-                    "value_type": "number",
+                    "value_type": KIND_BUCKET,
                     "value": str(bucket["index"]),
                     "label": bucket["label"],
-                    "lower": bucket["lower"],
-                    "upper": bucket["upper"],
-                    "train_count": count,
-                    "rare": False,
                 }
             )
 
-    return rows
-
-
-def build_layout(
-    target: Path,
-    processed_dir: Path,
-    config: TokenizerConfig,
-    group: str = "train",
-) -> LayoutResult:
-    """
-    Замораживает словари, разбиение текста и карту диапазонов.
-    """
-
-    target = Path(target)
-
-    catalog_path = target / CATALOG_FILE
-    registry_path = target / NUMERIC_REGISTRY_FILE
-
-    for path in (catalog_path, registry_path):
-        if not path.exists():
-            raise LayoutError(f"нет {path}: заморозке предшествуют этапы values и buckets")
-
-    catalog = read_json(catalog_path)
-    registry = read_json(registry_path)
-    fit = read_json(target / FIT_MANIFEST_FILE)
-
-    for name, artifact in (("каталог значений", catalog), ("числовые границы", registry)):
-        if artifact["config_sha256"] != config.sha256():
-            raise LayoutError(f"{name} собран другой конфигурацией: выполните этапы заново")
-
-    # --- BPE ---
-
-    text_keys = tuple(
-        row["key"]
-        for row in catalog["keys"]
-        if row["value_kind"] == "text" and row["key"] not in config.text_keys_as_categorical
-    )
-
-    bpe = train_bpe(target, config.bpe, text_keys)
-
-    if bpe.enabled:
-
-        texts = sorted({text for _key, text, _count in corpus_rows(target, text_keys)})
-
-        broken = check_roundtrip(bpe, [*PROBES, *texts])
-
-        if broken:
-            raise LayoutError(
-                "разбиение текста не обратимо на "
-                + ", ".join(repr(item) for item in broken[:3])
-                + ": байтовый алфавит обязан кодировать любой текст без потерь"
-            )
-
-    # --- пространство ID ---
-
-    keys = _key_rows(catalog)
-    values = _value_rows(catalog, registry)
-
-    first_key_id = len(SPECIAL_TOKENS)
-    first_value_id = first_key_id + len(keys)
-    bpe_offset = first_value_id + len(values)
-    size = bpe_offset + bpe.size
-
-    key_ids = {row["key"]: first_key_id + index for index, row in enumerate(keys)}
-
-    value_ids: dict[tuple, int] = {}
-
-    for index, row in enumerate(values):
-
-        row["id"] = first_value_id + index
-
-        if row["kind"] == KIND_CATEGORICAL:
-            value_ids[(row["domain"], row["value_type"], row["value"])] = row["id"]
-        else:
-            value_ids[(row["key"], KIND_BUCKET, row["value"])] = row["id"]
+    _check_ids(key_vocab["keys"], values, first_key_id, first_value_id, size)
 
     # --- кандидаты по ключам ---
+    #
+    # Что вообще может стоять в слоте значения этого ключа.
+    # Нужно и для проверки, и для масок допустимых целей.
 
     candidates: dict[str, dict] = {}
 
-    for row in keys:
+    for row in key_vocab["keys"]:
 
         key = row["key"]
 
         if row["value_kind"] == KIND_CATEGORICAL:
-            ids = [
-                value_ids[(row["domain"], item["value_type"], item["value"])]
-                for item in row["candidates"]
-            ]
-            candidates[key] = {"kind": KIND_CATEGORICAL, "domain": row["domain"], "value_ids": ids}
+            candidates[key] = {
+                "kind": KIND_CATEGORICAL,
+                "domain": row["domain"],
+                "value_ids": list(value_vocab["by_key"].get(key, ())),
+            }
 
         elif row["value_kind"] == "numeric":
-            entry = registry["encoders"][key]
-            ids = [value_ids[(key, KIND_BUCKET, str(bucket["index"]))] for bucket in entry["buckets"]]
-            candidates[key] = {"kind": KIND_BUCKET, "domain": None, "value_ids": ids}
+            candidates[key] = {
+                "kind": KIND_BUCKET,
+                "domain": None,
+                "value_ids": list(buckets["by_key"].get(key, ())),
+            }
 
         else:
-            candidates[key] = {"kind": "text", "domain": None, "value_ids": [], "bpe": bpe.enabled}
+            candidates[key] = {
+                "kind": "text",
+                "domain": None,
+                "value_ids": [],
+                "bpe": bool(bpe.get("enabled")),
+            }
 
     layout = {
         "format_version": FORMAT_VERSION,
@@ -290,12 +121,12 @@ def build_layout(
         "bpe_offset": bpe_offset,
         "size": size,
         "sizes": {
-            "special": len(SPECIAL_TOKENS),
-            "keys": len(keys),
-            "categorical": sum(1 for row in values if row["kind"] == KIND_CATEGORICAL),
-            "buckets": sum(1 for row in values if row["kind"] == KIND_BUCKET),
-            "values": len(values),
-            "bpe": bpe.size,
+            "special": int(specials["size"]),
+            "keys": int(key_vocab["size"]),
+            "categorical": int(value_vocab["size"]),
+            "buckets": int(buckets["size"]),
+            "values": int(value_vocab["size"]) + int(buckets["size"]),
+            "bpe": int(bpe.get("size") or 0),
             "total": size,
         },
         "invariants": [
@@ -304,205 +135,199 @@ def build_layout(
             "специальный токен в слоте значения означает не значение, а его отсутствие или невозможность",
             "ключи и значения логически раздельны, физически делят одну таблицу embedding",
         ],
-        "rule": "специальные -> ключи -> смысловые значения -> куски BPE",
-    }
-
-    # --- запись ---
-
-    outputs: list[Path] = []
-
-    def write(name: str, payload: dict) -> None:
-        path = target / name
-        write_json(path, payload)
-        outputs.append(path)
-
-    write(
-        SPECIAL_FILE,
-        {
-            "ids": {name: index for index, name in enumerate(SPECIAL_TOKENS)},
-            "roles": SPECIAL_ROLES,
-            "never_written": [PAD, MASK],
-            "marker_owner": "tokenizer",
-        },
-    )
-
-    write(
-        KEY_VOCAB_FILE,
-        {
-            "first_key_id": first_key_id,
-            "size": len(keys),
-            "keys": [
-                {
-                    "key": row["key"],
-                    "id": key_ids[row["key"]],
-                    "value_kind": row["value_kind"],
-                    "unit": row["unit"],
-                    "origin": row["origin"],
-                    "weight_rule": row["weight_rule"],
-                    "domain": row["domain"],
-                    "observed_in_train": row["observed_in_train"],
-                    "physical_fields": row["physical_fields"],
-                }
-                for row in keys
-            ],
-            # Ссылки перечислены рядом намеренно: кода у них нет,
-            # но потребитель обязан знать, что они существуют и
-            # приходят метаданными.
-            "link_keys": sorted(row["key"] for row in fit["keys"]["rows"] if row["role"] == "link"),
-        },
-    )
-
-    write(
-        VALUE_VOCAB_FILE,
-        {
-            "first_value_id": first_value_id,
-            "size": len(values),
-            "values": values,
-        },
-    )
-
-    write(KEY_VALUE_IDS_FILE, {"keys": candidates, "rule": "кандидаты ключа в порядке его домена"})
-
-    write(LAYOUT_FILE, layout)
-
-    if bpe.enabled:
-        outputs.append(target / BPE_FILE)
-
-    # --- манифест ---
-
-    artifacts = {
-        path.relative_to(target).as_posix(): sha256_file(path)
-        for path in [*outputs, target / CONFIG_FILE, catalog_path, registry_path, target / FIT_MANIFEST_FILE]
-    }
-
-    for name, digest in sorted((fit.get("artifacts") or {}).items()):
-        artifacts.setdefault(name, digest)
-
-    manifest = {
-        "stage": STAGE,
-        "schema_version": SCHEMA_VERSION,
-        "format_version": FORMAT_VERSION,
-        "implementation_version": IMPLEMENTATION_VERSION,
-        "group": group,
-        "fit_end": fit["fit_end"],
-        "fit_content_sha256": fit["fit_content_sha256"],
-        "config_sha256": config.sha256(),
-        "readiness": fit["readiness"],
-        "layout": layout,
-        "bpe": bpe.info,
-        "artifacts": dict(sorted(artifacts.items())),
-        "input_files": fit["input_files"],
-        "versions": fit["versions"],
-        "sources": _sources(),
-        "libraries": _libraries(),
-        "limitations": fit["limitations"],
-        "rules": {
-            "frozen": "словарь после fit неизменен: transform не добавляет ни одного токена",
-            "refit": "новый fit вправе переставить ID и обязан получить новую версию артефактов; "
-                     "совместимость со старым checkpoint автоматически не обещается",
-            "markers": "маркеры события и профиля ставит токенизатор, marker_owner = tokenizer",
-        },
-    }
-
-    # Отпечаток САМОГО словаря, без происхождения входов.
-    #
-    # artifact_id меняется и тогда, когда изменилось окружение
-    # набора: например, другими стали validation и test, и вместе
-    # с ними манифест разделения. Словарь при этом обязан
-    # остаться прежним, и доказывает это отдельное число.
-    manifest["vocab_sha256"] = sha256_bytes(
-        dumps_json(
-            {
-                name: digest
-                for name, digest in manifest["artifacts"].items()
-                if name in VOCABULARY_FILES
-            }
-        ).encode("utf-8")
-    )
-
-    # Тождество комплекта считается по ВСЕМУ манифесту, а не по
-    # одному списку файлов: версии, вердикт готовности,
-    # происхождение входов и отпечаток словаря тоже входят в
-    # то, чем этот комплект является. Иначе подмена любого поля
-    # манифеста оставляла бы прежний номер.
-    manifest["artifact_id"] = manifest_id(manifest)
-
-    path = target / MANIFEST_FILE
-    write_json(path, manifest)
-    outputs.append(path)
-
-    path = target / REPORT_FILE
-    write_text(path, render_vocab_md(manifest, values, bpe))
-    outputs.append(path)
-
-    return LayoutResult(report=manifest, outputs=outputs)
-
-
-def _sources() -> dict[str, str]:
-    """
-    sha256 модулей, которыми собран этот словарь.
-    """
-
-    from src.tokenization import categorical, contract, corpus, layout, numeric, report, scan, schema, settings, text
-
-    modules = {
-        "categorical": categorical,
-        "contract": contract,
-        "corpus": corpus,
-        "layout": layout,
-        "numeric": numeric,
-        "report": report,
-        "scan": scan,
-        "schema": schema,
-        "settings": settings,
-        "text": text,
+        "rule": "специальные -> ключи -> категории -> диапазоны чисел -> BPE",
     }
 
     return {
-        name: sha256_file(Path(module.__file__))
-        for name, module in sorted(modules.items())
+        "schema_version": SCHEMA_VERSION,
+        "format_version": FORMAT_VERSION,
+        "implementation_version": IMPLEMENTATION_VERSION,
+        "fit": value_vocab["fit"],
+        "config_sha256": value_vocab["config_sha256"],
+        "layout": layout,
+        "specials": {
+            "ids": {row["token"]: row["id"] for row in specials["tokens"]},
+            "roles": {row["token"]: row["role"] for row in specials["tokens"]},
+            "never_written": specials["never_written"],
+            "marker_owner": specials["marker_owner"],
+            "boundaries": specials["boundaries"],
+        },
+        "keys": {
+            "first_key_id": first_key_id,
+            "size": int(key_vocab["size"]),
+            "rows": key_vocab["keys"],
+            "link_keys": key_vocab["link_keys"],
+        },
+        "values": {
+            "first_value_id": first_value_id,
+            "first_bucket_id": first_bucket_id,
+            "size": len(values),
+            "rows": values,
+        },
+        "candidates": {"keys": candidates, "rule": "кандидаты ключа в порядке его домена"},
+        "numeric": {"encoders": buckets["encoders"]},
+        "declared_by_event_type": key_vocab["declared_by_event_type"],
+        "bpe": {**bpe, "offset": bpe_offset},
+        "tokens": _token_rows(specials, key_vocab, values, bpe, bpe_offset),
+        "versions": {
+            "keys": key_vocab["keys_version"],
+            "projection": key_vocab["projection_version"],
+        },
+        "rules": {
+            "frozen": "после сборки словарь не меняется: кодирование не добавляет ни одного токена",
+            "refit": "новый fit вправе переставить ID; совместимость со старым checkpoint "
+                     "автоматически не обещается",
+            "markers": "маркеры события и профиля ставит токенизатор, marker_owner = tokenizer",
+            "reuse": "val и test кодируются этим же словарём: второй раз он не учится",
+        },
     }
 
 
-def _libraries() -> dict[str, str]:
+def _token_rows(specials: dict, key_vocab: dict, values: list[dict], bpe: dict,
+                bpe_offset: int) -> list[dict]:
+    """
+    Одна строка на КАЖДЫЙ токен словаря, в порядке ID.
 
-    import sys
+    По этой таблице любой ID читается без знания того, как
+    он был назначен: тип, строковое обозначение и ключ, если
+    токен принадлежит конкретному полю.
+    """
 
-    import numpy
-    import pyarrow
+    rows: list[dict] = []
 
-    out = {
-        "python": sys.version.split()[0],
-        "numpy": numpy.__version__,
-        "pyarrow": pyarrow.__version__,
-    }
+    for item in specials["tokens"]:
+        rows.append(
+            {
+                "id": item["id"],
+                "token": item["token"],
+                "type": "special",
+                "key": None,
+                "role": item["role"],
+            }
+        )
 
-    try:
-        import tokenizers
+    for item in key_vocab["keys"]:
+        rows.append(
+            {
+                "id": item["id"],
+                "token": item["key"],
+                "type": "key",
+                "key": item["key"],
+                "value_kind": item["value_kind"],
+                "unit": item["unit"],
+                "domain": item["domain"],
+            }
+        )
 
-        out["tokenizers"] = tokenizers.__version__
-    except ImportError:  # pragma: no cover - библиотека объявлена зависимостью
-        pass
+    for item in values:
 
-    return out
+        categorical = item["kind"] == KIND_CATEGORICAL
+
+        rows.append(
+            {
+                "id": item["id"],
+                "token": item["label"],
+                "type": "categorical" if categorical else "numeric_bucket",
+                "key": item["key"],
+                "domain": item["domain"],
+                "value_type": item["value_type"],
+                "value": item["value"],
+                **({"keys": item["keys"]} if categorical and "keys" in item else {}),
+            }
+        )
+
+    model = bpe.get("model") or {}
+
+    vocab = (model.get("model") or {}).get("vocab") or {}
+
+    for piece, local in sorted(vocab.items(), key=lambda pair: pair[1]):
+        rows.append(
+            {
+                "id": bpe_offset + int(local),
+                "token": piece,
+                "type": "bpe",
+                "key": None,
+                "piece": int(local),
+            }
+        )
+
+    return rows
+
+
+
+def _check_chain(specials: dict, key_vocab: dict, value_vocab: dict, buckets: dict) -> None:
+    """
+    Части словаря обязаны быть собраны одна поверх другой.
+
+    Иначе диапазоны наложились бы друг на друга, и один номер
+    означал бы два разных токена.
+    """
+
+    if int(key_vocab["first_key_id"]) != int(specials["next_id"]):
+        raise LayoutError(
+            "словарь ключей собран поверх другого набора специальных токенов: "
+            f"ключи начинаются с {key_vocab['first_key_id']}, а специальные заканчиваются "
+            f"на {specials['next_id']}. Выполните key-vocab заново"
+        )
+
+    if int(value_vocab["first_value_id"]) != int(key_vocab["next_id"]):
+        raise LayoutError(
+            "каталог значений собран поверх другого словаря ключей: значения начинаются с "
+            f"{value_vocab['first_value_id']}, а ключи заканчиваются на {key_vocab['next_id']}. "
+            "Выполните value-vocab заново"
+        )
+
+    if int(buckets["first_bucket_id"]) != int(value_vocab["next_id"]):
+        raise LayoutError(
+            "числовые диапазоны собраны поверх другого каталога значений: диапазоны начинаются с "
+            f"{buckets['first_bucket_id']}, а значения заканчиваются на {value_vocab['next_id']}. "
+            "Выполните buckets заново"
+        )
+
+    if buckets["fit"]["fit_content_sha256"] != value_vocab["fit"]["fit_content_sha256"]:
+        raise LayoutError(
+            "значения и диапазоны посчитаны по разным данным train: выполните этапы заново"
+        )
+
+
+def _check_ids(keys: list[dict], values: list[dict], first_key_id: int, first_value_id: int,
+               size: int) -> None:
+    """
+    Каждый номер встречается один раз, и дыр между диапазонами
+    нет.
+    """
+
+    key_ids = [row["id"] for row in keys]
+    value_ids = [row["id"] for row in values]
+
+    if key_ids != list(range(first_key_id, first_key_id + len(key_ids))):
+        raise LayoutError("номера ключей идут не подряд: словарь ключей собран не этим кодом")
+
+    if value_ids != list(range(first_value_id, first_value_id + len(value_ids))):
+        raise LayoutError(
+            "номера значений идут не подряд: каталог значений и диапазоны собраны не одной цепочкой"
+        )
+
+    if size < first_value_id + len(value_ids):
+        raise LayoutError("размер словаря меньше числа выданных номеров")
 
 
 # ------------------------------------------------------------
-# ЗАМОРОЖЕННЫЙ КОМПЛЕКТ
+# ЗАМОРОЖЕННЫЙ СЛОВАРЬ
 # ------------------------------------------------------------
 
 
 @dataclass
 class FrozenArtifacts:
     """
-    Готовые словари, которыми кодируют и расшифровывают.
+    Готовый словарь, которым кодируют и расшифровывают.
 
     Ничего не обучает и не меняет: при загрузке проверяет, что
-    каждый артефакт тот же самый, каким его заморозили.
+    пространство ID цело.
     """
 
-    directory: Path
-    manifest: dict
+    path: Path | None
+    bundle: dict
     layout: dict
     specials: dict[str, int]
     key_ids: dict[str, int]
@@ -568,88 +393,66 @@ class FrozenArtifacts:
 
     def verify(self) -> None:
         """
-        Пересчитывает тождество комплекта и отпечатки артефактов.
-
-        Сначала манифест: он сам называет, что именно проверять,
-        и доверять непроверенному списку нельзя. Правленый
-        манифест с прежним номером — это и есть подмена словаря.
+        Пространство ID цело: диапазоны идут подряд и номера не
+        повторяются.
         """
 
-        actual = manifest_id(self.manifest)
+        ranges = self.layout["ranges"]
 
-        if actual != self.manifest.get("artifact_id"):
-            raise LayoutError(
-                f"манифест словаря изменён после заморозки: номер комплекта "
-                f"{self.manifest.get('artifact_id')!r}, а по содержимому {actual!r}. "
-                "Соберите словарь заново"
-            )
+        edges = [ranges["special"], ranges["keys"], ranges["values"], ranges["bpe"]]
 
-        for name, digest in sorted(self.manifest["artifacts"].items()):
+        if edges[0][0] != 0:
+            raise LayoutError("пространство ID начинается не с нуля")
 
-            path = self.directory / name
+        for left, right in zip(edges, edges[1:]):
+            if left[1] != right[0]:
+                raise LayoutError(f"диапазоны словаря не стыкуются: {left} и {right}")
 
-            if not path.exists():
-                raise LayoutError(f"артефакт {name} пропал из {self.directory}")
+        if edges[-1][1] != self.layout["size"]:
+            raise LayoutError("последний диапазон не доходит до размера словаря")
 
-            if sha256_file(path) != digest:
-                raise LayoutError(
-                    f"артефакт {name} изменился после заморозки: кодировать им нельзя, "
-                    "соберите словарь заново"
-                )
+        if len(self.value_rows) != ranges["values"][1] - ranges["values"][0]:
+            raise LayoutError("число значений не совпадает с их диапазоном")
 
     @staticmethod
-    def load(directory: Path) -> "FrozenArtifacts":
+    def from_bundle(bundle: dict, path: Path | None = None) -> "FrozenArtifacts":
 
-        directory = Path(directory)
-
-        path = directory / MANIFEST_FILE
-
-        if not path.exists():
-            raise LayoutError(f"нет {path}: словарь не заморожен, выполните freeze")
-
-        manifest = read_json(path)
-
-        specials = read_json(directory / SPECIAL_FILE)["ids"]
-        key_vocab = read_json(directory / KEY_VOCAB_FILE)
-        value_vocab = read_json(directory / VALUE_VOCAB_FILE)
-        candidates = read_json(directory / KEY_VALUE_IDS_FILE)["keys"]
-        registry = read_json(directory / NUMERIC_REGISTRY_FILE)
-        catalog = read_json(directory / CATALOG_FILE)
+        keys = bundle["keys"]["rows"]
 
         value_ids: dict[tuple, int] = {}
 
-        for row in value_vocab["values"]:
+        for row in bundle["values"]["rows"]:
             if row["kind"] == KIND_CATEGORICAL:
                 value_ids[(row["domain"], row["value_type"], row["value"])] = row["id"]
             else:
                 value_ids[(row["key"], KIND_BUCKET, row["value"])] = row["id"]
 
+        section = bundle["bpe"]
+
         bpe = (
-            load_bpe(directory / BPE_FILE)
-            if manifest["bpe"].get("enabled")
-            else BpeModel(enabled=False, keys=(), info=manifest["bpe"])
+            load_bpe(section["model"])
+            if section.get("enabled")
+            else BpeModel(enabled=False, keys=(), info=section)
         )
 
         artifacts = FrozenArtifacts(
-            directory=directory,
-            manifest=manifest,
-            layout=manifest["layout"],
-            specials=specials,
-            key_ids={row["key"]: row["id"] for row in key_vocab["keys"]},
-            key_info={row["key"]: row for row in key_vocab["keys"]},
-            domain_of={row["key"]: row["domain"] for row in key_vocab["keys"] if row["domain"]},
+            path=path,
+            bundle=bundle,
+            layout=bundle["layout"],
+            specials=bundle["specials"]["ids"],
+            key_ids={row["key"]: row["id"] for row in keys},
+            key_info={row["key"]: row for row in keys},
+            domain_of={row["key"]: row["domain"] for row in keys if row["domain"]},
             value_ids=value_ids,
-            value_rows=value_vocab["values"],
-            candidates=candidates,
-            encoders=load_encoders(registry),
+            value_rows=bundle["values"]["rows"],
+            candidates=bundle["candidates"]["keys"],
+            encoders=load_encoders(bundle["numeric"]),
             declared_by_event_type={
-                event_type: tuple(keys)
-                for event_type, keys in catalog["declared_by_event_type"].items()
+                event_type: tuple(item)
+                for event_type, item in bundle["declared_by_event_type"].items()
             },
-            link_keys=frozenset(key_vocab["link_keys"]),
-            profile_keys=tuple(
-                row["key"] for row in key_vocab["keys"] if row["origin"] == "profile"
-            ),
+            link_keys=frozenset(bundle["keys"]["link_keys"]),
+            profile_keys=tuple(row["key"] for row in keys if row["origin"] == "profile"),
             bpe=bpe,
         )
 
@@ -657,30 +460,24 @@ class FrozenArtifacts:
 
         return artifacts
 
+    @staticmethod
+    def load(path: Path | None = None) -> "FrozenArtifacts":
+        """
+        Словарь из data/tokenizer/tokenizer.json.
+        """
+
+        path = Path(path) if path is not None else tokenizer_path(TOKENIZER_FILE)
+
+        if not path.exists():
+            raise LayoutError(
+                f"нет {path}: выполните python -m src.tokenization.run final-vocab"
+            )
+
+        return FrozenArtifacts.from_bundle(read_json(path), path)
+
 
 __all__ = [
-    "EMPTY",
-    "EVT",
-    "INVALID",
-    "KEY_VALUE_IDS_FILE",
-    "KEY_VOCAB_FILE",
-    "KIND_BUCKET",
-    "KIND_CATEGORICAL",
-    "LAYOUT_FILE",
-    "MANIFEST_FILE",
-    "MASK",
-    "MISSING",
-    "PAD",
-    "REPORT_FILE",
-    "SPECIAL_FILE",
-    "SPECIAL_ROLES",
-    "SPECIAL_TOKENS",
-    "STAGE",
-    "UNK",
-    "USR",
-    "VALUE_VOCAB_FILE",
     "FrozenArtifacts",
     "LayoutError",
-    "LayoutResult",
-    "build_layout",
+    "build_tokenizer",
 ]

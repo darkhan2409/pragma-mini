@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field, replace
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -16,21 +15,22 @@ from .version import SCHEMA_VERSION
 # ИДЕЯ
 # ============================================================
 #
-# Всё, что решает человек, а не данные, живёт здесь: какие
-# группы собирать, на каких срезах, сколько истории брать в один
-# пример и какие старые события считаются важными.
+# Всё, что решает человек, а не данные, живёт здесь: сколько
+# истории берётся в один пример и какие старые события
+# считаются важными.
 #
-# Отпечаток конфигурации входит в dataset_id, поэтому смена
-# любого решения даёт другой набор явно, а не молча поверх
-# прежнего.
-#
-# Здесь нет ни одного значения, посчитанного по данным. Бюджеты
-# контекста выбирает человек, посмотрев на отчёт измерения, и
-# подбирать их по validation или test запрещено.
+# Здесь нет ни одного значения, посчитанного по данным.
+# Бюджеты контекста выбирает человек, и подбирать их по
+# validation или test запрещено.
 # ============================================================
 
 
-DATASETS_DIR = DATA_DIR / "datasets"
+# Один каталог на группу и один файл в нём.
+#
+#   data/dataset/<group>/samples.parquet
+DATASET_DIR = DATA_DIR / "dataset"
+
+SAMPLES_FILE = "samples.parquet"
 
 GROUPS: tuple[str, ...] = ("train", "val", "test")
 
@@ -189,110 +189,29 @@ def _optional_int(data: Mapping[str, Any], name: str, default: int | None) -> in
 
 @dataclass(frozen=True)
 class DatasetConfig:
+    """
+    Решения человека о сборке набора.
+    """
 
     schema_version: int = SCHEMA_VERSION
 
-    groups: tuple[str, ...] = GROUPS
-
-    # Дополнительные срезы по группам.
-    #
-    # СЕЙЧАС ОНИ ЗАПРЕЩЕНЫ, и поле оставлено только затем, чтобы
-    # отказ был внятным. Анкета клиента одна — итоговая, на
-    # границу выгрузки. На конечном срезе группы это честно: срез
-    # и есть граница. На любом более раннем срезе та же анкета
-    # была бы знанием из будущего, и пример перестал бы быть
-    # честным молча.
-    #
-    # Вернуть ранние срезы можно, когда профиль снова научится
-    # отвечать на вопрос «что банк знал к этой дате».
-    extra_cutoffs: dict[str, tuple[str, ...]] = field(default_factory=dict)
-
     context: ContextPolicy = field(default_factory=ContextPolicy)
 
-    # Сколько примеров лежит в одном файле и в одной группе строк.
-    shard_samples: int = 512
+    # Сколько примеров лежит в одной группе строк parquet.
     row_group_samples: int = 32
-
-    # Сколько читаемых примеров положить рядом с набором.
-    golden_limit: int = 6
 
     def validate(self) -> None:
 
-        if not self.groups:
-            raise ConfigError("собирать нечего: список групп пуст")
-
-        unknown = [group for group in self.groups if group not in GROUPS]
-
-        if unknown:
-            raise ConfigError(f"неизвестные группы: {unknown}; известны {list(GROUPS)}")
-
-        if len(set(self.groups)) != len(self.groups):
-            raise ConfigError("группа названа дважды")
-
-        declared = sorted(
-            group for group, moments in self.extra_cutoffs.items() if moments
-        )
-
-        if declared:
-            raise ConfigError(
-                "дополнительные срезы запрещены (объявлены у групп "
-                + ", ".join(declared)
-                + "): профиль это одна итоговая строка на границу выгрузки, и на более раннем "
-                "срезе он был бы знанием из будущего. Пример строится только на конечном "
-                "срезе группы"
-            )
-
-        for group, moments in sorted(self.extra_cutoffs.items()):
-
-            if group not in self.groups:
-                raise ConfigError(f"срезы объявлены для группы {group!r}, которую не собираем")
-
-            parsed = [_moment(group, item) for item in moments]
-
-            if len(set(parsed)) != len(parsed):
-                raise ConfigError(f"группа {group}: один и тот же дополнительный срез назван дважды")
-
-        if self.shard_samples < 1:
-            raise ConfigError("в одном файле обязан лежать хотя бы один пример")
-
         if self.row_group_samples < 1:
-            raise ConfigError("в одной группе строк обязан лежать хотя бы один пример")
-
-        if self.row_group_samples > self.shard_samples:
-            raise ConfigError("группа строк не может быть больше файла")
-
-        if self.golden_limit < 0:
-            raise ConfigError("число читаемых примеров не бывает отрицательным")
+            raise ConfigError("row_group_samples обязан быть положительным")
 
         self.context.validate()
-
-    def cutoffs_for(self, group: str, final_cutoff: datetime) -> list[datetime]:
-        """
-        Срезы группы: её конечный момент и объявленные явно.
-
-        Порядок хронологический и от порядка записи в конфиге не
-        зависит: вес примера считается по их числу, и перестановка
-        строк в файле не должна менять ничего.
-        """
-
-        moments = {final_cutoff}
-
-        for item in self.extra_cutoffs.get(group, ()):
-            moments.add(_moment(group, item))
-
-        return sorted(moments)
 
     def as_dict(self) -> dict:
         return {
             "schema_version": self.schema_version,
-            "groups": list(self.groups),
-            "extra_cutoffs": {
-                group: list(moments) for group, moments in sorted(self.extra_cutoffs.items())
-            },
             "context": self.context.as_dict(),
-            "shard_samples": self.shard_samples,
             "row_group_samples": self.row_group_samples,
-            "golden_limit": self.golden_limit,
         }
 
     def sha256(self) -> str:
@@ -310,17 +229,10 @@ class DatasetConfig:
 
         config = replace(
             base,
-            groups=tuple(str(item) for item in data.get("groups", base.groups)),
-            extra_cutoffs={
-                str(group): tuple(str(item) for item in moments)
-                for group, moments in data.get("extra_cutoffs", {}).items()
-            },
             context=(
                 ContextPolicy.from_dict(data["context"]) if "context" in data else base.context
             ),
-            shard_samples=int(data.get("shard_samples", base.shard_samples)),
             row_group_samples=int(data.get("row_group_samples", base.row_group_samples)),
-            golden_limit=int(data.get("golden_limit", base.golden_limit)),
         )
 
         config.validate()
@@ -338,27 +250,24 @@ class DatasetConfig:
         return DatasetConfig.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
-def _moment(group: str, value: str) -> datetime:
+def dataset_dir(group: str) -> Path:
+    """
+    Каталог собранной группы.
+    """
 
-    try:
-        return datetime.fromisoformat(str(value))
-    except ValueError as error:
-        raise ConfigError(f"группа {group}: срез {value!r} не читается как момент времени") from error
-
-
-def datasets_dir(name: str) -> Path:
-    return DATASETS_DIR / name
+    return DATASET_DIR / group
 
 
 __all__ = [
-    "DATASETS_DIR",
+    "DATASET_DIR",
     "DEFAULT_MILESTONES",
     "GROUPS",
     "POLICIES",
     "POLICY_ALL",
     "POLICY_RECENT_PLUS_MILESTONES",
+    "SAMPLES_FILE",
     "ConfigError",
     "ContextPolicy",
     "DatasetConfig",
-    "datasets_dir",
+    "dataset_dir",
 ]

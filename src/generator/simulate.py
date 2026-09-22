@@ -8,6 +8,7 @@ from .behaviour import adoption as adoption_module
 from .behaviour import habits as habits_module
 from . import config
 from .config import (
+    CONTRACT_TERMS_KEYS,
     REGISTRY_START,
 )
 from .finance import deposits as deposit_rules
@@ -40,7 +41,7 @@ from .rng import (
     keyed_rng,
     stable_hash,
 )
-from .world import products as product_catalog, relationships as graph_module
+from .world import geography, products as product_catalog, relationships as graph_module
 
 
 # ============================================================
@@ -477,7 +478,9 @@ class CommunitySimulation:
             "children": persona.children,
             "education": persona.education,
             "region": persona.region,
-            "city": persona.settlement,
+            # Сельская корзина области названием города не
+            # становится: у села имени в генераторе нет.
+            "city": geography.by_name(persona.settlement).public_name,
             "housing_type": persona.housing_type,
             "pensioner": persona.is_pensioner_at(config.HISTORY_START),
             "income_type": persona.income_type,
@@ -685,11 +688,17 @@ class CommunitySimulation:
             card.activated_at = activation
             card.status = CARD_ACTIVE
 
+            # Активация карты условий не назначает: сумма, срок
+            # и ставка остались в событии открытия договора.
             state.emit(
                 state.factory.make(
                     "card_activated",
                     activation,
-                    payload,
+                    {
+                        name: value
+                        for name, value in payload.items()
+                        if name not in CONTRACT_TERMS_KEYS
+                    },
                 )
             )
 

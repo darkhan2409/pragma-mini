@@ -1,15 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 
-from src.preprocessing.artifacts import read_json
-from src.preprocessing.canonical.build import REGISTRY_FILE as CANONICAL_REGISTRY_FILE
-from src.preprocessing.canonical.build import STAGE as CANONICAL_STAGE
-from src.preprocessing.projection import EVENT_TYPE_FIELD
-from src.preprocessing.semantic.build import REGISTRY_FILE as SEMANTIC_REGISTRY_FILE
-from src.preprocessing.semantic.build import STAGE as SEMANTIC_STAGE
-from src.preprocessing.semantic.keys import (
+from src.generator.config import key_catalogue
+from src.preprocessing.keys import (
     CATEGORICAL,
     DYNAMIC_FIELDS,
     DIRECT_KEYS,
@@ -18,26 +12,25 @@ from src.preprocessing.semantic.keys import (
     TEXT,
     KeysError,
     key_for,
+    keys_registry,
 )
+from src.preprocessing.projection import PROJECTION_VERSION, EVENT_TYPE_FIELD, model_role
 
 
 # ============================================================
 # ИДЕЯ
 # ============================================================
 #
-# Токенизатор не переосмысливает поля: смысл ему приносят два
-# реестра препроцессинга.
+# Токенизатор не переосмысливает поля: что значит ключ, какого
+# он вида и в каких единицах, говорит реестр смыслов, собранный
+# ИЗ КОДА по каталогу ключей payload. Файлов-реестров рядом с
+# данными больше нет.
 #
-#   semantic_registry.json   что значит ключ, какого он вида и в
-#                            каких единицах;
-#   field_registry.json      какое физическое поле у какого типа
-#                            события объявлено.
-#
-# Второй нужен ровно для одного вопроса: какие ключи у этого
-# типа события ОБЪЯВЛЕНЫ. Без него «значения нет» и «поля здесь
-# не бывает» выглядели бы одинаково, а это разные вещи: у
-# покупки отсутствие причины отказа значит «отказа не было», а у
-# экрана приложения причины отказа не предусмотрено вовсе.
+# Какие ключи ОБЪЯВЛЕНЫ у каждого типа события, читается оттуда
+# же. Различать это важно: «значения нет» и «поля здесь не
+# бывает» разные вещи. У покупки отсутствие причины отказа
+# значит «отказа не было», а у экрана приложения причины отказа
+# не предусмотрено вовсе.
 # ============================================================
 
 
@@ -127,22 +120,17 @@ class SemanticSchema:
     Реестры смысла глазами токенизатора.
     """
 
-    def __init__(self, semantic_registry: dict, field_registry: dict):
+    def __init__(self, registry: dict | None = None):
 
-        self.semantic_registry = semantic_registry
-        self.field_registry = field_registry
+        registry = registry or keys_registry(key_catalogue())
 
-        registry = semantic_registry.get("registry")
+        if not registry.get("keys"):
+            raise SchemaError("реестр смыслов пуст: каталог ключей не дал ни одного ключа")
 
-        if not registry or not registry.get("keys"):
-            raise SchemaError("в semantic_registry.json нет реестра ключей: соберите этап 5 заново")
+        self.registry = registry
 
         self.keys_version = registry["keys_version"]
-        self.semantic_version = semantic_registry["semantic_version"]
-        self.projection_version = semantic_registry["projection_version"]
-        self.stage_version = semantic_registry["stage_version"]
-        self.group = semantic_registry.get("group")
-        self.cutoff = semantic_registry.get("cutoff")
+        self.projection_version = PROJECTION_VERSION
 
         self.ambiguous = tuple(
             (tuple(item["keys"]), item["reason"]) for item in registry.get("ambiguous", ())
@@ -158,7 +146,7 @@ class SemanticSchema:
             physical = tuple(row.get("physical_fields") or ())
 
             if not physical:
-                raise SchemaError(f"у ключа {key} нет происхождения: реестр собран старой версией этапа 5")
+                raise SchemaError(f"у ключа {key} нет происхождения: реестр собран старой версией смыслового слоя")
 
             origin = _origin(physical[0])
 
@@ -174,50 +162,47 @@ class SemanticSchema:
                 weight_rule=WEIGHT_PER_CLIENT if origin == ORIGIN_PROFILE else WEIGHT_PER_EVENT,
             )
 
-        self.declared_payload, self.dynamic_event_types = self._declared(field_registry)
+        self.declared_payload, self.dynamic_event_types = self._declared()
 
     # --- разбор реестра полей ---
 
     @staticmethod
-    def _declared(field_registry: dict) -> tuple[dict[str, tuple[str, ...]], tuple[str, ...]]:
+    def _declared() -> tuple[dict[str, tuple[str, ...]], tuple[str, ...]]:
         """
         Какие смысловые ключи объявлены у каждого типа события.
 
-        Читается позитивно: в расчёт идёт только то, что сам
-        препроцессинг пометил смысловым полем. Локальные ссылки и
-        внутренние поля сюда не попадают — ни те, ни другие
-        значением модели не становятся.
+        Читается позитивно из каталога ключей payload: в расчёт
+        идёт только то, что модельная проекция назвала смысловым
+        полем. Локальные ссылки и внутренние поля сюда не
+        попадают — ни те, ни другие значением модели не
+        становятся.
         """
 
         declared: dict[str, set[str]] = {}
         dynamic: set[str] = set()
         problems: list[str] = []
 
-        rows = field_registry.get("fields")
-
-        if not rows:
-            raise SchemaError(f"в {CANONICAL_REGISTRY_FILE} нет полей: соберите canonical заново")
-
-        for row in rows:
-
-            if row.get("role") != "payload" or row.get("model_role") != "semantic_field":
-                continue
-
-            owner = row["owner"]
-            name = row["name"]
+        for owner, info in key_catalogue().items():
 
             declared.setdefault(owner, set())
 
-            if name in DYNAMIC_FIELDS:
-                # Смысл такого поля задаёт значение соседнего
-                # field_name, поэтому заранее он не объявлен.
-                dynamic.add(owner)
-                continue
+            for item in info["fields"]:
 
-            try:
-                declared[owner].add(key_for(name, row["source"]).key)
-            except KeysError as error:
-                problems.append(str(error))
+                name = item["name"]
+
+                if model_role(name) != "semantic_field":
+                    continue
+
+                if name in DYNAMIC_FIELDS:
+                    # Смысл такого поля задаёт значение соседнего
+                    # field_name, поэтому заранее он не объявлен.
+                    dynamic.add(owner)
+                    continue
+
+                try:
+                    declared[owner].add(key_for(name, info["source"]).key)
+                except KeysError as error:
+                    problems.append(str(error))
 
         if problems:
             raise SchemaError("; ".join(sorted(set(problems))))
@@ -285,23 +270,13 @@ class SemanticSchema:
     # --- открытие ---
 
     @staticmethod
-    def paths(processed_dir: Path, group: str) -> tuple[Path, Path]:
-        processed = Path(processed_dir)
-        return (
-            processed / SEMANTIC_STAGE / group / SEMANTIC_REGISTRY_FILE,
-            processed / CANONICAL_STAGE / group / CANONICAL_REGISTRY_FILE,
-        )
+    def open(group: str | None = None) -> "SemanticSchema":
+        """
+        Реестр смыслов из кода. Группа на смысл не влияет: он
+        один на весь конвейер.
+        """
 
-    @staticmethod
-    def open(processed_dir: Path, group: str) -> "SemanticSchema":
-
-        semantic_path, canonical_path = SemanticSchema.paths(processed_dir, group)
-
-        for path in (semantic_path, canonical_path):
-            if not path.exists():
-                raise SchemaError(f"нет файла {path}: этапы препроцессинга не собраны для группы {group}")
-
-        return SemanticSchema(read_json(semantic_path), read_json(canonical_path))
+        return SemanticSchema()
 
 
 __all__ = [

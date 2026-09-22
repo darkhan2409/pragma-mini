@@ -26,7 +26,7 @@ from ..rawdata import DTYPE_MAP, ENVELOPE_SCHEMA, RawManifest
 # ============================================================
 
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 TS = pa.timestamp("us")
 
@@ -65,13 +65,6 @@ DERIVED_COLUMNS: tuple[tuple[str, pa.DataType, str, str], ...] = (
         "bool",
         "остаток счёта не продолжает предыдущий наблюдаемый остаток: "
         "между строками потеряно движение денег",
-    ),
-    ("payload_status", pa.string(), "str", "ok, unparseable или null_payload"),
-    (
-        "payload_violations",
-        pa.list_(pa.string()),
-        "str",
-        "нарушения контракта payload в этой строке: вид и поле",
     ),
     (
         "known_missing",
@@ -143,92 +136,11 @@ def profile_schema() -> pa.Schema:
     return pa.schema(fields)
 
 
-# Адрес клиента в файле. Два разных числа, и путать их нельзя:
-# row_offset отсчитывается внутри своего row group, а
-# global_row_start — от начала файла.
-CLIENT_INDEX_SCHEMA = pa.schema(
-    [
-        ("client_idx", pa.int64()),
-        ("client_id", pa.string()),
-        ("row_group", pa.int32()),
-        ("row_offset", pa.int64()),
-        ("global_row_start", pa.int64()),
-        ("row_count", pa.int64()),
-        ("spans_row_groups", pa.bool_()),
-        ("event_time_min", TS),
-        ("event_time_max", TS),
-    ]
-)
-
-
-MENTIONS_SCHEMA = pa.schema(
-    [
-        ("entity_kind", pa.string()),
-        ("entity_id", pa.string()),
-        ("client_idx", pa.int64()),
-        ("client_id", pa.string()),
-        ("stable_event_index", pa.int64()),
-        ("event_time", TS),
-        ("type", pa.string()),
-        ("source", pa.string()),
-        ("field_name", pa.string()),
-        ("is_transition", pa.bool_()),
-        ("transition", pa.string()),
-        ("raw_row", pa.int64()),
-    ]
-)
-
-
-# Стороны перевода как они наблюдаются. Парности и контрагента
-# здесь нет намеренно: кто с кем сошёлся на дату, решает этап
-# истории среди видимых строк.
-#
-# transfer_id приходит из payload: в конверте связи нет, вид её
-# задаёт имя ключа.
-TRANSFERS_SCHEMA = pa.schema(
-    [
-        ("transfer_id", pa.string()),
-        ("side", pa.string()),
-        ("client_idx", pa.int64()),
-        ("client_id", pa.string()),
-        ("type", pa.string()),
-        ("stable_event_index", pa.int64()),
-        ("event_time", TS),
-        ("amount", pa.int64()),
-        ("direction", pa.string()),
-        ("status", pa.string()),
-        ("counterparty", pa.string()),
-        ("raw_row", pa.int64()),
-    ]
-)
-
-
-REJECTS_SCHEMA = pa.schema(
-    [
-        ("client_id", pa.string()),
-        ("type", pa.string()),
-        ("reason", pa.string()),
-        ("detail", pa.string()),
-        ("payload", pa.string()),
-        ("raw_file", pa.string()),
-        ("raw_row_group", pa.int32()),
-        ("raw_row", pa.int64()),
-    ]
-)
-
-
 __all__ = [
-    "CLIENT_INDEX_SCHEMA",
     "DERIVED_COLUMNS",
     "DERIVED_NAMES",
     "ENVELOPE_NAMES",
-    "MENTIONS_SCHEMA",
-    "PAYLOAD_NULL",
-    "PAYLOAD_OK",
-    "PAYLOAD_UNPARSEABLE",
-    "REJECTS_SCHEMA",
     "SCHEMA_VERSION",
-    "TRANSFERS_SCHEMA",
     "events_schema",
     "payload_columns",
     "profile_schema",

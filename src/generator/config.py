@@ -380,6 +380,14 @@ LOAN_FIELDS: tuple[FieldSpec, ...] = (
     _f("reason", "str", True, LEVEL_CONTRACT, "основание события"),
 )
 
+# Ключи условий договора: чем набор с условиями отличается от
+# набора без них. Нужны тому, кто шлёт один payload нескольким
+# событиям: там, где условий не назначают, их надо снять.
+CONTRACT_TERMS_KEYS: frozenset[str] = frozenset(
+    item.name for item in PRODUCT_TERMS_FIELDS
+) - frozenset(item.name for item in PRODUCT_FIELDS)
+
+
 APPLICATION_FIELDS: tuple[FieldSpec, ...] = (
     _f("application_id", "str", False, LEVEL_OPERATION, "заявка"),
     _f("product_id", "str", False, LEVEL_PRODUCT, "запрошенный продукт"),
@@ -787,18 +795,18 @@ DATASETS: dict[str, DatasetGroup] = {
         clients=1,
         history_start=datetime(2024, 1, 1),
         history_end=datetime(2026, 1, 1),
-        seed=44,
+        seed=499,
     ),
     "val": DatasetGroup(
         clients=10,
         history_start=datetime(2024, 1, 1),
         history_end=datetime(2026, 5, 1),
-        seed=202,
+        seed=501,
     ),
     "test": DatasetGroup(
         clients=10,
         history_start=datetime(2024, 1, 1),
         history_end=datetime(2026, 9, 1),
-        seed=303,
+        seed=502,
     ),
 }

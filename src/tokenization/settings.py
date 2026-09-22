@@ -31,11 +31,22 @@ from .version import SCHEMA_VERSION
 # ============================================================
 
 
-ARTIFACTS_DIR = DATA_DIR / "artifacts"
+# Пути стандартны и в командах не задаются.
+#
+#   data/tokenizer/           словарь по этапам и итоговый tokenizer.json
+#   data/tokenized/<group>/   закодированная группа, два файла
+#
+# Словарь один на весь конвейер и учится только на train,
+# поэтому лежит отдельно от групп.
+TOKENIZER_DIR = DATA_DIR / "tokenizer"
 TOKENIZED_DIR = DATA_DIR / "tokenized"
 
-# Каталог артефактов словаря внутри набора.
-VOCAB_DIRNAME = "tokenizer"
+SPECIAL_TOKENS_FILE = "special_tokens.json"
+KEY_VOCAB_FILE = "key_vocab.json"
+VALUE_VOCAB_FILE = "value_vocab.json"
+BUCKETS_FILE = "buckets.json"
+BPE_FILE = "bpe.json"
+TOKENIZER_FILE = "tokenizer.json"
 
 
 # ------------------------------------------------------------
@@ -199,23 +210,18 @@ def _fixed(boundaries: tuple[float, ...], reason: str,
 # меньше порога. Это не подгонка под данные: шкалы взяты из
 # смысла величины (тенге, доли, часы) и от набора не зависят.
 FALLBACK_KZT: tuple[float, ...] = (1_000, 5_000, 20_000, 50_000, 200_000, 1_000_000)
-FALLBACK_RATIO: tuple[float, ...] = (0.01, 0.05, 0.2, 0.5, 1.0, 2.0)
-FALLBACK_HOURS: tuple[float, ...] = (1, 6, 24, 72, 168, 720)
 
 
 def default_numeric_encoders() -> dict[str, NumericEncoder]:
     """
     Кодировщик каждого числового ключа смыслового реестра.
 
-    Деньги, отношения и интервалы режутся по train: их разброс
-    свойство популяции. Сроки, возраст, ставка, доли и счётчики
-    заданы бизнесом: их границы известны заранее и от выборки
-    зависеть не должны.
+    Деньги режутся по train: их разброс свойство популяции.
+    Сроки, возраст, ставка, доли и счётчики заданы бизнесом:
+    их границы известны заранее и от выборки зависеть не должны.
     """
 
     money = "сумма в тенге: разброс свойство популяции, границы считает train"
-    ratio = "безразмерное отношение: границы считает train"
-    interval = "интервал между событиями в часах: границы считает train"
 
     encoders: dict[str, NumericEncoder] = {
         # --- деньги события ---
@@ -244,19 +250,6 @@ def default_numeric_encoders() -> dict[str, NumericEncoder]:
             fit_source="profile_declared_income",
         ),
         "profile_credit_limit": _quantile(12, FALLBACK_KZT, money),
-        # --- отношения ---
-        "amount_to_declared_income": _quantile(12, FALLBACK_RATIO, ratio),
-        "amount_to_limit": _quantile(12, FALLBACK_RATIO, ratio),
-        "amount_to_balance_after": _quantile(
-            12, FALLBACK_RATIO,
-            "отношение к остатку: минус законен, остаток бывает отрицательным",
-            negative=NEGATIVE_ALLOWED,
-        ),
-        "amount_to_client_average": _quantile(12, FALLBACK_RATIO, ratio),
-        # --- интервалы ---
-        "since_previous_hours": _quantile(12, FALLBACK_HOURS, interval, zero=ZERO_IN_RANGE),
-        "since_same_type_hours": _quantile(12, FALLBACK_HOURS, interval, zero=ZERO_IN_RANGE),
-        "since_last_income_hours": _quantile(12, FALLBACK_HOURS, interval, zero=ZERO_IN_RANGE),
         # --- время в днях: шкалы бизнеса ---
         # Граница 1 здесь была бы лишней: ноль уже отдельный
         # диапазон, а между нулём и единицей целых дней нет.
@@ -264,15 +257,6 @@ def default_numeric_encoders() -> dict[str, NumericEncoder]:
             (30, 60, 90, 120, 180),
             "полосы просрочки банка: ноль это отдельное состояние «просрочки нет»",
             zero=ZERO_SEPARATE,
-        ),
-        "days_to_due": _fixed(
-            (-30, -7, 0, 1, 7, 30),
-            "дней до планового платежа: минус это просрочка, и она законна",
-            negative=NEGATIVE_ALLOWED,
-        ),
-        "age_of_history_days": _fixed(
-            (30, 90, 180, 365, 730, 1095),
-            "возраст наблюдаемой истории клиента",
         ),
         # --- сроки ---
         "term": _fixed((3, 6, 12, 24, 36, 60), "типовые сроки договоров в месяцах"),
@@ -587,16 +571,31 @@ class TokenizerConfig:
         return TokenizerConfig.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
-def vocab_dir(name: str) -> Path:
-    return ARTIFACTS_DIR / name / VOCAB_DIRNAME
+def tokenizer_path(name: str) -> Path:
+    """
+    Путь к файлу словаря в data/tokenizer.
+    """
+
+    return TOKENIZER_DIR / name
 
 
-def tokenized_dir(name: str) -> Path:
-    return TOKENIZED_DIR / name
+def tokenized_dir(group: str) -> Path:
+    """
+    Каталог закодированной группы.
+    """
+
+    return TOKENIZED_DIR / group
 
 
 __all__ = [
-    "ARTIFACTS_DIR",
+    "BPE_FILE",
+    "BUCKETS_FILE",
+    "KEY_VOCAB_FILE",
+    "SPECIAL_TOKENS_FILE",
+    "TOKENIZED_DIR",
+    "TOKENIZER_DIR",
+    "TOKENIZER_FILE",
+    "VALUE_VOCAB_FILE",
     "BpeConfig",
     "ConfigError",
     "DECLINED_DOMAINS",
@@ -606,14 +605,12 @@ __all__ = [
     "NEGATIVE_ALLOWED",
     "NEGATIVE_INVALID",
     "NumericEncoder",
-    "TOKENIZED_DIR",
     "TokenizerConfig",
-    "VOCAB_DIRNAME",
     "ValueDomain",
     "ZERO_IN_RANGE",
     "ZERO_SEPARATE",
     "default_numeric_encoders",
     "default_value_domains",
     "tokenized_dir",
-    "vocab_dir",
+    "tokenizer_path",
 ]

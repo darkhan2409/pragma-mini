@@ -2,26 +2,25 @@ from __future__ import annotations
 
 import bisect
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-import pyarrow.parquet as pq
 
-from src.preprocessing.artifacts import read_json, write_json, write_text
+from src.preprocessing.artifacts import read_json
 
-from .contract import FIT_MANIFEST_FILE, NUMERIC_SAMPLES_FILE, NUMERIC_SUMMARY_FILE, STATISTICS_DIR
-from .categorical import CATALOG_FILE, ValuesError
-from .report import render_buckets_md
+from .fit import TrainCorpus
+from .scan import FitStatistics
 from .schema import SemanticSchema
 from .settings import (
+    BUCKETS_FILE,
     METHOD_FIXED,
     METHOD_QUANTILE,
     METHOD_UNFITTED,
-    NEGATIVE_ALLOWED,
     NEGATIVE_INVALID,
     ZERO_SEPARATE,
     TokenizerConfig,
+    tokenizer_path,
 )
 from .version import FORMAT_VERSION, IMPLEMENTATION_VERSION, SCHEMA_VERSION
 
@@ -30,7 +29,7 @@ from .version import FORMAT_VERSION, IMPLEMENTATION_VERSION, SCHEMA_VERSION
 # ИДЕЯ
 # ============================================================
 #
-# Этап 3 заменяет точные числа диапазонами и объясняет каждый
+# Бакетизация заменяет точные числа диапазонами и объясняет каждый
 # из них.
 #
 # Границы считает train и только train. Там, где наблюдений
@@ -51,12 +50,6 @@ from .version import FORMAT_VERSION, IMPLEMENTATION_VERSION, SCHEMA_VERSION
 # ============================================================
 
 
-STAGE = "buckets"
-
-REGISTRY_FILE = "numeric_encoder_registry.json"
-REPORT_FILE = "buckets_report.md"
-
-# Метод, которым границы получены на самом деле.
 SOURCE_TRAIN = "train_quantiles"
 SOURCE_CONFIG = "config_fixed"
 SOURCE_FALLBACK = "config_fallback"
@@ -72,12 +65,6 @@ class BucketsError(ValueError):
     """
     Числовые границы построить нельзя.
     """
-
-
-@dataclass
-class BucketsResult:
-    report: dict
-    outputs: list[Path] = field(default_factory=list)
 
 
 def format_number(value: float) -> str:
@@ -257,16 +244,12 @@ def quantile_boundaries(values: list[float], bins: int, algorithm: str) -> tuple
     return tuple(sorted({float(edge) for edge in edges if float(edge) > minimum}))
 
 
-def _samples(target: Path) -> dict[str, list[float]]:
+def _samples(stats: FitStatistics) -> dict[str, list[float]]:
+    """
+    Отобранные значения каждого числового ключа.
+    """
 
-    table = pq.read_table(target / STATISTICS_DIR / NUMERIC_SAMPLES_FILE).to_pydict()
-
-    out: dict[str, list[float]] = {}
-
-    for key, value in zip(table["key"], table["value"]):
-        out.setdefault(key, []).append(float(value))
-
-    return out
+    return {key: stats.numeric[key].values() for key in sorted(stats.numeric)}
 
 
 def _distribution(encoder: FittedEncoder, values: list[float]) -> tuple[list[int], dict[str, int]]:
@@ -287,34 +270,19 @@ def _distribution(encoder: FittedEncoder, values: list[float]) -> tuple[list[int
 
 
 def build_buckets(
-    target: Path,
-    processed_dir: Path,
+    train: TrainCorpus,
+    value_vocab: dict,
     config: TokenizerConfig,
-    group: str = "train",
-) -> BucketsResult:
+    schema: SemanticSchema,
+) -> dict:
     """
-    Границы и политики каждого числового ключа.
+    Границы, политики и токены каждого числового ключа.
     """
 
-    target = Path(target)
+    stats = train.statistics
 
-    catalog_path = target / CATALOG_FILE
-
-    if not catalog_path.exists():
-        raise BucketsError(
-            f"нет {catalog_path}: границы строятся после каталога значений, выполните values"
-        )
-
-    catalog = read_json(catalog_path)
-    manifest = read_json(target / FIT_MANIFEST_FILE)
-
-    if catalog["config_sha256"] != config.sha256():
-        raise BucketsError("конфигурация изменилась после каталога значений: выполните values заново")
-
-    schema = SemanticSchema.open(processed_dir, group)
-
-    summary = read_json(target / STATISTICS_DIR / NUMERIC_SUMMARY_FILE)
-    samples = _samples(target)
+    summary = {key: stats.numeric[key].summary() for key in sorted(stats.numeric)}
+    samples = _samples(stats)
 
     entries: dict[str, dict] = {}
     encoders: dict[str, FittedEncoder] = {}
@@ -326,10 +294,10 @@ def build_buckets(
         info = schema.info(key)
 
         source_key = spec.fit_source or key
-        stats = summary.get(source_key, {})
+        measured = summary.get(source_key, {})
 
-        observed = stats.get("n", 0)
-        clients = stats.get("clients", 0)
+        observed = measured.get("n", 0)
+        clients = measured.get("clients", 0)
 
         # Значения, по которым учатся границы: ноль исключается,
         # если он отдельный диапазон, а невозможный минус не
@@ -444,13 +412,13 @@ def build_buckets(
                 "values": len(usable),
                 "clients": clients,
                 "observed": observed,
-                "sampled": bool(stats.get("sampled")),
-                "sample_k": stats.get("sample_k"),
-                "minimum": stats.get("minimum"),
-                "maximum": stats.get("maximum"),
-                "zeros": stats.get("n_zero", 0),
-                "negatives": stats.get("n_negative", 0),
-                "invalid": stats.get("n_invalid", 0),
+                "sampled": bool(measured.get("sampled")),
+                "sample_k": measured.get("sample_k"),
+                "minimum": measured.get("minimum"),
+                "maximum": measured.get("maximum"),
+                "zeros": measured.get("n_zero", 0),
+                "negatives": measured.get("n_negative", 0),
+                "invalid": measured.get("n_invalid", 0),
                 "algorithm": config.quantile_algorithm if source == SOURCE_TRAIN else None,
             },
             "distribution": {
@@ -461,15 +429,39 @@ def build_buckets(
             },
         }
 
+    # --- токены диапазонов ---
+    #
+    # Диапазоны продолжают пространство ID сразу за
+    # категориальными значениями: порядок — ключ по имени,
+    # внутри ключа номер диапазона.
+
+    first_bucket_id = int(value_vocab["next_id"])
+
+    next_id = first_bucket_id
+
+    by_key: dict[str, list[int]] = {}
+
+    for key in sorted(entries):
+
+        ids: list[int] = []
+
+        for bucket in entries[key]["buckets"]:
+            bucket["id"] = next_id
+            ids.append(next_id)
+            next_id += 1
+
+        by_key[key] = ids
+
     report = {
-        "stage": STAGE,
         "schema_version": SCHEMA_VERSION,
         "format_version": FORMAT_VERSION,
         "implementation_version": IMPLEMENTATION_VERSION,
-        "group": group,
-        "fit_content_sha256": manifest["fit_content_sha256"],
+        "fit": train.as_dict(),
         "config_sha256": config.sha256(),
-        "fit_period": {"until": manifest["fit_end"], "rule": "граница исключительная"},
+        "first_bucket_id": first_bucket_id,
+        "size": next_id - first_bucket_id,
+        "next_id": next_id,
+        "fit_period": {"until": train.fit_end.isoformat(), "rule": "граница исключительная"},
         "rules": {
             "interval": "[lower, upper): значение на границе принадлежит следующему диапазону",
             "last": "последний диапазон открыт сверху",
@@ -493,20 +485,24 @@ def build_buckets(
             ),
         },
         "encoders": {key: entries[key] for key in sorted(entries)},
+        "by_key": by_key,
         "warnings": warnings,
     }
 
-    outputs: list[Path] = []
+    return report
 
-    path = target / REGISTRY_FILE
-    write_json(path, report)
-    outputs.append(path)
 
-    path = target / REPORT_FILE
-    write_text(path, render_buckets_md(report))
-    outputs.append(path)
+def load_buckets(directory: Path | None = None) -> dict:
+    """
+    Числовые диапазоны предыдущего этапа.
+    """
 
-    return BucketsResult(report=report, outputs=outputs)
+    path = (Path(directory) / BUCKETS_FILE) if directory else tokenizer_path(BUCKETS_FILE)
+
+    if not path.exists():
+        raise BucketsError(f"нет {path}: выполните python -m src.tokenization.run buckets")
+
+    return read_json(path)
 
 
 def _by(entries: dict[str, dict], field_name: str) -> dict[str, int]:
@@ -531,19 +527,16 @@ __all__ = [
     "FOUND_BUCKET",
     "FOUND_INVALID",
     "FOUND_UNKNOWN",
-    "REGISTRY_FILE",
-    "REPORT_FILE",
     "SOURCE_CONFIG",
     "SOURCE_FALLBACK",
     "SOURCE_NONE",
     "SOURCE_TRAIN",
-    "STAGE",
     "Bucket",
     "BucketsError",
-    "BucketsResult",
     "FittedEncoder",
     "build_buckets",
     "build_buckets_list",
+    "load_buckets",
     "format_number",
     "load_encoders",
     "quantile_boundaries",
