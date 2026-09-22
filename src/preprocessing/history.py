@@ -47,7 +47,7 @@ from .canonical.entities import ENTITY_FIELDS, TRANSFER_SIDES, TRANSITIONS
 
 
 STAGE = "history"
-STAGE_VERSION = "8.0.0"
+STAGE_VERSION = "9.0.0"
 
 # Колонки canonical, которые НЕ выдаются как знание клиента.
 INTERNAL_COLUMNS: tuple[str, ...] = ()
@@ -317,7 +317,7 @@ class CanonicalStore:
             columns = [
                 "transfer_id",
                 "client_id",
-                "event_type",
+                "type",
                 "event_time",
                 "raw_row",
                 "amount",
@@ -338,7 +338,7 @@ class CanonicalStore:
                 chunk = self._events.read_row_group(index, columns=columns)
                 chunk = chunk.filter(
                     pc.and_(
-                        pc.is_in(chunk.column("event_type"), value_set=sides),
+                        pc.is_in(chunk.column("type"), value_set=sides),
                         pc.is_valid(chunk.column("transfer_id")),
                     )
                 )
@@ -486,7 +486,7 @@ def entity_states_as_of(events: pa.Table, cutoff: datetime) -> list[EntityState]
     if events.num_rows == 0:
         return []
 
-    columns = ["event_type", "event_time", "stable_event_index"] + [
+    columns = ["type", "event_time", "stable_event_index"] + [
         name for name in ENTITY_FIELDS if name in events.column_names
     ]
 
@@ -518,7 +518,7 @@ def entity_states_as_of(events: pa.Table, cutoff: datetime) -> list[EntityState]
                 },
             )
 
-            transition = TRANSITIONS.get((kind, row["event_type"]))
+            transition = TRANSITIONS.get((kind, row["type"]))
 
             if transition is None:
                 continue
@@ -600,8 +600,8 @@ def _matching_side(row: dict, other: dict) -> bool:
     if other["raw_row"] == row["raw_row"]:
         return False
 
-    mine = TRANSFER_SIDES.get(row["event_type"])
-    theirs = TRANSFER_SIDES.get(other["event_type"])
+    mine = TRANSFER_SIDES.get(row["type"])
+    theirs = TRANSFER_SIDES.get(other["type"])
 
     if mine is None or theirs is None or mine == theirs:
         return False
@@ -676,7 +676,7 @@ def transfers_as_of(index: tuple[dict, dict], client_id: str, cutoff: datetime) 
         out.append(
             TransferSide(
                 transfer_id=transfer_id,
-                side=TRANSFER_SIDES.get(row["event_type"]),
+                side=TRANSFER_SIDES.get(row["type"]),
                 event_time=row["event_time"],
                 amount=row["amount"],
                 direction=row["direction"],

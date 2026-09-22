@@ -47,7 +47,7 @@ from .keys import (
 # ============================================================
 
 
-SEMANTIC_VERSION = "5.0.0"
+SEMANTIC_VERSION = "6.0.0"
 
 
 @dataclass
@@ -153,8 +153,6 @@ def _semantic_values(row: dict, source: str, refs: LocalRefs) -> tuple[dict[str,
 
         if name == EVENT_TYPE_FIELD:
             values[DIRECT_KEYS[EVENT_TYPE_FIELD].key] = value
-            continue
-
             continue
 
         if name in reference_names:
@@ -318,7 +316,7 @@ def semantic_as_of(
 
         formulas_module.note_limit(limits, row)
 
-        same_type = past_amounts.setdefault(row["event_type"], [])
+        same_type = past_amounts.setdefault(row["type"], [])
 
         derived.append(formulas_module.deviation_from_past(row, list(same_type)))
 

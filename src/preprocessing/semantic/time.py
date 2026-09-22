@@ -114,7 +114,7 @@ def timings(rows: list[dict], observed_start: datetime | None) -> list[EventTimi
     for row in rows:
 
         moment = row["event_time"]
-        event_type = row["event_type"]
+        event_type = row["type"]
 
         due = row.get("due_date")
 
@@ -178,7 +178,7 @@ def product_ages(rows: list[dict], cutoff: datetime) -> dict[str, float]:
 
     for row in rows:
 
-        if row["event_type"] not in OPENING_TYPES:
+        if row["type"] not in OPENING_TYPES:
             continue
 
         known = row["event_time"]

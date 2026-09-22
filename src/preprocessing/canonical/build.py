@@ -29,7 +29,7 @@ from .schema import (
     REJECTS_SCHEMA,
     SCHEMA_VERSION,
     TRANSFERS_SCHEMA,
-    payload_fields,
+    payload_columns,
 )
 from .sidecars import build_profile
 
@@ -52,7 +52,7 @@ from .sidecars import build_profile
 
 
 STAGE = "canonical"
-STAGE_VERSION = "9.0.0"
+STAGE_VERSION = "10.0.0"
 
 STATUS_OK = "ok"
 STATUS_ROW_COUNT_MISMATCH = "row_count_mismatch"
@@ -138,10 +138,7 @@ def build_group(
     out_dir = Path(out_dir)
 
     schema = canonical_schema(manifest)
-    # Разбор идёт по именам полей выгрузки, а колонки canonical
-    # называет canonical_column: тип события приезжает ключом
-    # type и ложится колонкой event_type.
-    payload_names = payload_fields(manifest)
+    payload_names = [name for name, _ in payload_columns(manifest)]
 
     client_index = build_client_index(raw)
 

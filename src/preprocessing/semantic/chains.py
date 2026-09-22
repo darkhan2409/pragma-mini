@@ -24,7 +24,7 @@ from datetime import datetime
 # ============================================================
 
 
-CHAINS_VERSION = "3.0.0"
+CHAINS_VERSION = "4.0.0"
 
 IN_PROGRESS = "in_progress"
 
@@ -126,7 +126,7 @@ def chains(rows: list[dict]) -> list[Chain]:
         # Исход это ЗАКРЫВШИЙ шаг, а не просто последний: после
         # решения по заявке в цепочке идут платежи, и называть
         # исходом платёж было бы неправдой.
-        closing = next((step for step in steps if step["event_type"] in terminal), None)
+        closing = next((step for step in steps if step["type"] in terminal), None)
 
         out.append(
             Chain(
@@ -134,9 +134,9 @@ def chains(rows: list[dict]) -> list[Chain]:
                 started_at=first["event_time"],
                 last_step_at=last["event_time"],
                 steps=len(steps),
-                first_event_type=first["event_type"],
-                last_event_type=last["event_type"],
-                outcome=closing["event_type"] if closing is not None else IN_PROGRESS,
+                first_event_type=first["type"],
+                last_event_type=last["type"],
+                outcome=closing["type"] if closing is not None else IN_PROGRESS,
             )
         )
 

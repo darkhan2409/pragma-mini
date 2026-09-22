@@ -25,8 +25,9 @@ if TYPE_CHECKING:  # pragma: no cover - только для подсказок �
 #   source       какая система записала
 #   fields       смысловые банковские значения
 #
-# event_type лежит ВНУТРИ fields как смысловое поле и в проекции
-# больше нигде не дублируется.
+# Тип события лежит ВНУТРИ fields как смысловое поле: в данных
+# это ключ type, смысловым ключом он зовётся event_type, и в
+# проекции больше нигде не дублируется.
 #
 # Список разрешённого позитивный. «Всё, кроме нескольких
 # исключений» здесь запрещено: новое поле в выгрузке не должно
@@ -44,12 +45,12 @@ if TYPE_CHECKING:  # pragma: no cover - только для подсказок �
 # ============================================================
 
 
-PROJECTION_VERSION = "5.0.0"
+PROJECTION_VERSION = "6.0.0"
 
-# Тип события. В выгрузке это ключ payload под именем type, в
-# canonical — колонка event_type; здесь названа колонка, потому
-# что проекция читает уже очищенную строку.
-EVENT_TYPE_FIELD = "event_type"
+# Тип события: ключ payload выгрузки и колонка canonical под
+# одним именем. Смысловой ключ у него называется event_type —
+# так же, как amount операции называется transaction_amount.
+EVENT_TYPE_FIELD = "type"
 
 
 class ProjectionError(ValueError):
@@ -70,8 +71,7 @@ class ProjectionError(ValueError):
 SEMANTIC_PAYLOAD_FIELDS: dict[str, str] = {
     # --- что произошло ---
     #
-    # В выгрузке это ключ payload под именем type, в canonical —
-    # колонка event_type. Поле смысловое и идёт в fields первым.
+    # Поле смысловое и идёт в fields первым.
     EVENT_TYPE_FIELD: "тип события",
     # --- деньги ---
     "amount": "сумма операции",
@@ -438,7 +438,7 @@ def projection_registry(payload_names: Iterable[str], timezone: str | None = Non
             "client_id": "чей это факт",
             "event_time": "когда произошло",
             "source": "какая система записала",
-            "fields": "смысловые банковские значения, включая event_type",
+            "fields": "смысловые банковские значения, включая тип события",
         },
         "rules": {
             "allowlist": "в модель проходит только явно названное поле; «всё, кроме исключений» запрещено",

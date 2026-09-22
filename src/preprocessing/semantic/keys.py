@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..canonical.registry import UNITS
-from ..canonical.schema import canonical_column
 from ..projection import ENTITY_REFS, EVENT_TYPE_FIELD, SEMANTIC_PAYLOAD_FIELDS
 
 
@@ -37,7 +36,7 @@ from ..projection import ENTITY_REFS, EVENT_TYPE_FIELD, SEMANTIC_PAYLOAD_FIELDS
 # ============================================================
 
 
-KEYS_VERSION = "5.0.0"
+KEYS_VERSION = "6.0.0"
 
 # Вид значения. Их ровно три. Служебные поля сюда не попадают
 # вовсе: их отсеяла модельная проекция.
@@ -99,9 +98,8 @@ def _k(key: str, kind: str, description: str, temporal: str | None = None) -> Se
 DIRECT_KEYS: dict[str, SemanticKey] = {
     # --- что произошло ---
     #
-    # В выгрузке это ключ payload type, в canonical — колонка
-    # event_type. Отдельной колонки конверта у типа больше нет,
-    # поэтому и ключ здесь, вместе с остальными полями payload.
+    # Физическое поле называется type, смысл — event_type:
+    # отдельной колонки конверта у типа события больше нет.
     EVENT_TYPE_FIELD: _k("event_type", CATEGORICAL, "что произошло"),
     # --- деньги операции ---
     "currency": _k("currency", CATEGORICAL, "валюта счёта операции"),
@@ -356,11 +354,11 @@ TIMING_KEYS: dict[str, SemanticKey] = {
     ),
     "since_same_type_hours": SemanticKey(
         "since_same_type_hours", NUMERIC, "часов с прошлого события того же типа", unit="hours",
-        derived_from=("event_time", "event_type"),
+        derived_from=("event_time", "type"),
     ),
     "since_last_income_hours": SemanticKey(
         "since_last_income_hours", NUMERIC, "часов с последнего видимого поступления дохода", unit="hours",
-        derived_from=("event_time", "event_type"),
+        derived_from=("event_time", "type"),
     ),
     "age_of_history_days": SemanticKey(
         "age_of_history_days", NUMERIC, "дней от начала наблюдаемой истории клиента", unit="days",
@@ -407,7 +405,7 @@ DERIVED_KEYS: dict[str, SemanticKey] = {
     "amount_to_client_average": SemanticKey(
         "amount_to_client_average", NUMERIC, "во сколько раз сумма отличается от среднего по прошлым "
         "видимым операциям того же типа", unit="ratio",
-        derived_from=("transaction_amount", "event_type"),
+        derived_from=("transaction_amount", "type"),
     ),
 }
 
@@ -532,7 +530,7 @@ def validate_keys(catalogue: dict) -> None:
 
         for item in fields:
 
-            name = canonical_column(item["name"] if isinstance(item, dict) else item.name)
+            name = item["name"] if isinstance(item, dict) else item.name
 
             if name not in SEMANTIC_PAYLOAD_FIELDS or name in DYNAMIC_FIELDS:
                 continue
@@ -594,11 +592,7 @@ def keys_registry(catalogue: dict) -> dict:
 
         for item in fields:
 
-            # Имя поля так, как оно записано в выгрузке, и оно же
-            # именем колонки canonical: смысл ищется по колонке,
-            # а трассировка ведёт к физическому полю payload.
-            raw_name = item["name"] if isinstance(item, dict) else item.name
-            name = canonical_column(raw_name)
+            name = item["name"] if isinstance(item, dict) else item.name
 
             if name not in SEMANTIC_PAYLOAD_FIELDS or name in DYNAMIC_FIELDS:
                 continue
@@ -606,7 +600,7 @@ def keys_registry(catalogue: dict) -> dict:
             key = key_for(name, source)
 
             row = rows.setdefault(key.key, {**key.as_dict(), "physical_fields": []})
-            row["physical_fields"].append(f"{event_type}.{raw_name}")
+            row["physical_fields"].append(f"{event_type}.{name}")
 
     for key in REFERENCE_KEYS.values():
         rows.setdefault(key.key, {**key.as_dict(), "physical_fields": ["derived:local_ref"]})
