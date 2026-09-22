@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pyarrow as pa
 
-from ..rawdata import COVERAGE_SCHEMA, DTYPE_MAP, ENVELOPE_SCHEMA, RawManifest
+from ..rawdata import DTYPE_MAP, ENVELOPE_SCHEMA, RawManifest
 
 
 # ============================================================
@@ -24,7 +24,7 @@ from ..rawdata import COVERAGE_SCHEMA, DTYPE_MAP, ENVELOPE_SCHEMA, RawManifest
 # ============================================================
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 9
 
 TS = pa.timestamp("us")
 
@@ -58,10 +58,10 @@ DERIVED_COLUMNS: tuple[tuple[str, pa.DataType, str, str], ...] = (
         "before_window",
         pa.bool_(),
         "bool",
-        "событие произошло раньше history_start выгрузки: по контракту таких строк нет, "
+        "событие произошло раньше period_start выгрузки: по контракту таких строк нет, "
         "и колонка это проверка, а не описание",
     ),
-    ("at_or_after_extract", pa.bool_(), "bool", "событие произошло на границе extract_time или позже"),
+    ("at_or_after_extract", pa.bool_(), "bool", "событие произошло на границе period_end или позже"),
     ("ambiguous_local_time", pa.bool_(), "bool", "местное время попадает в объявленный неоднозначный интервал"),
     (
         "balance_chain_gap",
@@ -139,26 +139,6 @@ def profile_schema() -> pa.Schema:
 
     fields += [
         ("client_idx", pa.int64()),
-        ("raw_file", pa.string()),
-        ("raw_row_group", pa.int32()),
-        ("raw_row", pa.int64()),
-    ]
-
-    return pa.schema(fields)
-
-
-def coverage_schema() -> pa.Schema:
-
-    fields = [(field.name, field.type) for field in COVERAGE_SCHEMA]
-
-    fields += [
-        ("client_idx", pa.int64()),
-        # Форма opening_state зависит от источника: у витрины
-        # договоров это число контрактов, у кредитов остаток долга,
-        # у транзакций остатки счетов. Карта хранит все ключи, не
-        # выбирая заранее, какие из них важны.
-        ("opening_state_values", pa.map_(pa.string(), pa.int64())),
-        ("opening_state_status", pa.string()),
         ("raw_file", pa.string()),
         ("raw_row_group", pa.int32()),
         ("raw_row", pa.int64()),
@@ -272,7 +252,6 @@ __all__ = [
     "REPEATS_SCHEMA",
     "SCHEMA_VERSION",
     "TRANSFERS_SCHEMA",
-    "coverage_schema",
     "events_schema",
     "payload_columns",
     "profile_schema",

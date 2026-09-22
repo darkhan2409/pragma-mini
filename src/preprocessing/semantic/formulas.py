@@ -25,7 +25,7 @@ from datetime import datetime
 # ============================================================
 
 
-FORMULAS_VERSION = "1.2.0"
+FORMULAS_VERSION = "1.3.0"
 
 REASON_NO_INCOME = "income_unknown"
 REASON_NO_LIMIT = "limit_unknown"
@@ -36,9 +36,11 @@ REASON_NO_BALANCE = "balance_unknown"
 REASON_NO_HISTORY = "no_visible_past"
 REASON_ZERO = "zero_denominator"
 
-# Семейство продуктов, у которого amount_or_limit это КРЕДИТНЫЙ
-# ЛИМИТ. У вклада то же поле означает сумму размещения.
-CREDIT_LIMIT_FAMILY = "credit_card"
+# Кредитный лимит это лимит КАРТЫ: событие, назначившее условия,
+# называет и карту. У вклада и кредита то же поле означает сумму
+# размещения или тело долга, и карты рядом с ним нет.
+# Семейство продукта событие больше не несёт, и догадываться о
+# нём по идентификатору продукта здесь нечего.
 
 
 @dataclass(frozen=True)
@@ -133,7 +135,7 @@ def amount_ratios(row: dict, profile: dict | None, limits: dict[str, dict]) -> l
 
     if known is None:
         out.append(Derived("amount_to_limit", None, REASON_NO_LIMIT, entity_sources))
-    elif known.get("product_family") != CREDIT_LIMIT_FAMILY:
+    elif not known.get("on_card"):
         out.append(Derived("amount_to_limit", None, REASON_NO_CREDIT_LIMIT, entity_sources))
     else:
         out.append(
@@ -207,26 +209,14 @@ def note_limit(limits: dict[str, dict], row: dict) -> None:
     if value is None:
         return
 
-    family = row.get("product_family")
+    on_card = row.get("card_ref") is not None
 
     for column in ("contract_ref", "card_ref", "account_ref"):
 
         ref = row.get(column)
 
         if ref is not None:
-            limits[ref] = {"value": float(value), "product_family": family}
-
-
-def merchant_provenance(ref: str | None) -> tuple[dict, ...]:
-    """
-    Происхождение расшифровки точки: справочник и локальная
-    ссылка. Сырой идентификатор наружу не выходит.
-    """
-
-    if ref is None:
-        return ()
-
-    return ({"kind": "catalog", "table": "merchants", "via": "outlet_ref", "ref": ref},)
+            limits[ref] = {"value": float(value), "on_card": on_card}
 
 
 def income_moments(rows: list[dict], income_types: frozenset[str]) -> list[datetime]:
@@ -244,6 +234,5 @@ __all__ = [
     "amount_ratios",
     "deviation_from_past",
     "income_moments",
-    "merchant_provenance",
     "note_limit",
 ]

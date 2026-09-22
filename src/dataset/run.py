@@ -139,7 +139,6 @@ def run_contract(args) -> int:
         "inputs": inputs.as_dict(),
         "config": config.as_dict(),
         "identity": inputs.identity(),
-        "sources": list(inputs.sources()),
         "channels": {
             "model": list(MODEL_COLUMNS),
             "masker": list(MASKER_COLUMNS),

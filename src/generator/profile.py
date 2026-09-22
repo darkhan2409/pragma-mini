@@ -32,7 +32,7 @@ PROFILE_FIELD_TYPES: dict[str, pa.DataType] = {
     "income_type": pa.string(),
     "declared_income": pa.int64(),
     "industry": pa.string(),
-    "salary_day": pa.int32(),
+    "income_day": pa.int32(),
     "relationship_months": pa.int32(),
     "contracts_count": pa.int32(),
     "active_contracts": pa.int32(),

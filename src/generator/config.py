@@ -21,11 +21,19 @@ REFERENCE_DIR = BASE_DIR / "reference"
 
 PRODUCT_TIMELINE_PATH = REFERENCE_DIR / "home_product_timeline.json"
 
-# Контракт v7: снимок остатка больше не денежная операция,
-# пустых ключей в payload нет, покрытие называет дни сбоев.
-# Выгрузка v6 под эти правила не подходит и читаться не должна.
-GENERATOR_VERSION = "5.1"
-SCHEMA_VERSION = 7
+# Справочник реальных мерчантов (2ГИС и OpenStreetMap). Тоже
+# ВХОД генератора: названия точек берутся отсюда, а не
+# выдумываются по слогам. MCC в справочнике нет намеренно —
+# его даёт внутренняя категория генератора.
+MERCHANT_REFERENCE_PATH = REFERENCE_DIR / "merchants_2gis.json"
+
+# Контракт v10: выгрузка это ДВЕ таблицы, events.parquet и
+# profile.parquet. Каталогов рядом с выгрузкой больше нет:
+# справочники мерчантов, продуктов и географии остались входом
+# генератора, а в событие попадают только поля выбранного
+# объекта. Выгрузка v9 под эти правила не подходит.
+GENERATOR_VERSION = "8.0"
+SCHEMA_VERSION = 10
 
 SEED = 42
 
@@ -67,9 +75,9 @@ REGISTRY_START = datetime(2018, 1, 1)
 SOURCE_LAUNCH: dict[str, datetime | None] = {
     "profile": None,
     "applications": None,
-    # Договоры старше окна в выгрузку не попадают: их состояние
-    # описывает opening_state покрытия. Поэтому витрина договоров
-    # наблюдается с начала окна, как и остальные.
+    # Договоры старше окна в выгрузку не попадают, поэтому
+    # витрина договоров наблюдается с начала окна, как и
+    # остальные.
     "product_events": None,
     "loans": None,
     "transactions": None,
@@ -260,8 +268,9 @@ EVENT_TYPE_PRIORITY: dict[str, int] = {
 # ============================================================
 #
 # Контракт данных: для каждого типа события перечислены поля,
-# их тип, допустимость null, уровень и смысл. Каталог уезжает
-# в манифест и заменяет собой отдельные схемы таблиц.
+# их тип, допустимость null, уровень и смысл. Каталог статичен
+# и живёт здесь: и генератор, и препроцессинг читают его из
+# кода, а не из копии в манифесте каждой выгрузки.
 # ============================================================
 
 LEVEL_CLIENT = "client"
@@ -314,24 +323,27 @@ MONEY_FIELDS: tuple[FieldSpec, ...] = (
     _f("session_id", "str", True, LEVEL_SESSION, "сессия приложения, если операция сделана в нём"),
     _f("accrual_period", "str", True, LEVEL_CONTRACT, "период начисления YYYY-MM для периодических сумм"),
     _f("reason", "str", True, LEVEL_OPERATION, "основание операции"),
+    # Точка описывается шестью полями и только ими: справочник
+    # мерчантов в событие не копируется. Сектор, подкатегория,
+    # район, часы и ценовой сегмент остаются внутри генератора.
     _f("merchant_id", "str", True, LEVEL_OPERATION, "сеть или поставщик услуг"),
-    _f("outlet_id", "str", True, LEVEL_OPERATION, "торговая точка или онлайн-витрина"),
     _f("merchant_name", "str", True, LEVEL_OPERATION, "имя в терминальной строке"),
-    _f("mcc", "str", True, LEVEL_OPERATION, "код категории точки"),
-    _f("merchant_city", "str", True, LEVEL_OPERATION, "город точки"),
+    _f("merchant_category", "str", True, LEVEL_OPERATION, "категория точки"),
+    _f("merchant_city", "str", True, LEVEL_OPERATION, "город операции"),
     _f("merchant_country", "str", True, LEVEL_OPERATION, "страна точки"),
+    _f("mcc", "str", True, LEVEL_OPERATION, "код категории точки"),
     _f("is_online", "bool", True, LEVEL_OPERATION, "операция без присутствия карты"),
     _f("is_subscription", "bool", True, LEVEL_OPERATION, "регулярное списание подписки"),
     _f("counterparty", "str", True, LEVEL_OPERATION, "устойчивое маскированное имя контрагента"),
     _f("balance_after", "int", True, LEVEL_CONTRACT, "остаток счёта после проводки"),
 )
 
+# Продукт назван идентификатором каталога и договором, и только
+# ими. Код, версия, тариф, семейство и название — это строка
+# справочника продуктов: копировать её в каждое событие незачем,
+# а product_name и product_type вдобавок повторяют product_id.
 PRODUCT_FIELDS: tuple[FieldSpec, ...] = (
     _f("product_id", "str", False, LEVEL_PRODUCT, "продукт каталога"),
-    _f("product_code", "str", False, LEVEL_PRODUCT, "код продукта"),
-    _f("product_version", "int", False, LEVEL_PRODUCT, "версия условий на момент договора"),
-    _f("tariff_version", "int", False, LEVEL_PRODUCT, "версия тарифа на момент договора"),
-    _f("product_family", "str", False, LEVEL_PRODUCT, "семейство продукта"),
     _f("contract_id", "str", True, LEVEL_CONTRACT, "договор"),
     _f("account_id", "str", True, LEVEL_CONTRACT, "счёт договора"),
     _f("card_id", "str", True, LEVEL_CONTRACT, "карта договора"),
@@ -339,10 +351,17 @@ PRODUCT_FIELDS: tuple[FieldSpec, ...] = (
     _f("application_id", "str", True, LEVEL_OPERATION, "заявка, по которой открыт договор"),
     _f("previous_product_id", "str", True, LEVEL_PRODUCT, "продукт, с которого перешёл клиент"),
     _f("migration_reason", "str", True, LEVEL_PRODUCT, "причина перехода"),
+    _f("reason", "str", True, LEVEL_CONTRACT, "основание события"),
+)
+
+# Условия договора записываются только там, где банк их назначил
+# или изменил: при открытии и при смене условий. В остальных
+# продуктовых событиях сумма, срок и ставка не повторяются —
+# действующие условия задаёт последнее такое событие.
+PRODUCT_TERMS_FIELDS: tuple[FieldSpec, ...] = PRODUCT_FIELDS + (
     _f("amount_or_limit", "int", True, LEVEL_CONTRACT, "сумма договора или лимит"),
     _f("term", "int", True, LEVEL_CONTRACT, "срок договора в месяцах"),
     _f("rate", "float", True, LEVEL_CONTRACT, "номинальная ставка"),
-    _f("reason", "str", True, LEVEL_CONTRACT, "основание события"),
 )
 
 LOAN_FIELDS: tuple[FieldSpec, ...] = (
@@ -360,8 +379,6 @@ LOAN_FIELDS: tuple[FieldSpec, ...] = (
 APPLICATION_FIELDS: tuple[FieldSpec, ...] = (
     _f("application_id", "str", False, LEVEL_OPERATION, "заявка"),
     _f("product_id", "str", False, LEVEL_PRODUCT, "запрошенный продукт"),
-    _f("product_code", "str", False, LEVEL_PRODUCT, "код продукта"),
-    _f("product_version", "int", False, LEVEL_PRODUCT, "версия условий на момент заявки"),
     _f("offer_id", "str", True, LEVEL_COMMUNICATION, "предложение, из которого выросла заявка"),
     _f("channel", "str", False, LEVEL_OPERATION, "канал подачи"),
     _f("requested_amount", "int", True, LEVEL_OPERATION, "запрошенная сумма"),
@@ -412,13 +429,20 @@ _spec(
 _spec("application_submitted", "applications", APPLICATION_FIELDS, "клиент подал заявку")
 _spec("application_decision", "applications", APPLICATION_FIELDS, "банк принял решение по заявке")
 
-for _product_event, _text in (
+# Открытие и смена условий: сумма, срок и ставка записываются.
+for _terms_event, _text in (
     ("account_opened", "открыт счёт"),
     ("product_opened", "открыт договор по продукту"),
     ("contract_terms_changed", "изменены условия действующего договора"),
     ("product_repriced", "изменён тариф действующего договора"),
     ("product_renewed", "договор пролонгирован на новых условиях"),
     ("product_migrated", "клиент переведён на другой продукт"),
+):
+    _spec(_terms_event, "product_events", PRODUCT_TERMS_FIELDS, _text)
+
+# Остальные продуктовые события условий не назначают: они
+# называют договор и продукт.
+for _product_event, _text in (
     ("product_closed", "договор закрыт"),
     ("card_activated", "карта активирована"),
     ("card_blocked", "карта заблокирована"),
@@ -598,7 +622,8 @@ PAYLOAD_REQUIRED: dict[str, frozenset[str]] = {
 
 def key_catalogue() -> dict:
     """
-    Каталог ключей payload для манифеста.
+    Каталог ключей payload: тип события -> источник, описание
+    и поля.
     """
 
     return {
@@ -613,6 +638,26 @@ def key_catalogue() -> dict:
 
 assert set(EVENT_SPECS) == set(EVENT_TYPES), "каталог ключей и EVENT_TYPES разошлись"
 assert set(EVENT_TYPE_SOURCE.values()) <= set(SOURCES), "источник события вне SOURCES"
+
+
+# ============================================================
+# СМЕНА СХЕМЫ В СЕРЕДИНЕ ИСТОРИИ
+# ============================================================
+#
+# Поле начинает собираться с определённой даты: до неё оно
+# пусто по известной причине, а не по неизвестной. Таблица
+# статична, как и каталог ключей: генератор её применяет,
+# препроцессинг по ней объясняет пустые ячейки.
+# ============================================================
+
+SCHEMA_CHANGES: tuple[dict, ...] = (
+    {"source": "app_screens", "field": "product_id", "from": "2025-06-01",
+     "reason": "not_collected"},
+    {"source": "app_operations", "field": "device_new", "from": "2025-03-01",
+     "reason": "not_collected"},
+    {"source": "banners", "field": "campaign_code", "from": "2025-01-15",
+     "reason": "not_collected"},
+)
 
 
 # ============================================================
@@ -682,7 +727,7 @@ PROFILE_FIELDS = (
     "income_type",
     "declared_income",
     "industry",
-    "salary_day",
+    "income_day",
     "relationship_months",
     "contracts_count",
     "active_contracts",
@@ -736,7 +781,7 @@ DATASETS: dict[str, DatasetGroup] = {
         clients=1,
         history_start=datetime(2024, 1, 1),
         history_end=datetime(2026, 1, 1),
-        seed=101,
+        seed=44,
     ),
     "val": DatasetGroup(
         clients=10,

@@ -418,8 +418,8 @@ def find_repeated_ids(batch: pa.Table) -> DuplicateVerdict:
 # запись до выгрузки.
 #
 # Это признак КАЧЕСТВА НАБЛЮДЕНИЯ, а не ошибка арифметики, и
-# считается он по самой выгрузке. Скрытая истина сюда не
-# заглядывает: canonical её не читает вовсе.
+# считается он по самой выгрузке: ничего, кроме неё, у
+# canonical нет.
 #
 # Строки одного счёта с одинаковым event_time считаются группой:
 # порядок внутри секунды в ленте задаёт приоритет типа события,
@@ -566,7 +566,7 @@ def build_batch(
     event_id = np.asarray(batch.column("event_id").to_pylist(), dtype=object)
 
     # Причинный порядок внутри одной секунды задаёт приоритет типа
-    # события из манифеста выгрузки: договор открыт, потом график,
+    # события из контракта: договор открыт, потом график,
     # потом выдача. Приоритет в данные не пишется и токеном не
     # становится; неизвестный тип уходит в конец секунды.
     priority_of = manifest.event_type_priority
@@ -622,11 +622,11 @@ def build_batch(
 
     # --- наблюдаемость ---
 
-    history_start = np.datetime64(manifest.history_start, "us")
-    extract_time = np.datetime64(manifest.extract_time, "us")
+    period_start = np.datetime64(manifest.period_start, "us")
+    period_end = np.datetime64(manifest.period_end, "us")
 
-    before_window = event_time < history_start
-    after_extract = event_time >= extract_time
+    before_window = event_time < period_start
+    after_extract = event_time >= period_end
 
     # --- неоднозначное местное время ---
 

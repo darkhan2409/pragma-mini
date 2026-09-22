@@ -67,7 +67,7 @@ def month_starts(start: datetime, end: datetime) -> list[datetime]:
     return out
 
 
-def choose_cutoffs(window_start: datetime, final_cutoff: datetime, extract_time: datetime, count: int) -> list[datetime]:
+def choose_cutoffs(window_start: datetime, final_cutoff: datetime, period_end: datetime, count: int) -> list[datetime]:
     """
     Срезы для отчёта: конечный cutoff группы плюс равномерно
     разреженные более ранние начала месяцев.
@@ -76,7 +76,7 @@ def choose_cutoffs(window_start: datetime, final_cutoff: datetime, extract_time:
     точки, на которых проверяются правила чтения.
     """
 
-    limit = min(final_cutoff, extract_time)
+    limit = min(final_cutoff, period_end)
 
     candidates = [moment for moment in month_starts(window_start, limit) if moment <= limit]
 
@@ -186,7 +186,6 @@ def temporal_report(
     cutoffs = sorted(cutoffs)
 
     counts: Counter = Counter()
-    coverage_states: Counter = Counter()
     limitations: Counter = Counter()
     problems: list[dict] = []
 
@@ -225,9 +224,6 @@ def temporal_report(
             for key, value in history.counts.items():
                 counts[key] += value
 
-            for item in history.coverage:
-                coverage_states[item.state] += 1
-
             for item in history.entities:
                 entity_states[f"{item.kind}:{item.state}"] += 1
 
@@ -265,7 +261,6 @@ def temporal_report(
         "problem_count": len(problems),
         "rows": dict(sorted(counts.items())),
         "per_cutoff": per_cutoff,
-        "coverage_states": dict(sorted(coverage_states.items())),
         "entity_states": dict(sorted(entity_states.items())),
         "transfers": {
             "counterpart_visible": transfers_visible,
@@ -282,7 +277,6 @@ def temporal_report(
             "rows": "event_id приходит в выгрузку один раз; запись сразу окончательна",
             "order": "бизнес-порядок по времени события и приоритету типа",
             "profile": "одна итоговая строка на клиента; версий и границ действия нет",
-            "coverage": "состояние только из датированных полей; недатированные причины остаются вне состояния",
             "transitions": (
                 "переход состояния действует с момента, которым записан: отдельного "
                 "времени вступления в силу у записи нет. Объявленное заранее изменение "
@@ -364,29 +358,10 @@ def render_history_md(history: ClientHistory, tail: int = 15) -> str:
                 ["наблюдение началось", _fmt(relationship.observed_start)],
                 ["наблюдается дней", _fmt(relationship.observed_days)],
                 ["история неполна", _fmt(relationship.history_incomplete)],
-                ["закрыты", _fmt(relationship.closed_at)],
             ],
             ["показатель", "значение"],
         )
     )
-
-    out.append("\n## Источники на эту дату\n")
-    out.append(
-        _md_table(
-            [
-                [
-                    item.source,
-                    item.state,
-                    _fmt(item.first_available_at),
-                    _fmt(item.first_seen),
-                    _fmt(item.last_available_at),
-                ]
-                for item in history.coverage
-            ],
-            ["источник", "состояние", "запуск источника", "клиент замечен", "объявленный конец"],
-        )
-    )
-
     if history.entities:
 
         out.append("\n## Счета, карты, договоры, заявки\n")
@@ -424,19 +399,6 @@ def render_history_md(history: ClientHistory, tail: int = 15) -> str:
                     for item in history.transfers[-10:]
                 ],
                 ["перевод", "сторона", "сумма", "когда", "встречная сторона", "контрагент"],
-            )
-        )
-
-    if history.products:
-
-        out.append("\n## Продукты по справочнику на эту дату\n")
-        out.append(
-            _md_table(
-                [
-                    [key, item.get("state"), _fmt(item.get("product_code")), _fmt(item.get("status"))]
-                    for key, item in list(history.products.items())[:12]
-                ],
-                ["продукт и версия", "состояние справочника", "код", "статус продукта"],
             )
         )
 
@@ -505,9 +467,6 @@ def render_temporal_md(report: dict) -> str:
 
     out.append("\n## Отброшено при чтении\n")
     out.append(_md_table([[name, value] for name, value in report["rows"].items()], ["причина", "строк"]))
-
-    out.append("\n## Состояния источников\n")
-    out.append(_md_table([[name, value] for name, value in report["coverage_states"].items()], ["состояние", "случаев"]))
 
     out.append("\n## Переводы\n")
     out.append(

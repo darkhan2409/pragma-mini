@@ -253,7 +253,7 @@ def transform_group(
     usable = []
 
     for cutoff in cutoffs:
-        if cutoff > corpus.extract_time:
+        if cutoff > corpus.period_end:
             skipped.append(
                 {
                     "cutoff": cutoff.isoformat(),

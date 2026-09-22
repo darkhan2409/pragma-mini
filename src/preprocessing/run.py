@@ -16,7 +16,7 @@ from .manifest import (
     update_manifest,
 )
 from .manifest import MANIFEST_FILE
-from .rawdata import MANIFEST_NAME, TRUTH_PREFIX
+from .rawdata import MANIFEST_NAME
 from .settings import GROUPS, PreprocessingConfig, normalize_group, processed_dir
 
 
@@ -126,8 +126,7 @@ def dataset_name(args) -> str:
 
 def raw_inputs(raw_dir: Path) -> dict[str, str]:
     """
-    sha256 фактических файлов RAW: манифест и все parquet-таблицы,
-    кроме truth/*.
+    sha256 фактических файлов RAW: манифест и все parquet-таблицы.
 
     Считается по содержимому на диске: именно это отличает
     «данные те же» от «манифест говорит, что те же». Отчёты и
@@ -150,9 +149,6 @@ def raw_inputs(raw_dir: Path) -> dict[str, str]:
     for path in sorted(raw_dir.rglob("*.parquet")):
 
         name = path.relative_to(raw_dir).as_posix()
-
-        if name.startswith(TRUTH_PREFIX):
-            continue
 
         inputs[name] = sha256_file(path)
 
@@ -508,31 +504,8 @@ def canonical_source_gate(out_root: Path, group: str, raw_dir: Path) -> tuple[di
     return entry, None
 
 
-def catalog_inputs(raw_dir: Path | None, names: tuple[str, ...]) -> dict[str, str]:
-    """
-    sha256 справочников, которыми этап расшифровывает данные.
 
-    Каталог продуктов и точек меняет РЕЗУЛЬТАТ: он даёт названия
-    и семейства. Не входя в отпечаток, подменённый справочник
-    оставлял бы этап пропущенным, а отчёт — от прежнего каталога.
-    """
-
-    inputs: dict[str, str] = {}
-
-    for name in names:
-
-        if raw_dir is None:
-            inputs[f"catalog:{name}"] = "справочника нет"
-            continue
-
-        path = Path(raw_dir) / "catalog" / name
-
-        inputs[f"catalog:{name}"] = sha256_file(path) if path.exists() else "справочника нет"
-
-    return inputs
-
-
-def resolve_cutoffs(args, config: PreprocessingConfig, group: str | None, extract_time) -> list:
+def resolve_cutoffs(args, config: PreprocessingConfig, group: str | None, period_end) -> list:
 
     from datetime import datetime
 
@@ -546,14 +519,12 @@ def resolve_cutoffs(args, config: PreprocessingConfig, group: str | None, extrac
     return choose_cutoffs(
         window.history_start,
         window.final_cutoff,
-        extract_time,
+        period_end,
         config.history_report_cutoffs,
     )
 
 
 def run_history(args) -> int:
-
-    import pyarrow.parquet as pq
 
     from .canonical.build import STAGE as CANONICAL_STAGE
     from .history import STAGE, STAGE_VERSION, CanonicalStore, HistoryError, history_as_of
@@ -580,22 +551,14 @@ def run_history(args) -> int:
 
     canonical_dir = out_root / CANONICAL_STAGE / (group or "raw")
 
-    products = None
+    store = CanonicalStore(canonical_dir)
 
-    if raw_dir is not None:
-        catalogue = raw_dir / "catalog" / "products.parquet"
-        if catalogue.exists():
-            products = pq.read_table(catalogue)
-
-    store = CanonicalStore(canonical_dir, products=products)
-
-    cutoffs = resolve_cutoffs(args, config, group, store.extract_time)
+    cutoffs = resolve_cutoffs(args, config, group, store.period_end)
 
     marker = load_fingerprint(fingerprint_path(out_root, CANONICAL_STAGE, group))
 
     inputs = dict(marker.get("outputs", {}))
     inputs["stage:canonical"] = canonical["fingerprint"]
-    inputs.update(catalog_inputs(raw_dir, ("products.parquet",)))
 
     section = dict(config.section(STAGE))
     section["cutoffs"] = [moment.isoformat() for moment in cutoffs]
@@ -859,8 +822,6 @@ def run_semantic(args) -> int:
         "code:history": HISTORY_VERSION,
     }
 
-    inputs.update(catalog_inputs(raw_dir, ("products.parquet", "merchants.parquet")))
-
     section = dict(config.section(STAGE))
     section["cutoff"] = cutoff.isoformat()
 
@@ -894,7 +855,6 @@ def run_semantic(args) -> int:
             group=group,
             cutoff=cutoff,
             clients=[args.client] if single else None,
-            raw_dir=raw_dir,
         )
     except SemanticError as error:
         print(f"[{STAGE}] группа {group or '—'}: {error}")

@@ -37,7 +37,6 @@ from .storage import (
     publish,
     write_manifest,
 )
-from .targets import COVERAGE_STATES
 from .version import FORMAT_VERSION, IMPLEMENTATION_VERSION, SCHEMA_VERSION
 
 
@@ -244,7 +243,6 @@ def build_dataset(inputs: DatasetInputs, config: DatasetConfig, root: Path,
 
     artifacts = inputs.artifacts
     limit = inputs.tokenizer_config.max_pieces_per_value
-    sources = inputs.sources()
     policy = config.context
 
     fit_group = artifacts.manifest["group"]
@@ -283,7 +281,6 @@ def build_dataset(inputs: DatasetInputs, config: DatasetConfig, root: Path,
                 client_id=client_id,
                 cutoff=cutoff,
                 weight=entry.weight,
-                sources=sources,
                 policy=policy,
                 limit=limit,
             )
@@ -325,7 +322,7 @@ def build_dataset(inputs: DatasetInputs, config: DatasetConfig, root: Path,
 
     # --- отчёт ---
 
-    report = _report(inputs, config, dataset_id, counters, shards, sources, limitations)
+    report = _report(inputs, config, dataset_id, counters, shards, limitations)
 
     path = directory / REPORT_JSON_FILE
     write_json(path, report)
@@ -364,7 +361,7 @@ def build_dataset(inputs: DatasetInputs, config: DatasetConfig, root: Path,
 
 
 def _one(inputs: DatasetInputs, group: str, client_id: str, cutoff: datetime,
-         weight: float, sources: tuple[str, ...], policy, limit: int) -> tuple[Sample, int]:
+         weight: float, policy, limit: int) -> tuple[Sample, int]:
     """
     Один пример: история на дату, её причины, кодирование, отбор.
     """
@@ -384,7 +381,6 @@ def _one(inputs: DatasetInputs, group: str, client_id: str, cutoff: datetime,
             group=group,
             window=entry.window,
             weight=weight,
-            sources=sources,
             policy=policy,
         )
 
@@ -520,7 +516,7 @@ def _batch_view(sample: Sample) -> dict:
 
 def _report(inputs: DatasetInputs, config: DatasetConfig, dataset_id: str,
             counters: dict[str, Counters], shards: dict[str, dict],
-            sources: tuple[str, ...], limitations: set[str]) -> dict:
+            limitations: set[str]) -> dict:
 
     by_group = {group: counter.as_dict() for group, counter in sorted(counters.items())}
 
@@ -566,8 +562,6 @@ def _report(inputs: DatasetInputs, config: DatasetConfig, dataset_id: str,
         "config": config.as_dict(),
         "counts": {**total, "by_group": by_group},
         "eligible_agreement": agreement,
-        "sources": list(sources),
-        "coverage_states": list(COVERAGE_STATES),
         "shards": shards,
         "limitations": sorted(limitations),
     }
@@ -591,8 +585,6 @@ def _manifest(inputs: DatasetInputs, config: DatasetConfig, dataset_id: str,
             },
         },
         "shards": shards,
-        "sources": report["sources"],
-        "coverage_states": report["coverage_states"],
         "channels": {
             "model": list(MODEL_COLUMNS),
             "masker": list(MASKER_COLUMNS),
@@ -616,7 +608,6 @@ def _manifest(inputs: DatasetInputs, config: DatasetConfig, dataset_id: str,
             "not_tracked": list(NOT_TRACKED),
             "relation_features": list(RELATION_FEATURES),
             "dependency_statuses": list(DEP_STATUSES),
-            "coverage": "состояние источника на срез, одно на пример",
             "weight": (
                 "вес примера равен единице, делённой на число срезов клиента; применять его "
                 "нужно после нормировки потерь внутри примера"

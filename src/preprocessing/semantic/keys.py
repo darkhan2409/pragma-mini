@@ -36,7 +36,7 @@ from ..projection import ENTITY_REFS, EVENT_TYPE_FIELD, SEMANTIC_PAYLOAD_FIELDS
 # ============================================================
 
 
-KEYS_VERSION = "2.0.0"
+KEYS_VERSION = "3.0.0"
 
 # Вид значения. Их ровно три. Служебные поля сюда не попадают
 # вовсе: их отсеяла модельная проекция.
@@ -108,15 +108,14 @@ DIRECT_KEYS: dict[str, SemanticKey] = {
                          temporal="месяц начисления"),
     # --- торговая точка ---
     "merchant_name": _k("merchant_name", TEXT, "название точки в терминальной строке"),
+    "merchant_category": _k("merchant_category", CATEGORICAL, "категория точки"),
     "mcc": _k("mcc", CATEGORICAL, "категория точки кодом MCC: цифры это код, а не величина"),
-    "merchant_city": _k("merchant_city", CATEGORICAL, "город точки"),
+    "merchant_city": _k("merchant_city", CATEGORICAL, "город операции"),
     "merchant_country": _k("merchant_country", CATEGORICAL, "страна точки"),
     "is_online": _k("is_online", CATEGORICAL, "операция без присутствия карты"),
     "is_subscription": _k("is_subscription", CATEGORICAL, "регулярное списание подписки"),
     "counterparty": _k("counterparty", TEXT, "устойчивое маскированное имя контрагента"),
     # --- договор и продукт ---
-    "product_family": _k("product_family", CATEGORICAL, "семейство продукта: отдельный смысл, не сам продукт"),
-    "tariff_version": _k("tariff_version", CATEGORICAL, "версия тарифа: код версии, а не величина"),
     "migration_reason": _k("migration_reason", CATEGORICAL, "причина перехода между продуктами"),
     "amount_or_limit": SemanticKey("amount_or_limit", NUMERIC, "сумма договора или кредитный лимит", unit="KZT"),
     "term": SemanticKey("term", NUMERIC, "срок договора", unit="months"),
@@ -211,14 +210,6 @@ BY_SOURCE_KEYS: dict[str, dict[str, SemanticKey]] = {
         "app_screens": _k("app_domain", CATEGORICAL, "раздел приложения"),
         "app_operations": _k("app_domain", CATEGORICAL, "раздел приложения"),
     },
-    "product_code": {
-        "product_events": _k("product_code", CATEGORICAL, "код конкретного продукта"),
-        "applications": _k("product_code", CATEGORICAL, "код запрошенного продукта"),
-    },
-    "product_version": {
-        "product_events": _k("product_version", CATEGORICAL, "версия условий продукта: код версии"),
-        "applications": _k("product_version", CATEGORICAL, "версия условий запрошенного продукта"),
-    },
 }
 
 
@@ -236,29 +227,6 @@ ENVELOPE_KEYS: dict[str, SemanticKey] = {
 REFERENCE_KEYS: dict[str, SemanticKey] = {
     name: SemanticKey(name, REFERENCE, f"локальная ссылка на наблюдаемую сущность клиента ({column})")
     for column, (name, _prefix) in ENTITY_REFS.items()
-}
-
-
-# ------------------------------------------------------------
-# РАСШИФРОВКА ТОРГОВОЙ ТОЧКИ
-# ------------------------------------------------------------
-#
-# Колонка справочника мерчантов → смысл. Событие несёт только
-# название в терминальной строке, MCC и город; сектор, категорию
-# и район даёт справочник. Идентификаторы точки в список не
-# входят: они связь, а не значение.
-# ------------------------------------------------------------
-
-MERCHANT_KEYS: dict[str, SemanticKey] = {
-    "brand": SemanticKey("merchant_brand", TEXT, "бренд сети по справочнику мерчантов"),
-    "sector": SemanticKey("merchant_sector", CATEGORICAL, "сектор точки по справочнику"),
-    "category": SemanticKey("merchant_category", CATEGORICAL, "категория точки по справочнику"),
-    "subcategory": SemanticKey("merchant_subcategory", CATEGORICAL, "подкатегория точки по справочнику"),
-    "settlement_type": SemanticKey("outlet_settlement_type", CATEGORICAL, "тип населённого пункта точки"),
-    "region": SemanticKey("outlet_region", CATEGORICAL, "регион точки"),
-    "district": SemanticKey("outlet_district", CATEGORICAL, "район точки"),
-    "channel": SemanticKey("outlet_channel", CATEGORICAL, "канал обслуживания точки"),
-    "price_segment": SemanticKey("outlet_price_segment", CATEGORICAL, "ценовой сегмент точки"),
 }
 
 
@@ -292,7 +260,7 @@ PROFILE_CATEGORICAL: dict[str, str] = {
     "pensioner": "пенсионер",
     "income_type": "вид дохода",
     "industry": "отрасль занятости",
-    "salary_day": "день зарплаты: число это код дня месяца",
+    "income_day": "день выплаты основного дохода: число это код дня месяца",
     "holds_credit_card": "держит кредитную карту",
     "holds_debit_card": "держит дебетовую карту",
     "holds_deposit": "держит вклад",
@@ -345,7 +313,7 @@ CHANGEABLE_PROFILE_FIELDS: tuple[str, ...] = (
     "declared_income",
     "income_type",
     "industry",
-    "salary_day",
+    "income_day",
     "pensioner",
     "consent_marketing",
 )
@@ -367,38 +335,6 @@ def _change_pair(base: SemanticKey) -> tuple[SemanticKey, SemanticKey]:
 PROFILE_CHANGE_KEYS: dict[str, tuple[SemanticKey, SemanticKey]] = {
     name: _change_pair(PROFILE_KEYS[name] if name in PROFILE_KEYS else PROFILE_CHANGE_EXTRA[name])
     for name in CHANGEABLE_PROFILE_FIELDS
-}
-
-
-# ------------------------------------------------------------
-# РАСШИФРОВКА ПРОДУКТА
-# ------------------------------------------------------------
-#
-# Идентификатор продукта остаётся внутри слоя, а модель узнаёт
-# название той версии условий, которую называет само событие, и
-# только если эта версия известна справочнику к cutoff.
-# ------------------------------------------------------------
-
-PRODUCT_KEYS: dict[str, SemanticKey] = {
-    "product_name": SemanticKey(
-        "product_name", TEXT, "название продукта по справочнику в версии, названной событием",
-        derived_from=("product_code", "product_version", "catalog:products"),
-    ),
-    "previous_product_name": SemanticKey(
-        "previous_product_name", TEXT, "название прежнего продукта при переходе",
-        derived_from=("catalog:products",),
-    ),
-    "previous_product_family": SemanticKey(
-        "previous_product_family", CATEGORICAL, "семейство прежнего продукта при переходе",
-        derived_from=("catalog:products",),
-    ),
-}
-
-# Откуда в справочнике берётся значение каждого продуктового ключа.
-PRODUCT_PROVENANCE: dict[str, str] = {
-    "product_name": "catalog:products.product_name",
-    "previous_product_name": "catalog:products.product_name по previous_product_id",
-    "previous_product_family": "catalog:products.product_family по previous_product_id",
 }
 
 
@@ -426,8 +362,8 @@ RELATION_KEYS: dict[str, SemanticKey] = {
         unit="days", derived_from=("event_time",),
     ),
     "same_merchant": SemanticKey(
-        "same_merchant", CATEGORICAL, "та же ли точка, что у события-причины",
-        derived_from=("outlet_ref",),
+        "same_merchant", CATEGORICAL, "та же ли сеть, что у события-причины",
+        derived_from=("merchant_ref",),
     ),
 }
 
@@ -490,8 +426,8 @@ DERIVED_KEYS: dict[str, SemanticKey] = {
     ),
     "amount_to_limit": SemanticKey(
         "amount_to_limit", NUMERIC,
-        "сумма операции к кредитному лимиту карты; у вклада и кредита это поле означает другое, "
-        "и отношение не считается",
+        "сумма операции к кредитному лимиту карты; лимитом считается amount_or_limit договора, "
+        "назначенный вместе с картой, а сумма вклада или тело кредита лимитом не считается",
         unit="ratio",
         derived_from=("transaction_amount", "amount_or_limit"),
     ),
@@ -528,11 +464,11 @@ AMBIGUOUS: tuple[tuple[tuple[str, ...], str], ...] = (
      "решение по заявке и решение антифрода не сравнимы"),
     (("fraud_resolution", "case_resolution"),
      "исход проверки мошенничества и исход обращения в поддержку это разные вещи"),
-    (("product_code", "product_family", "offer"),
-     "конкретный продукт, семейство продуктов и код предложения это три разных смысла: "
-     "предложение в баннере называет повод показа, а не сам продукт"),
     (("merchant_city", "profile_city", "profile_region"),
-     "город точки это место покупки, а город профиля это место жизни клиента"),
+     "город операции это место покупки, а город и регион профиля это место жизни клиента"),
+    (("merchant_category", "mcc"),
+     "категория точки и код MCC описывают одно и то же разными перечнями: "
+     "внутренняя категория подробнее кода"),
     (("is_online", "is_subscription", "delivered", "confirmed", "device_new"),
      "булевы значения разных фактов: истина у одного ничего не говорит об истине у другого"),
     (("amount_to_declared_income", "amount_to_limit", "amount_to_balance_after", "amount_to_client_average"),
@@ -550,9 +486,6 @@ ALLOWED_SHARING: tuple[tuple[str, tuple[str, ...], str], ...] = (
      "код одной и той же маркетинговой кампании"),
     ("app_domain", ("app_screens", "app_operations"),
      "раздел приложения, названный экраном или операцией"),
-    ("product_code", ("product_events", "applications"),
-     "код продукта из одного справочника: договор и заявка ссылаются на один каталог"),
-    ("product_version", ("product_events", "applications"), "версия условий того же продукта"),
 )
 
 
@@ -667,8 +600,6 @@ def _all_declared_keys() -> list[SemanticKey]:
         *ENVELOPE_KEYS.values(),
         *REFERENCE_KEYS.values(),
         *PROFILE_KEYS.values(),
-        *MERCHANT_KEYS.values(),
-        *PRODUCT_KEYS.values(),
         *RELATION_KEYS.values(),
         *TIMING_KEYS.values(),
         *DERIVED_KEYS.values(),
@@ -714,12 +645,6 @@ def keys_registry(catalogue: dict) -> dict:
 
     for name, key in PROFILE_KEYS.items():
         rows.setdefault(key.key, {**key.as_dict(), "physical_fields": [f"profile.{name}"]})
-
-    for column, key in MERCHANT_KEYS.items():
-        rows.setdefault(key.key, {**key.as_dict(), "physical_fields": [f"catalog:merchants.{column}"]})
-
-    for name, key in PRODUCT_KEYS.items():
-        rows.setdefault(key.key, {**key.as_dict(), "physical_fields": [PRODUCT_PROVENANCE[name]]})
 
     for field_name, (old, new) in PROFILE_CHANGE_KEYS.items():
         rows.setdefault(old.key, {**old.as_dict(), "physical_fields": [f"profile_change[{field_name}].old_value"]})
@@ -777,9 +702,7 @@ __all__ = [
     "DYNAMIC_FIELDS",
     "ENVELOPE_KEYS",
     "KEYS_VERSION",
-    "MERCHANT_KEYS",
     "NUMERIC",
-    "PRODUCT_KEYS",
     "PROFILE_CATEGORICAL",
     "PROFILE_CHANGE_KEYS",
     "PROFILE_KEYS",

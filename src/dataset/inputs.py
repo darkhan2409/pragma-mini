@@ -90,7 +90,7 @@ class GroupInputs:
             "clients": len(self.clients),
             "weight": self.weight,
             "declared_eligible_at_final_cutoff": self.declared_eligible,
-            "extract_time": self.corpus.extract_time.isoformat(),
+            "period_end": self.corpus.period_end.isoformat(),
         }
 
 
@@ -147,29 +147,6 @@ class DatasetInputs:
 
     def dataset_id(self) -> str:
         return sha256_bytes(dumps_json(self.identity()).encode("utf-8"))[:12]
-
-    # --- источники покрытия ---
-
-    def sources(self) -> tuple[str, ...]:
-        """
-        Имена источников покрытия в том порядке, в каком они лягут
-        колонкой доступности.
-
-        Порядок фиксируется здесь и записывается в манифест:
-        колонка чисел без списка имён рядом ничего не значит.
-        """
-
-        names: set[str] = set()
-
-        for group in self.groups.values():
-
-            store = group.corpus.store
-
-            for client in store.clients:
-                for row in store.coverage_rows(client["client_id"]):
-                    names.add(row["source"])
-
-        return tuple(sorted(names))
 
     def as_dict(self) -> dict:
         return {
@@ -269,7 +246,7 @@ class DatasetInputs:
 
             cutoffs = config.cutoffs_for(group, window.final_cutoff)
 
-            _check_cutoffs(group, cutoffs, window, corpus.extract_time)
+            _check_cutoffs(group, cutoffs, window, corpus.period_end)
 
             groups[group] = GroupInputs(
                 group=group,
@@ -375,7 +352,7 @@ def _resolve_raw(root: Path, group: str) -> Path:
 
 
 def _check_cutoffs(group: str, cutoffs: list[datetime], window: GroupWindow,
-                   extract_time: datetime) -> None:
+                   period_end: datetime) -> None:
     """
     Срез обязан быть внутри своей группы и внутри выгрузки.
 
@@ -386,10 +363,10 @@ def _check_cutoffs(group: str, cutoffs: list[datetime], window: GroupWindow,
 
     for cutoff in cutoffs:
 
-        if cutoff > extract_time:
+        if cutoff > period_end:
             raise InputsError(
                 f"группа {group}: срез {cutoff.isoformat()} позже границы выгрузки "
-                f"{extract_time.isoformat()}: такой истории ещё не существует"
+                f"{period_end.isoformat()}: такой истории ещё не существует"
             )
 
         if cutoff > window.final_cutoff:

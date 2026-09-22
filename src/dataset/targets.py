@@ -2,12 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from src.preprocessing.history import (
-    COVERAGE_AVAILABLE,
-    COVERAGE_ENDED,
-    COVERAGE_NOT_LAUNCHED,
-    COVERAGE_NOT_SEEN,
-)
 from src.preprocessing.semantic.time import interval_hours
 from src.preprocessing.settings import GroupWindow
 from src.preprocessing.corpus import mlm_target_eligible
@@ -38,24 +32,6 @@ from src.preprocessing.corpus import mlm_target_eligible
 # это разные утверждения.
 # ============================================================
 
-
-# Состояние источника кодируется числом, потому что едет
-# колонкой рядом с числами. Имена лежат рядом в манифесте:
-# колонка чисел без списка имён ничего не значит.
-COVERAGE_STATES: tuple[str, ...] = (
-    COVERAGE_AVAILABLE,
-    COVERAGE_NOT_LAUNCHED,
-    COVERAGE_NOT_SEEN,
-    COVERAGE_ENDED,
-    # Строки покрытия у этого клиента по этому источнику нет
-    # вовсе: это не «источник молчал», это «о нём ничего не
-    # сказано».
-    "no_row",
-)
-
-COVERAGE_CODES: dict[str, int] = {name: number for number, name in enumerate(COVERAGE_STATES)}
-
-NO_ROW = COVERAGE_CODES["no_row"]
 
 # Почему возраст истории неизвестен.
 AGE_UNKNOWN_REASON = "observed_start_unknown"
@@ -109,66 +85,9 @@ def history_age_days(relationship, cutoff: datetime) -> tuple[float | None, str 
     return float(observed), None
 
 
-def coverage_codes(coverage, sources: tuple[str, ...]) -> list[int]:
-    """
-    Состояние каждого объявленного источника на срез.
-
-    Порядок источников задан снаружи и одинаков у всех примеров
-    набора: иначе колонки соседних клиентов означали бы разное.
-    """
-
-    state_of = {item.source: item.state for item in coverage}
-
-    out: list[int] = []
-
-    for name in sources:
-
-        state = state_of.get(name)
-
-        if state is None:
-            out.append(NO_ROW)
-            continue
-
-        code = COVERAGE_CODES.get(state)
-
-        if code is None:
-            raise TargetsError(
-                f"источник {name}: состояние {state!r} этому формату неизвестно. "
-                "Состояния покрытия объявляет этап истории на дату"
-            )
-
-        out.append(code)
-
-    return out
-
-
-def coverage_details(coverage) -> list[dict]:
-    """
-    Даты и недатированные причины покрытия: служебные сведения
-    рядом с колонкой состояний.
-    """
-
-    return [
-        {
-            "source": item.source,
-            "state": item.state,
-            "first_available_at": item.first_available_at,
-            "first_seen": item.first_seen,
-            "last_available_at": item.last_available_at,
-            "reason": item.reason,
-        }
-        for item in sorted(coverage, key=lambda item: item.source)
-    ]
-
-
 __all__ = [
     "AGE_UNKNOWN_REASON",
-    "COVERAGE_CODES",
-    "COVERAGE_STATES",
-    "NO_ROW",
     "TargetsError",
-    "coverage_codes",
-    "coverage_details",
     "eligible",
     "history_age_days",
     "hours_to_cutoff",

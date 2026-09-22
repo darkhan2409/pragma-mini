@@ -14,7 +14,6 @@ import pyarrow.parquet as pq
 
 from .artifacts import _md_table
 from .rawdata import (
-    CONTENT_TABLES,
     ParsedPayload,
     RawContractError,
     RawDataset,
@@ -47,7 +46,7 @@ from .settings import GROUPS, PreprocessingConfig
 
 
 STAGE = "passport"
-STAGE_VERSION = "5.0.0"
+STAGE_VERSION = "7.0.0"
 
 # Статусы по возрастанию тяжести. Ready означает «данные пригодны
 # целиком»; всё остальное запрещает объявлять набор готовым.
@@ -68,7 +67,7 @@ STATUS_ORDER: tuple[str, ...] = (
 NOT_USABLE: frozenset[str] = frozenset({STATUS_CONTRACT_MISMATCH, STATUS_BLOCKED})
 
 # Виды нарушений контракта payload: каждое означает, что данные
-# расходятся с собственным каталогом ключей манифеста.
+# расходятся с каталогом ключей контракта.
 CONTRACT_VIOLATION_KINDS: tuple[str, ...] = (
     "missing_required",
     "type_mismatch",
@@ -214,8 +213,8 @@ def scan_events(raw: RawDataset, config: PreprocessingConfig) -> EventsScan:
     manifest = raw.manifest
     scan = EventsScan()
 
-    history_start = np.datetime64(manifest.history_start, "us")
-    extract_time = np.datetime64(manifest.extract_time, "us")
+    period_start = np.datetime64(manifest.period_start, "us")
+    period_end = np.datetime64(manifest.period_end, "us")
 
     for _, chunk in raw.iter_row_groups("events"):
 
@@ -280,7 +279,7 @@ def scan_events(raw: RawDataset, config: PreprocessingConfig) -> EventsScan:
         keyed = pc.binary_join_element_wise(chunk.column("source"), months, "|")
         scan.month_counts.update(_counter(keyed))
 
-        before = event_np < history_start
+        before = event_np < period_start
         if before.any():
             scan.before_start_by_source.update(Counter(sources[before].tolist()))
             types = np.asarray(chunk.column("event_type").to_pylist(), dtype=object)
@@ -288,7 +287,7 @@ def scan_events(raw: RawDataset, config: PreprocessingConfig) -> EventsScan:
 
         # Событие на границе выгрузки или позже: в честной выгрузке
         # таких строк быть не должно, и их число печатается.
-        after = event_np >= extract_time
+        after = event_np >= period_end
         if after.any():
             scan.after_extract_by_source.update(Counter(sources[after].tolist()))
 
@@ -351,82 +350,6 @@ def scan_profile(raw: RawDataset) -> dict[str, Any]:
     }
 
 
-def scan_coverage(raw: RawDataset) -> dict[str, Any]:
-
-    table = raw.read("source_coverage")
-
-    by_source: dict[str, dict] = {}
-
-    for source in sorted(pc.unique(table.column("source")).to_pylist()):
-
-        rows = table.filter(pc.equal(table.column("source"), source))
-
-        by_source[source] = {
-            "rows": rows.num_rows,
-            "first_available_at": sorted(
-                {value.isoformat() for value in rows.column("first_available_at").to_pylist() if value is not None}
-            ),
-            "first_seen_null": rows.column("first_seen").null_count,
-            "last_available_at_set": rows.num_rows - rows.column("last_available_at").null_count,
-            "opening_state_set": rows.num_rows - rows.column("opening_state").null_count,
-            "status": dict(sorted(_counter(rows.column("coverage_status")).items())),
-            "reason": dict(sorted(_counter(rows.column("coverage_reason")).items())),
-        }
-
-    with_opening = table.filter(pc.is_valid(table.column("opening_state")))
-
-    return {
-        "rows": table.num_rows,
-        "clients": len(pc.unique(table.column("client_id"))),
-        "status": dict(sorted(_counter(table.column("coverage_status")).items())),
-        "reason": dict(sorted(_counter(table.column("coverage_reason")).items())),
-        "clients_with_opening_state": len(pc.unique(with_opening.column("client_id"))) if with_opening.num_rows else 0,
-        "by_source": by_source,
-    }
-
-
-def scan_catalogs(raw: RawDataset) -> dict[str, Any]:
-
-    out: dict[str, Any] = {
-        "note": "справочники расшифровки: наличие продукта в каталоге не делает его известным клиенту в прошлом",
-    }
-
-    if raw.exists("products"):
-        products = raw.read("products")
-        out["products"] = {
-            "rows": products.num_rows,
-            "product_ids": len(pc.unique(products.column("product_id"))),
-            "product_codes": len(pc.unique(products.column("product_code"))),
-            "max_product_version": pc.max(products.column("product_version")).as_py(),
-            "valid_from": dict(zip(("min", "max"), _min_max(products.column("valid_from")))),
-            "status": dict(sorted(_counter(products.column("status")).items())),
-            "synthetic_rows": int(pc.sum(products.column("is_synthetic")).as_py() or 0),
-        }
-
-    if raw.exists("merchants"):
-        merchants = raw.read("merchants")
-        out["merchants"] = {
-            "rows": merchants.num_rows,
-            "merchant_ids": len(pc.unique(merchants.column("merchant_id"))),
-            "outlet_ids": len(pc.unique(merchants.column("outlet_id"))),
-            "brands": len(pc.unique(merchants.column("brand"))),
-            "mcc": len(pc.unique(merchants.column("mcc"))),
-            "settlements": len(pc.unique(merchants.column("settlement"))),
-            "online_share": round(
-                int(pc.sum(merchants.column("is_online")).as_py() or 0) / max(1, merchants.num_rows), 6
-            ),
-        }
-
-    if raw.exists("geography"):
-        geography = raw.read("geography")
-        out["geography"] = {
-            "rows": geography.num_rows,
-            "regions": len(pc.unique(geography.column("region"))),
-        }
-
-    return out
-
-
 # ============================================================
 # МЕСЯЦЫ, ГОРИЗОНТ, ИСТОЧНИКИ
 # ============================================================
@@ -463,10 +386,10 @@ def month_table(scan: EventsScan, raw: RawDataset, config: PreprocessingConfig) 
 
     manifest = raw.manifest
 
-    start = min(config.required_history_start, manifest.history_start)
-    months = month_range(start, manifest.history_end)
+    start = min(config.required_history_start, manifest.period_start)
+    months = month_range(start, manifest.period_end)
 
-    generated_from = manifest.history_start.strftime("%Y-%m")
+    generated_from = manifest.period_start.strftime("%Y-%m")
 
     table: dict[str, dict[str, Any]] = {}
     empty_generated: dict[str, list[str]] = {}
@@ -502,12 +425,12 @@ def month_table(scan: EventsScan, raw: RawDataset, config: PreprocessingConfig) 
         },
         "table": table,
         "empty_months_of_available_sources": empty_generated,
-        "before_history_start": {
+        "before_period_start": {
             "rows": sum(scan.before_start_by_source.values()),
             "by_source": dict(sorted(scan.before_start_by_source.items())),
             "by_type": dict(sorted(scan.before_start_by_type.items())),
         },
-        "event_time_at_or_after_extract": {
+        "event_time_at_or_after_period_end": {
             "rows": sum(scan.after_extract_by_source.values()),
             "by_source": dict(sorted(scan.after_extract_by_source.items())),
         },
@@ -520,12 +443,12 @@ def horizon_check(raw: RawDataset, config: PreprocessingConfig, groups: tuple[st
 
     reasons: list[str] = []
 
-    start_ok = manifest.history_start <= config.required_history_start
+    start_ok = manifest.period_start <= config.required_history_start
 
     if not start_ok:
         reasons.append(
             f"согласованный горизонт с {config.required_history_start.date()} не обеспечен: "
-            f"history_start = {manifest.history_start.date()}"
+            f"period_start = {manifest.period_start.date()}"
         )
 
     per_group: dict[str, dict] = {}
@@ -534,30 +457,25 @@ def horizon_check(raw: RawDataset, config: PreprocessingConfig, groups: tuple[st
 
         window = config.windows[group]
 
-        end_ok = manifest.history_end >= window.final_cutoff
-        extract_ok = manifest.extract_time >= window.final_cutoff
+        # period_end это и граница выгрузки, и момент, на который
+        # она сделана: другого времени у выгрузки нет.
+        end_ok = manifest.period_end >= window.final_cutoff
 
         per_group[group] = {
             "final_cutoff": window.final_cutoff.isoformat(),
-            "history_end_ok": end_ok,
-            "extract_time_ok": extract_ok,
+            "period_end_ok": end_ok,
         }
 
         if not end_ok:
             reasons.append(
-                f"{group}: history_end {manifest.history_end.date()} раньше конечного cutoff {window.final_cutoff.date()}"
-            )
-        if not extract_ok:
-            reasons.append(
-                f"{group}: extract_time {manifest.extract_time.date()} раньше конечного cutoff {window.final_cutoff.date()}"
+                f"{group}: period_end {manifest.period_end.date()} раньше конечного cutoff {window.final_cutoff.date()}"
             )
 
     return {
         "required_history_start": config.required_history_start.isoformat(),
-        "history_start": manifest.history_start.isoformat(),
-        "history_start_ok": start_ok,
-        "history_end": manifest.history_end.isoformat(),
-        "extract_time": manifest.extract_time.isoformat(),
+        "period_start": manifest.period_start.isoformat(),
+        "period_start_ok": start_ok,
+        "period_end": manifest.period_end.isoformat(),
         "groups": per_group,
         "ok": not reasons,
         "reasons": reasons,
@@ -595,7 +513,7 @@ def sources_check(raw: RawDataset, config: PreprocessingConfig) -> dict[str, Any
 
     return {
         "base": base,
-        "base_missing_in_manifest": missing_base,
+        "base_missing_in_contract": missing_base,
         "base_available_later_than_required": late_base,
         "late_connected_sources": others,
         "schema_changes": list(manifest.schema_changes),
@@ -670,10 +588,6 @@ def _file_inventory(raw: RawDataset) -> list[dict]:
     inventory: list[dict] = []
 
     for name in raw.listed_files():
-
-        if name.startswith("truth/"):
-            inventory.append({"file": name, "role": "truth: присутствует, не читается"})
-            continue
 
         path = raw.raw_dir / name
 
@@ -754,10 +668,8 @@ def build_passport(
     for name, item in checks["files"].items():
         if item["status"] == "mismatch":
             errors.append(f"sha256 файла {name} не совпадает с манифестом")
-        elif item["status"] == "missing" and not name.startswith("truth/"):
+        elif item["status"] == "missing":
             errors.append(f"файл {name} назван манифестом, но отсутствует")
-        elif item["status"] == "unlisted":
-            limitations.append(f"файл {name} не назван в манифесте")
 
     for table, item in checks["rows"].items():
         if item["status"] == "mismatch":
@@ -768,17 +680,6 @@ def build_passport(
     for table, item in checks["schemas"].items():
         if item["status"] == "mismatch":
             errors.append(f"схема {table}: " + "; ".join(item["differences"]))
-
-    if not errors:
-        checks["content"] = raw.verify_content()
-        for table, item in checks["content"].items():
-            if item["status"] == "mismatch":
-                errors.append(f"content_sha256 таблицы {table} не совпадает с манифестом")
-    else:
-        checks["content"] = {}
-
-    if raw.manifest.world_seed is None:
-        limitations.append("в манифесте нет world_seed: общий мир групп манифестом не подтверждается")
 
     report["checks"] = checks
     report["files"] = _file_inventory(raw)
@@ -802,8 +703,6 @@ def build_passport(
     report["events"] = _events_summary(scan, config)
     report["payload"] = _payload_summary(scan, raw)
     report["profile"] = scan_profile(raw)
-    report["coverage"] = scan_coverage(raw)
-    report["catalogs"] = scan_catalogs(raw)
     report["months"] = month_table(scan, raw, config)
     report["horizon"] = horizon_check(raw, config, groups)
     report["sources"] = sources_check(raw, config)
@@ -829,14 +728,14 @@ def build_passport(
 
     # --- нарушения входного контракта ---
     #
-    # Данные расходятся с каталогом ключей, который объявляет сам
-    # манифест. Это дефект выгрузки, а не ограничение наблюдения:
+    # Данные расходятся с каталогом ключей контракта. Это дефект
+    # выгрузки, а не ограничение наблюдения:
     # набор с такими строками не станет готовым и после того, как
     # горизонт станет полным. Чинится в генераторе.
 
     for event_type, rows in sorted(scan.unknown_types.items()):
         contract_violations.append(
-            f"тип события {event_type} ({rows} строк) отсутствует в каталоге ключей манифеста"
+            f"тип события {event_type} ({rows} строк) отсутствует в каталоге ключей контракта"
         )
 
     for event_type, item in sorted(report["payload"]["by_event_type"].items()):
@@ -854,13 +753,13 @@ def build_passport(
             f"{repeated['extra_rows']} лишних строк; запись обязана приходить один раз"
         )
 
-    before = report["months"]["before_history_start"]["rows"]
+    before = report["months"]["before_period_start"]["rows"]
     if before:
-        limitations.append(f"записей до history_start: {before} (реестр договоров, контекст, не история)")
+        limitations.append(f"записей до period_start: {before} (реестр договоров, контекст, не история)")
 
-    after = report["months"]["event_time_at_or_after_extract"]["rows"]
+    after = report["months"]["event_time_at_or_after_period_end"]["rows"]
     if after:
-        limitations.append(f"событий на границе extract_time или позже: {after}")
+        limitations.append(f"событий на границе period_end или позже: {after}")
 
     for source in report["sources"]["base_available_later_than_required"]:
         limitations.append(
@@ -868,8 +767,8 @@ def build_passport(
             f"позже согласованного начала"
         )
 
-    for source in report["sources"]["base_missing_in_manifest"]:
-        errors.append(f"базовый источник {source} отсутствует в manifest.sources")
+    for source in report["sources"]["base_missing_in_contract"]:
+        errors.append(f"базовый источник {source} не объявлен источником контракта")
 
     limitations.extend(report["horizon"]["reasons"])
 
@@ -933,7 +832,7 @@ def render_passport_md(report: dict) -> str:
     if report.get("contract_violations"):
         out.append("## Нарушения входного контракта (блокируют)\n")
         out.append(
-            "Данные расходятся с каталогом ключей собственного манифеста. "
+            "Данные расходятся с каталогом ключей контракта. "
             "Набор с такими строками не может быть объявлен готовым; "
             "исправление принадлежит генератору.\n"
         )
@@ -952,13 +851,10 @@ def render_passport_md(report: dict) -> str:
             _md_table(
                 [
                     ["schema_version", raw["schema_version"]],
-                    ["generator_version", raw["generator_version"]],
-                    ["seed / world_seed", f"{raw['seed']} / {raw['world_seed']}"],
-                    ["total_clients", raw["total_clients"]],
-                    ["history_start", raw["history_start"]],
-                    ["history_end", raw["history_end"]],
-                    ["extract_time", raw["extract_time"]],
-                    ["registry_start", raw["registry_start"]],
+                    ["period_start", raw["period_start"]],
+                    ["period_end", raw["period_end"]],
+                    ["events_rows", raw["events_rows"]],
+                    ["profile_rows", raw["profile_rows"]],
                 ],
                 ["ключ", "значение"],
             )
@@ -974,8 +870,6 @@ def render_passport_md(report: dict) -> str:
             rows.append(["строки", name, f"{item['status']} ({item['expected']} / {item['actual']})"])
         for name, item in sorted(checks.get("schemas", {}).items()):
             rows.append(["схема", name, item["status"]])
-        for name, item in sorted(checks.get("content", {}).items()):
-            rows.append(["содержимое", name, item["status"]])
         out.append(_md_table(rows, ["проверка", "объект", "результат"]))
 
     if report["status"] == STATUS_BLOCKED:
@@ -1060,28 +954,6 @@ def render_passport_md(report: dict) -> str:
         )
     )
 
-    coverage = report["coverage"]
-    out.append("\n## Покрытие источников\n")
-    out.append(
-        _md_table(
-            [
-                [
-                    source,
-                    item["rows"],
-                    ", ".join(item["first_available_at"]),
-                    item["first_seen_null"],
-                    item["last_available_at_set"],
-                    item["opening_state_set"],
-                    ", ".join(f"{k}={v}" for k, v in item["status"].items()),
-                    ", ".join(f"{k}={v}" for k, v in item["reason"].items()),
-                ]
-                for source, item in sorted(coverage["by_source"].items())
-            ],
-            ["источник", "строк", "first_available_at", "first_seen null", "last_available_at задан", "opening_state", "статусы", "причины"],
-        )
-    )
-    out.append(f"\nКлиентов с opening_state: {coverage['clients_with_opening_state']}.\n")
-
     months = report["months"]
     out.append("\n## Источник × месяц\n")
     out.append(
@@ -1093,9 +965,9 @@ def render_passport_md(report: dict) -> str:
     rows = [[source] + [months["table"][source][month] for month in months["months"]] for source in sorted(months["table"])]
     out.append(_md_table(rows, header))
     out.append(
-        f"\nЗаписей до history_start: {months['before_history_start']['rows']} "
-        f"({_fmt(months['before_history_start']['by_type']) if months['before_history_start']['rows'] else '—'}). "
-        f"Событий на границе extract_time или позже: {months['event_time_at_or_after_extract']['rows']}.\n"
+        f"\nЗаписей до period_start: {months['before_period_start']['rows']} "
+        f"({_fmt(months['before_period_start']['by_type']) if months['before_period_start']['rows'] else '—'}). "
+        f"Событий на границе period_end или позже: {months['event_time_at_or_after_period_end']['rows']}.\n"
     )
 
     horizon = report["horizon"]
@@ -1104,15 +976,13 @@ def render_passport_md(report: dict) -> str:
         _md_table(
             [
                 ["согласованное начало", horizon["required_history_start"]],
-                ["history_start", f"{horizon['history_start']} ({'ok' if horizon['history_start_ok'] else 'короче'})"],
-                ["history_end", horizon["history_end"]],
-                ["extract_time", horizon["extract_time"]],
+                ["period_start", f"{horizon['period_start']} ({'ok' if horizon['period_start_ok'] else 'короче'})"],
+                ["period_end", horizon["period_end"]],
             ]
             + [
                 [
                     f"группа {name}",
-                    f"конечный cutoff {item['final_cutoff']}: history_end {'ok' if item['history_end_ok'] else 'мало'}, "
-                    f"extract_time {'ok' if item['extract_time_ok'] else 'мало'}",
+                    f"конечный cutoff {item['final_cutoff']}: period_end {'ok' if item['period_end_ok'] else 'мало'}",
                 ]
                 for name, item in sorted(horizon["groups"].items())
             ],
@@ -1146,15 +1016,6 @@ def render_passport_md(report: dict) -> str:
                 ["источник", "поле", "с даты", "причина"],
             )
         )
-
-    catalogs = report["catalogs"]
-    out.append("\n## Справочники\n")
-    out.append(f"{catalogs['note']}.\n")
-    rows = []
-    for name in ("products", "merchants", "geography"):
-        if name in catalogs:
-            rows.append([name, ", ".join(f"{k}={_fmt(v)}" for k, v in catalogs[name].items())])
-    out.append(_md_table(rows, ["таблица", "сводка"]))
 
     out.append("\n## Файлы\n")
     out.append(

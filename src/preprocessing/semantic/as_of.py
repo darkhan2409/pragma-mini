@@ -2,14 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
-
-import pyarrow.parquet as pq
 
 from ..calendar import calendar_features
-from ..history import CanonicalStore, ClientHistory, history_as_of, product_key
+from ..history import CanonicalStore, ClientHistory, history_as_of
 from ..projection import ENTITY_REFS, EVENT_TYPE_FIELD, LocalRefs, model_event
-from ..settings import BASE_SOURCES
 from . import activity as activity_module
 from . import chains as chains_module
 from . import formulas as formulas_module
@@ -18,7 +14,6 @@ from .keys import (
     DYNAMIC_FIELDS,
     ENVELOPE_KEYS,
     NUMERIC,
-    PRODUCT_KEYS,
     PROFILE_KEYS,
     REFERENCE_KEYS,
     RELATION_KEYS,
@@ -26,7 +21,6 @@ from .keys import (
     key_for,
     profile_change_keys,
 )
-from .merchants import MerchantCatalog
 
 
 # ============================================================
@@ -39,10 +33,12 @@ from .merchants import MerchantCatalog
 # Слой ничего не решает заново про видимость: события, версии,
 # профиль и покрытие приходят из этапа 3, а модельную границу
 # держит проекция. Здесь к ним добавляется смысл: у значения
-# появляется ключ, у точки и продукта — расшифровка по
-# справочнику, у события-следствия — смысл связи вместо
+# появляется ключ, у события-следствия — смысл связи вместо
 # идентификатора причины, у суммы — отношение к доходу и лимиту с
 # причиной, когда знаменатель неизвестен.
+#
+# Расшифровки по справочникам здесь больше нет: точку и продукт
+# описывает само событие. Придумывать за него нечего.
 #
 # Значения остаются исходными: 12 500 это 12 500, «Europharma»
 # это текст. Ни квантилей, ни нормализации, ни корзин здесь нет.
@@ -52,7 +48,7 @@ from .merchants import MerchantCatalog
 # ============================================================
 
 
-SEMANTIC_VERSION = "2.0.0"
+SEMANTIC_VERSION = "3.0.0"
 
 
 @dataclass
@@ -122,10 +118,8 @@ class SemanticHistory:
     events: list[SemanticEvent]
     profile: dict
     profile_meta: dict
-    coverage: list
     entities: list
     relationship: object
-    products: dict
     product_ages: dict
     activity: list
     activity_summary: dict
@@ -249,48 +243,6 @@ def _typed_profile_value(key: SemanticKey, raw: object, field_name: str) -> tupl
         return None, f"значение профиля {field_name} не разобрано как число: {text!r}"
 
 
-def _product_values(row: dict, products: dict) -> tuple[dict[str, object], str | None]:
-    """
-    Расшифровка продукта по справочнику: название той версии
-    условий, которую называет само событие, и прежний продукт
-    перехода.
-
-    Идентификатор каталога наружу не выходит. Версии, неизвестной
-    справочнику к cutoff, название не придумывается.
-    """
-
-    out: dict[str, object] = {}
-
-    product_id = row.get("product_id")
-
-    if product_id:
-
-        entry = products.get(product_key(product_id, row.get("product_version"), row.get("tariff_version")))
-
-        if entry is None or entry.get("state") != "known":
-            return out, (entry or {}).get("state", "not_in_catalogue")
-
-        if entry.get("product_name") is not None:
-            out[PRODUCT_KEYS["product_name"].key] = entry["product_name"]
-
-    previous_id = row.get("previous_product_id")
-
-    if previous_id:
-
-        entry = products.get(product_key(previous_id))
-
-        if entry is None or entry.get("state") != "known":
-            return out, (entry or {}).get("state", "not_in_catalogue")
-
-        if entry.get("product_name") is not None:
-            out[PRODUCT_KEYS["previous_product_name"].key] = entry["product_name"]
-
-        if entry.get("product_family") is not None:
-            out[PRODUCT_KEYS["previous_product_family"].key] = entry["product_family"]
-
-    return out, None
-
-
 def _relation_values(relation: chains_module.Relation) -> dict[str, object]:
     """
     Смысл связи вместо идентификатора события-причины.
@@ -329,7 +281,6 @@ def semantic_as_of(
     store: CanonicalStore,
     client: str | int,
     cutoff: datetime,
-    merchants: MerchantCatalog | None = None,
 ) -> SemanticHistory:
     """
     Смысловая история клиента на дату.
@@ -339,17 +290,13 @@ def semantic_as_of(
 
     rows = history.events.to_pylist()
 
-    catalog = merchants or MerchantCatalog(None)
-
     refs = LocalRefs()
 
     limitations = list(history.limitations)
 
-    # --- значения, расшифровка точки и продукта ---
+    # --- значения ---
 
     values_per_event: list[dict[str, object]] = []
-    merchant_notes: set[str] = set()
-    product_notes: set[str] = set()
     profile_notes: set[str] = set()
 
     for row in rows:
@@ -358,27 +305,7 @@ def semantic_as_of(
 
         profile_notes.update(notes)
 
-        decoded, reason = catalog.decode(row.get("outlet_id"))
-
-        values.update(decoded)
-
-        if reason is not None and row.get("outlet_id") is not None:
-            merchant_notes.add(reason)
-
-        product, product_reason = _product_values(row, history.products)
-
-        values.update(product)
-
-        if product_reason is not None:
-            product_notes.add(product_reason)
-
         values_per_event.append(values)
-
-    for note in sorted(merchant_notes):
-        limitations.append(f"расшифровка точки недоступна: {note}")
-
-    for note in sorted(product_notes):
-        limitations.append(f"расшифровка продукта недоступна: {note}")
 
     limitations.extend(sorted(profile_notes))
 
@@ -444,12 +371,6 @@ def semantic_as_of(
         if row.get("amount") is not None:
             same_type.append(float(row["amount"]))
 
-        merchant_ref = values_per_event[index].get(REFERENCE_KEYS["outlet_ref"].key)
-
-        for item in derived:
-            if item.key.startswith("merchant"):
-                item.derived_from += formulas_module.merchant_provenance(merchant_ref)
-
         events.append(
             SemanticEvent(
                 client_id=history.client_id,
@@ -466,9 +387,7 @@ def semantic_as_of(
 
     # --- активность и цепочки ---
 
-    months = activity_module.activity_months(
-        rows, history.coverage, observed_start, cutoff, BASE_SOURCES
-    )
+    months = activity_module.activity_months(rows, observed_start, cutoff)
 
     return SemanticHistory(
         client_id=history.client_id,
@@ -477,10 +396,8 @@ def semantic_as_of(
         events=events,
         profile=profile_values,
         profile_meta=history.profile_meta,
-        coverage=history.coverage,
         entities=history.entities,
         relationship=history.relationship,
-        products=history.products,
         product_ages=time_module.product_ages(resolved, cutoff),
         activity=months,
         activity_summary=activity_module.activity_summary(months),
@@ -490,29 +407,9 @@ def semantic_as_of(
     )
 
 
-def open_merchants(raw_dir: Path | None) -> MerchantCatalog:
-    return MerchantCatalog.open(raw_dir)
-
-
-def open_products(raw_dir: Path | None):
-    """
-    Справочник продуктов выгрузки. Без него названия продукта не
-    придумывается: остаётся код и семейство.
-    """
-
-    if raw_dir is None:
-        return None
-
-    path = Path(raw_dir) / "catalog" / "products.parquet"
-
-    return pq.read_table(path) if path.exists() else None
-
-
 __all__ = [
     "SEMANTIC_VERSION",
     "SemanticEvent",
     "SemanticHistory",
-    "open_merchants",
-    "open_products",
     "semantic_as_of",
 ]

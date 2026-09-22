@@ -10,6 +10,7 @@ from .behaviour import merchants as merchant_choice
 from .behaviour import needs as needs_module
 from .behaviour import sessions as session_module
 from . import config
+from .world import merchants as merchant_catalog
 from .finance import cards as card_rules
 from .finance import loans as loan_rules
 from .finance.entities import (
@@ -222,7 +223,6 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
 
         if "bills" in silenced:
             # Счёт никуда не делся, но оплачен мимо этого банка.
-            state.note(day, "hidden_purchase", "bill_outside_bank", {"kind": bill.kind})
             continue
 
         add(
@@ -306,7 +306,7 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
             rate = relation.typical_frequency * scale / 30.0
 
             if relation.relation_type == "landlord":
-                if cal.day_in_month(day, min(28, persona.salary_day + 2)).date() != day.date():
+                if cal.day_in_month(day, min(28, persona.income_day + 2)).date() != day.date():
                     continue
                 rate = 1.0
 
@@ -699,7 +699,6 @@ def _touch_client(state: ClientState, ts: datetime) -> None:
 
     if previous is not None and (ts - previous).days >= 45:
         state.returned_flag = True
-        state.note(ts, "pause_end", "return", {"silence_days": (ts - previous).days})
 
     state.last_client_event = ts
 
@@ -932,8 +931,6 @@ def _on_registration(sim, state: ClientState, ts: datetime, payload: dict) -> No
     # Профиль появляется вместе с клиентом, а не в конце месяца.
     _update_profile(state, ts, moment=ts)
 
-    state.note(ts, "state_transition", lifecycle_module.STATE_ONBOARDING, {"cause": "registration"})
-
 
 def _on_income(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
@@ -948,12 +945,10 @@ def _on_income(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     if payout.landing == "cash":
         state.ledger.post(ts, "hidden", counterpart, state.ledger.cash_id, amount)
-        state.note(ts, "income_event", "cash", {"amount": amount, "kind": payout.kind})
         return
 
     if payout.landing == "other_bank":
         state.ledger.post(ts, "hidden", counterpart, state.ledger.other_bank_id, amount)
-        state.note(ts, "income_event", "other_bank", {"amount": amount, "kind": payout.kind})
         return
 
     account = state.primary_card_account(ts)
@@ -977,8 +972,6 @@ def _on_income(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             "merchant_country": "KZ",
         },
     )
-
-    state.note(ts, "income_event", payout.outcome, {"amount": amount, "kind": payout.kind})
 
 
 def _on_bill(sim, state: ClientState, ts: datetime, payload: dict) -> None:
@@ -1013,12 +1006,7 @@ def _on_bill(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         # оплата онлайн наблюдается как ecom, автоплатёж — как
         # действие самого банка.
         "channel": "ecom" if not bill.autopay else "system",
-        "merchant_id": merchant.merchant_id if merchant else None,
-        "outlet_id": merchant.outlet_id if merchant else None,
-        "merchant_name": merchant.merchant_name if merchant else None,
-        "mcc": merchant.mcc if merchant else None,
-        "merchant_city": merchant.settlement if merchant else None,
-        "merchant_country": "KZ",
+        **merchant_catalog.payload_fields(merchant),
         "is_online": bool(merchant.is_online) if merchant is not None else True,
         "is_subscription": False,
         "reason": f"bill_{bill.kind}",
@@ -1050,23 +1038,17 @@ def _on_bill(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             _decline(state, ts, "bill_payment", None, amount, "debit", body,
                      "insufficient_funds")
 
-        state.note(ts, "hidden_purchase", "bill_unpaid_in_bank", {"amount": amount, "kind": bill.kind})
         return
 
     card = state.usable_card(account.account_id, ts)
 
     body["card_id"] = card.card_id if card else None
 
-    paid = _emit_money(
+    _emit_money(
         state, ts, "bill_payment", account.account_id, amount, "debit",
-        f"merchant:{merchant.outlet_id}" if merchant else COUNTERPART_GOVERNMENT,
+        f"merchant:{merchant.merchant_id}" if merchant else COUNTERPART_GOVERNMENT,
         body,
     )
-
-    # Отклонённое списание счёт не закрывает: он остался неоплачен.
-    if paid.payload.get("status") != "approved":
-        state.note(ts, "hidden_purchase", "bill_unpaid_in_bank",
-                   {"amount": amount, "kind": bill.kind})
 
 
 def _on_subscription(sim, state: ClientState, ts: datetime, payload: dict) -> None:
@@ -1090,12 +1072,10 @@ def _on_subscription(sim, state: ClientState, ts: datetime, payload: dict) -> No
 
     body = {
         "channel": "ecom",
-        "merchant_id": outlet.merchant_id if outlet else None,
-        "outlet_id": subscription.outlet_id,
-        "merchant_name": outlet.merchant_name if outlet else None,
+        **merchant_catalog.payload_fields(outlet),
+        # Точка подписки могла не найтись в каталоге: MCC
+        # подписочного сервиса известен и без неё.
         "mcc": outlet.mcc if outlet else "5815",
-        "merchant_city": outlet.settlement if outlet else None,
-        "merchant_country": "KZ",
         "is_online": True,
         "is_subscription": True,
         "reason": "subscription",
@@ -1110,14 +1090,13 @@ def _on_subscription(sim, state: ClientState, ts: datetime, payload: dict) -> No
                      "insufficient_funds")
             return
 
-        state.note(ts, "hidden_purchase", "subscription_outside_bank", {"amount": amount})
         return
 
     body["card_id"] = state.usable_card(account.account_id, ts).card_id if state.usable_card(account.account_id, ts) else None
 
     event = _emit_money(
         state, ts, "purchase", account.account_id, amount, "debit",
-        f"merchant:{subscription.outlet_id}", body,
+        f"merchant:{body['merchant_id']}" if body.get("merchant_id") else "external:merchant", body,
     )
 
     # Отказ покупкой не стал: возвращать нечего и в оборот
@@ -1189,12 +1168,7 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     body = {
         "channel": channel,
-        "merchant_id": choice.outlet.merchant_id,
-        "outlet_id": choice.outlet.outlet_id,
-        "merchant_name": choice.outlet.merchant_name,
-        "mcc": choice.outlet.mcc,
-        "merchant_city": choice.outlet.settlement or None,
-        "merchant_country": choice.outlet.country,
+        **merchant_catalog.payload_fields(choice.outlet),
         "is_online": choice.outlet.is_online,
         "is_subscription": False,
         "reason": "routine" if intent.from_routine else "purchase",
@@ -1212,8 +1186,7 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         hidden = state.ledger.hidden_sources(amount)
 
         if hidden and rng.random() < settings.hidden_purchase_share:
-            state.ledger.post(ts, "hidden", hidden[0].account_id, f"merchant:{choice.outlet.outlet_id}", amount)
-            state.note(ts, "hidden_purchase", intent.category, {"amount": amount})
+            state.ledger.post(ts, "hidden", hidden[0].account_id, f"merchant:{choice.outlet.merchant_id}", amount)
             return
 
         if rng.random() < settings.decline_attempt_share and state.may_decline(ts):
@@ -1222,8 +1195,6 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             _touch_client(state, ts)
             return
 
-        state.note(ts, "hidden_purchase", intent.category,
-                   {"amount": amount, "reason": "postponed"})
         return
 
     # В трудный период чаще расплачиваются кредитным лимитом,
@@ -1253,7 +1224,7 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     event = _emit_money(
         state, ts, "purchase", account.account_id, amount, "debit",
-        f"merchant:{choice.outlet.outlet_id}", body,
+        f"merchant:{choice.outlet.merchant_id}", body,
     )
 
     # Банк видел попытку, но денег не списал: ни возврата, ни
@@ -1343,12 +1314,10 @@ def _on_refund(sim, state: ClientState, ts: datetime, payload: dict) -> None:
     body = {
         "channel": "system",
         "card_id": cause.payload.get("card_id"),
-        "merchant_id": cause.payload.get("merchant_id"),
-        "outlet_id": cause.payload.get("outlet_id"),
-        "merchant_name": cause.payload.get("merchant_name"),
-        "mcc": cause.payload.get("mcc"),
-        "merchant_city": cause.payload.get("merchant_city"),
-        "merchant_country": cause.payload.get("merchant_country"),
+        **{
+            name: cause.payload.get(name)
+            for name in merchant_catalog.MERCHANT_PAYLOAD_FIELDS
+        },
         "cause_event_id": cause.event_id,
         "reason": plan["kind"],
         "is_online": cause.payload.get("is_online"),
@@ -1362,8 +1331,8 @@ def _on_refund(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         account_id,
         int(plan["amount"]),
         "credit",
-        f"merchant:{cause.payload.get('outlet_id')}"
-        if cause.payload.get("outlet_id")
+        f"merchant:{cause.payload.get('merchant_id')}"
+        if cause.payload.get("merchant_id")
         else "external:merchant",
         body,
     )
@@ -1408,7 +1377,6 @@ def _on_cash(sim, state: ClientState, ts: datetime, payload: dict) -> None:
                      "insufficient_funds")
             return
 
-        state.note(ts, "hidden_purchase", "cash_need", {"amount": amount, "reason": "postponed"})
         return
 
     account = sources[0]
@@ -1522,11 +1490,9 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
             if outcome in ("client_cancels", "topup_from_other_bank", "reduce_amount"):
                 # Попытка не удалась и до банка не дошла.
-                state.note(ts, "transfer_intent", "cancelled", {"amount": amount})
                 return
 
             if not state.may_decline(ts):
-                state.note(ts, "transfer_intent", "abandoned", {"amount": amount})
                 return
 
             _decline(

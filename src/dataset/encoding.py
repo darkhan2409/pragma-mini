@@ -88,7 +88,6 @@ class EncodedHistory:
     profile: EncodedRecord
     profile_meta: dict
     has_profile: bool
-    coverage: tuple
     relationship: object
     limitations: tuple[str, ...]
 
@@ -204,7 +203,6 @@ def encode_history(
         profile=encode_profile(artifacts, history, limit),
         profile_meta=dict(history.profile_meta or {}),
         has_profile=profile_known(history),
-        coverage=tuple(history.coverage),
         relationship=history.relationship,
         limitations=tuple(history.limitations),
         cause_of=dict(cause_of or {}),

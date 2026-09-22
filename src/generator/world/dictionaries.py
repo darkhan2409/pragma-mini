@@ -423,7 +423,7 @@ PROFILE_TRACKED_FIELDS = (
     "income_type",
     "declared_income",
     "industry",
-    "salary_day",
+    "income_day",
     "consent_marketing",
 )
 

@@ -18,7 +18,6 @@ torch = ["torch==2.13.0"]
 
 [project.scripts]
 mini-pragma-emit = "src.generator.emit:main"
-mini-pragma-report = "src.generator.report.realism:main"
 mini-pragma-show = "src.generator.report.show:main"
 mini-pragma-preprocess = "src.preprocessing.run:main"
 mini-pragma-tokenize = "src.tokenization.run:main"

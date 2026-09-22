@@ -13,7 +13,7 @@ from .context import EventStub, Selection, select
 from .dependencies import Dependencies, resolve
 from .encoding import EncodedHistory
 from .settings import ContextPolicy
-from .targets import coverage_codes, coverage_details, eligible, history_age_days, hours_to_cutoff
+from .targets import eligible, history_age_days, hours_to_cutoff
 
 
 # ============================================================
@@ -91,10 +91,6 @@ class Sample:
     has_profile: bool
 
     # --- клиент на срез ---
-    #
-    # Состояние источника ОДНО на пример и описывает момент
-    # среза, а не доступность во время каждого события истории.
-    coverage_at_cutoff: np.ndarray
     history_age_days: float | None
     history_age_reason: str | None
 
@@ -109,7 +105,6 @@ class Sample:
 
     # --- служебное ---
     events: list[dict] = field(default_factory=list)
-    coverage: list[dict] = field(default_factory=list)
     relationship: dict = field(default_factory=dict)
     limitations: list[str] = field(default_factory=list)
 
@@ -302,7 +297,6 @@ def build_sample(
     group: str,
     window: GroupWindow,
     weight: float,
-    sources: tuple[str, ...],
     policy: ContextPolicy,
 ) -> Sample:
     """
@@ -415,7 +409,6 @@ def build_sample(
         ),
         profile_state=meta.get("state", ""),
         has_profile=encoded.has_profile,
-        coverage_at_cutoff=np.asarray(coverage_codes(encoded.coverage, sources), dtype=np.int8),
         history_age_days=age,
         history_age_reason=age_reason,
         n_eligible_events=sum(1 for slot in selection.kept if flags[slot]),
@@ -424,7 +417,6 @@ def build_sample(
         selection=_selection_report(selection, policy),
         dependencies=dependencies,
         events=_service_rows(encoded, selection, flags),
-        coverage=coverage_details(encoded.coverage),
         relationship=_relationship(encoded.relationship),
         limitations=list(encoded.limitations),
     )
@@ -552,7 +544,6 @@ def sample_from_row(row: dict) -> Sample:
         profile_value_key_id=_ints(row["profile_value_key_id"]),
         profile_state=row["profile_state"],
         has_profile=bool(row["has_profile"]),
-        coverage_at_cutoff=np.asarray(row["coverage_at_cutoff"], dtype=np.int8),
         history_age_days=row["history_age_days"],
         history_age_reason=None,
         n_eligible_events=int(row["n_eligible_events"]),

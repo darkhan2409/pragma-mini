@@ -39,14 +39,12 @@ REGISTRY_VERSION = "1.1.0"
 # Владельцы полей.
 OWNER_ENVELOPE = "envelope"
 OWNER_PROFILE = "profile"
-OWNER_COVERAGE = "coverage"
 OWNER_DERIVED = "derived"
 
 # Роли: что поле значит для дальнейших этапов.
 ROLE_PAYLOAD = "payload"
 ROLE_ENVELOPE = "envelope"
 ROLE_PROFILE = "profile"
-ROLE_COVERAGE = "coverage"
 ROLE_DERIVED = "derived"
 ROLE_TRACE = "trace"
 ROLE_INTERNAL = "internal"
@@ -92,7 +90,7 @@ UNITS: dict[str, str] = {
     # код календаря: число это код, а не величина. Час и день
     # недели события сюда не входят: они не поля выгрузки, а
     # отдельный временной канал, считаемый из event_time.
-    "salary_day": "day_of_month_code",
+    "income_day": "day_of_month_code",
 }
 
 # Поля, чей текст нормализуется отдельной копией.
@@ -108,7 +106,6 @@ REFERENCE_FIELDS: dict[str, str] = {
     "offer_id": "offer",
     "cause_event_id": "event",
     "merchant_id": "merchant",
-    "outlet_id": "outlet",
     "product_id": "product",
     "previous_product_id": "product",
 }
@@ -169,7 +166,7 @@ def build_registry(manifest: RawManifest, extra: Iterable[tuple[str, str, str, s
     колонок, которых в RAW нет.
     """
 
-    from ..rawdata import COVERAGE_SCHEMA, ENVELOPE_SCHEMA
+    from ..rawdata import ENVELOPE_SCHEMA
 
     entries: list[FieldEntry] = []
 
@@ -237,20 +234,6 @@ def build_registry(manifest: RawManifest, extra: Iterable[tuple[str, str, str, s
             "поле версии профиля",
         )
 
-    # --- покрытие ---
-
-    for field in COVERAGE_SCHEMA:
-        add(
-            OWNER_COVERAGE,
-            field.name,
-            _arrow_name(field.type),
-            field.name
-            in ("last_available_at", "first_seen", "coverage_reason", "opening_state", "outage_days"),
-            "client_source",
-            ROLE_COVERAGE,
-            "поле покрытия источника",
-        )
-
     # --- производные колонки canonical ---
 
     for owner, name, dtype, description in extra:
@@ -283,7 +266,6 @@ def registry_as_dict(entries: list[FieldEntry], timezone: str | None = None) -> 
                 "envelope": sum(1 for item in entries if item.owner == OWNER_ENVELOPE),
                 "payload": sum(1 for item in entries if item.role == ROLE_PAYLOAD),
                 "profile": sum(1 for item in entries if item.owner == OWNER_PROFILE),
-                "coverage": sum(1 for item in entries if item.owner == OWNER_COVERAGE),
                 "derived": sum(1 for item in entries if item.owner == OWNER_DERIVED),
             },
             "distinct_payload_names": len({item.name for item in entries if item.role == ROLE_PAYLOAD}),

@@ -15,7 +15,7 @@ from .canonical.schema import DERIVED_NAMES, ENVELOPE_NAMES
 from .history import STAGE_VERSION as HISTORY_VERSION
 from .history import CanonicalStore, ClientHistory, history_as_of
 from .manifest import fingerprint_path, load_fingerprint
-from .rawdata import TABLE_FILES, ContentDigest
+from .rawdata import ContentDigest
 from .settings import GroupWindow, PreprocessingConfig
 
 
@@ -39,10 +39,9 @@ from .settings import GroupWindow, PreprocessingConfig
 # сравнивать не с чем, и отчёт говорит это прямо.
 #
 # Что проверяется:
-#   популяции независимы: свой seed, ни одного общего client_id;
+#   популяции независимы: ни одного общего client_id;
 #   мир общий: справочники продуктов, мерчантов и географии
-#   совпадают по содержимому, как и продуктовая хронология с
-#   конфигурацией генерации;
+#   совпадают по содержимому;
 #   конечный cutoff группы лежит внутри её выгрузки.
 #
 # Несовпадение мира это не ошибка препроцессинга, а свойство
@@ -61,7 +60,7 @@ from .settings import GroupWindow, PreprocessingConfig
 
 
 STAGE = "corpus"
-STAGE_VERSION = "5.0.0"
+STAGE_VERSION = "7.0.0"
 SCHEMA_VERSION = 1
 
 CORPUS_MANIFEST_FILE = "corpus_manifest.json"
@@ -73,9 +72,6 @@ TRAIN_GROUP = "train"
 STATUS_OK = "ok"
 STATUS_BLOCKED_BY_INPUT = "blocked_by_input"
 STATUS_BLOCKED = "blocked"
-
-# Справочники, которые обязаны быть общими у трёх групп.
-WORLD_CATALOGS: tuple[str, ...] = ("products", "merchants", "geography")
 
 # Поля конверта, входящие в контрольную сумму содержимого.
 # Это весь конверт, кроме payload: он идёт в сумму отдельно,
@@ -141,98 +137,13 @@ class CorpusResult:
 
 
 # ============================================================
-# ОБЩИЙ МИР
+# НЕЗАВИСИМОСТЬ ПОПУЛЯЦИЙ
 # ============================================================
 
 
-def catalog_digests(raw_dir: Path) -> dict[str, str]:
+def population_check(clients: dict[str, list[str]]) -> dict:
     """
-    Отпечаток содержимого справочников: сумма по строкам, не
-    зависящая ни от их порядка, ни от того, как записан parquet.
-
-    Манифест генератора подписывает только ленту, профиль и
-    покрытие, поэтому равенство справочников считается здесь, а
-    не берётся на слово.
-    """
-
-    digests: dict[str, str] = {}
-
-    for name in WORLD_CATALOGS:
-
-        path = Path(raw_dir) / TABLE_FILES[name]
-
-        if not path.exists():
-            digests[name] = "<нет файла>"
-            continue
-
-        digest = ContentDigest()
-        digest.extend(pq.read_table(path).to_pylist())
-        digests[name] = digest.value()
-
-    return digests
-
-
-def world_check(worlds: dict[str, dict]) -> dict:
-    """
-    Один ли мир у групп: справочники, продуктовая хронология,
-    конфигурация генерации и world_seed.
-
-    Отсутствие world_seed само по себе мир не разводит: если
-    содержимое всех справочников, продуктовая хронология и
-    конфигурация генерации совпали, мир общий, а неподтверждённое
-    происхождение остаётся ограничением.
-
-    worlds: группа -> {catalogs, product_timeline_sha256,
-    generation_config_sha256, world_seed}.
-    """
-
-    mismatches: list[str] = []
-    notes: list[str] = []
-
-    if len(worlds) < 2:
-        notes.append(
-            "групп меньше двух: общий мир не с чем сравнивать, равенство справочников "
-            "не проверено и принято по умолчанию"
-        )
-
-    def compare(label: str, values: dict[str, object]) -> None:
-        if len({str(value) for value in values.values()}) > 1:
-            listed = ", ".join(f"{group}: {str(values[group])[:12]}" for group in sorted(values))
-            mismatches.append(f"{label} различается ({listed})")
-
-    for catalog in WORLD_CATALOGS:
-        compare(f"справочник {catalog}", {group: item["catalogs"][catalog] for group, item in worlds.items()})
-
-    compare("продуктовая хронология", {group: item["product_timeline_sha256"] for group, item in worlds.items()})
-    compare("конфигурация генерации", {group: item["generation_config_sha256"] for group, item in worlds.items()})
-
-    seeds = {group: item["world_seed"] for group, item in worlds.items()}
-
-    if any(value is None for value in seeds.values()):
-        notes.append(
-            "происхождение общего мира не подтверждено: world_seed не объявлен генератором, "
-            "равенство установлено по содержимому справочников"
-        )
-    else:
-        compare("world_seed", seeds)
-
-    return {
-        "shared_world": not mismatches,
-        "mismatches": mismatches,
-        "notes": notes,
-        "world_seed": dict(sorted(seeds.items())),
-        "catalogs": {group: item["catalogs"] for group, item in sorted(worlds.items())},
-        "rule": (
-            "мир общий, если совпали справочники, продуктовая хронология и конфигурация генерации; "
-            "world_seed подтверждает происхождение, а его отсутствие остаётся ограничением"
-        ),
-    }
-
-
-def population_check(clients: dict[str, list[str]], seeds: dict[str, int]) -> dict:
-    """
-    Популяции независимы: свой seed у каждой группы и ни одного
-    общего client_id.
+    Популяции независимы: ни одного общего client_id.
     """
 
     overlaps: list[dict] = []
@@ -246,14 +157,8 @@ def population_check(clients: dict[str, list[str]], seeds: dict[str, int]) -> di
             if shared:
                 overlaps.append({"groups": [left, right], "clients": len(shared), "examples": shared[:5]})
 
-    values = list(seeds.values())
-    repeated = sorted({value for value in values if values.count(value) > 1})
-
     return {
         "compared": len(names) > 1,
-        "seeds": dict(sorted(seeds.items())),
-        "distinct_seeds": not repeated,
-        "repeated_seeds": repeated,
         "overlaps": overlaps,
         "shared_clients": sum(item["clients"] for item in overlaps),
     }
@@ -333,7 +238,6 @@ def collect_visible(store: CanonicalStore, client_ids: list[str], window: GroupW
 
     events_digest = ContentDigest()
     profile_digest = ContentDigest()
-    coverage_digest = ContentDigest()
 
     client_idx: list[int] = []
     stable_index: list[int] = []
@@ -364,7 +268,6 @@ def collect_visible(store: CanonicalStore, client_ids: list[str], window: GroupW
         stable_index.extend(history.events.column("stable_event_index").to_pylist())
 
         profile_digest.extend(_profile_rows(store, client_id))
-        coverage_digest.extend([item.as_dict() for item in history.coverage])
 
         if not rows:
             stats["silent_clients"] += 1
@@ -394,17 +297,15 @@ def collect_visible(store: CanonicalStore, client_ids: list[str], window: GroupW
         "events_rows": events_digest.rows,
         "profile": profile_digest.value(),
         "profile_rows": profile_digest.rows,
-        "coverage": coverage_digest.value(),
-        "coverage_rows": coverage_digest.rows,
         "rule": (
             "по финальной очищенной истории событий до cutoff: конверт и payload видимых строк, "
-            "итоговую строку профиля, датированные факты покрытия; служебные индексы, "
+            "итоговую строку профиля; служебные индексы, "
             "флаги и итоговые статусы выгрузки не входят"
         ),
     }
 
     checksum["content_sha256"] = sha256_bytes(
-        dumps_json({key: checksum[key] for key in ("events", "profile", "coverage")}).encode("utf-8")
+        dumps_json({key: checksum[key] for key in ("events", "profile")}).encode("utf-8")
     )
 
     return VisibleSet(index=index, checksum=checksum, stats=stats)
@@ -479,8 +380,7 @@ class TrainCorpus:
 
     @staticmethod
     def open(corpus_dir: Path, canonical_dir: Path, processed_dir: Path | None = None,
-             allow_unusable: bool = False, allow_short_horizon: bool = False,
-             products: pa.Table | None = None) -> "TrainCorpus":
+             allow_unusable: bool = False, allow_short_horizon: bool = False) -> "TrainCorpus":
         """
         allow_unusable — режим диагностики: снимает проверки
         пригодности и свежести. Обучение открывает корпус без него.
@@ -490,11 +390,6 @@ class TrainCorpus:
         горизонт оно не выполняет, и молчаливое согласие на это
         принимать нельзя.
 
-        products — справочник продуктов выгрузки. Без него
-        название продукта не расшифровывается: смысловой слой
-        поверх такого корпуса молча потерял бы product_name.
-        Корпус справочник не читает сам: файл лежит в RAW, а
-        разрешение на группу выдаёт разделение.
         """
 
         corpus_dir = Path(corpus_dir)
@@ -570,7 +465,7 @@ class TrainCorpus:
                 )
 
         return TrainCorpus(
-            store=CanonicalStore(canonical_dir, products=products),
+            store=CanonicalStore(canonical_dir),
             index=index,
             fit_end=datetime.fromisoformat(corpus["fit_end"]),
             client_ids=list(manifest["groups"][TRAIN_GROUP]["clients"]),
@@ -629,10 +524,8 @@ def group_summary(source: GroupInput, store: CanonicalStore, clients: list[dict]
 
     return {
         "directory": source.group,
-        "seed": echo["seed"],
-        "world_seed": echo["world_seed"],
-        "raw_history_start": echo["history_start"],
-        "extract_time": echo["extract_time"],
+        "raw_period_start": echo["period_start"],
+        "period_end": echo["period_end"],
         "window": window.as_dict(),
         "clients_total": len(clients),
         "clients_working": len(working),
@@ -696,8 +589,6 @@ def build_corpus(sources: list[GroupInput], config: PreprocessingConfig, target:
 
     stores: dict[str, CanonicalStore] = {}
     clients: dict[str, list[dict]] = {}
-    worlds: dict[str, dict] = {}
-    seeds: dict[str, int] = {}
     visible: dict[str, VisibleSet] = {}
 
     # Выполнение договорённости о горизонте это ОТДЕЛЬНЫЙ вердикт:
@@ -717,32 +608,22 @@ def build_corpus(sources: list[GroupInput], config: PreprocessingConfig, target:
         stores[name] = store
         clients[name] = _client_rows(source.canonical_dir)
 
-        echo = store.report["raw"]
-        seeds[name] = echo["seed"]
-
-        worlds[name] = {
-            "catalogs": catalog_digests(source.raw_dir),
-            "product_timeline_sha256": echo["product_timeline_sha256"],
-            "generation_config_sha256": echo["generation_config_sha256"],
-            "world_seed": echo["world_seed"],
-        }
-
-        if window.final_cutoff > store.extract_time:
+        if window.final_cutoff > store.period_end:
             errors.append(
                 f"группа {name}: конечный cutoff {window.final_cutoff.isoformat()} позже границы выгрузки "
-                f"{store.extract_time.isoformat()}"
+                f"{store.period_end.isoformat()}"
             )
             continue
 
         contract_groups[name] = {
-            "history_start": store.history_start.isoformat(),
-            "horizon_ok": store.history_start <= config.required_history_start,
+            "period_start": store.period_start.isoformat(),
+            "horizon_ok": store.period_start <= config.required_history_start,
             "passport_status": source.passport_status,
         }
 
-        if store.history_start > config.required_history_start:
+        if store.period_start > config.required_history_start:
             limitations.append(
-                f"группа {name}: история начинается {store.history_start.date()}, "
+                f"группа {name}: история начинается {store.period_start.date()}, "
                 f"а согласованный горизонт с {config.required_history_start.date()}"
             )
 
@@ -753,27 +634,13 @@ def build_corpus(sources: list[GroupInput], config: PreprocessingConfig, target:
 
         visible[name] = collect_visible(store, working, window)
 
-    world = world_check(worlds) if worlds else {
-        "shared_world": False,
-        "mismatches": ["групп нет"],
-        "notes": [],
-        "world_seed": {},
-        "catalogs": {},
-    }
-
-    population = population_check({name: [row["client_id"] for row in rows] for name, rows in clients.items()}, seeds)
+    population = population_check({name: [row["client_id"] for row in rows] for name, rows in clients.items()})
 
     for item in population["overlaps"]:
         errors.append(
             f"группы {item['groups'][0]} и {item['groups'][1]} делят {item['clients']} клиентов: "
             f"популяции не независимы (например {', '.join(item['examples'])})"
         )
-
-    if population["repeated_seeds"]:
-        input_dependencies.append(f"seed популяции повторяется у разных групп: {population['repeated_seeds']}")
-
-    input_dependencies.extend(world["mismatches"])
-    limitations.extend(world["notes"])
 
     groups = {
         name: group_summary(by_group[name], stores[name], clients[name], config.windows[name], visible[name])
@@ -795,7 +662,7 @@ def build_corpus(sources: list[GroupInput], config: PreprocessingConfig, target:
 
         if not item["horizon_ok"]:
             reasons.append(
-                f"группа {name}: история с {item['history_start'][:10]}, "
+                f"группа {name}: история с {item['period_start'][:10]}, "
                 f"согласовано с {config.required_history_start.date()}"
             )
 
@@ -830,8 +697,6 @@ def build_corpus(sources: list[GroupInput], config: PreprocessingConfig, target:
             "группы генерируются по одной; отсутствие val или test это ограничение, "
             "а не ошибка, и потребитель обязан называть группу явно"
         ),
-        "shared_world": world["shared_world"],
-        "world": world,
         "population": population,
         "groups": groups,
         "train_corpus": (
@@ -909,9 +774,7 @@ def render_corpus_md(report: dict) -> str:
     out: list[str] = []
 
     out.append("# Разделение train / validation / test\n")
-    out.append(
-        f"Статус: **{report['status']}**. Общий мир: {'да' if report['shared_world'] else 'нет'}.\n"
-    )
+    out.append(f"Статус: **{report['status']}**.\n")
     out.append(
         f"\nТехнически пригодно: **{'да' if report['usable'] else 'нет'}**. "
         f"Договорённость о горизонте выполнена: **{'да' if report.get('contract_met') else 'нет'}**. "
@@ -931,11 +794,10 @@ def render_corpus_md(report: dict) -> str:
             [
                 [
                     name,
-                    item["seed"],
                     item["clients_total"],
                     item["clients_working"],
                     item["window"]["history_start"][:10],
-                    item["raw_history_start"][:10],
+                    item["raw_period_start"][:10],
                     item["window"]["final_cutoff"][:10],
                     f"{item['window']['target_start'][:10]} … {item['window']['target_end'][:10]}",
                 ]
@@ -943,7 +805,6 @@ def render_corpus_md(report: dict) -> str:
             ],
             [
                 "группа",
-                "seed",
                 "клиентов",
                 "рабочих",
                 "окно с",
@@ -987,24 +848,11 @@ def render_corpus_md(report: dict) -> str:
     out.append(
         _md_table(
             [
-                ["разные seed", "да" if population["distinct_seeds"] else f"нет: {population['repeated_seeds']}"],
                 ["общих client_id", population["shared_clients"]],
             ],
             ["проверка", "результат"],
         )
     )
-
-    if report["world"]["catalogs"]:
-        out.append("\n## Общий мир\n")
-        out.append(
-            _md_table(
-                [
-                    [name, digests["products"][:12], digests["merchants"][:12], digests["geography"][:12]]
-                    for name, digests in _ordered(report["world"]["catalogs"])
-                ],
-                ["группа", "продукты", "мерчанты", "география"],
-            )
-        )
 
     if report["train_corpus"]:
 
@@ -1022,7 +870,6 @@ def render_corpus_md(report: dict) -> str:
                     ["sha256 индекса", (corpus.get("index_sha256") or "")[:16]],
                     ["сумма событий", corpus["checksum"]["events"][:16]],
                     ["сумма профиля", corpus["checksum"]["profile"][:16]],
-                    ["сумма покрытия", corpus["checksum"]["coverage"][:16]],
                     ["сумма содержимого", corpus["checksum"]["content_sha256"][:16]],
                 ],
                 ["показатель", "значение"],
@@ -1062,11 +909,9 @@ __all__ = [
     "VisibleSet",
     "build_corpus",
     "canonical_fingerprint",
-    "catalog_digests",
     "collect_visible",
     "group_summary",
     "mlm_target_eligible",
     "population_check",
     "render_corpus_md",
-    "world_check",
 ]

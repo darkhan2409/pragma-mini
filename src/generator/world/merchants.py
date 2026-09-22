@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from .. import params as params_module
 from ..rng import NS_MERCHANT, keyed_rng, stable_hash, state_cache
-from . import geography
+from . import geography, reference
 from .dictionaries import CATEGORY_BY_NAME, CATEGORY_NAMES, Category
 
 
@@ -22,9 +22,18 @@ from .dictionaries import CATEGORY_BY_NAME, CATEGORY_NAMES, Category
 # сетей собирают большую часть оборота, а десятки тысяч точек
 # встречаются считанные разы.
 #
-# Каталог процедурный: атрибуты точки считаются из её индекса,
-# поэтому в памяти лежат только диапазоны, а не сотни тысяч
-# объектов.
+# Названия сетей берутся из справочника 2ГИС и OpenStreetMap
+# (world.reference): частые имена идут национальным сетям,
+# встреченные в самом поселении — местным. Слоговые названия
+# остались только там, где справочник категорию не покрывает:
+# такси, коммунальные платежи, государственные услуги и прочие
+# 30 категорий из 49.
+#
+# MCC справочник не даёт ни в одном источнике, поэтому код
+# категории по-прежнему назначает внутренняя категория.
+#
+# Точки остаются процедурными: атрибуты считаются из индекса,
+# поэтому в памяти лежат диапазоны, а не сотни тысяч объектов.
 # ============================================================
 
 
@@ -101,7 +110,72 @@ class Outlet:
 # ============================================================
 
 
-def _brand_name(category: Category, index: int, scope: str, region: str | None) -> str:
+@state_cache
+def _region_names(category_name: str, region: str) -> tuple:
+    """
+    Имена категории, встреченные в поселениях региона.
+    """
+
+    seen: list[str] = []
+
+    for settlement in geography.settlements():
+
+        if settlement.region != region:
+            continue
+
+        for name in reference.names_in(settlement.name, category_name):
+            if name not in seen:
+                seen.append(name)
+
+    return tuple(seen)
+
+
+def _reference_pool(category_name: str, scope: str, key: str) -> tuple:
+    """
+    Имена справочника, подходящие сети этого охвата.
+
+    Голова списка по частоте — это и есть национальные сети:
+    «Magnum» встречается в справочнике сотни раз. Региональной
+    и местной сети достаётся то, что встречено именно там, а
+    если там не встречено ничего — хвост списка категории со
+    сдвигом по ключу, чтобы соседние места не получили одно имя.
+    """
+
+    catalog = reference.names_of_category(category_name)
+
+    if not catalog:
+        return ()
+
+    head_size = min(len(catalog), params_module.active().merchants.national_brands_per_category[1])
+
+    head = catalog[:head_size]
+
+    if scope == "national":
+        return head
+
+    nearby = (
+        reference.names_in(key, category_name)
+        if scope == "local"
+        else _region_names(category_name, key)
+    )
+
+    local = tuple(name for name in nearby if name not in set(head))
+
+    if local:
+        return local
+
+    tail = catalog[head_size:] or catalog
+
+    offset = stable_hash(scope, category_name, key) % len(tail)
+
+    return tail[offset:] + tail[:offset]
+
+
+def _synthetic_name(category: Category, index: int, scope: str, region: str | None) -> str:
+    """
+    Название из слогов. Остаётся для категорий, которых в
+    справочнике нет вовсе.
+    """
 
     rng = keyed_rng(NS_MERCHANT, stable_hash("brand", category.name, scope, region or "", index) % (2 ** 31))
 
@@ -112,6 +186,16 @@ def _brand_name(category: Category, index: int, scope: str, region: str | None) 
     suffix = suffixes[rng.integers(0, len(suffixes))]
 
     return f"{first}{second} {suffix}"
+
+
+def _brand_name(category: Category, index: int, scope: str, region: str | None) -> str:
+
+    pool = _reference_pool(category.name, scope, region or "")
+
+    if pool:
+        return pool[index % len(pool)]
+
+    return _synthetic_name(category, index, scope, region)
 
 
 def _zipf_weights(count: int, alpha: float) -> tuple:
@@ -228,7 +312,7 @@ def _local_brands(category_name: str, settlement_name: str) -> tuple:
             NS_MERCHANT, stable_hash("local_brand", category_name, settlement_name, index) % (2 ** 31)
         )
 
-        name = _brand_name(category, index, f"local:{settlement_name}", settlement_name)
+        name = _brand_name(category, index, "local", settlement_name)
 
         brands.append(
             Brand(
@@ -441,7 +525,9 @@ def foreign_outlet(country: str, category_name: str, index: int) -> Outlet:
 
     rng = keyed_rng(NS_MERCHANT, stable_hash("foreign", country, category_name, index) % (2 ** 31))
 
-    name = _brand_name(category, index, f"foreign:{country}", country)
+    # Справочник описывает Казахстан, поэтому заграничной
+    # точке имя остаётся процедурным.
+    name = _synthetic_name(category, index, f"foreign:{country}", country)
 
     return Outlet(
         outlet_id=f"ot_{stable_hash('foreign', country, category_name, index) % 10 ** 12:012d}",
@@ -466,34 +552,54 @@ def foreign_outlet(country: str, category_name: str, index: int) -> Outlet:
     )
 
 
-def iter_catalog():
+# ============================================================
+# ТОЧКА В СОБЫТИИ
+# ============================================================
+#
+# Наружу выходят шесть полей выбранной точки и только они.
+# Остальное — сектор, подкатегория, район, часы, ценовой
+# сегмент, идентификатор самой точки — остаётся внутри
+# генератора: справочник мерчантов не выгружается.
+# ============================================================
+
+MERCHANT_PAYLOAD_FIELDS: tuple[str, ...] = (
+    "merchant_id",
+    "merchant_name",
+    "merchant_category",
+    "merchant_city",
+    "merchant_country",
+    "mcc",
+)
+
+
+def payload_fields(item: Outlet | None) -> dict:
     """
-    Полный каталог точек для записи на диск.
+    Поля выбранной точки для payload. Точки нет — все шесть
+    пусты, выдумывать нечего.
     """
 
-    for settlement in geography.settlements():
-        for category_name in available_categories(settlement):
-            for item in outlets_of(settlement.name, category_name):
-                yield item
+    if item is None:
+        return {name: None for name in MERCHANT_PAYLOAD_FIELDS}
 
-
-def catalog_size() -> int:
-    return sum(
-        outlet_count(settlement.name, category_name)
-        for settlement in geography.settlements()
-        for category_name in available_categories(settlement)
-    )
+    return {
+        "merchant_id": item.merchant_id,
+        "merchant_name": item.merchant_name,
+        "merchant_category": item.category,
+        "merchant_city": item.settlement or None,
+        "merchant_country": item.country,
+        "mcc": item.mcc,
+    }
 
 
 __all__ = [
+    "MERCHANT_PAYLOAD_FIELDS",
     "Brand",
     "Outlet",
     "available_categories",
     "brands_for",
-    "catalog_size",
     "foreign_outlet",
-    "iter_catalog",
     "outlet",
     "outlet_count",
     "outlets_of",
+    "payload_fields",
 ]

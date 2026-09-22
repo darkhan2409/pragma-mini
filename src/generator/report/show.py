@@ -16,14 +16,12 @@ from ..config import RAW_DIR
 # ЛЕНТА ОДНОГО КЛИЕНТА
 # ============================================================
 #
-# Отчёт реализма показывает популяцию. Здесь другое: одна
-# история подряд, строка за строкой, чтобы глазами увидеть,
-# что деньги сходятся, а события следуют друг за другом по
-# причине.
+# Одна история подряд, строка за строкой, чтобы глазами
+# увидеть, что деньги сходятся, а события следуют друг за
+# другом по причине.
 #
-# По умолчанию печатается только наблюдаемое. Скрытая истина
-# показывается лишь по явному --truth и никогда не смешивается
-# с лентой без пометки.
+# Печатается только то, что есть в выгрузке: скрытых состояний
+# симуляции она не содержит, и показать их неоткуда.
 # ============================================================
 
 
@@ -34,25 +32,16 @@ def _read(path: Path) -> list:
     return pq.read_table(path).to_pylist() if path.exists() else []
 
 
-def load(raw_dir: Path, client_id: str | None, ordinal: int | None) -> dict:
+def load(raw_dir: Path, client_id: str | None) -> dict:
     """
-    Лента, профиль, покрытие и скрытая истина одного клиента.
+    Лента и профиль одного клиента.
     """
-
-    truth_clients = _read(raw_dir / "truth" / "clients.parquet")
 
     if client_id is None:
-
-        if ordinal is not None:
-            match = [row for row in truth_clients if row.get("client_ordinal") == ordinal]
-            if not match:
-                raise SystemExit(f"клиента с ординалом {ordinal} нет в наборе")
-            client_id = match[0]["client_id"]
-        else:
-            events = _read(raw_dir / "events.parquet")
-            if not events:
-                raise SystemExit("в наборе нет событий")
-            client_id = Counter(row["client_id"] for row in events).most_common(1)[0][0]
+        events = _read(raw_dir / "events.parquet")
+        if not events:
+            raise SystemExit("в наборе нет событий")
+        client_id = Counter(row["client_id"] for row in events).most_common(1)[0][0]
 
     events = [row for row in _read(raw_dir / "events.parquet") if row["client_id"] == client_id]
 
@@ -68,24 +57,6 @@ def load(raw_dir: Path, client_id: str | None, ordinal: int | None) -> dict:
         "events": events,
         "profile": [
             row for row in _read(raw_dir / "profile.parquet") if row["client_id"] == client_id
-        ],
-        "coverage": [
-            row
-            for row in _read(raw_dir / "source_coverage.parquet")
-            if row["client_id"] == client_id
-        ],
-        "truth_client": next(
-            (row for row in truth_clients if row["client_id"] == client_id), None
-        ),
-        "truth_events": [
-            row
-            for row in _read(raw_dir / "truth" / "events.parquet")
-            if row["client_id"] == client_id
-        ],
-        "relationships": [
-            row
-            for row in _read(raw_dir / "truth" / "relationships.parquet")
-            if row["client_id"] == client_id
         ],
     }
 
@@ -119,7 +90,7 @@ def _describe(row: dict) -> str:
         sign = "-" if payload.get("direction") == "debit" else "+"
         parts.append(f"{sign}{_money(payload['amount'])} ₸")
 
-    for key in ("merchant_name", "counterparty", "product_code", "template", "topic",
+    for key in ("merchant_name", "counterparty", "product_id", "template", "topic",
                 "firebase_screen", "operation", "decision", "reason"):
         value = payload.get(key)
         if value:
@@ -139,36 +110,13 @@ def _describe(row: dict) -> str:
 
 
 def render(data: dict, limit: int | None, since: datetime | None,
-           until: datetime | None, sources: tuple, truth: bool,
-           full_payload: bool) -> str:
+           until: datetime | None, sources: tuple, full_payload: bool) -> str:
 
     out: list[str] = []
 
-    client_id = data["client_id"]
-
-    out.append(f"клиент {client_id}")
-
-    person = data["truth_client"]
-
-    if person is not None:
-        out.append(
-            f"ординал {person.get('client_ordinal')}, сообщество {person.get('community_id')}, "
-            f"архетип {person.get('archetype')}"
-        )
+    out.append(f"клиент {data['client_id']}")
 
     out.append("")
-
-    # --- покрытие ---
-
-    if data["coverage"]:
-        out.append("ИСТОЧНИКИ")
-        for row in sorted(data["coverage"], key=lambda item: item["source"]):
-            seen = row["first_seen"].strftime("%Y-%m-%d") if row["first_seen"] else "—"
-            out.append(
-                f"  {row['source']:<16} {row['coverage_status']:<12} первое событие {seen}"
-                + (f"  ({row['coverage_reason']})" if row["coverage_reason"] else "")
-            )
-        out.append("")
 
     # --- лента ---
 
@@ -224,38 +172,6 @@ def render(data: dict, limit: int | None, since: datetime | None,
             )
         out.append("")
 
-    # --- скрытая истина ---
-
-    if truth:
-
-        out.append("СКРЫТАЯ ИСТИНА (в RAW её нет)")
-
-        if person is not None:
-            traits = {
-                key[len("trait_"):]: round(value, 2)
-                for key, value in person.items()
-                if key.startswith("trait_")
-                and not key.startswith("trait_final_")
-                and isinstance(value, (int, float))
-            }
-            if traits:
-                out.append("  черты: " + ", ".join(f"{k} {v}" for k, v in sorted(traits.items())))
-
-        for row in sorted(data["truth_events"], key=lambda item: item["ts"])[:200]:
-            out.append(
-                f"  {row['ts'].strftime('%d.%m.%Y')}  {row['kind']:<20} {row['key']}"
-            )
-
-        if data["relationships"]:
-            out.append("  связи:")
-            for row in data["relationships"]:
-                out.append(
-                    f"    {row['relation_type']:<24} {row['counterpart_id']} "
-                    f"(сила {row['strength']:.2f})"
-                )
-
-        out.append("")
-
     # --- сводка ---
 
     types = Counter(row["event_type"] for row in data["events"])
@@ -278,18 +194,16 @@ def main() -> None:
 
     parser.add_argument("--raw", type=Path, default=RAW_DIR / "smoke")
     parser.add_argument("--client", default=None, help="client_id; по умолчанию самый активный")
-    parser.add_argument("--ordinal", type=int, default=None, help="порядковый номер из truth")
     parser.add_argument("--limit", type=int, default=200, help="0 — без ограничения")
     parser.add_argument("--since", default=None)
     parser.add_argument("--until", default=None)
     parser.add_argument("--source", action="append", default=None)
-    parser.add_argument("--truth", action="store_true", help="показать скрытую истину")
     parser.add_argument("--payload", action="store_true", help="печатать payload целиком")
     parser.add_argument("--out", type=Path, default=None)
 
     args = parser.parse_args()
 
-    data = load(args.raw, args.client, args.ordinal)
+    data = load(args.raw, args.client)
 
     text = render(
         data,
@@ -297,7 +211,6 @@ def main() -> None:
         since=_date(args.since),
         until=_date(args.until),
         sources=tuple(args.source or ()),
-        truth=args.truth,
         full_payload=args.payload,
     )
 

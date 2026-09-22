@@ -246,14 +246,12 @@ def relations(rows: list[dict]) -> list[Relation]:
         if cause is None:
             continue
 
-        # Точка это прежде всего конкретная торговая точка; сеть
-        # отвечает на вопрос, только когда точки не названы.
+        # Сравнивается сеть: отдельной ссылки на торговую точку
+        # в событии больше нет.
         same_merchant: bool | None = None
 
-        for column in ("outlet_ref", "merchant_ref"):
-            if row.get(column) is not None or cause.get(column) is not None:
-                same_merchant = row.get(column) == cause.get(column)
-                break
+        if row.get("merchant_ref") is not None or cause.get("merchant_ref") is not None:
+            same_merchant = row.get("merchant_ref") == cause.get("merchant_ref")
 
         days, observed, reason = _interval(row, cause)
 

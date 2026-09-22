@@ -5,6 +5,9 @@ __pycache__/
 .vscode/
 .idea/
 
+# локальные настройки сессии и рабочие копии репозитория
+.claude/
+
 data/raw/
 data/processed/
 data/tokenized/

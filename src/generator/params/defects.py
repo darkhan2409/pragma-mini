@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ..config import SCHEMA_CHANGES
+
 
 # ============================================================
 # ДЕФЕКТЫ НАБЛЮДАЕМОСТИ
@@ -54,30 +56,10 @@ class DefectParams:
 
     ga4_not_set: str = "(not set)"
 
-    # Сбой источника: на сутки данные не доходят вовсе.
-    outage_days_per_year: dict = field(
-        default_factory=lambda: {
-            "app_screens": 3.0,
-            "banners": 2.0,
-            "communications": 1.2,
-            "app_operations": 1.0,
-            "antifraud": 0.8,
-            "support": 0.6,
-            "transactions": 0.25,
-        }
-    )
-
-    outage_recovers_share: float = 0.55
-
     # Смена схемы в середине истории: поле начинает собираться.
-    schema_changes: tuple = (
-        {"source": "app_screens", "field": "product_id", "from": "2025-06-01",
-         "reason": "not_collected"},
-        {"source": "app_operations", "field": "device_new", "from": "2025-03-01",
-         "reason": "not_collected"},
-        {"source": "banners", "field": "campaign_code", "from": "2025-01-15",
-         "reason": "not_collected"},
-    )
+    # Таблица статична и объявлена в config: препроцессинг читает
+    # оттуда же, поэтому переопределять её параметрами нельзя.
+    schema_changes: tuple = SCHEMA_CHANGES
 
     # Доступность источника клиенту.
     app_adoption_share: float = 0.93

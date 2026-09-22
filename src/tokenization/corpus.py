@@ -11,10 +11,10 @@ from src.preprocessing.canonical.build import REGISTRY_FILE as CANONICAL_REGISTR
 from src.preprocessing.canonical.build import STAGE as CANONICAL_STAGE
 from src.preprocessing.history import CanonicalStore
 from src.preprocessing.manifest import fingerprint_path, load_fingerprint, outputs_intact
-from src.preprocessing.semantic.as_of import SemanticHistory, open_merchants, open_products, semantic_as_of
+from src.preprocessing.semantic.as_of import SemanticHistory, semantic_as_of
 from src.preprocessing.semantic.build import REGISTRY_FILE as SEMANTIC_REGISTRY_FILE
 from src.preprocessing.semantic.build import STAGE as SEMANTIC_STAGE
-from src.preprocessing.corpus import CORPUS_MANIFEST_FILE, TRAIN_INDEX_FILE, catalog_digests
+from src.preprocessing.corpus import CORPUS_MANIFEST_FILE, TRAIN_INDEX_FILE
 from src.preprocessing.corpus import STAGE as CORPUS_STAGE
 from src.preprocessing.corpus import CorpusError as TrainCorpusError
 from src.preprocessing.corpus import TrainCorpus
@@ -41,8 +41,6 @@ from .schema import SemanticSchema
 # мира, а отпечаток этого не заметил бы.
 # ============================================================
 
-
-CATALOG_FILES: tuple[str, ...] = ("products", "merchants")
 
 READY = "ready"
 DIAGNOSTIC = "diagnostic"
@@ -128,7 +126,6 @@ class FitCorpus:
         self,
         corpus: TrainCorpus,
         schema: SemanticSchema,
-        merchants,
         manifest: dict,
         group: str,
         raw_dir: Path,
@@ -138,7 +135,6 @@ class FitCorpus:
     ):
         self.corpus = corpus
         self.schema = schema
-        self.merchants = merchants
         self.manifest = manifest
         self.group = group
         self.raw_dir = Path(raw_dir)
@@ -191,7 +187,6 @@ class FitCorpus:
             self.corpus.store,
             self.corpus.require(client_id),
             self.fit_end,
-            self.merchants,
         )
 
     def iter_histories(self) -> Iterator[SemanticHistory]:
@@ -241,15 +236,12 @@ class FitCorpus:
         _marker(processed, CORPUS_STAGE, None, "corpus")
         _marker(processed, SEMANTIC_STAGE, group, f"semantic/{group}")
 
-        catalogs = FitCorpus._catalogs(raw, manifest, group)
-
         try:
             corpus = TrainCorpus.open(
                 corpus_dir,
                 canonical_dir,
                 processed_dir=processed,
                 allow_short_horizon=allow_short_horizon,
-                products=open_products(raw),
             )
         except TrainCorpusError as error:
             raise CorpusError(str(error)) from error
@@ -263,13 +255,11 @@ class FitCorpus:
             TRAIN_INDEX_FILE: sha256_file(corpus_dir / TRAIN_INDEX_FILE),
             SEMANTIC_REGISTRY_FILE: sha256_file(semantic_path),
             CANONICAL_REGISTRY_FILE: sha256_file(field_path),
-            **{f"catalog/{name}.parquet": digest for name, digest in catalogs.items()},
         }
 
         return FitCorpus(
             corpus=corpus,
             schema=schema,
-            merchants=open_merchants(raw),
             manifest=manifest,
             group=group,
             raw_dir=raw,
@@ -277,46 +267,6 @@ class FitCorpus:
             readiness=_readiness(manifest),
             inputs=inputs,
         )
-
-    @staticmethod
-    def _catalogs(raw: Path, manifest: dict, group: str) -> dict[str, str]:
-        """
-        Справочники выгрузки обязаны быть теми же, на которых
-        построено разделение.
-
-        Сравнивается содержимое, а не байты файла: отпечаток
-        считает та же функция, что и этап разделения, поэтому
-        «тот же мир» здесь значит ровно то же самое, что там.
-        """
-
-        declared = (manifest.get("world") or {}).get("catalogs", {}).get(group, {})
-
-        actual = catalog_digests(raw)
-
-        digests: dict[str, str] = {}
-
-        for name in CATALOG_FILES:
-
-            path = raw / "catalog" / f"{name}.parquet"
-
-            if not path.exists():
-                raise CorpusError(
-                    f"нет справочника {path}: без него смысловой слой не расшифрует "
-                    "ни продукт, ни торговую точку"
-                )
-
-            digests[name] = sha256_file(path)
-
-            expected = declared.get(name)
-
-            if expected is not None and expected != actual.get(name):
-                raise CorpusError(
-                    f"справочник {name} выгрузки {raw} не тот, на котором построено разделение: "
-                    "словарь учился бы на другом мире"
-                )
-
-        return digests
-
 
 class GroupCorpus:
     """
@@ -328,11 +278,10 @@ class GroupCorpus:
     собственные клиенты, и границу держит cutoff.
     """
 
-    def __init__(self, store: CanonicalStore, merchants, group: str, raw_dir: Path,
+    def __init__(self, store: CanonicalStore, group: str, raw_dir: Path,
                  processed_dir: Path, client_ids: list[str], readiness: Readiness,
                  final_cutoff: datetime | None = None):
         self.store = store
-        self.merchants = merchants
         self.group = group
         self.raw_dir = Path(raw_dir)
         self.processed_dir = Path(processed_dir)
@@ -344,11 +293,11 @@ class GroupCorpus:
         self.final_cutoff = final_cutoff
 
     @property
-    def extract_time(self) -> datetime:
-        return self.store.extract_time
+    def period_end(self) -> datetime:
+        return self.store.period_end
 
     def history(self, client_id: str, cutoff: datetime) -> SemanticHistory:
-        return semantic_as_of(self.store, client_id, cutoff, self.merchants)
+        return semantic_as_of(self.store, client_id, cutoff)
 
     @staticmethod
     def open(processed_dir: Path, raw_dir: Path, group: str) -> "GroupCorpus":
@@ -380,9 +329,8 @@ class GroupCorpus:
             if entry is not None:
                 clients = list(entry["clients"])
                 final_cutoff = datetime.fromisoformat(entry["window"]["final_cutoff"])
-                FitCorpus._catalogs(raw, manifest, group)
 
-        store = CanonicalStore(canonical_dir, products=open_products(raw))
+        store = CanonicalStore(canonical_dir)
 
         if clients is None:
             # Разделения нет: состав группы берётся из адресной
@@ -391,7 +339,6 @@ class GroupCorpus:
 
         return GroupCorpus(
             store=store,
-            merchants=open_merchants(raw),
             group=group,
             raw_dir=raw,
             processed_dir=processed,
@@ -402,7 +349,6 @@ class GroupCorpus:
 
 
 __all__ = [
-    "CATALOG_FILES",
     "DIAGNOSTIC",
     "READY",
     "CorpusError",
