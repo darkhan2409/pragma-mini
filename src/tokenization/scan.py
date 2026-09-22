@@ -368,12 +368,6 @@ def scan(
 
         # --- события ---
 
-        reason_of_event = {
-            item.stable_event_index: item.reason
-            for item in history.relations
-            if getattr(item, "reason", None)
-        }
-
         for event in history.events:
 
             stats.events += 1
@@ -382,7 +376,7 @@ def scan(
 
             if event_type is None:
                 raise ScanError(
-                    f"событие {event.event_id} клиента {client_id} пришло без типа: "
+                    f"событие {event.stable_event_index} клиента {client_id} пришло без типа: "
                     "смысловой слой обязан его выдавать"
                 )
 
@@ -390,7 +384,7 @@ def scan(
 
             values = event.model_values()
 
-            unit_prefix = f"{client_id}\x1f{event.event_id}\x1f"
+            unit_prefix = f"{client_id}\x1f{event.stable_event_index}\x1f"
 
             for key, value in sorted(values.items()):
 
@@ -404,7 +398,7 @@ def scan(
                     {
                         "unit": "event",
                         "client_id": client_id,
-                        "event_id": event.event_id,
+                        "stable_event_index": event.stable_event_index,
                         "key": key,
                         "type": value_type(value),
                         "value": value_text(value),
@@ -449,12 +443,6 @@ def scan(
                 if item.value is None and item.reason:
                     bucket = stats.absent_reasons.setdefault(item.key, {})
                     bucket[item.reason] = bucket.get(item.reason, 0) + 1
-
-            reason = reason_of_event.get(event.stable_event_index)
-
-            if reason:
-                bucket = stats.absent_reasons.setdefault("days_since_related_event", {})
-                bucket[reason] = bucket.get(reason, 0) + 1
 
         # --- профиль ---
 

@@ -619,7 +619,6 @@ def _activate_product(sim, state: ClientState, contract, view, ts: datetime, rng
                 {
                     "channel": "system",
                     "contract_id": contract.contract_id,
-                    "cause_event_id": opened.event_id if opened else None,
                     "reason": "disbursement",
                     "merchant_country": "KZ",
                 },
@@ -653,7 +652,6 @@ def _activate_product(sim, state: ClientState, contract, view, ts: datetime, rng
                     "principal_outstanding": loan.principal_outstanding,
                     "days_past_due": 0,
                     "due_date": loan.schedule[0].due_date.date().isoformat() if loan.schedule else None,
-                    "cause_event_id": opened.event_id if opened else None,
                     "reason": "annuity",
                 },
             )
@@ -1050,7 +1048,6 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
                 "account_id": account.account_id,
                 "score_band": band,
                 "rule_code": fraud_behaviour.rule_code(episode.kind),
-                "cause_event_id": event.event_id,
             },
         )
     )
@@ -1071,7 +1068,6 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
                 "account_id": account.account_id,
                 "decision": decision,
                 "resolution": episode.client_response if episode.client_response != "no_response" else None,
-                "cause_event_id": alert.event_id,
             },
         )
     )
@@ -1134,7 +1130,7 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
         case = support_module.open_case(
             state.persona, "fraud_alert" if episode.kind != "false_positive" else "card_blocked",
             decision_ts + timedelta(hours=int(rng.integers(1, 20))),
-            alert.event_id, len(state.cases),
+            len(state.cases),
         )
 
         _emit_case(state, case)
@@ -1167,7 +1163,6 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
                             name: event.payload.get(name)
                             for name in merchant_catalog.MERCHANT_PAYLOAD_FIELDS
                         },
-                        "cause_event_id": event.event_id,
                         "reason": "dispute_resolved",
                     },
                 )
@@ -1244,7 +1239,6 @@ def _emit_case(state: ClientState, case) -> None:
         "topic": case.topic,
         "status": "open",
         "resolution": None,
-        "cause_event_id": case.cause_event_id,
     }
 
     state.emit(
@@ -1424,24 +1418,10 @@ def _on_support_check(sim, state: ClientState, ts: datetime, payload: dict) -> N
 
     state.support_last_by_cause[cause] = ts
 
-    cause_event_id = None
-
-    for event in reversed(state.events):
-        if cause == "failed_operation" and event.event_type == "app_operation":
-            if event.payload.get("status") == "failed":
-                cause_event_id = event.event_id
-                break
-        if cause == "delinquency" and event.event_type == "delinquency_registered":
-            cause_event_id = event.event_id
-            break
-        if cause == "card_blocked" and event.event_type == "card_blocked":
-            cause_event_id = event.event_id
-            break
-        if cause == "missed_installment" and event.event_type == "installment_missed":
-            cause_event_id = event.event_id
-            break
-
-    case = support_module.open_case(state.persona, cause, ts, cause_event_id, len(state.cases))
+    # Повод обращения известен симуляции и остаётся её знанием:
+    # ссылки на событие-причину в выгрузке нет, и искать его
+    # здесь больше незачем.
+    case = support_module.open_case(state.persona, cause, ts, len(state.cases))
 
     _emit_case(state, case)
 

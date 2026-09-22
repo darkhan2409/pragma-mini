@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from src.preprocessing.semantic.keys import RELATION_KEYS, TIMING_KEYS
+from src.preprocessing.semantic.keys import TIMING_KEYS
 
 from .encoding import EncodedEvent, EncodedRecord
 
@@ -35,13 +35,10 @@ from .encoding import EncodedEvent, EncodedRecord
 #                          у такого источника нет
 #   source_value_missing   событие найдено, а объявленного
 #                          ключа в его записи нет
-#   cause_event            источник это событие-причина ЦЕЛИКОМ:
-#                          адрес события есть, одного значения
-#                          у такого источника нет
 #
 # Отсюда правило для потребителя: in_context обещает ОБА адреса,
-# cause_event только адрес события, остальные статусы ни одного.
-# Говорить «источник найден» и «адреса нет» одновременно нельзя.
+# остальные статусы ни одного. Говорить «источник найден» и
+# «адреса нет» одновременно нельзя.
 #
 # Чего здесь сознательно НЕТ: источников интервалов. Признаки
 # since_previous_hours и родственные зависят от ВРЕМЕНИ соседних
@@ -55,7 +52,6 @@ DEP_OUTSIDE_CONTEXT = 1
 DEP_PROFILE = 2
 DEP_EXTERNAL = 3
 DEP_SOURCE_VALUE_MISSING = 4
-DEP_CAUSE_EVENT = 5
 
 DEP_STATUSES: tuple[str, ...] = (
     "in_context",
@@ -63,15 +59,11 @@ DEP_STATUSES: tuple[str, ...] = (
     "profile",
     "external",
     "source_value_missing",
-    "cause_event",
 )
 
 # Ключи, происхождение которых не отслеживается: они считаются
 # из времени соседних записей, а не из их значений.
 NOT_TRACKED: tuple[str, ...] = tuple(sorted(TIMING_KEYS))
-
-# Признаки связи: их источник это событие-причина целиком.
-RELATION_FEATURES: tuple[str, ...] = tuple(sorted(RELATION_KEYS))
 
 
 class DependencyError(ValueError):
@@ -131,7 +123,6 @@ def resolve(
     kept: list[int],
     value_offsets: list[int],
     profile: EncodedRecord,
-    cause_of: dict[tuple[str, int], str | None],
 ) -> Dependencies:
     """
     Происхождение значений отобранных событий.
@@ -139,22 +130,13 @@ def resolve(
     events это ВСЯ видимая история: источник, не попавший в
     пример, обязан быть узнан как исключённый, а не потерян.
 
-    cause_of приходит из истории НА ЭТОТ СРЕЗ и опознаётся парой
-    «запись, версия»: лента клиента целиком содержала бы строки,
-    которых на срезе ещё нет, и версии, которые ещё не
-    действовали.
     """
 
     slot_of_position = {position: number for number, position in enumerate(kept)}
 
     position_of_identity = {
-        item.event_id: position for position, item in enumerate(events)
+        item.stable_event_index: position for position, item in enumerate(events)
     }
-
-    position_of_event_id: dict[str, int] = {}
-
-    for position, item in enumerate(events):
-        position_of_event_id[item.event_id] = position
 
     out = Dependencies()
 
@@ -175,7 +157,7 @@ def resolve(
                 # Значение посчиталось, но в запись не попало:
                 # такого быть не должно, и молчать об этом нельзя.
                 raise DependencyError(
-                    f"событие {event.event_id}: у значения {key} есть происхождение, "
+                    f"событие {event.stable_event_index}: у значения {key} есть происхождение, "
                     "а самого значения в записи нет"
                 )
 
@@ -184,39 +166,6 @@ def resolve(
             for source in sources:
                 _add_source(out, target, key, source, events, slot_of_position,
                             position_of_identity, value_offsets, profile)
-
-        # --- признаки связи ---
-
-        cause_id = cause_of.get(event.event_id)
-
-        if cause_id is None:
-            continue
-
-        cause_position = position_of_event_id.get(cause_id)
-
-        if cause_position is None:
-            # Причина не видна на этот срез, и связи у события
-            # тогда нет вовсе: семантика её не построила.
-            continue
-
-        cause_slot = slot_of_position.get(cause_position)
-
-        for key in RELATION_FEATURES:
-
-            local = _value_index(record, key)
-
-            if local is None:
-                continue
-
-            if cause_slot is None:
-                out.add(base + local, -1, -1, DEP_OUTSIDE_CONTEXT, key)
-                continue
-
-            # Источник это всё событие-причина целиком: вид связи
-            # и интервал считаются по нему, а не по одному его
-            # значению. Поэтому и статус свой: адрес события есть,
-            # адреса значения не существует.
-            out.add(base + local, cause_slot, -1, DEP_CAUSE_EVENT, key)
 
     return out
 
@@ -237,7 +186,7 @@ def _add_source(
 
     if kind == "event":
 
-        identity = source.get("event_id")
+        identity = source.get("stable_event_index")
 
         position = position_of_identity.get(identity)
 
@@ -285,7 +234,6 @@ def _add_source(
 
 
 __all__ = [
-    "DEP_CAUSE_EVENT",
     "DEP_EXTERNAL",
     "DEP_IN_CONTEXT",
     "DEP_OUTSIDE_CONTEXT",
@@ -293,7 +241,6 @@ __all__ = [
     "DEP_SOURCE_VALUE_MISSING",
     "DEP_STATUSES",
     "NOT_TRACKED",
-    "RELATION_FEATURES",
     "Dependencies",
     "DependencyError",
     "resolve",

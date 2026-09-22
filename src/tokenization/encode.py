@@ -332,7 +332,7 @@ def references(artifacts: FrozenArtifacts, event: SemanticEvent) -> dict[str, st
     }
 
 
-def absent_reasons(event: SemanticEvent, relation_reason: str | None) -> dict[str, str]:
+def absent_reasons(event: SemanticEvent) -> dict[str, str]:
     """
     Почему расчётного значения нет. Причина едет метаданными и
     токеном не становится.
@@ -340,20 +340,16 @@ def absent_reasons(event: SemanticEvent, relation_reason: str | None) -> dict[st
 
     out = {item.key: item.reason for item in event.derived if item.value is None and item.reason}
 
-    if relation_reason:
-        out["days_since_related_event"] = relation_reason
-
     return dict(sorted(out.items()))
 
 
-def provenance(event: SemanticEvent, identity: dict[int, tuple[str, int]]) -> dict[str, list[dict]]:
+def provenance(event: SemanticEvent) -> dict[str, list[dict]]:
     """
     Происхождение расчётных значений.
 
-    Ссылка на событие переводится из внутреннего номера в
-    устойчивую пару «идентификатор, версия»: номер зависит от
-    состава видимой истории, а пара переживает и другой срез, и
-    другую сборку.
+    Событие-источник называется своим номером в истории клиента:
+    идентификатора записи в выгрузке нет, а номер canonical
+    считает по времени, приоритету типа и месту в RAW.
     """
 
     out: dict[str, list[dict]] = {}
@@ -367,29 +363,12 @@ def provenance(event: SemanticEvent, identity: dict[int, tuple[str, int]]) -> di
 
         for source in item.derived_from:
 
-            entry = dict(source)
-
-            index = entry.pop("stable_event_index", None)
-
-            if index is not None:
-                known = identity.get(index)
-                if known is not None:
-                    entry["event_id"] = known
-
-            sources.append(entry)
+            sources.append(dict(source))
 
         if sources:
             out[item.key] = sources
 
     return dict(sorted(out.items()))
-
-
-def event_identity(history: SemanticHistory) -> dict[int, tuple[str, int]]:
-    """
-    Внутренний номер события -> его устойчивый идентификатор.
-    """
-
-    return {item.stable_event_index: item.event_id for item in history.events}
 
 
 def decode_record(artifacts: FrozenArtifacts, record: EncodedRecord) -> list[dict]:
@@ -442,7 +421,6 @@ __all__ = [
     "encode_event",
     "encode_profile",
     "encode_values",
-    "event_identity",
     "provenance",
     "references",
 ]

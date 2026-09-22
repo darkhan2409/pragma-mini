@@ -15,8 +15,6 @@ from dataclasses import dataclass
 #   balance_after продолжает предыдущий balance_after
 #   declined и cancelled баланс не меняют
 #   p2p_out и p2p_in совпадают по transfer_id и сумме
-#   возвраты не превышают исходную операцию
-#   cause_event_id ведёт на существующее событие
 #   долг сходится с выдачей, платежами и процентами
 #   по заблокированной карте нет одобренных покупок
 #   операции депозита лежат внутри жизни договора
@@ -69,8 +67,6 @@ DEBIT_EVENTS = frozenset(
 
 MONEY_EVENTS = CREDIT_EVENTS | DEBIT_EVENTS | {"reversal", "balance_snapshot"}
 
-REVERSING_EVENTS = frozenset({"refund", "reversal", "chargeback"})
-
 
 @dataclass(frozen=True)
 class Violation:
@@ -103,22 +99,6 @@ def authoritative(events: list) -> list:
     ]
 
 
-def repeated_event_ids(events: list) -> list:
-    """
-    Идентификаторы, встретившиеся в выгрузке больше одного раза.
-
-    Это поломка, а не дефект наблюдаемости: запись приходит
-    ровно один раз.
-    """
-
-    seen: dict[str, int] = {}
-
-    for event in events:
-        key = event["event_id"]
-        seen[key] = seen.get(key, 0) + 1
-
-    return sorted(key for key, count in seen.items() if count > 1)
-
 def check_client(events: list) -> list:
     """
     Все финансовые инварианты одного клиента.
@@ -132,8 +112,6 @@ def check_client(events: list) -> list:
     ordered = authoritative(events)
 
     problems: list[Violation] = []
-
-    known_ids = {event["event_id"] for event in ordered}
 
     # Договоры карт рассрочки: у них выписка вместо графика.
     card_contracts = {
@@ -163,7 +141,7 @@ def check_client(events: list) -> list:
 
         if status in ("declined", "cancelled"):
             if balance is not None:
-                fail("declined_no_posting", f"{kind} {event['event_id']} несёт balance_after")
+                fail("declined_no_posting", f"{kind} в {event['event_time']} несёт balance_after")
             continue
 
         if account is None or balance is None:
@@ -189,7 +167,7 @@ def check_client(events: list) -> list:
             if expected != int(balance):
                 fail(
                     "balance_after_chain",
-                    f"{account} на {kind} {event['event_id']}: ожидалось {expected}, записано {balance}",
+                    f"{account} на {kind} в {event['event_time']}: ожидалось {expected}, записано {balance}",
                 )
 
         last_balance[account] = int(balance)
@@ -211,7 +189,7 @@ def check_client(events: list) -> list:
         transfer_id = event["payload"].get("transfer_id")
 
         if not transfer_id:
-            fail("transfer_has_id", f"{kind} {event['event_id']} без transfer_id")
+            fail("transfer_has_id", f"{kind} в {event['event_time']} без transfer_id")
             continue
 
         transfers[transfer_id][kind] = event
@@ -228,31 +206,6 @@ def check_client(events: list) -> list:
 
             if sides["p2p_out"]["event_time"] > sides["p2p_in"]["event_time"]:
                 fail("transfer_pair_order", f"{transfer_id}: зачисление раньше списания")
-
-    # --- ссылки причин ---
-
-    reversed_totals: dict[str, int] = defaultdict(int)
-    originals: dict[str, int] = {}
-
-    for event in ordered:
-
-        payload = event["payload"]
-
-        cause = payload.get("cause_event_id")
-
-        if cause is not None and cause not in known_ids:
-            fail("cause_event_exists", f"{event['event_type']} ссылается на неизвестный {cause}")
-
-        if event["event_type"] in ("purchase", "bill_payment", "p2p_out", "transfer_out"):
-            originals[event["event_id"]] = int(payload.get("amount") or 0)
-
-        if event["event_type"] in REVERSING_EVENTS and cause is not None:
-            reversed_totals[cause] += int(payload.get("amount") or 0)
-
-    for cause, total in reversed_totals.items():
-        original = originals.get(cause)
-        if original is not None and total > original:
-            fail("refund_not_above_original", f"{cause}: возвращено {total} при исходных {original}")
 
     # --- заблокированная карта ---
 
@@ -271,7 +224,7 @@ def check_client(events: list) -> list:
             blocked_until.pop(card, None)
         elif kind in ("purchase", "cash_withdrawal", "bill_payment") and card:
             if card in blocked_until and payload.get("status") == "approved":
-                fail("no_purchase_on_blocked_card", f"{kind} {event['event_id']} по карте {card}")
+                fail("no_purchase_on_blocked_card", f"{kind} в {event['event_time']} по карте {card}")
 
     # --- депозит существует до своих операций ---
 
@@ -447,9 +400,6 @@ def check_all(events_by_client: dict) -> list:
         problems.extend(check_client(events))
         problems.extend(check_money_conservation(events))
 
-        for event_id in repeated_event_ids(events):
-            problems.append(Violation("repeated_event_id", client_id, event_id))
-
     return problems
 
 
@@ -457,11 +407,9 @@ __all__ = [
     "CREDIT_EVENTS",
     "DEBIT_EVENTS",
     "MONEY_EVENTS",
-    "REVERSING_EVENTS",
     "Violation",
     "authoritative",
     "check_all",
     "check_client",
     "check_money_conservation",
-    "repeated_event_ids",
 ]

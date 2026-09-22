@@ -10,7 +10,6 @@ from src.tokenization.encode import (
     absent_reasons,
     encode_event,
     encode_profile,
-    event_identity,
     profile_known,
     provenance,
     references,
@@ -56,7 +55,6 @@ class EncodedEvent:
 
     record: EncodedRecord
 
-    event_id: str
     stable_event_index: int
     event_time: datetime
     source: str
@@ -93,47 +91,16 @@ class EncodedHistory:
 
     # Причина каждой видимой записи по ключу «запись, версия».
     # Пусто, когда причины нет или она на этот срез не видна.
-    cause_of: dict[tuple[str, int], str | None] = field(default_factory=dict)
 
     @property
     def n_events(self) -> int:
         return len(self.events)
 
 
-def causes_as_of(store, client_id: str, cutoff: datetime) -> dict[tuple[str, int], str | None]:
-    """
-    Причина каждой видимой записи: «запись, версия» → причина.
-
-    Читается через историю на дату, а не по всей ленте клиента.
-    Разница принципиальная: лента содержит и строки, которых на
-    этот срез ещё не существовало, и версии, которые ещё не
-    действовали. Карта по одному event_id смешала бы версии, а
-    карта по всей ленте протащила бы в пример знание из будущего.
-
-    Стоит это второго прохода истории на дату, примерно шестую
-    часть времени смыслового слоя. Дешевле нет: смысловой слой
-    идентификатор причины наружу не отдаёт, а трогать его ради
-    этого нельзя.
-    """
-
-    table = history_as_of(store, client_id, cutoff).events
-
-    if table.num_rows == 0:
-        return {}
-
-    columns = table.select(["event_id", "cause_event_id"]).to_pylist()
-
-    return {
-        row["event_id"]: row["cause_event_id"]
-        for row in columns
-    }
-
-
 def encode_history(
     artifacts: FrozenArtifacts,
     history: SemanticHistory,
     limit: int,
-    cause_of: dict[tuple[str, int], str | None] | None = None,
 ) -> EncodedHistory:
     """
     Смысловая история на дату в закодированном виде.
@@ -142,17 +109,6 @@ def encode_history(
     кодирует токенизатор, а этот слой только собирает результат
     вместе с трассировкой.
     """
-
-    identity = event_identity(history)
-
-    # Причина, по которой у связи нет длительности, лежит рядом с
-    # самой связью, а не в событии: источник объявил время грубее
-    # разницы, и порядок двух записей неизвестен.
-    reason_of_event = {
-        item.stable_event_index: item.reason
-        for item in history.relations
-        if getattr(item, "reason", None)
-    }
 
     events: list[EncodedEvent] = []
 
@@ -170,7 +126,7 @@ def encode_history(
         # Проверять надо то, что действительно обязано расти.
         if previous is not None and event.stable_event_index <= previous:
             raise EncodingError(
-                f"клиент {history.client_id}: событие {event.event_id} нарушает деловой порядок "
+                f"клиент {history.client_id}: событие {event.stable_event_index} нарушает деловой порядок "
                 f"истории (stable_event_index {event.stable_event_index} после {previous})"
             )
 
@@ -179,15 +135,14 @@ def encode_history(
         events.append(
             EncodedEvent(
                 record=encode_event(artifacts, event, limit),
-                event_id=event.event_id,
                 stable_event_index=event.stable_event_index,
                 event_time=event.event_time,
                 source=event.source,
                 event_type=event.values.get("event_type"),
                 calendar=tuple(event.calendar),
                 refs=references(artifacts, event),
-                absent_reasons=absent_reasons(event, reason_of_event.get(event.stable_event_index)),
-                provenance=provenance(event, identity),
+                absent_reasons=absent_reasons(event),
+                provenance=provenance(event),
             )
         )
 
@@ -205,7 +160,6 @@ def encode_history(
         has_profile=profile_known(history),
         relationship=history.relationship,
         limitations=tuple(history.limitations),
-        cause_of=dict(cause_of or {}),
     )
 
 
@@ -213,6 +167,5 @@ __all__ = [
     "EncodedEvent",
     "EncodedHistory",
     "EncodingError",
-    "causes_as_of",
     "encode_history",
 ]

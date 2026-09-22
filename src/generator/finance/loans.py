@@ -117,9 +117,8 @@ def due_today(state: LoanState, day: datetime) -> Installment | None:
     return None
 
 
-def register_due(state: LoanState, item: Installment, event_id: str) -> None:
+def register_due(state: LoanState, item: Installment) -> None:
     item.status = "due"
-    item.due_event_id = event_id
 
 
 def apply_payment(state: LoanState, item: Installment, amount: int, ts: datetime) -> int:

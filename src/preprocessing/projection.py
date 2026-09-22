@@ -44,8 +44,11 @@ if TYPE_CHECKING:  # pragma: no cover - только для подсказок �
 # ============================================================
 
 
-PROJECTION_VERSION = "3.0.0"
+PROJECTION_VERSION = "5.0.0"
 
+# Тип события. В выгрузке это ключ payload под именем type, в
+# canonical — колонка event_type; здесь названа колонка, потому
+# что проекция читает уже очищенную строку.
 EVENT_TYPE_FIELD = "event_type"
 
 
@@ -65,6 +68,11 @@ class ProjectionError(ValueError):
 # ------------------------------------------------------------
 
 SEMANTIC_PAYLOAD_FIELDS: dict[str, str] = {
+    # --- что произошло ---
+    #
+    # В выгрузке это ключ payload под именем type, в canonical —
+    # колонка event_type. Поле смысловое и идёт в fields первым.
+    EVENT_TYPE_FIELD: "тип события",
     # --- деньги ---
     "amount": "сумма операции",
     "original_amount": "сумма в валюте страны покупки",
@@ -154,6 +162,11 @@ ENTITY_REFS: dict[str, tuple[str, str]] = {
     "case_id": ("case_ref", "CASE"),
     "offer_id": ("offer_ref", "OFFER"),
     "merchant_id": ("merchant_ref", "MERCHANT"),
+    # Сессия приложения и перевод — такие же наблюдаемые сущности
+    # клиента: они различают шаги одной сессии и две ноги одного
+    # перевода. Сырой ключ наружу не выходит, выходит ссылка.
+    "session_id": ("session_ref", "SESSION"),
+    "transfer_id": ("transfer_ref", "TRANSFER"),
 }
 
 
@@ -168,18 +181,13 @@ ENTITY_REFS: dict[str, tuple[str, str]] = {
 
 INTERNAL_FIELDS: dict[str, str] = {
     # конверт
-    "event_id": "тождество записи: связывает версии, модели не нужно",
     # payload
     "product_id": "идентификатор продукта в каталоге банка: связывает события одного продукта",
     "previous_product_id": "идентификатор прежнего продукта при переходе",
-    "cause_event_id": "внутренняя ссылка на событие-причину: заменена признаками связи",
-    "session_id": "внутренний ключ сессии приложения: собирает шаги одной сессии, модели не нужен",
-    "transfer_id": "внутренний ключ перевода: сводит две его ноги, модели не нужен",
     "due_date": "плановая дата платежа: модель получает days_to_due, календарных дат в словарях нет",
     # производные canonical
     "client_idx": "внутренний индекс клиента в группе",
     "stable_event_index": "внутренний номер логического события",
-    "is_repeated_event_id": "метка повторного идентификатора",
     "before_window": "строка старше окна наблюдения",
     "at_or_after_extract": "строка на границе выгрузки или позже",
     "ambiguous_local_time": "признак качества времени",
@@ -247,10 +255,6 @@ CLIENT_ACTION_EVENT_TYPES: frozenset[str] = frozenset(
 # ------------------------------------------------------------
 
 SEMANTIC_LAYER_FIELDS: dict[str, str] = {
-    "related_event_type": "тип события-причины вместо cause_event_id",
-    "relation_type": "вид связи с событием-причиной",
-    "days_since_related_event": "сколько прошло с события-причины",
-    "same_merchant": "та же сеть, что и у события-причины",
     "days_to_due": "дней до планового платежа вместо самой даты",
     "since_previous_hours": "часов с прошлого видимого события",
     "since_same_type_hours": "часов с прошлого события того же типа",
@@ -371,7 +375,7 @@ def model_role(name: str) -> str:
     внутреннее поле слоя.
     """
 
-    if name in SEMANTIC_PAYLOAD_FIELDS or name == EVENT_TYPE_FIELD:
+    if name in SEMANTIC_PAYLOAD_FIELDS:
         return "semantic_field"
 
     if name in ENTITY_REFS:

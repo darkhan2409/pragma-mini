@@ -213,7 +213,6 @@ def _card_statement(sim, state: ClientState, day: datetime, month: datetime) -> 
                     "principal_outstanding": credit.outstanding,
                     "days_past_due": credit.dpd,
                     "due_date": day.date().isoformat(),
-                    "cause_event_id": None,
                     "reason": "card_statement",
                 },
             )
@@ -345,7 +344,6 @@ def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_ev
             "channel": "system",
             "contract_id": contract_id,
             "counterparty": "own_account",
-            "cause_event_id": due_event.event_id,
             "reason": "card_statement",
             "mcc": MCC_TRANSFER,
             "merchant_country": "KZ",
@@ -392,7 +390,6 @@ def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_ev
                 "principal_outstanding": credit.outstanding,
                 "days_past_due": 0,
                 "due_date": day.date().isoformat(),
-                "cause_event_id": due_event.event_id,
                 "reason": "payment",
             },
         )
@@ -422,7 +419,6 @@ def _card_missed(state: ClientState, day, credit, contract_id, payment, due_even
                 "principal_outstanding": credit.outstanding,
                 "days_past_due": credit.dpd,
                 "due_date": day.date().isoformat(),
-                "cause_event_id": due_event.event_id,
                 "reason": "missed",
             },
         )
@@ -447,7 +443,6 @@ def _card_missed(state: ClientState, day, credit, contract_id, payment, due_even
                     "principal_outstanding": credit.outstanding,
                     "days_past_due": milestone,
                     "due_date": None,
-                    "cause_event_id": None,
                     "reason": "delinquency",
                 },
             )
@@ -473,7 +468,6 @@ def _card_arrears_cleared(state: ClientState, day, credit, contract_id) -> None:
                 "principal_outstanding": credit.outstanding,
                 "days_past_due": 0,
                 "due_date": None,
-                "cause_event_id": None,
                 "reason": "arrears_cleared",
             },
         )
@@ -521,7 +515,7 @@ def _sweep_bills(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             # Оплачено вне наблюдаемого контура.
             hidden = state.ledger.accounts[state.ledger.cash_id]
             if hidden.balance >= bill["amount"]:
-                state.ledger.post(moment, "hidden", hidden.account_id,
+                state.ledger.post(moment, hidden.account_id,
                                   f"merchant:{bill['kind']}", bill["amount"])
 
     state.open_bills = remaining
@@ -978,13 +972,18 @@ def finish(sim) -> CommunityResult:
 
 def _tape_order(event) -> tuple:
     """
-    Порядок строк клиента в файле выгрузки.
+    Порядок строк клиента в файле выгрузки: время, приоритет
+    типа события, порядок выдачи.
+
+    Третья часть ключа нужна, когда время и тип совпали:
+    идентификатора записи в конверте нет, и порядок держит
+    номер выдачи симуляции. В выгрузку он не попадает.
     """
 
     return (
         event.event_time,
         EVENT_TYPE_PRIORITY.get(event.event_type, 99),
-        event.event_id,
+        event.ordinal,
     )
 
 
@@ -1041,11 +1040,9 @@ def assign_balances(state: ClientState, tape: list) -> None:
 def _row(event) -> dict:
 
     return {
-        "event_id": event.event_id,
         "client_id": event.client_id,
-        "event_type": event.event_type,
-        "source": event.source,
         "event_time": event.event_time,
+        "source": event.source,
         "payload": json.dumps(event.payload, ensure_ascii=False, separators=(",", ":"), default=str),
     }
 

@@ -24,7 +24,24 @@ from ..rawdata import DTYPE_MAP, ENVELOPE_SCHEMA, RawManifest
 # ============================================================
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 11
+
+# Имя поля payload -> имя колонки canonical.
+#
+# В выгрузке тип события называется ключом type: конверт у неё
+# из четырёх колонок, и это её контракт. Внутри слоя та же
+# величина зовётся event_type — так её называют каталог ключей,
+# приоритет типов, реестр полей и все отчёты. Переименование
+# ровно одно, объявлено здесь и нигде не повторяется.
+PAYLOAD_COLUMNS: dict[str, str] = {"type": "event_type"}
+
+
+def canonical_column(name: str) -> str:
+    """
+    Как поле payload называется колонкой canonical.
+    """
+
+    return PAYLOAD_COLUMNS.get(name, name)
 
 TS = pa.timestamp("us")
 
@@ -46,13 +63,7 @@ DERIVED_COLUMNS: tuple[tuple[str, pa.DataType, str, str], ...] = (
         "stable_event_index",
         pa.int64(),
         "int",
-        "номер логического события клиента по (event_time, приоритет типа, event_id)",
-    ),
-    (
-        "is_repeated_event_id",
-        pa.bool_(),
-        "bool",
-        "event_id этой строки уже встречался в выгрузке: запись обязана приходить один раз",
+        "номер логического события клиента по (event_time, приоритет типа, номер строки RAW)",
     ),
     (
         "before_window",
@@ -115,7 +126,25 @@ def payload_columns(manifest: RawManifest) -> list[tuple[str, pa.DataType]]:
                     "общая колонка невозможна"
                 )
 
-    return [(name, DTYPE_MAP[dtype]) for name, dtype in columns.items()]
+    return [(canonical_column(name), DTYPE_MAP[dtype]) for name, dtype in columns.items()]
+
+
+def payload_fields(manifest: RawManifest) -> list[str]:
+    """
+    Имена полей payload так, как они называются В ВЫГРУЗКЕ.
+
+    Разбор идёт по ним, а колонка canonical называется через
+    canonical_column: единственное расхождение — type/event_type.
+    """
+
+    names: list[str] = []
+
+    for info in manifest.catalogue.values():
+        for item in info.fields:
+            if item.name not in names:
+                names.append(item.name)
+
+    return names
 
 
 def events_schema(manifest: RawManifest) -> pa.Schema:
@@ -171,7 +200,6 @@ MENTIONS_SCHEMA = pa.schema(
         ("entity_id", pa.string()),
         ("client_idx", pa.int64()),
         ("client_id", pa.string()),
-        ("event_id", pa.string()),
         ("stable_event_index", pa.int64()),
         ("event_time", TS),
         ("event_type", pa.string()),
@@ -196,7 +224,6 @@ TRANSFERS_SCHEMA = pa.schema(
         ("side", pa.string()),
         ("client_idx", pa.int64()),
         ("client_id", pa.string()),
-        ("event_id", pa.string()),
         ("event_type", pa.string()),
         ("stable_event_index", pa.int64()),
         ("event_time", TS),
@@ -209,24 +236,8 @@ TRANSFERS_SCHEMA = pa.schema(
 )
 
 
-# Повторы идентификатора: запись обязана приходить в выгрузку
-# ровно один раз, и повтор это поломка контракта, а не дефект
-# доставки. Строка сохраняется с пометкой, чтобы расхождение
-# было видно, а не исчезло молча.
-REPEATS_SCHEMA = pa.schema(
-    [
-        ("event_id", pa.string()),
-        ("client_id", pa.string()),
-        ("raw_row", pa.int64()),
-        ("first_raw_row", pa.int64()),
-        ("reason", pa.string()),
-    ]
-)
-
-
 REJECTS_SCHEMA = pa.schema(
     [
-        ("event_id", pa.string()),
         ("client_id", pa.string()),
         ("event_type", pa.string()),
         ("reason", pa.string()),
@@ -240,6 +251,9 @@ REJECTS_SCHEMA = pa.schema(
 
 
 __all__ = [
+    "PAYLOAD_COLUMNS",
+    "payload_fields",
+    "canonical_column",
     "CLIENT_INDEX_SCHEMA",
     "DERIVED_COLUMNS",
     "DERIVED_NAMES",
@@ -249,7 +263,6 @@ __all__ = [
     "PAYLOAD_OK",
     "PAYLOAD_UNPARSEABLE",
     "REJECTS_SCHEMA",
-    "REPEATS_SCHEMA",
     "SCHEMA_VERSION",
     "TRANSFERS_SCHEMA",
     "events_schema",

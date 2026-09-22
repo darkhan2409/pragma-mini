@@ -77,7 +77,6 @@ PAIR_ONE = "one_side_observed"
 MENTION_COLUMNS = (
     "client_idx",
     "client_id",
-    "event_id",
     "stable_event_index",
     "event_time",
     "event_type",
@@ -180,7 +179,6 @@ def extract_transfers(table: pa.Table) -> list[dict]:
                 "side": TRANSFER_SIDES.get(row["event_type"]),
                 "client_idx": row["client_idx"],
                 "client_id": row["client_id"],
-                "event_id": row["event_id"],
                 "event_type": row["event_type"],
                 "stable_event_index": row["stable_event_index"],
                 "event_time": row["event_time"],

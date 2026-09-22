@@ -8,7 +8,7 @@ import numpy as np
 from src.preprocessing.artifacts import write_json, write_text
 
 from .collate import collate
-from .encoding import causes_as_of, encode_history
+from .encoding import encode_history
 from .inputs import DatasetInputs
 from .reader import Dataset
 from .report import render_check_md
@@ -374,10 +374,7 @@ def _recompute(dataset: Dataset, inputs: DatasetInputs, count: int) -> list[dict
 
         history = entry.history(row["client_id"], cutoff)
 
-        encoded = encode_history(
-            inputs.artifacts, history, limit,
-            cause_of=causes_as_of(entry.corpus.store, row["client_id"], cutoff),
-        )
+        encoded = encode_history(inputs.artifacts, history, limit)
 
         fresh = build_sample(
             artifacts=inputs.artifacts,

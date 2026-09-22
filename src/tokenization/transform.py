@@ -9,7 +9,6 @@ import pyarrow as pa
 
 from src.preprocessing.artifacts import TableWriter, dumps_json, read_json, sha256_file, write_json, write_text
 from src.preprocessing.history import HistoryError
-from src.preprocessing.semantic.chains import ChainsError
 from src.preprocessing.semantic.keys import KeysError
 
 from .corpus import CorpusError, GroupCorpus
@@ -19,7 +18,6 @@ from .encode import (
     decode_record,
     encode_event,
     encode_profile,
-    event_identity,
     profile_known,
     provenance,
     references,
@@ -66,7 +64,6 @@ CHANNEL_COLUMNS: tuple[str, ...] = ("calendar",)
 METADATA_COLUMNS: tuple[str, ...] = (
     "client_id",
     "cutoff",
-    "event_id",
     "stable_event_index",
     "event_time",
     "source",
@@ -83,7 +80,6 @@ EVENTS_SCHEMA = pa.schema(
     [
         ("client_id", pa.string()),
         ("cutoff", pa.timestamp("us")),
-        ("event_id", pa.string()),
         ("stable_event_index", pa.int64()),
         ("event_time", pa.timestamp("us")),
         ("source", pa.string()),
@@ -278,18 +274,10 @@ def transform_group(
 
                 try:
                     history = corpus.history(client_id, cutoff)
-                except (HistoryError, ChainsError, KeysError) as error:
+                except (HistoryError, KeysError) as error:
                     raise TransformError(
                         f"клиент {client_id} на срезе {cutoff.isoformat()}: {error}"
                     ) from error
-
-                identity = event_identity(history)
-
-                reason_of_event = {
-                    item.stable_event_index: item.reason
-                    for item in history.relations
-                    if getattr(item, "reason", None)
-                }
 
                 rows: list[dict] = []
                 client_values = 0
@@ -323,7 +311,6 @@ def transform_group(
                         {
                             "client_id": history.client_id,
                             "cutoff": cutoff,
-                            "event_id": event.event_id,
                             "stable_event_index": event.stable_event_index,
                             "event_time": event.event_time,
                             "source": event.source,
@@ -337,9 +324,9 @@ def transform_group(
                             "value_lengths": record.value_lengths,
                             "value_keys": record.value_keys,
                             "refs": dumps_json(references(artifacts, event)).strip(),
-                            "provenance": dumps_json(provenance(event, identity)).strip(),
+                            "provenance": dumps_json(provenance(event)).strip(),
                             "absent_reasons": dumps_json(
-                                absent_reasons(event, reason_of_event.get(event.stable_event_index))
+                                absent_reasons(event)
                             ).strip(),
                             "unknown_keys": record.unknown_keys,
                             "calendar": list(event.calendar),
@@ -562,14 +549,6 @@ def _golden(artifacts: FrozenArtifacts, history, config: TokenizerConfig, limit:
 
     out: list[dict] = []
 
-    identity = event_identity(history)
-
-    reason_of_event = {
-        item.stable_event_index: item.reason
-        for item in history.relations
-        if getattr(item, "reason", None)
-    }
-
     # Разные типы событий интереснее, чем подряд идущие покупки.
     seen: set[str] = set()
 
@@ -590,7 +569,7 @@ def _golden(artifacts: FrozenArtifacts, history, config: TokenizerConfig, limit:
             {
                 "client_id": history.client_id,
                 "cutoff": cutoff.isoformat(),
-                "event_id": event.event_id,
+                "stable_event_index": event.stable_event_index,
                 "event_type": event_type,
                 "event_time": event.event_time.isoformat(),
                 "n_tokens": record.n_tokens,
@@ -599,8 +578,8 @@ def _golden(artifacts: FrozenArtifacts, history, config: TokenizerConfig, limit:
                     for item in decode_record(artifacts, record)
                 ],
                 "refs": references(artifacts, event),
-                "absent_reasons": absent_reasons(event, reason_of_event.get(event.stable_event_index)),
-                "provenance": provenance(event, identity),
+                "absent_reasons": absent_reasons(event),
+                "provenance": provenance(event),
             }
         )
 

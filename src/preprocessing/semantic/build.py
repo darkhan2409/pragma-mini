@@ -10,13 +10,14 @@ from ..artifacts import _md_table, read_json, write_json, write_table, write_tex
 from ..canonical.build import REGISTRY_FILE as CANONICAL_REGISTRY_FILE
 from ..canonical.build import STAGE as CANONICAL_STAGE
 from ..canonical.registry import catalogue_from_registry
+from ..canonical.schema import canonical_column
 from ..history import CanonicalStore
 from ..projection import PROJECTION_VERSION, projection_registry
 from ..settings import CALENDAR_ENCODING, PreprocessingConfig
 from . import activity as activity_module
 from . import chains as chains_module
 from .as_of import SEMANTIC_VERSION, SemanticHistory, semantic_as_of
-from .keys import DERIVED_KEYS, KEYS_VERSION, RELATION_KEYS, TIMING_KEYS, keys_registry
+from .keys import DERIVED_KEYS, KEYS_VERSION, TIMING_KEYS, keys_registry
 
 
 # ============================================================
@@ -34,7 +35,7 @@ from .keys import DERIVED_KEYS, KEYS_VERSION, RELATION_KEYS, TIMING_KEYS, keys_r
 
 
 STAGE = "semantic"
-STAGE_VERSION = "4.0.0"
+STAGE_VERSION = "6.0.0"
 SCHEMA_VERSION = 1
 
 REGISTRY_FILE = "semantic_registry.json"
@@ -106,12 +107,9 @@ def build_group(
 
     wanted = clients or [row["client_id"] for row in store.clients[: config.semantic_sample_clients]]
 
-    try:
-        histories: list[SemanticHistory] = [
-            semantic_as_of(store, client_id, cutoff) for client_id in wanted
-        ]
-    except chains_module.ChainsError as error:
-        raise SemanticError(str(error)) from error
+    histories: list[SemanticHistory] = [
+        semantic_as_of(store, client_id, cutoff) for client_id in wanted
+    ]
 
     activity_rows: list[dict] = []
     chain_rows: list[dict] = []
@@ -175,14 +173,9 @@ def build_group(
         "chains": chains_module.chain_summary(
             [chain for history in histories for chain in history.chains]
         ),
-        "relations": sum(len(history.relations) for history in histories),
-        "relation_intervals": _relation_totals(
-            [item for history in histories for item in history.relations]
-        ),
         "derived_reasons": dict(sorted(derived_reasons.items())),
         "computed_keys": {
             "timing": sorted(key.key for key in TIMING_KEYS.values()),
-            "relation": sorted(key.key for key in RELATION_KEYS.values()),
             "formula": sorted(key.key for key in DERIVED_KEYS.values()),
         },
         "calendar": {
@@ -246,30 +239,21 @@ class SemanticError(ValueError):
 
 
 def _payload_names(catalogue: dict) -> list[str]:
+    """
+    Имена полей payload так, как они называются колонками
+    canonical: тип события приезжает из payload["type"] и зовётся
+    здесь event_type.
+    """
 
     names: set[str] = set()
 
     for info in catalogue.values():
         fields = info["fields"] if isinstance(info, dict) else info.fields
         for item in fields:
-            names.add(item["name"] if isinstance(item, dict) else item.name)
+            name = item["name"] if isinstance(item, dict) else item.name
+            names.add(canonical_column(name))
 
     return sorted(names)
-
-
-def _relation_totals(items: list) -> dict:
-    """
-    Сколько связей найдено.
-
-    Длительность есть у каждой: время событий точное, и порядок
-    причины со следствием известен всегда.
-    """
-
-    return {
-        "with_interval": sum(1 for item in items if item.days_since_related_event is not None),
-        "total": len(items),
-        "rule": "время точное: причина всегда раньше следствия, иначе это поломка данных",
-    }
 
 
 def _activity_totals(rows: list[dict]) -> dict:
@@ -420,19 +404,6 @@ def render_example_md(history: SemanticHistory) -> str:
                 [[item.kind, item.started_at, item.steps, item.first_event_type, item.outcome]
                  for item in history.chains],
                 ["вид", "начало", "шагов", "первое событие", "исход"],
-            )
-        )
-
-    if history.relations:
-        out.append("\n## Связи событий\n")
-        out.append(
-            _md_table(
-                [[item.related_event_type, item.relation_type,
-                  item.reason if item.days_since_related_event is None
-                  else round(item.days_since_related_event, 3),
-                  "—" if item.same_merchant is None else ("да" if item.same_merchant else "нет")]
-                 for item in history.relations[:10]],
-                ["событие-причина", "вид связи", "дней прошло", "та же точка"],
             )
         )
 

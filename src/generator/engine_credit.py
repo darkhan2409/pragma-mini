@@ -41,7 +41,6 @@ def loan_payload(contract_id: str, loan, **extra) -> dict:
         # последнем обходе месяца.
         "days_past_due": loan.dpd,
         "due_date": None,
-        "cause_event_id": None,
         "reason": None,
     }
 
@@ -143,7 +142,7 @@ def _on_installment_due(sim, state: ClientState, ts: datetime, payload: dict) ->
         )
     )
 
-    loan_rules.register_due(loan, item, event.event_id)
+    loan_rules.register_due(loan, item)
 
     if loan.autopay:
         owed = max(int(item.amount), loan_rules.arrears_amount(loan))
@@ -288,7 +287,6 @@ def _decline_payment(state: ClientState, ts: datetime, loan, item, amount: int) 
         {
             "channel": "system",
             "contract_id": loan.contract_id,
-            "cause_event_id": item.due_event_id,
             "reason": "installment",
             "decline_reason": "insufficient_funds",
             "mcc": MCC_SALARY,
@@ -409,7 +407,6 @@ def repay_loan(
             "channel": channel,
             "session_id": session_id,
             "contract_id": loan.contract_id,
-            "cause_event_id": covered[0][0].due_event_id,
             "reason": "installment",
             "mcc": MCC_SALARY,
             "merchant_country": "KZ",
@@ -428,7 +425,6 @@ def repay_loan(
                     amount_due=target.amount,
                     amount_paid=paid,
                     due_date=target.due_date.date().isoformat(),
-                    cause_event_id=target.due_event_id,
                     reason="payment",
                 ),
             )
@@ -523,7 +519,6 @@ def _on_loan_check(sim, state: ClientState, ts: datetime, payload: dict) -> None
                     amount_paid=item.paid_amount or None,
                     days_past_due=(ts - item.due_date).days,
                     due_date=item.due_date.date().isoformat(),
-                    cause_event_id=item.due_event_id,
                     reason="missed",
                 ),
             )

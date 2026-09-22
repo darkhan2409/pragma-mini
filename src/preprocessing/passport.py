@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -17,6 +16,7 @@ from .rawdata import (
     ParsedPayload,
     RawContractError,
     RawDataset,
+    event_types_of,
     iter_event_types,
     parse_payloads,
 )
@@ -46,7 +46,7 @@ from .settings import GROUPS, PreprocessingConfig
 
 
 STAGE = "passport"
-STAGE_VERSION = "7.0.0"
+STAGE_VERSION = "9.0.0"
 
 # Статусы по возрастанию тяжести. Ready означает «данные пригодны
 # целиком»; всё остальное запрещает объявлять набор готовым.
@@ -86,11 +86,9 @@ CONTRACT_VIOLATION_KINDS: tuple[str, ...] = (
 # payload в список не входит: пустой payload canonical уже
 # обрабатывает как null_payload и строку сохраняет с причиной.
 REQUIRED_ENVELOPE_FIELDS: tuple[str, ...] = (
-    "event_id",
     "client_id",
-    "event_type",
-    "source",
     "event_time",
+    "source",
 )
 
 MONTH_NOT_GENERATED = "—"
@@ -129,7 +127,6 @@ class EventsScan:
     by_type: Counter = field(default_factory=Counter)
     event_time_min: datetime | None = None
     event_time_max: datetime | None = None
-    pair_hashes: list[np.ndarray] = field(default_factory=list)
     clients: set = field(default_factory=set)
     month_counts: Counter = field(default_factory=Counter)
     before_start_by_source: Counter = field(default_factory=Counter)
@@ -188,26 +185,6 @@ def _merge_max(current: datetime | None, candidate: datetime | None) -> datetime
     return candidate if current is None or candidate > current else current
 
 
-def _hash_ids(event_id: pa.Array | pa.ChunkedArray) -> np.ndarray:
-    """
-    uint64-отпечаток event_id без хранения самих строк: повторы
-    находятся через np.unique в конце.
-
-    Считается blake2b: pandas ради одной хеш-функции держать
-    незачем, а его реализация между версиями не обещана
-    стабильной.
-    """
-
-    return np.fromiter(
-        (
-            int.from_bytes(hashlib.blake2b(value.encode("utf-8"), digest_size=8).digest(), "little")
-            for value in event_id.to_pylist()
-        ),
-        dtype=np.uint64,
-        count=len(event_id),
-    )
-
-
 def scan_events(raw: RawDataset, config: PreprocessingConfig) -> EventsScan:
 
     manifest = raw.manifest
@@ -232,7 +209,12 @@ def scan_events(raw: RawDataset, config: PreprocessingConfig) -> EventsScan:
                 scan.required_nulls[name] += nulls
 
         scan.by_source.update(_counter(chunk.column("source")))
-        scan.by_type.update(_counter(chunk.column("event_type")))
+
+        # Тип события лежит внутри payload: колонки у него нет,
+        # и читается он ключом type.
+        event_types = event_types_of(chunk.column("payload"))
+
+        scan.by_type.update(_counter(event_types))
 
         event_time = chunk.column("event_time")
 
@@ -243,14 +225,6 @@ def scan_events(raw: RawDataset, config: PreprocessingConfig) -> EventsScan:
         event_np = event_time.to_numpy(zero_copy_only=False).astype("datetime64[us]")
 
         sources = np.asarray(chunk.column("source").to_pylist(), dtype=object)
-
-        # --- повторы идентификаторов ---
-        #
-        # Запись приходит в выгрузку ровно один раз. Повтор
-        # event_id — поломка, а не дефект доставки, и считается
-        # по идентификатору, а не по паре с версией.
-
-        scan.pair_hashes.append(_hash_ids(chunk.column("event_id")))
 
         # --- клиенты ---
 
@@ -282,7 +256,7 @@ def scan_events(raw: RawDataset, config: PreprocessingConfig) -> EventsScan:
         before = event_np < period_start
         if before.any():
             scan.before_start_by_source.update(Counter(sources[before].tolist()))
-            types = np.asarray(chunk.column("event_type").to_pylist(), dtype=object)
+            types = np.asarray(event_types.to_pylist(), dtype=object)
             scan.before_start_by_type.update(Counter(types[before].tolist()))
 
         # Событие на границе выгрузки или позже: в честной выгрузке
@@ -298,7 +272,7 @@ def scan_events(raw: RawDataset, config: PreprocessingConfig) -> EventsScan:
             info = manifest.catalogue.get(event_type)
 
             if info is None:
-                scan.unknown_types[event_type] += rows.num_rows
+                scan.unknown_types[str(event_type)] += rows.num_rows
                 continue
 
             parsed = parse_payloads(info, rows.column("payload"))
@@ -527,11 +501,6 @@ def sources_check(raw: RawDataset, config: PreprocessingConfig) -> dict[str, Any
 
 def _events_summary(scan: EventsScan, config: PreprocessingConfig) -> dict[str, Any]:
 
-    ids = np.concatenate(scan.pair_hashes) if scan.pair_hashes else np.zeros(0, dtype=np.uint64)
-    _, counts = np.unique(ids, return_counts=True)
-    repeated_ids = int((counts > 1).sum())
-    repeated_rows = int((counts[counts > 1] - 1).sum())
-
     return {
         "rows": scan.rows,
         "row_groups": scan.row_groups,
@@ -539,9 +508,6 @@ def _events_summary(scan: EventsScan, config: PreprocessingConfig) -> dict[str, 
         "event_time": {"min": scan.event_time_min, "max": scan.event_time_max},
         "by_source": dict(sorted(scan.by_source.items())),
         "by_event_type": dict(sorted(scan.by_type.items())),
-        # Запись приходит в выгрузку ровно один раз. Повтор
-        # event_id — поломка контракта, а не дефект доставки.
-        "repeated_event_ids": {"ids": repeated_ids, "extra_rows": repeated_rows},
         "reversal_like": {
             name: scan.by_type.get(name, 0) for name in ("refund", "reversal", "chargeback")
         },
@@ -746,13 +712,6 @@ def build_passport(
             place = f"{event_type}.{field_name}" if field_name not in ("", "None") else event_type
             contract_violations.append(f"{place}: {kind} в {count} строках")
 
-    repeated = report["events"]["repeated_event_ids"]
-    if repeated["ids"]:
-        errors.append(
-            f"повторяющийся event_id: {repeated['ids']} идентификаторов, "
-            f"{repeated['extra_rows']} лишних строк; запись обязана приходить один раз"
-        )
-
     before = report["months"]["before_period_start"]["rows"]
     if before:
         limitations.append(f"записей до period_start: {before} (реестр договоров, контекст, не история)")
@@ -883,11 +842,6 @@ def render_passport_md(report: dict) -> str:
                 ["строк", events["rows"]],
                 ["клиентов", events["clients"]],
                 ["event_time", f"{_fmt(events['event_time']['min'])} … {_fmt(events['event_time']['max'])}"],
-                [
-                    "повторов event_id",
-                    f"{events['repeated_event_ids']['ids']} идентификаторов / "
-                    f"{events['repeated_event_ids']['extra_rows']} лишних строк",
-                ],
                 ["refund / reversal / chargeback", ", ".join(f"{k}={v}" for k, v in events["reversal_like"].items())],
             ],
             ["показатель", "значение"],

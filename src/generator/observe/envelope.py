@@ -4,31 +4,33 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from ..config import EVENT_TYPE_SOURCE, PAYLOAD_FIELDS, PAYLOAD_REQUIRED
-from ..rng import stable_hash
 
 
 # ============================================================
 # КОНВЕРТ СОБЫТИЯ
 # ============================================================
 #
-#   event_id     устойчивый идентификатор записи; встречается
-#                в выгрузке ровно один раз
 #   client_id    чей это факт
-#   event_type   что произошло
-#   source       какая система банка записала факт
 #   event_time   ТОЧНОЕ время, когда действие или факт
 #                произошли; другого времени у записи нет
-#   payload      остальное, JSON-строкой
+#   source       какая система банка записала факт
+#   payload      что произошло и всё остальное, JSON-строкой
 #
-# Шесть колонок и ничего больше. Запись сразу окончательна:
-# исправлений, версий и повторных доставок не бывает, поэтому
-# ни версии, ни метки доставки в конверте нет.
+# Четыре колонки и ничего больше. Тип события лежит ВНУТРИ
+# payload под ключом type: отдельной колонки у него нет, и
+# читатель узнаёт тип из самой записи.
 #
-# Деловая связь живёт ключами payload: cause_event_id называет
-# событие-причину, contract_id, application_id, case_id,
-# offer_id, session_id и transfer_id — сущность, частью которой
-# запись является. Отдельной метки связи конверт не несёт: вид
-# связи задаёт имя ключа.
+# Идентификатора записи в конверте нет: тождество строки банку
+# не нужно, а истории клиента хватает времени события. Запись
+# сразу окончательна: исправлений, версий и повторных доставок
+# не бывает.
+#
+# Деловая связь живёт деловыми ключами payload: contract_id,
+# account_id, card_id, application_id, case_id, offer_id,
+# session_id, transfer_id и merchant_id называют сущность,
+# частью которой запись является. Ссылки на событие-причину
+# нет: причинные связи не восстанавливаются ни полем, ни
+# догадкой.
 #
 # Неприменимое поле ОТСУТСТВУЕТ. Не null, а именно отсутствует:
 # ключ без значения не сообщает ничего, чего не сообщает его
@@ -52,28 +54,30 @@ class PayloadError(Exception):
 
 @dataclass
 class Event:
-    event_id: str
     client_id: str
-    event_type: str
-    source: str
     event_time: datetime
+    source: str
     payload: dict
+    # Тип события живёт в payload["type"]; здесь он повторён для
+    # самой симуляции, которая спрашивает его на каждом шагу.
+    # В выгрузку идёт только payload.
+    event_type: str = ""
+    # Номер выдачи внутри клиента. Живёт только в памяти
+    # симуляции: держит порядок строк с одинаковым временем и
+    # даёт воспроизводимый ключ случайности. В выгрузку не
+    # попадает и заменой event_id не является.
+    ordinal: int = 0
 
 
 class EventFactory:
     """
-    Выдаёт события одного клиента со стабильными
-    идентификаторами.
+    Выдаёт события одного клиента и нумерует их по порядку
+    выдачи.
     """
 
     def __init__(self, client_id: str) -> None:
         self.client_id = client_id
-        self._counters: dict[str, int] = {}
-
-    def next_id(self, source: str) -> str:
-        index = self._counters.get(source, 0) + 1
-        self._counters[source] = index
-        return f"ev{stable_hash(self.client_id, source, index) % 10 ** 15:015d}"
+        self._ordinal = 0
 
     def make(self, event_type: str, ts: datetime, payload: dict) -> Event:
 
@@ -89,20 +93,30 @@ class EventFactory:
                 f"допустимы {sorted(allowed)}"
             )
 
-        clean = {name: value for name, value in payload.items() if value is not None}
+        if "type" in payload:
+            raise PayloadError(
+                f"{event_type}: ключ type проставляет конверт, передавать его нельзя"
+            )
+
+        # Тип идёт первым ключом записи: читатель payload узнаёт,
+        # что перед ним, до разбора остальных полей.
+        clean = {"type": event_type}
+        clean.update({name: value for name, value in payload.items() if value is not None})
 
         empty = sorted(PAYLOAD_REQUIRED[event_type] - set(clean))
 
         if empty:
             raise PayloadError(f"{event_type}: обязательные ключи не заполнены: {empty}")
 
+        self._ordinal += 1
+
         return Event(
-            event_id=self.next_id(source),
             client_id=self.client_id,
-            event_type=event_type,
-            source=source,
             event_time=ts,
+            source=source,
             payload=clean,
+            event_type=event_type,
+            ordinal=self._ordinal,
         )
 
 

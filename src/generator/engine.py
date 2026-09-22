@@ -728,7 +728,7 @@ def _pick_spending_account(state: ClientState, ts: datetime, sources: list, stre
 
 
 def _register_card_debt(
-    state: ClientState, account_id: str, amount: int, ts, is_cash: bool, cause_event_id: str
+    state: ClientState, account_id: str, amount: int, ts, is_cash: bool, purchase_ref: int
 ) -> None:
     """
     Трата по кредитной карте становится долгом: покупка идёт в
@@ -751,25 +751,29 @@ def _register_card_debt(
     if is_cash:
         card_rules.add_cash(credit, amount)
     else:
-        card_rules.add_purchase(credit, amount, cal.month_index(ts), cause_event_id)
+        card_rules.add_purchase(credit, amount, cal.month_index(ts), purchase_ref)
 
 
 def _release_card_debt(
-    state: ClientState, account_id: str, amount: int, cause_event_id: str | None
+    state: ClientState, account_id: str, amount: int, purchase_ref: int | None
 ) -> None:
     """
     Возврат по кредитной карте снимает долг ТОЙ покупки, которую
     вернули, а не просто кладёт деньги на счёт.
 
+    Возвращаемая покупка называется внутренней ссылкой
+    симуляции, которой в выгрузке нет: связь причины и следствия
+    наружу не выдаётся.
+
     Раньше покупка ставила части рассрочки в график, а её полный
     возврат их не убирал: клиент оставался должен банку за то,
     чего не покупал. Потом возврат снимал долг без разбора и
     добирался до наличного: возврат уже выплаченной покупки
-    гасил снятые наличные. Возврат без причины долга не снимает:
-    непонятно, чьего.
+    гасил снятые наличные. Возврат без известной покупки долга
+    не снимает: непонятно, чьего.
     """
 
-    if not cause_event_id:
+    if purchase_ref is None:
         return
 
     account = state.ledger.accounts.get(account_id)
@@ -782,7 +786,7 @@ def _release_card_debt(
     if credit is None or credit.closed:
         return
 
-    card_rules.reverse_purchase(credit, int(amount), cause_event_id)
+    card_rules.reverse_purchase(credit, int(amount), purchase_ref)
 
 
 def _emit_money(
@@ -796,6 +800,7 @@ def _emit_money(
     payload: dict,
     status: str = "approved",
     post: bool = True,
+    releases=None,
 ):
     """
     Одна денежная операция: проводка и событие с balance_after.
@@ -803,6 +808,9 @@ def _emit_money(
 
     post=False — вторая нога перевода между своими счетами:
     событие с остатком есть, проводки нет, её сделала первая нога.
+
+    releases — покупка, долг которой снимает этот возврат. Связь
+    живёт в памяти симуляции и в выгрузку не попадает.
     """
 
     account = state.ledger.get(account_id) if account_id else None
@@ -876,9 +884,9 @@ def _emit_money(
         # там пересчитывается по ленте, страдала только симуляция.
         if post:
             if direction == "debit":
-                state.ledger.post(ts, event.event_id, account_id, counterpart_account, int(amount))
+                state.ledger.post(ts, account_id, counterpart_account, int(amount))
             else:
-                state.ledger.post(ts, event.event_id, counterpart_account, account_id, int(amount))
+                state.ledger.post(ts, counterpart_account, account_id, int(amount))
 
         event.payload["balance_after"] = account.balance
 
@@ -891,13 +899,16 @@ def _emit_money(
                 int(amount),
                 ts,
                 event_type in ("cash_withdrawal", "transfer_out", "p2p_out"),
-                event.event_id,
+                event.ordinal,
             )
 
         # Возврат, отмена и chargeback идут обратным ходом: долг
         # той же покупки уменьшается на вернувшуюся сумму.
         if direction == "credit" and event_type in ("refund", "reversal", "chargeback"):
-            _release_card_debt(state, account_id, int(amount), event.payload.get("cause_event_id"))
+            _release_card_debt(
+                state, account_id, int(amount),
+                releases.ordinal if releases is not None else None,
+            )
 
     return state.emit(event)
 
@@ -944,17 +955,17 @@ def _on_income(sim, state: ClientState, ts: datetime, payload: dict) -> None:
     counterpart = f"employer:{payout.payer}"
 
     if payout.landing == "cash":
-        state.ledger.post(ts, "hidden", counterpart, state.ledger.cash_id, amount)
+        state.ledger.post(ts, counterpart, state.ledger.cash_id, amount)
         return
 
     if payout.landing == "other_bank":
-        state.ledger.post(ts, "hidden", counterpart, state.ledger.other_bank_id, amount)
+        state.ledger.post(ts, counterpart, state.ledger.other_bank_id, amount)
         return
 
     account = state.primary_card_account(ts)
 
     if account is None:
-        state.ledger.post(ts, "hidden", counterpart, state.ledger.cash_id, amount)
+        state.ledger.post(ts, counterpart, state.ledger.cash_id, amount)
         return
 
     event_type = {
@@ -1186,7 +1197,7 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         hidden = state.ledger.hidden_sources(amount)
 
         if hidden and rng.random() < settings.hidden_purchase_share:
-            state.ledger.post(ts, "hidden", hidden[0].account_id, f"merchant:{choice.outlet.merchant_id}", amount)
+            state.ledger.post(ts, hidden[0].account_id, f"merchant:{choice.outlet.merchant_id}", amount)
             return
 
         if rng.random() < settings.decline_attempt_share and state.may_decline(ts):
@@ -1318,12 +1329,14 @@ def _on_refund(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             name: cause.payload.get(name)
             for name in merchant_catalog.MERCHANT_PAYLOAD_FIELDS
         },
-        "cause_event_id": cause.event_id,
         "reason": plan["kind"],
         "is_online": cause.payload.get("is_online"),
         "is_subscription": False,
     }
 
+    # Возвращаемая покупка передаётся симуляции, а не записи:
+    # долг снимается с той покупки, которую вернули, но в
+    # выгрузке событие о своей причине не говорит.
     _emit_money(
         state,
         ts,
@@ -1335,6 +1348,7 @@ def _on_refund(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         if cause.payload.get("merchant_id")
         else "external:merchant",
         body,
+        releases=cause,
     )
 
 

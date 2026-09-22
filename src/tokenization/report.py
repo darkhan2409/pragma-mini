@@ -676,7 +676,7 @@ def render_golden_md(examples: list[dict]) -> str:
         )
 
         out.append(
-            f"Срез {example['cutoff'][:10]}, запись {example['event_id']}, "
+            f"Срез {example['cutoff'][:10]}, событие {example['stable_event_index']}, "
             f"токенов {example['n_tokens']}.\n\n"
         )
 
@@ -732,7 +732,7 @@ def _source(item: dict) -> str:
     kind = item.get("kind")
 
     if kind == "event":
-        return f"событие {item.get('event_id', '?')}.{item.get('key')}"
+        return f"событие {item.get('stable_event_index', '?')}.{item.get('key')}"
 
     if kind == "profile":
         return f"профиль.{item.get('key')}"

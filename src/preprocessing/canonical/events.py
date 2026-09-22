@@ -10,7 +10,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from ..rawdata import RawDataset, RawManifest, iter_event_types, parse_payloads
+from ..rawdata import RawDataset, RawManifest, event_types_of, iter_event_types, parse_payloads
 from ..settings import PreprocessingConfig
 from .schema import (
     DERIVED_NAMES,
@@ -18,6 +18,7 @@ from .schema import (
     PAYLOAD_NULL,
     PAYLOAD_OK,
     PAYLOAD_UNPARSEABLE,
+    canonical_column,
     events_schema,
     payload_columns,
 )
@@ -56,11 +57,9 @@ class CanonicalError(ValueError):
 # на то, что его запускали: проверка повторяется до сортировки,
 # индексов и связей.
 REQUIRED_ENVELOPE_FIELDS: tuple[str, ...] = (
-    "event_id",
     "client_id",
-    "event_type",
-    "source",
     "event_time",
+    "source",
 )
 
 
@@ -86,13 +85,6 @@ def require_envelope(batch: pa.Table) -> None:
             "Выгрузка необрабатываема: выполните этап passport, он называет все такие строки"
         )
 
-
-# Поля конверта, которые в сравнение содержимого входят.
-CONTENT_ENVELOPE: tuple[str, ...] = (
-    "event_type",
-    "source",
-    "event_time",
-)
 
 # Тип события, чья сумма это сам остаток, а не движение по счёту.
 # Объявляется явно: по каталогу ключей такое свойство не видно.
@@ -250,22 +242,31 @@ def parse_batch(manifest: RawManifest, batch: pa.Table, payload_names: list[str]
     counts: dict[str, int] = {}
 
     if rows == 0:
-        empty = pa.table({name: pa.nulls(0, columns[name]) for name in payload_names})
+        empty = pa.table(
+            {canonical_column(name): pa.nulls(0, columns[canonical_column(name)]) for name in payload_names}
+        )
         return ParsedBatch(empty, status, violations, rejects, counts)
 
     order: list[np.ndarray] = []
     pieces: list[pa.Table] = []
 
-    event_type_column = batch.column("event_type")
+    # Тип события читается из payload: колонки event_type в
+    # выгрузке нет. Строка без разобранного типа уходит в
+    # unknown_event_type, а не получает выдуманный тип.
+    event_type_column = event_types_of(batch.column("payload"))
 
     for event_type, _ in iter_event_types(batch):
 
-        mask = pc.equal(event_type_column, event_type)
+        mask = (
+            pc.equal(event_type_column, event_type)
+            if event_type is not None
+            else pc.is_null(event_type_column)
+        )
         indices = np.asarray(pc.indices_nonzero(mask).to_pylist(), dtype=np.int64)
 
         rows_of_type = batch.filter(mask)
 
-        info = manifest.catalogue.get(event_type)
+        info = manifest.catalogue.get(event_type) if event_type is not None else None
 
         if info is None:
             # Тип вне каталога ключей: строка сохраняется, поля пустые.
@@ -274,7 +275,6 @@ def parse_batch(manifest: RawManifest, batch: pa.Table, payload_names: list[str]
                 violations.setdefault(int(position), []).append(f"unknown_event_type:{event_type}")
                 rejects.append(
                     {
-                        "event_id": rows_of_type.column("event_id")[local].as_py(),
                         "client_id": rows_of_type.column("client_id")[local].as_py(),
                         "event_type": event_type,
                         "reason": "unknown_event_type",
@@ -286,7 +286,12 @@ def parse_batch(manifest: RawManifest, batch: pa.Table, payload_names: list[str]
                     }
                 )
             counts["unknown_event_type"] = counts.get("unknown_event_type", 0) + len(indices)
-            piece = pa.table({name: pa.nulls(len(indices), columns[name]) for name in payload_names})
+            piece = pa.table(
+                {
+                    canonical_column(name): pa.nulls(len(indices), columns[canonical_column(name)])
+                    for name in payload_names
+                }
+            )
             order.append(indices)
             pieces.append(piece)
             continue
@@ -305,7 +310,6 @@ def parse_batch(manifest: RawManifest, batch: pa.Table, payload_names: list[str]
                 status[position] = PAYLOAD_UNPARSEABLE if items[0].startswith("unparseable") else PAYLOAD_NULL
                 rejects.append(
                     {
-                        "event_id": rows_of_type.column("event_id")[local].as_py(),
                         "client_id": rows_of_type.column("client_id")[local].as_py(),
                         "event_type": event_type,
                         "reason": items[0].split(":")[0],
@@ -319,10 +323,10 @@ def parse_batch(manifest: RawManifest, batch: pa.Table, payload_names: list[str]
 
         piece = pa.table(
             {
-                name: (
+                canonical_column(name): (
                     parsed.table.column(name)
                     if name in parsed.table.column_names
-                    else pa.nulls(len(indices), columns[name])
+                    else pa.nulls(len(indices), columns[canonical_column(name)])
                 )
                 for name in payload_names
             }
@@ -338,74 +342,6 @@ def parse_batch(manifest: RawManifest, batch: pa.Table, payload_names: list[str]
     inverse[positions] = np.arange(positions.size, dtype=np.int64)
 
     return ParsedBatch(stacked.take(pa.array(inverse)), status, violations, rejects, counts)
-
-
-# ============================================================
-# ВЕРСИИ, ДУБЛИ И КОНФЛИКТЫ
-# ============================================================
-
-
-@dataclass
-class DuplicateVerdict:
-    """
-    Повторы event_id в выгрузке.
-
-    Запись приходит ровно один раз, поэтому повтор — поломка
-    контракта, а не техническая доставка. Строка сохраняется,
-    но помечается, и этап её пересчитывает в отчёт.
-    """
-
-    repeated: np.ndarray
-    first_row: np.ndarray
-    log: list[dict]
-
-
-def find_repeated_ids(batch: pa.Table) -> DuplicateVerdict:
-    """
-    Находит строки, чей event_id уже встречался в этой группе.
-
-    Первая строка идентификатора остаётся действующей, каждая
-    следующая помечается повтором и попадает в журнал.
-    """
-
-    rows = batch.num_rows
-
-    event_id = np.asarray(batch.column("event_id").to_pylist(), dtype=object)
-    raw_row = np.asarray(batch.column("raw_row").to_pylist(), dtype=np.int64)
-    client_id = np.asarray(batch.column("client_id").to_pylist(), dtype=object)
-
-    repeated = np.zeros(rows, dtype=bool)
-    first_row = np.full(rows, -1, dtype=np.int64)
-
-    seen: dict[object, int] = {}
-    log: list[dict] = []
-
-    order = np.argsort(raw_row, kind="stable")
-
-    for index in order:
-
-        key = event_id[index]
-
-        known = seen.get(key)
-
-        if known is None:
-            seen[key] = int(index)
-            continue
-
-        repeated[index] = True
-        first_row[index] = int(raw_row[known])
-
-        log.append(
-            {
-                "event_id": str(key),
-                "client_id": str(client_id[index]),
-                "raw_row": int(raw_row[index]),
-                "first_raw_row": int(raw_row[known]),
-                "reason": "event_id встретился в выгрузке повторно",
-            }
-        )
-
-    return DuplicateVerdict(repeated, first_row, log)
 
 
 # ============================================================
@@ -429,10 +365,8 @@ def find_repeated_ids(batch: pa.Table) -> DuplicateVerdict:
 
 def balance_chain_gaps(
     runs: list[tuple[int, int]],
-    event_id,
     event_type,
     event_time,
-    repeated,
     stable_index,
     raw_row,
     account_id,
@@ -445,11 +379,10 @@ def balance_chain_gaps(
     Отмечает строки, чей остаток не продолжает предыдущий.
 
     Участвуют только одобренные денежные строки с известным
-    счётом и остатком. Повтор идентификатора пропускается: своих
-    денег у него нет, это та же запись ещё раз.
+    счётом и остатком.
     """
 
-    rows = len(event_id)
+    rows = len(event_type)
 
     gap = np.zeros(rows, dtype=bool)
 
@@ -463,9 +396,6 @@ def balance_chain_gaps(
         per_account: dict[object, list[int]] = {}
 
         for index in order:
-
-            if repeated[index]:
-                continue
 
             # Снимок остатка статуса не несёт: он не операция, а
             # сообщение о том, сколько на счёте лежит. Из цепочки
@@ -524,7 +454,6 @@ def balance_chain_gaps(
 @dataclass
 class BatchResult:
     table: pa.Table
-    dedupe_log: list[dict]
     rejects: list[dict]
     clients: list[dict]
     counts: dict[str, int]
@@ -551,8 +480,6 @@ def build_batch(
 
     parsed = parse_batch(manifest, batch, payload_names)
 
-    verdict = find_repeated_ids(batch)
-
     client_id = np.asarray(batch.column("client_id").to_pylist(), dtype=object)
     runs = _client_runs(client_id)
 
@@ -563,7 +490,6 @@ def build_batch(
 
     event_time = batch.column("event_time").to_numpy(zero_copy_only=False).astype("datetime64[us]")
     raw_row = np.asarray(batch.column("raw_row").to_pylist(), dtype=np.int64)
-    event_id = np.asarray(batch.column("event_id").to_pylist(), dtype=object)
 
     # Причинный порядок внутри одной секунды задаёт приоритет типа
     # события из контракта: договор открыт, потом график,
@@ -571,7 +497,7 @@ def build_batch(
     # становится; неизвестный тип уходит в конец секунды.
     priority_of = manifest.event_type_priority
     last_priority = len(priority_of)
-    event_type = batch.column("event_type").to_pylist()
+    event_type = parsed.table.column("event_type").to_pylist()
     priority = np.asarray(
         [priority_of.get(name, last_priority) for name in event_type],
         dtype=np.int64,
@@ -586,22 +512,21 @@ def build_batch(
         index = client_index[str(client_id[lo])]
         client_idx[lo:hi] = index
 
-        # Номер логического события клиента: события
-        # упорядочены по (время, приоритет типа, event_id), а все
-        # версии и дубли одного event_id делят одно место. Поэтому
-        # исправление уточняет событие НА ЕГО МЕСТЕ и не создаёт
-        # второй позиции в истории.
-        marks: dict[object, tuple] = {}
+        # Номер события в истории клиента: строки упорядочены
+        # по времени, приоритету типа и своему месту в RAW.
+        # Идентификатора записи нет, версий и дублей тоже: каждая
+        # строка это отдельное событие, и место у неё своё.
+        positions = sorted(
+            range(lo, hi),
+            key=lambda position: (
+                event_time[position],
+                priority[position],
+                raw_row[position],
+            ),
+        )
 
-        for position in range(lo, hi):
-            key = event_id[position]
-            mark = (event_time[position], priority[position], key)
-            if key not in marks or mark < marks[key]:
-                marks[key] = mark
-
-        rank_of = {mark[2]: rank for rank, mark in enumerate(sorted(marks.values()))}
-
-        stable_index[lo:hi] = [rank_of[event_id[position]] for position in range(lo, hi)]
+        for rank, position in enumerate(positions):
+            stable_index[position] = rank
 
         clients.append(
             {
@@ -645,10 +570,8 @@ def build_batch(
 
     chain_gap = balance_chain_gaps(
         runs,
-        event_id,
         event_type,
         event_time,
-        verdict.repeated,
         stable_index,
         raw_row,
         payload_column("account_id"),
@@ -701,7 +624,6 @@ def build_batch(
     derived = {
         "client_idx": pa.array(client_idx),
         "stable_event_index": pa.array(stable_index),
-        "is_repeated_event_id": pa.array(verdict.repeated),
         "before_window": pa.array(before_window),
         "at_or_after_extract": pa.array(after_extract),
         "ambiguous_local_time": pa.array(ambiguous),
@@ -722,15 +644,18 @@ def build_batch(
 
     columns.update(derived)
 
+    # parsed уже назвал колонки по-канонически: тип события
+    # приехал из payload["type"] колонкой event_type.
     for name in payload_names:
-        columns[name] = parsed.table.column(name)
+        column = canonical_column(name)
+        columns[column] = parsed.table.column(column)
 
     table = pa.table(columns).select(schema.names).cast(schema)
 
     counts = dict(parsed.counts)
     counts["rows"] = rows
 
-    return BatchResult(table, verdict.log, parsed.rejects, clients, counts)
+    return BatchResult(table, parsed.rejects, clients, counts)
 
 
 def canonical_schema(manifest: RawManifest) -> pa.Schema:

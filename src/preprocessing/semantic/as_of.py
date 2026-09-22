@@ -11,12 +11,11 @@ from . import chains as chains_module
 from . import formulas as formulas_module
 from . import time as time_module
 from .keys import (
+    DIRECT_KEYS,
     DYNAMIC_FIELDS,
-    ENVELOPE_KEYS,
     NUMERIC,
     PROFILE_KEYS,
     REFERENCE_KEYS,
-    RELATION_KEYS,
     SemanticKey,
     key_for,
     profile_change_keys,
@@ -48,7 +47,7 @@ from .keys import (
 # ============================================================
 
 
-SEMANTIC_VERSION = "3.0.0"
+SEMANTIC_VERSION = "5.0.0"
 
 
 @dataclass
@@ -56,23 +55,16 @@ class SemanticEvent:
     """
     Одно событие со смыслом.
 
-    stable_event_index внутренний: он адресует логическое событие
-    внутри слоя, чтобы связь и расчёт можно было надёжно
-    приложить к своему событию. В values он не попадает и границу
-    модели не пересекает.
-
-    event_id тоже внутренний и тоже не становится
-    значениями. Они названы отдельно от порядкового номера,
-    потому что номер устойчив только внутри одной истории: он
-    зависит от состава видимых событий, а трассировка к исходной
-    записи обязана пережить другой срез и другую сборку.
+    stable_event_index внутренний: он адресует событие внутри
+    слоя, чтобы расчёт можно было надёжно приложить к своему
+    событию. В values он не попадает и границу модели не
+    пересекает.
     """
 
     client_id: str
     event_time: datetime
     source: str
     stable_event_index: int
-    event_id: str
     values: dict[str, object]
     calendar: tuple[float, ...]
     timing: time_module.EventTiming
@@ -86,7 +78,6 @@ class SemanticEvent:
             "event_time": self.event_time,
             "source": self.source,
             "stable_event_index": self.stable_event_index,
-            "event_id": self.event_id,
             "values": dict(self.values),
             "calendar": list(self.calendar),
             "timing": self.timing.as_dict(),
@@ -124,7 +115,6 @@ class SemanticHistory:
     activity: list
     activity_summary: dict
     chains: list
-    relations: list
     limitations: list[str]
 
     @property
@@ -140,7 +130,6 @@ class SemanticHistory:
             "profile": self.profile_meta,
             "activity": self.activity_summary,
             "chains": chains_module.chain_summary(self.chains),
-            "relations": len(self.relations),
             "product_ages": self.product_ages,
             "limitations": self.limitations,
         }
@@ -163,7 +152,7 @@ def _semantic_values(row: dict, source: str, refs: LocalRefs) -> tuple[dict[str,
     for name, value in fields.items():
 
         if name == EVENT_TYPE_FIELD:
-            values[ENVELOPE_KEYS[EVENT_TYPE_FIELD].key] = value
+            values[DIRECT_KEYS[EVENT_TYPE_FIELD].key] = value
             continue
 
             continue
@@ -243,28 +232,6 @@ def _typed_profile_value(key: SemanticKey, raw: object, field_name: str) -> tupl
         return None, f"значение профиля {field_name} не разобрано как число: {text!r}"
 
 
-def _relation_values(relation: chains_module.Relation) -> dict[str, object]:
-    """
-    Смысл связи вместо идентификатора события-причины.
-    """
-
-    out: dict[str, object] = {
-        RELATION_KEYS["related_event_type"].key: relation.related_event_type,
-        RELATION_KEYS["relation_type"].key: relation.relation_type,
-    }
-
-    # Сам факт связи известен всегда, а её длительность — нет.
-    # Неизвестный интервал признаком не становится: ни
-    # отрицательным числом, ни нулём.
-    if relation.days_since_related_event is not None:
-        out[RELATION_KEYS["days_since_related_event"].key] = relation.days_since_related_event
-
-    if relation.same_merchant is not None:
-        out[RELATION_KEYS["same_merchant"].key] = relation.same_merchant
-
-    return out
-
-
 def _profile_values(profile: dict | None) -> dict[str, object]:
 
     if profile is None:
@@ -315,19 +282,6 @@ def semantic_as_of(
     # идентификатор не попадает.
     resolved = [{**row, **values} for row, values in zip(rows, values_per_event)]
 
-    # --- связи ---
-
-    relations = chains_module.relations(resolved)
-
-    relation_of_event = {item.stable_event_index: item for item in relations}
-
-    for index, row in enumerate(rows):
-
-        relation = relation_of_event.get(row["stable_event_index"])
-
-        if relation is not None:
-            values_per_event[index].update(_relation_values(relation))
-
     # --- время, формулы, календарь ---
 
     observed_start = history.relationship.observed_start
@@ -377,7 +331,6 @@ def semantic_as_of(
                 event_time=row["event_time"],
                 source=row["source"],
                 stable_event_index=row["stable_event_index"],
-                event_id=row["event_id"],
                 values=values_per_event[index],
                 calendar=tuple(float(value) for value in calendars[index]) if len(calendars) else (),
                 timing=timings[index],
@@ -402,7 +355,6 @@ def semantic_as_of(
         activity=months,
         activity_summary=activity_module.activity_summary(months),
         chains=chains_module.chains(resolved),
-        relations=relations,
         limitations=limitations,
     )
 

@@ -28,7 +28,13 @@ from .envelope import Event
 
 
 def _rng(event: Event, slot: int):
-    return keyed_rng(NS_OBSERVE, stable_hash(event.event_id) % (2 ** 31), slot)
+    """
+    Ключ случайности события: клиент и номер выдачи. Номер живёт
+    в памяти симуляции, в выгрузку не попадает и от места строки
+    в файле не зависит.
+    """
+
+    return keyed_rng(NS_OBSERVE, stable_hash(event.client_id, event.ordinal) % (2 ** 31), slot)
 
 
 def _apply_schema_change(event: Event) -> Event:

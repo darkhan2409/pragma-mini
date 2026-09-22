@@ -189,7 +189,6 @@ EVENTS_SCHEMA = pa.schema(
         ("kept", pa.bool_()),
         ("selection_reason", pa.string()),
         ("exclusion_reason", pa.string()),
-        ("event_id", pa.string()),
         ("stable_event_index", pa.int64()),
         ("event_time", pa.timestamp("us")),
         ("source", pa.string()),
