@@ -8,7 +8,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from .calendar import calendar_features
-from .canonical.build import EVENTS_FILE, PROFILE_FILE
+from .canonical.build import EVENTS_FILE
 from .keys import (
     DIRECT_KEYS,
     DYNAMIC_FIELDS,
@@ -20,18 +20,22 @@ from .keys import (
     profile_change_keys,
 )
 from .projection import ENTITY_REFS, EVENT_TYPE_FIELD, LocalRefs, model_event
-from .settings import group_dir
+from .settings import group_dir, raw_group_dir
 
 
 # ============================================================
-# ЧТЕНИЕ ОБРАБОТАННОЙ ГРУППЫ
+# ЧТЕНИЕ ГРУППЫ
 # ============================================================
 #
-# Единственный способ добраться до данных после препроцессинга:
-# две таблицы группы и ничего больше.
+# Единственный способ добраться до данных для модели: две
+# таблицы и ничего больше.
 #
-#   data/preprocessed/<group>/events.parquet
-#   data/preprocessed/<group>/profile.parquet
+#   data/preprocessed/<group>/events.parquet   очищенная лента
+#   data/raw/<group>/profile.parquet           анкета как есть
+#
+# Анкета берётся прямо из выгрузки: препроцессингу в ней
+# нечего чинить, а копия с тем же содержимым была бы вторым
+# источником правды о клиенте.
 #
 # История клиента это его строки, отобранные по client_id и
 # упорядоченные так, как их уложил препроцессинг. Срез — простой
@@ -94,7 +98,6 @@ class ClientHistory:
     """
 
     client_id: str
-    client_idx: int
     cutoff: datetime | None
     events: list[ClientEvent]
     profile: dict[str, object]
@@ -122,26 +125,35 @@ class ClientHistory:
 
 class Group:
     """
-    Обработанная группа: лента и профиль по стандартному пути.
+    Группа для модели: очищенная лента и анкета из выгрузки.
 
-    Клиенты берутся из профиля: одна строка на клиента, и
+    Клиенты берутся из анкеты: одна строка на клиента, и
     отдельного реестра для этого не нужно.
     """
+
+    PROFILE_FILE = "profile.parquet"
 
     def __init__(self, group: str):
 
         self.group = group
         self.directory = group_dir(group)
+        self.profile_path = raw_group_dir(group) / Group.PROFILE_FILE
 
-        for name in (EVENTS_FILE, PROFILE_FILE):
-            if not (self.directory / name).exists():
-                raise ReadError(f"нет {self.directory / name}: выполните preprocess {group}")
+        events_path = self.directory / EVENTS_FILE
 
-        self._events = pq.ParquetFile(self.directory / EVENTS_FILE)
-        self._profile = pq.read_table(self.directory / PROFILE_FILE)
+        if not events_path.exists():
+            raise ReadError(f"нет {events_path}: выполните preprocess {group}")
+
+        if not self.profile_path.exists():
+            raise ReadError(
+                f"нет {self.profile_path}: анкета читается прямо из выгрузки, "
+                f"и без неё группа неполна"
+            )
+
+        self._events = pq.ParquetFile(events_path)
 
         self._profile_rows: dict[str, dict] = {
-            row["client_id"]: row for row in self._profile.to_pylist()
+            row["client_id"]: row for row in pq.read_table(self.profile_path).to_pylist()
         }
 
         self.client_ids: list[str] = sorted(self._profile_rows)
@@ -260,7 +272,6 @@ class Group:
 
         return ClientHistory(
             client_id=client_id,
-            client_idx=self.client_ids.index(client_id) if client_id in self._profile_rows else -1,
             cutoff=cutoff,
             events=events,
             profile=profile_values(profile),

@@ -120,22 +120,6 @@ def events_schema(manifest: RawManifest) -> pa.Schema:
     return pa.schema(fields)
 
 
-def profile_schema() -> pa.Schema:
-
-    from src.generator.profile import PROFILE_SCHEMA
-
-    fields = [(field.name, field.type) for field in PROFILE_SCHEMA]
-
-    fields += [
-        ("client_idx", pa.int64()),
-        ("raw_file", pa.string()),
-        ("raw_row_group", pa.int32()),
-        ("raw_row", pa.int64()),
-    ]
-
-    return pa.schema(fields)
-
-
 __all__ = [
     "DERIVED_COLUMNS",
     "DERIVED_NAMES",
@@ -143,5 +127,4 @@ __all__ = [
     "SCHEMA_VERSION",
     "events_schema",
     "payload_columns",
-    "profile_schema",
 ]
