@@ -15,9 +15,8 @@ from ..projection import PROJECTION_VERSION, projection_registry
 from ..settings import CALENDAR_ENCODING, PreprocessingConfig
 from . import activity as activity_module
 from . import chains as chains_module
-from .as_of import SEMANTIC_VERSION, SemanticHistory, open_merchants, open_products, semantic_as_of
-from .keys import DERIVED_KEYS, KEYS_VERSION, PRODUCT_KEYS, RELATION_KEYS, TIMING_KEYS, keys_registry
-from .merchants import MERCHANT_KEYS
+from .as_of import SEMANTIC_VERSION, SemanticHistory, semantic_as_of
+from .keys import DERIVED_KEYS, KEYS_VERSION, RELATION_KEYS, TIMING_KEYS, keys_registry
 
 
 # ============================================================
@@ -35,7 +34,7 @@ from .merchants import MERCHANT_KEYS
 
 
 STAGE = "semantic"
-STAGE_VERSION = "3.0.0"
+STAGE_VERSION = "4.0.0"
 SCHEMA_VERSION = 1
 
 REGISTRY_FILE = "semantic_registry.json"
@@ -79,7 +78,6 @@ def build_group(
     group: str | None,
     cutoff: datetime,
     clients: list[str] | None = None,
-    raw_dir: Path | None = None,
     examples: int = 1,
 ) -> SemanticResult:
     """
@@ -88,8 +86,7 @@ def build_group(
 
     target = Path(target)
 
-    store = CanonicalStore(Path(canonical_dir), products=open_products(raw_dir))
-    merchants = open_merchants(raw_dir)
+    store = CanonicalStore(Path(canonical_dir))
 
     # Каталог ключей читается из реестра полей canonical: это
     # ВХОД этапа. Импорт генератора описывал бы код, а не данные.
@@ -111,7 +108,7 @@ def build_group(
 
     try:
         histories: list[SemanticHistory] = [
-            semantic_as_of(store, client_id, cutoff, merchants) for client_id in wanted
+            semantic_as_of(store, client_id, cutoff) for client_id in wanted
         ]
     except chains_module.ChainsError as error:
         raise SemanticError(str(error)) from error
@@ -183,9 +180,6 @@ def build_group(
             [item for history in histories for item in history.relations]
         ),
         "derived_reasons": dict(sorted(derived_reasons.items())),
-        "merchants": {"outlets_in_catalog": merchants.size, "decoded_keys": len(MERCHANT_KEYS)},
-        "products": {"rows_in_catalog": 0 if store.products is None else store.products.num_rows,
-                     "decoded_keys": len(PRODUCT_KEYS)},
         "computed_keys": {
             "timing": sorted(key.key for key in TIMING_KEYS.values()),
             "relation": sorted(key.key for key in RELATION_KEYS.values()),

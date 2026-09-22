@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 
 from .. import params as params_module
 from ..rng import NS_OBSERVE, keyed_rng, stable_hash
-from . import coverage
 from .envelope import Event
 
 
@@ -17,12 +16,11 @@ from .envelope import Event
 # ИСТОЧНИКУ, а не равномерному шуму по всем данным:
 #
 #   пропуски полей с причиной
-#   сбой источника: записи дня не доходят вовсе
 #   смена схемы: поле начинает собираться с определённой даты
 #
-# Чего здесь БОЛЬШЕ НЕТ: дублей и исправлений. Запись приходит
-# в выгрузку один раз и сразу окончательной, поэтому ни второй
-# версии, ни повторной доставки не бывает.
+# Чего здесь БОЛЬШЕ НЕТ: дублей, исправлений и сбоев источника.
+# Запись приходит в выгрузку один раз и сразу окончательной, а
+# отсутствие записи означает ровно одно: события не было.
 #
 # Проход идёт по идентичности события, а не по номеру строки:
 # вставка события в другом месте ленты ничего не сдвигает.
@@ -31,38 +29,6 @@ from .envelope import Event
 
 def _rng(event: Event, slot: int):
     return keyed_rng(NS_OBSERVE, stable_hash(event.event_id) % (2 ** 31), slot)
-
-
-def _paired(event: Event) -> bool:
-    """
-    Запись, у которой есть обязательная вторая половина.
-    """
-
-    if event.payload.get("transfer_id"):
-        return True
-
-    if event.payload.get("counterparty") == "own_account":
-        return True
-
-    return event.event_type == "fee_charge" and event.payload.get("reason") == "transfer_fee"
-
-
-def _outage_rng(client_ordinal: int, source: str, ts: datetime):
-    """
-    Судьба записей сбойного дня общая для всего источника.
-
-    Решать по каждой записи отдельно нельзя: тогда из пары
-    проводок одного перевода долетала бы ровно одна, и деньги
-    переставали бы сходиться.
-    """
-
-    return keyed_rng(
-        NS_OBSERVE,
-        client_ordinal,
-        stable_hash(source) % (2 ** 31),
-        ts.toordinal(),
-        9,
-    )
 
 
 def _apply_schema_change(event: Event) -> Event:
@@ -130,59 +96,18 @@ def _apply_field_missing(event: Event, rng) -> Event:
     return replace(event, payload=payload) if changed else event
 
 
-def apply(events: list, client_ordinal: int) -> tuple[list, list]:
+def apply(events: list) -> list:
     """
     Наблюдаемая лента: к каждому событию применяются дефекты
     его источника.
 
-    Возвращает пару: наблюдаемые записи и записи, которых сбой
-    источника не донёс до выгрузки вовсе.
-
-    Потерянная запись это потеря НАБЛЮДЕНИЯ, а не отмена события:
-    деньги по ней двигались, остаток счёта её учёл, и переписывать
-    остальную цепочку так, будто её не было, нельзя. Поэтому
-    потери возвращаются наружу и уходят в скрытую истину.
+    Записи не теряются: выгрузка показывает всё, что случилось,
+    а отсутствие строки означает, что события не было.
     """
 
-    settings = params_module.active().defects
-
     observed: list[Event] = []
-    lost: list[Event] = []
-
-    # Событие, на которое кто-то ссылается как на причину, не
-    # имеет права пропасть: иначе возврат будет указывать на
-    # покупку, которой в данных нет.
-    referenced = {
-        event.payload.get("cause_event_id")
-        for event in events
-        if event.payload.get("cause_event_id")
-    }
 
     for event in events:
-
-        # --- сбой источника: записи дня не доходят ---
-
-        # Сбой витрины не имеет права потерять одну сторону
-        # парной проводки: у перевода вторая сторона живёт у
-        # другого клиента, у перевода между своими счетами обе
-        # стороны у одного, а комиссия привязана к переводу.
-        # В любом из этих случаев пропажа половины разрушила бы
-        # денежную связность.
-        if (
-            not _paired(event)
-            and event.event_id not in referenced
-            and coverage.in_outage(client_ordinal, event.source, event.event_time)
-        ):
-
-            recover_rng = _outage_rng(client_ordinal, event.source, event.event_time)
-
-            if recover_rng.random() >= settings.outage_recovers_share:
-                lost.append(event)
-                continue
-
-            # Источник восстановился и досдал записи. Времени
-            # поступления у выгрузки нет, поэтому досланная
-            # запись неотличима от обычной.
 
         rng = _rng(event, 1)
 
@@ -191,7 +116,7 @@ def apply(events: list, client_ordinal: int) -> tuple[list, list]:
 
         observed.append(current)
 
-    return observed, lost
+    return observed
 
 
 def plan_refunds(purchases: list) -> list:

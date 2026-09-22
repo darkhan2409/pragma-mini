@@ -35,7 +35,7 @@ from .rng import (
     stable_hash,
 )
 from .simulate import ClientState, _application_id
-from .world import products as product_catalog
+from .world import merchants as merchant_catalog, products as product_catalog
 from .world.dictionaries import FUNNEL_SCREENS, MCC_CASH, MCC_TRANSFER
 
 
@@ -283,8 +283,6 @@ def _application_payload(application: Application, **extra) -> dict:
     body = {
         "application_id": application.application_id,
         "product_id": application.product_id,
-        "product_code": application.product_code,
-        "product_version": application.product_version,
         "offer_id": application.offer_id,
         "channel": application.channel,
         "requested_amount": application.requested_amount,
@@ -813,10 +811,6 @@ def _apply_new_versions(state: ClientState, ts: datetime) -> None:
                     ts.replace(hour=0, minute=5),
                     {
                         "product_id": contract.product_id,
-                        "product_code": contract.product_code,
-                        "product_version": contract.product_version,
-                        "tariff_version": contract.tariff_version,
-                        "product_family": contract.product_family,
                         "contract_id": contract.contract_id,
                         "account_id": contract.account_id,
                         "card_id": contract.card_id,
@@ -874,12 +868,7 @@ def _fraud_purchase(state: ClientState, account, card, ts, amount, episode, step
     body = {
         "channel": choice.channel,
         "card_id": card.card_id,
-        "merchant_id": outlet.merchant_id,
-        "outlet_id": outlet.outlet_id,
-        "merchant_name": outlet.merchant_name,
-        "mcc": outlet.mcc,
-        "merchant_city": outlet.settlement or None,
-        "merchant_country": outlet.country,
+        **merchant_catalog.payload_fields(outlet),
         "is_online": outlet.is_online,
         "is_subscription": False,
         "reason": "purchase",
@@ -905,7 +894,7 @@ def _fraud_purchase(state: ClientState, account, card, ts, amount, episode, step
         account.account_id,
         amount,
         "debit",
-        f"merchant:{outlet.outlet_id}",
+        f"merchant:{outlet.merchant_id}",
         body,
     )
 
@@ -1032,7 +1021,6 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
     # Мошенническая операция не попадает в список кандидатов на
     # обычный возврат: её оспаривают через chargeback, и два
     # возврата по одной операции превысили бы её сумму.
-    state.note(ts, "fraud_episode_step", episode.kind, {"step": step.kind, "amount": amount})
 
     if step.kind != "strike" and episode.kind != "false_positive":
         return
@@ -1169,19 +1157,18 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
             if back_ts < config.HISTORY_END:
                 _emit_money(
                     state, back_ts, "chargeback", account.account_id, amount, "credit",
-                    f"merchant:{event.payload.get('outlet_id')}"
-                    if event.payload.get("outlet_id")
+                    f"merchant:{event.payload.get('merchant_id')}"
+                    if event.payload.get("merchant_id")
                     else "external:merchant",
                     {
                         "channel": "system",
                         "card_id": event.payload.get("card_id"),
-                        "merchant_id": event.payload.get("merchant_id"),
-                        "outlet_id": event.payload.get("outlet_id"),
-                        "merchant_name": event.payload.get("merchant_name"),
-                        "mcc": event.payload.get("mcc"),
+                        **{
+                            name: event.payload.get(name)
+                            for name in merchant_catalog.MERCHANT_PAYLOAD_FIELDS
+                        },
                         "cause_event_id": event.event_id,
                         "reason": "dispute_resolved",
-                        "merchant_country": event.payload.get("merchant_country"),
                     },
                 )
 
@@ -1292,6 +1279,12 @@ def _emit_case(state: ClientState, case) -> None:
 # ============================================================
 
 
+# «Стереть поле» это НЕ «ничего не менять». Сторож нужен, потому
+# что None означает «событие этого поля не касается»: без него
+# потеря работы не могла убрать ни отрасль, ни день выплаты.
+CLEAR = object()
+
+
 def _on_profile_change(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     event = payload["event"]
@@ -1307,7 +1300,14 @@ def _on_profile_change(sim, state: ClientState, ts: datetime, payload: dict) -> 
 
         new = _new_profile_value(state, name, event)
 
-        if new is None or str(new) == str(old):
+        if new is None:
+            continue
+
+        if new is CLEAR:
+            if old is None:
+                continue
+            new = None
+        elif str(new) == str(old):
             continue
 
         state.profile_values[name] = new
@@ -1319,7 +1319,7 @@ def _on_profile_change(sim, state: ClientState, ts: datetime, payload: dict) -> 
                 {
                     "field_name": name,
                     "old_value": None if old is None else str(old),
-                    "new_value": str(new),
+                    "new_value": None if new is None else str(new),
                     "change_source": "client" if event.kind in ("move", "wedding", "divorce") else "application",
                     "confirmed": event.confirmed,
                 },
@@ -1349,17 +1349,57 @@ def _new_profile_value(state: ClientState, name: str, event):
         return int(round(current * float(factor) / 5000) * 5000)
 
     if name == "income_type":
-        return "unemployed" if event.kind == "job_loss" else state.profile_values.get("income_type")
+
+        if event.kind == "job_loss":
+            return "unemployed"
+
+        # Новая работа возвращает занятость тому, кто её терял.
+        # Остальным тип дохода менять незачем: самозанятый не
+        # становится наёмным оттого, что сменил заказчика.
+        #
+        # Но занятость объявляется только если деньги её
+        # подтверждают: зарплатный поток к этому моменту
+        # действительно открыт. Иначе анкета сообщала бы о работе,
+        # которой в ленте нет — ровно та несостыковка, из-за
+        # которой безработный оставался безработным навсегда,
+        # только с другой стороны.
+        if state.profile_values.get("income_type") != "unemployed":
+            return state.profile_values.get("income_type")
+
+        moment = event.known_to_bank_at or event.ts
+
+        working = any(
+            item.kind == "salary" and item.active_at(moment)
+            for item in state.income_streams
+        )
+
+        return "employed" if working else "unemployed"
 
     if name == "industry":
+
+        if event.kind == "job_loss":
+            return CLEAR
+
+        # Отрасль есть только у наёмной занятости. Самозанятому,
+        # предпринимателю и пенсионеру её не приписывают: в анкете
+        # это поле места работы, а не рода занятий.
+        settings = params_module.active().population
+
+        if state.profile_values.get("income_type") not in settings.industry_income_types:
+            return CLEAR
+
         # Новая работа это новая отрасль. Возврат прежнего
         # значения делал эффект события пустым.
         choice = keyed_rng(
             NS_PROFILE, state.ordinal, int(event.ts.toordinal()), 1
-        ).weighted(params_module.active().population.industry_weights)
+        ).weighted(settings.industry_weights)
         return str(choice)
 
-    if name == "salary_day":
+    if name == "income_day":
+
+        if event.kind == "job_loss":
+            return CLEAR
+
         low, high = params_module.active().income.salary_day_range
         return int(
             keyed_rng(NS_PROFILE, state.ordinal, int(event.ts.toordinal()), 2).integers(low, high)
@@ -1479,8 +1519,6 @@ def _migrate_products(sim, state: ClientState, ts: datetime, rng) -> None:
         )
 
         _activate_product(sim, state, fresh, target, ts + timedelta(minutes=12), rng)
-
-        state.note(ts, "adoption_decision", "migration", {"from": view.code, "to": target.code})
 
         return
 

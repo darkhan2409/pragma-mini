@@ -23,7 +23,6 @@ from .finance.ledger import COUNTERPART_BANK, COUNTERPART_GOVERNMENT, NON_PAYMEN
 from .life import calendar as cal
 from .life import lifecycle as lifecycle_module
 from .life import stress as stress_module
-from .observe import coverage as coverage_module
 from .observe import defects as defect_module
 from .rng import (
     NS_CARD_CREDIT,
@@ -524,7 +523,6 @@ def _sweep_bills(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             if hidden.balance >= bill["amount"]:
                 state.ledger.post(moment, "hidden", hidden.account_id,
                                   f"merchant:{bill['kind']}", bill["amount"])
-            state.note(moment, "hidden_purchase", "bill_paid_outside", {"amount": bill["amount"]})
 
     state.open_bills = remaining
 
@@ -754,10 +752,6 @@ def _close_deposit(state: ClientState, ts: datetime, deposit, early: bool = Fals
                 ts,
                 {
                     "product_id": contract.product_id,
-                    "product_code": contract.product_code,
-                    "product_version": contract.product_version,
-                    "tariff_version": contract.tariff_version,
-                    "product_family": contract.product_family,
                     "contract_id": contract.contract_id,
                     "account_id": contract.account_id,
                     "card_id": None,
@@ -851,7 +845,7 @@ def _update_state(state: ClientState, day: datetime) -> None:
 
     ratio = len(current) / max(1, len(previous)) if previous else 1.0
 
-    new_state, cause = lifecycle_module.month_state(
+    new_state, _ = lifecycle_module.month_state(
         persona=persona,
         ts=day,
         previous=state.state,
@@ -866,7 +860,6 @@ def _update_state(state: ClientState, day: datetime) -> None:
     state.returned_flag = False
 
     if new_state != state.state:
-        state.note(day, "state_transition", new_state, {"from": state.state, "cause": cause})
         state.state = new_state
 
     # Дата закрытия отношений живёт РОВНО пока клиент закрыт.
@@ -955,42 +948,16 @@ def finish(sim) -> CommunityResult:
 
     events: list = []
     profile_rows: list = []
-    coverage_rows: list = []
-    truth_clients: list = []
-    truth_events: list = []
-    truth_relationships: list = []
 
     for ordinal in sorted(sim.clients):
 
         state = sim.clients[ordinal]
 
-        # Остаток проставляется по ПОЛНОЙ ленте клиента, до
-        # дефектов наблюдаемости: balance_after это состояние
-        # счёта, а не пересчёт по тому, что доехало до витрины.
         assign_balances(state, sorted(state.events, key=_tape_order))
 
-        observed, lost = defect_module.apply(state.events, ordinal)
+        observed = defect_module.apply(state.events)
 
         observed.sort(key=_tape_order)
-
-        # Потерянная наблюдением строка остаётся в скрытой истине:
-        # по ней двигались деньги, и разрыв цепочки остатков в
-        # выгрузке объясняется именно ею. В RAW её нет.
-        for event in lost:
-            state.note(
-                event.event_time,
-                "unobserved_row",
-                event.source,
-                {
-                    "event_id": event.event_id,
-                    "event_type": event.event_type,
-                    "account_id": event.payload.get("account_id"),
-                    "amount": event.payload.get("amount"),
-                    "direction": event.payload.get("direction"),
-                    "status": event.payload.get("status"),
-                    "counterparty": event.payload.get("counterparty"),
-                },
-            )
 
         # Порядок ленты несёт сам список: строки клиента уходят
         # в файл подряд в этом порядке. Отдельного номера записи
@@ -1006,69 +973,7 @@ def finish(sim) -> CommunityResult:
             row.update({name: state.profile_values.get(name) for name in PROFILE_FIELDS})
             profile_rows.append(row)
 
-        for row in coverage_module.coverage_rows(
-            state.persona, state.opening_state, state.closed_at
-        ):
-            coverage_rows.append(
-                {
-                    "client_id": row.client_id,
-                    "source": row.source,
-                    "first_available_at": row.first_available_at,
-                    "last_available_at": row.last_available_at,
-                    "first_seen": row.first_seen,
-                    "coverage_status": row.coverage_status,
-                    "coverage_reason": row.coverage_reason,
-                    "opening_state": row.opening_state,
-                    "outage_days": row.outage_days,
-                }
-            )
-
-        truth_clients.append(_truth_client(state, sim.graph.households.get(ordinal)))
-
-        # Правда о клиенте идёт по времени, как и его лента.
-        # Заметки копились по ходу прогона, а план дописывался в
-        # конце, поэтому склейка шла не по времени, и читать файл
-        # приходилось с сортировкой на своей стороне.
-        truth_events.extend(
-            sorted(
-                [*state.truth, *_truth_plan(state)],
-                key=lambda row: (row["ts"], row["kind"], row["key"]),
-            )
-        )
-
-    for relation in sim.graph.relationships:
-
-        persona = sim.personas[relation.client_ordinal]
-
-        truth_relationships.append(
-            {
-                "client_id": persona.client_id,
-                "counterpart_id": relation.counterpart.counterpart_id,
-                "counterpart_kind": relation.counterpart.kind,
-                "counterpart_client_id": (
-                    sim.personas[relation.counterpart.client_ordinal].client_id
-                    if relation.counterpart.client_ordinal in sim.personas
-                    else None
-                ),
-                "relation_type": relation.relation_type,
-                "strength": relation.strength,
-                "typical_frequency": relation.typical_frequency,
-                "typical_amount_low": relation.typical_amount_low,
-                "typical_amount_high": relation.typical_amount_high,
-                "valid_from": relation.valid_from,
-                "valid_to": relation.valid_to,
-                "household_id": relation.household_id,
-            }
-        )
-
-    return CommunityResult(
-        events=events,
-        profile_rows=profile_rows,
-        coverage=coverage_rows,
-        truth_clients=truth_clients,
-        truth_events=truth_events,
-        truth_relationships=truth_relationships,
-    )
+    return CommunityResult(events=events, profile_rows=profile_rows)
 
 
 def _tape_order(event) -> tuple:
@@ -1085,7 +990,7 @@ def _tape_order(event) -> tuple:
 
 def assign_balances(state: ClientState, tape: list) -> None:
     """
-    Проставляет balance_after по ПОЛНОЙ ленте клиента, в том
+    Проставляет balance_after по всей ленте клиента, в том
     порядке, в котором строки лягут в файл.
 
     Зачем пересчёт вообще нужен: внутри симуляции проводки
@@ -1096,15 +1001,8 @@ def assign_balances(state: ClientState, tape: list) -> None:
     же счёта, поэтому running-баланс раскладывается по порядку
     ленты. Суммы при этом настоящие, и итог совпадает с ledger.
 
-    Почему по полной, а не по наблюдаемой ленте: строка, которую
-    сбой источника не донёс до витрины, это потеря НАБЛЮДЕНИЯ, а
-    не отмена движения денег. Пересчёт по наблюдаемой ленте
-    переписывал бы всю последующую цепочку так, будто зачисления
-    не было, и выгрузка врала бы о деньгах. Разрыв должен
-    остаться видимым, а не исчезнуть.
-
-    Дубли и исправления получают остаток копированием payload и
-    здесь не участвуют: новых денег они не создают.
+    Цепочка остатков сплошная: в выгрузку уходит каждая строка,
+    и пропусков в ней не бывает.
     """
 
     balances = {
@@ -1150,144 +1048,6 @@ def _row(event) -> dict:
         "event_time": event.event_time,
         "payload": json.dumps(event.payload, ensure_ascii=False, separators=(",", ":"), default=str),
     }
-
-
-def _truth_client(state: ClientState, household_id: str | None = None) -> dict:
-
-    persona = state.persona
-
-    row = {
-        "client_id": persona.client_id,
-        "client_ordinal": persona.client_ordinal,
-        "community_id": persona.community_id,
-        "archetype": f"{persona.life_stage}|{persona.hcb_role}|{persona.activity_mode}",
-        "life_stage": persona.life_stage,
-        "hcb_role": persona.hcb_role,
-        "activity_mode": persona.activity_mode,
-        "settlement": persona.settlement,
-        "settlement_type": persona.settlement_type,
-        "true_income": persona.true_income,
-        "visible_share": persona.visible_share,
-        "registered_in_window": persona.registered_in_window,
-        "vanished_after_registration": persona.vanished_after_registration,
-        "night_segment": persona.night_segment,
-        "household_id": household_id,
-        "final_state": state.state,
-        "hidden_cash": state.ledger.balance(state.ledger.cash_id),
-        "hidden_other_bank": state.ledger.balance(state.ledger.other_bank_id),
-    }
-
-    for name, value in persona.traits.base.items():
-        row[f"trait_{name}"] = round(float(value), 4)
-
-    final = state.traits.at(config.HISTORY_END - timedelta(days=1)) if state.traits else persona.traits.base
-
-    for name, value in final.items():
-        row[f"trait_final_{name}"] = round(float(value), 4)
-
-    return row
-
-
-def _truth_plan(state: ClientState) -> list:
-
-    rows = []
-
-    client_id = state.client_id
-
-    for event in state.life_events:
-        rows.append(
-            {
-                "client_id": client_id,
-                "ts": event.ts,
-                "kind": "life_event",
-                "key": event.kind,
-                "value": json.dumps(event.payload, ensure_ascii=False, default=str),
-            }
-        )
-
-    for episode in state.stress_episodes:
-        rows.append(
-            {
-                "client_id": client_id,
-                "ts": episode.start,
-                "kind": "stress_start",
-                "key": episode.trigger,
-                "value": json.dumps(
-                    {
-                        "intensity": round(episode.intensity, 3),
-                        "end": episode.end.isoformat(),
-                        "resolution": episode.resolution,
-                    },
-                    ensure_ascii=False,
-                ),
-            }
-        )
-        rows.append(
-            {
-                "client_id": client_id,
-                "ts": episode.end,
-                "kind": "stress_end",
-                "key": episode.resolution,
-                # Исход эпизода это ПЛАН скрытой истории, а не
-                # вывод из поведения клиента: отчёт подписывает
-                # его именно так и не выдаёт за наблюдение.
-                "value": json.dumps(
-                    {"trigger": episode.trigger, "planned": True},
-                    ensure_ascii=False,
-                ),
-            }
-        )
-
-    for pause in state.pauses:
-        rows.append(
-            {
-                "client_id": client_id,
-                "ts": pause.start,
-                "kind": "pause_start",
-                "key": pause.kind,
-                "value": json.dumps(
-                    {
-                        "reason": pause.reason,
-                        "planned_end": pause.planned_end.isoformat(),
-                        "actual_end": pause.actual_end.isoformat(),
-                        "return_trigger": pause.return_trigger,
-                    },
-                    ensure_ascii=False,
-                ),
-            }
-        )
-
-    for episode in state.fraud_episodes:
-        rows.append(
-            {
-                "client_id": client_id,
-                "ts": episode.start,
-                "kind": "fraud_episode",
-                "key": episode.kind,
-                "value": json.dumps(
-                    {
-                        "detected": episode.detected,
-                        "decision": episode.decision,
-                        "response": episode.client_response,
-                        "chargeback": episode.chargeback,
-                    },
-                    ensure_ascii=False,
-                ),
-            }
-        )
-
-    for shift in (state.traits.shifts if state.traits else ()):
-        rows.append(
-            {
-                "client_id": client_id,
-                "ts": shift.ts,
-                "kind": "trait_shift",
-                "key": shift.cause,
-                "value": json.dumps(shift.deltas, ensure_ascii=False),
-            }
-        )
-
-    return rows
 
 
 _HANDLERS["bill_sweep"] = _sweep_bills

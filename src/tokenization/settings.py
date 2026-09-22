@@ -368,11 +368,6 @@ def default_value_domains() -> tuple[ValueDomain, ...]:
             ("event_type", "related_event_type"),
             "тип события и тип события-причины берутся из одного перечня типов ленты",
         ),
-        ValueDomain(
-            "product_family_domain",
-            ("product_family", "previous_product_family"),
-            "семейство продукта и семейство прежнего продукта читаются из одного справочника",
-        ),
     )
 
 

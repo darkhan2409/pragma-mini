@@ -417,7 +417,7 @@ def _pay_bill_in_app(
     body["session_id"] = session.session_id
 
     counterpart = (
-        f"merchant:{body.get('outlet_id')}" if body.get("outlet_id") else COUNTERPART_GOVERNMENT
+        f"merchant:{body.get('merchant_id')}" if body.get("merchant_id") else COUNTERPART_GOVERNMENT
     )
 
     paid = _emit_money(
@@ -803,8 +803,6 @@ def _on_communication(sim, state: ClientState, ts: datetime, payload: dict) -> N
 
     if not contact.clicked:
         return
-
-    state.note(ts, "click", contact.campaign_code, {"channel": contact.channel})
 
     if contact.product_family and contact.offer_id:
         state.offers.append(

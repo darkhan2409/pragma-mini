@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -30,9 +29,8 @@ from .life import fraud as fraud_plan
 from .life import income as income_module
 from .life import lifecycle as lifecycle_module
 from .life import stress as stress_module
-from .life.persona import Persona, draw_persona
+from .life.persona import Persona, app_adoption, consent_date, draw_persona
 from .life.traits import event_shift
-from .observe import coverage as coverage_module
 from .observe.envelope import Event, EventFactory
 from .rng import (
     NS_PREHISTORY,
@@ -64,7 +62,6 @@ class ClientState:
     factory: EventFactory
     ledger: Ledger
     events: list = field(default_factory=list)
-    truth: list = field(default_factory=list)
     profile_known: bool = False
 
     life_events: tuple = ()
@@ -107,7 +104,6 @@ class ClientState:
     month_key: int = 0
 
     profile_values: dict = field(default_factory=dict)
-    opening_state: dict = field(default_factory=dict)
     # Возвраты и отмены, назначенные покупкой на будущие дни:
     # ключ это порядковый номер дня исполнения.
     pending_refunds: dict = field(default_factory=dict)
@@ -134,8 +130,7 @@ class ClientState:
         Три условия, и все про НАБЛЮДЕНИЕ, а не про симуляцию:
 
           событие раньше начала окна выгрузка не показывает
-          вовсе — то, что было до него, описывает opening_state
-          покрытия, а не задним числом выданная лента;
+          вовсе: банк отдаёт окно, а не всю жизнь клиента;
 
           событие на границе выгрузки или позже в неё не попадает:
           выгрузка сделана в этот момент, и того, что случилось
@@ -159,17 +154,6 @@ class ClientState:
             self.events.append(event)
 
         return event
-
-    def note(self, ts: datetime, kind: str, key: str, value) -> None:
-        self.truth.append(
-            {
-                "client_id": self.client_id,
-                "ts": ts,
-                "kind": kind,
-                "key": key,
-                "value": json.dumps(value, ensure_ascii=False, default=str),
-            }
-        )
 
     def may_decline(self, ts: datetime) -> bool:
         """
@@ -331,10 +315,6 @@ class ClientState:
 
         return {
             "product_id": contract.product_id,
-            "product_code": contract.product_code,
-            "product_version": contract.product_version,
-            "tariff_version": contract.tariff_version,
-            "product_family": contract.product_family,
             "contract_id": contract.contract_id,
             "account_id": card.account_id,
             "card_id": card_id or card.card_id,
@@ -354,10 +334,6 @@ class Action:
 class CommunityResult:
     events: list
     profile_rows: list
-    coverage: list
-    truth_clients: list
-    truth_events: list
-    truth_relationships: list
 
 
 # ============================================================
@@ -485,8 +461,8 @@ class CommunitySimulation:
 
         state.traits = traits
 
-        state.app_adopted_at = coverage_module.app_adoption(persona.client_ordinal)
-        state.consent_at = coverage_module.consent_date(persona.client_ordinal)
+        state.app_adopted_at = app_adoption(persona.client_ordinal)
+        state.consent_at = consent_date(persona.client_ordinal)
 
         state.profile_values = self._initial_profile(persona)
 
@@ -507,7 +483,7 @@ class CommunitySimulation:
             "income_type": persona.income_type,
             "declared_income": persona.declared_income,
             "industry": persona.industry,
-            "salary_day": persona.salary_day,
+            "income_day": persona.income_day,
             "relationship_months": persona.relationship_months_at(config.HISTORY_START),
             "contracts_count": 0,
             "active_contracts": 0,
@@ -662,10 +638,6 @@ class CommunitySimulation:
 
         payload = {
             "product_id": contract.product_id,
-            "product_code": contract.product_code,
-            "product_version": contract.product_version,
-            "tariff_version": contract.tariff_version,
-            "product_family": family,
             "contract_id": contract_id,
             "account_id": contract.account_id,
             "card_id": contract.card_id,
@@ -730,8 +702,8 @@ class CommunitySimulation:
     def _prehistory(self, state: ClientState) -> None:
         """
         Договоры, открытые до окна наблюдения. Прошлые проводки
-        не выдумываются: остаток и долг на первое наблюдение
-        уходят в opening_state покрытия.
+        не выдумываются: с чем клиент вошёл в окно, видно по
+        первому же остатку его ленты.
         """
 
         persona = state.persona
@@ -875,27 +847,10 @@ class CommunitySimulation:
 
             state.deposits[contract.contract_id] = deposit
 
-        # Остаток на первое наблюдение это opening state, а не
-        # результат наблюдавшихся проводок.
+        # Остаток, с которым клиент вошёл в окно: он не результат
+        # наблюдавшихся проводок, а начальное условие ленты.
         for account in state.ledger.accounts.values():
             account.opening_balance = account.balance
-
-        state.opening_state = {
-            "product_events": {
-                "contracts_before_window": len(state.contracts),
-                "open_contracts": len(state.open_contracts(config.HISTORY_START)),
-            },
-            "transactions": {
-                "card_balance": state.primary_card_account(config.HISTORY_START).balance
-                if state.primary_card_account(config.HISTORY_START)
-                else 0,
-                "deposit_balance": state.assets(),
-            },
-            "loans": {
-                "open_loans": len(state.loans),
-                "principal_outstanding": sum(item.principal_outstanding for item in state.loans.values()),
-            },
-        }
 
     def _outlets_by_id(self, state: ClientState, category: str, ts: datetime) -> tuple:
         from .world import merchants as catalog

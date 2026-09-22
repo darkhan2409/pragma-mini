@@ -13,6 +13,12 @@ import pyarrow.compute as pc
 import pyarrow.json as pj
 import pyarrow.parquet as pq
 
+from src.generator.config import (
+    EVENT_TYPE_PRIORITY,
+    SCHEMA_CHANGES,
+    SOURCE_LAUNCH,
+    key_catalogue,
+)
 from src.generator.profile import PROFILE_SCHEMA
 
 from .artifacts import sha256_file
@@ -22,63 +28,53 @@ from .artifacts import sha256_file
 # ИДЕЯ
 # ============================================================
 #
-# Доступ к RAW v5 без pandas и без загрузки всего датасета:
+# Доступ к RAW v10 без pandas и без загрузки всего датасета:
 # лента читается по одному row group, payload разбирается
-# pyarrow.json по каталогу ключей из manifest.json.
+# pyarrow.json по каталогу ключей.
 #
-# Контракт берётся из манифеста, а не из config генератора:
-# препроцессинг должен работать и на выгрузке, которую делал не
-# этот генератор. Всё, что манифест обещает (строки, контрольные
-# суммы файлов и содержимого), здесь сверяется.
+# Манифест это технический паспорт выгрузки: версия контракта,
+# окно, число строк и sha256 двух основных файлов. Всё это
+# здесь сверяется.
 #
-# truth/* не читается никогда: файлы лишь перечисляются как
-# присутствующие.
+# Статическая часть контракта — каталог ключей payload,
+# приоритет типов событий, даты запуска источников, смены
+# схемы — живёт в config генератора и читается из кода: копии
+# рядом с каждой выгрузкой у неё больше нет.
+#
+# Справочники мерчантов, продуктов и географии в выгрузку тоже
+# не попадают. Событие несёт поля выбранного объекта, и
+# расшифровывать по справочнику больше нечего.
 # ============================================================
 
 
 MANIFEST_NAME = "manifest.json"
 
-EXPECTED_SCHEMA_VERSION = 7
+EXPECTED_SCHEMA_VERSION = 10
 
-# Файлы, без которых группа не обрабатывается.
+# Файлы, без которых группа не обрабатывается. Справочников
+# рядом с выгрузкой нет: они остались входом генератора.
 REQUIRED_FILES: tuple[str, ...] = (
     "events.parquet",
     "profile.parquet",
-    "source_coverage.parquet",
-    "catalog/products.parquet",
-    "catalog/merchants.parquet",
-    "catalog/geography.parquet",
 )
-
-# Контрольный слой генератора: присутствие отмечается, содержимое
-# не читается.
-TRUTH_PREFIX = "truth/"
 
 TABLE_FILES: dict[str, str] = {
     "events": "events.parquet",
     "profile": "profile.parquet",
-    "source_coverage": "source_coverage.parquet",
-    "products": "catalog/products.parquet",
-    "merchants": "catalog/merchants.parquet",
-    "geography": "catalog/geography.parquet",
 }
 
-# Таблицы, чьё содержимое манифест подписывает content_sha256 и
-# которые препроцессинг читает.
-CONTENT_TABLES: tuple[str, ...] = ("events", "profile", "source_coverage")
+# Таблицы выгрузки: их подписывает манифест и читает
+# препроцессинг. Других в выгрузке нет.
+MAIN_TABLES: tuple[str, ...] = ("events", "profile")
 
 REQUIRED_MANIFEST_KEYS: tuple[str, ...] = (
     "schema_version",
-    "seed",
-    "total_clients",
-    "history_start",
-    "history_end",
-    "extract_time",
-    "sources",
-    "key_catalogue",
-    "rows",
-    "content_sha256",
-    "file_sha256",
+    "period_start",
+    "period_end",
+    "events_rows",
+    "profile_rows",
+    "events_sha256",
+    "profile_sha256",
 )
 
 ENVELOPE_SCHEMA = pa.schema(
@@ -92,24 +88,9 @@ ENVELOPE_SCHEMA = pa.schema(
     ]
 )
 
-COVERAGE_SCHEMA = pa.schema(
-    [
-        ("client_id", pa.string()),
-        ("source", pa.string()),
-        ("first_available_at", pa.timestamp("us")),
-        ("last_available_at", pa.timestamp("us")),
-        ("first_seen", pa.timestamp("us")),
-        ("coverage_status", pa.string()),
-        ("coverage_reason", pa.string()),
-        ("opening_state", pa.string()),
-        ("outage_days", pa.string()),
-    ]
-)
-
 EXPECTED_SCHEMAS: dict[str, pa.Schema] = {
     "events": ENVELOPE_SCHEMA,
     "profile": PROFILE_SCHEMA,
-    "source_coverage": COVERAGE_SCHEMA,
 }
 
 # dtype каталога ключей -> тип pyarrow.
@@ -181,63 +162,83 @@ class EventTypeInfo:
 class SourceInfo:
     source: str
     available_from: datetime
-    defect_profile: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class RawManifest:
+    """
+    Технический паспорт выгрузки: версия контракта, окно, число
+    строк и sha256 двух основных файлов.
+
+    Статическая часть контракта сюда не копируется, а берётся из
+    кода генератора: каталог ключей payload, приоритет типов
+    событий, даты запуска источников и смены схемы.
+    """
+
     schema_version: int
-    generator_version: str | None
-    seed: int
-    world_seed: int | None
-    total_clients: int
-    history_start: datetime
-    history_end: datetime
-    registry_start: datetime | None
-    extract_time: datetime
-    sources: dict[str, SourceInfo]
-    catalogue: dict[str, EventTypeInfo]
-    schema_changes: tuple[dict, ...]
-    event_type_priority: dict[str, int]
-    rows: dict[str, int]
-    content_sha256: dict[str, str]
-    file_sha256: dict[str, str]
-    catalog_rows: dict[str, int]
-    generation_config_sha256: str | None
-    product_timeline_sha256: str | None
+    period_start: datetime
+    period_end: datetime
+    events_rows: int
+    profile_rows: int
+    events_sha256: str
+    profile_sha256: str
     sha256: str
+
+    @property
+    def catalogue(self) -> dict[str, EventTypeInfo]:
+        return _static_catalogue()
 
     @property
     def event_types(self) -> tuple[str, ...]:
         return tuple(self.catalogue)
 
+    @property
+    def event_type_priority(self) -> dict[str, int]:
+        return dict(EVENT_TYPE_PRIORITY)
+
+    @property
+    def sources(self) -> dict[str, SourceInfo]:
+        """
+        Источник доступен с даты запуска своей системы, а тот,
+        что существует с начала наблюдения, — с начала окна.
+        """
+
+        return {
+            name: SourceInfo(
+                source=name,
+                available_from=self.period_start if launch is None else launch,
+            )
+            for name, launch in SOURCE_LAUNCH.items()
+        }
+
+    @property
+    def schema_changes(self) -> tuple[dict, ...]:
+        return tuple(dict(item) for item in SCHEMA_CHANGES)
+
+    @property
+    def rows(self) -> dict[str, int]:
+        return {"events": self.events_rows, "profile": self.profile_rows}
+
+    @property
+    def file_sha256(self) -> dict[str, str]:
+        return {
+            TABLE_FILES["events"]: self.events_sha256,
+            TABLE_FILES["profile"]: self.profile_sha256,
+        }
+
     def echo(self) -> dict:
         """
-        Часть манифеста, которая переписывается в артефакты. Без
-        путей и без полного каталога.
+        Манифест целиком: он и так короткий.
         """
 
         return {
             "schema_version": self.schema_version,
-            "generator_version": self.generator_version,
-            "seed": self.seed,
-            "world_seed": self.world_seed,
-            "total_clients": self.total_clients,
-            "history_start": self.history_start.isoformat(),
-            "history_end": self.history_end.isoformat(),
-            "registry_start": None if self.registry_start is None else self.registry_start.isoformat(),
-            "extract_time": self.extract_time.isoformat(),
-            "sources": {
-                name: {"available_from": info.available_from.isoformat()}
-                for name, info in sorted(self.sources.items())
-            },
-            "event_types": list(self.event_types),
-            "schema_changes": list(self.schema_changes),
-            "rows": dict(sorted(self.rows.items())),
-            "content_sha256": dict(sorted(self.content_sha256.items())),
-            "catalog_rows": dict(sorted(self.catalog_rows.items())),
-            "generation_config_sha256": self.generation_config_sha256,
-            "product_timeline_sha256": self.product_timeline_sha256,
+            "period_start": self.period_start.isoformat(),
+            "period_end": self.period_end.isoformat(),
+            "events_rows": self.events_rows,
+            "profile_rows": self.profile_rows,
+            "events_sha256": self.events_sha256,
+            "profile_sha256": self.profile_sha256,
             "manifest_sha256": self.sha256,
         }
 
@@ -276,6 +277,21 @@ def _parse_catalogue(data: dict) -> dict[str, EventTypeInfo]:
     return catalogue
 
 
+_CATALOGUE: dict[str, EventTypeInfo] = {}
+
+
+def _static_catalogue() -> dict[str, EventTypeInfo]:
+    """
+    Каталог ключей payload из config генератора. Разбирается
+    один раз: он статичен и от выгрузки не зависит.
+    """
+
+    if not _CATALOGUE:
+        _CATALOGUE.update(_parse_catalogue(key_catalogue()))
+
+    return _CATALOGUE
+
+
 def read_manifest(raw_dir: Path) -> RawManifest:
 
     path = Path(raw_dir) / MANIFEST_NAME
@@ -305,43 +321,22 @@ def read_manifest(raw_dir: Path) -> RawManifest:
             f"schema_version манифеста {schema_version}, поддерживается {EXPECTED_SCHEMA_VERSION}"
         )
 
-    sources = {
-        name: SourceInfo(
-            source=name,
-            available_from=datetime.fromisoformat(info["available_from"]),
-            defect_profile=dict(info.get("defect_profile", {})),
+    period_start = datetime.fromisoformat(data["period_start"])
+    period_end = datetime.fromisoformat(data["period_end"])
+
+    if period_start >= period_end:
+        raise RawContractError(
+            f"окно выгрузки пусто: period_start {period_start} не раньше period_end {period_end}"
         )
-        for name, info in data["sources"].items()
-    }
-
-    catalogue = _parse_catalogue(data["key_catalogue"])
-
-    unknown_sources = sorted({info.source for info in catalogue.values()} - set(sources))
-    if unknown_sources:
-        raise RawContractError(f"каталог ключей ссылается на источники вне manifest.sources: {unknown_sources}")
 
     return RawManifest(
         schema_version=schema_version,
-        generator_version=None if data.get("generator_version") is None else str(data["generator_version"]),
-        seed=int(data["seed"]),
-        world_seed=None if data.get("world_seed") is None else int(data["world_seed"]),
-        total_clients=int(data["total_clients"]),
-        history_start=datetime.fromisoformat(data["history_start"]),
-        history_end=datetime.fromisoformat(data["history_end"]),
-        registry_start=(
-            None if data.get("registry_start") is None else datetime.fromisoformat(data["registry_start"])
-        ),
-        extract_time=datetime.fromisoformat(data["extract_time"]),
-        sources=sources,
-        catalogue=catalogue,
-        schema_changes=tuple(dict(item) for item in data.get("schema_changes", [])),
-        event_type_priority={name: int(value) for name, value in data.get("event_type_priority", {}).items()},
-        rows={name: int(value) for name, value in data["rows"].items()},
-        content_sha256={name: str(value) for name, value in data["content_sha256"].items()},
-        file_sha256={name: str(value) for name, value in data["file_sha256"].items()},
-        catalog_rows={name: int(value) for name, value in data.get("catalog_rows", {}).items()},
-        generation_config_sha256=data.get("generation_config_sha256"),
-        product_timeline_sha256=data.get("product_timeline_sha256"),
+        period_start=period_start,
+        period_end=period_end,
+        events_rows=int(data["events_rows"]),
+        profile_rows=int(data["profile_rows"]),
+        events_sha256=str(data["events_sha256"]),
+        profile_sha256=str(data["profile_sha256"]),
         sha256=hashlib.sha256(raw_bytes).hexdigest(),
     )
 
@@ -350,10 +345,10 @@ def read_manifest(raw_dir: Path) -> RawManifest:
 # КОНТРОЛЬНАЯ СУММА СОДЕРЖИМОГО
 # ============================================================
 #
-# Тот же алгоритм, что у генератора: сумма blake2b-отпечатков
-# строк по модулю 2**128 плюс число строк, порядок строк не
-# важен. Повторён здесь, чтобы препроцессинг не зависел от
-# внутренностей emit; равенство с оригиналом проверяет тест.
+# Сумма blake2b-отпечатков строк по модулю 2**128 плюс число
+# строк: порядок строк не важен. Нужна там, где сравниваются
+# НАБОРЫ строк, а не файлы: каталоги мира у разных групп и
+# корпус срезов.
 # ============================================================
 
 
@@ -408,16 +403,13 @@ class RawDataset:
     def listed_files(self) -> list[str]:
         """
         Все parquet-файлы каталога относительными путями с прямыми
-        слэшами, как их называет манифест.
+        слэшами.
         """
 
         return sorted(
             path.relative_to(self.raw_dir).as_posix()
             for path in self.raw_dir.rglob("*.parquet")
         )
-
-    def truth_files(self) -> list[str]:
-        return [name for name in self.listed_files() if name.startswith(TRUTH_PREFIX)]
 
     # --- таблицы ---
 
@@ -451,17 +443,13 @@ class RawDataset:
 
     def verify_files(self) -> dict[str, dict]:
         """
-        sha256 каждого файла, названного манифестом, кроме truth/*:
-        контрольный слой не читается даже ради хэша.
+        sha256 двух основных файлов: манифест подписывает только
+        их. Каталоги мира сверяет отдельная проверка корпуса.
         """
 
         result: dict[str, dict] = {}
 
         for name, expected in sorted(self.manifest.file_sha256.items()):
-
-            if name.startswith(TRUTH_PREFIX):
-                result[name] = {"status": "not_read", "expected": expected, "actual": None}
-                continue
 
             path = self.raw_dir / name
 
@@ -477,17 +465,13 @@ class RawDataset:
                 "actual": actual,
             }
 
-        for name in self.listed_files():
-            if name not in result:
-                result[name] = {"status": "unlisted", "expected": None, "actual": None}
-
         return result
 
     def verify_rows(self) -> dict[str, dict]:
 
         result: dict[str, dict] = {}
 
-        for table in CONTENT_TABLES:
+        for table in MAIN_TABLES:
 
             expected = self.manifest.rows.get(table)
 
@@ -502,40 +486,9 @@ class RawDataset:
                 continue
 
             result[table] = {
-                "status": "ok" if expected == actual else ("unlisted" if expected is None else "mismatch"),
+                "status": "ok" if expected == actual else "mismatch",
                 "expected": expected,
                 "actual": actual,
-            }
-
-        return result
-
-    def verify_content(self) -> dict[str, dict]:
-        """
-        content_sha256 таблиц по строкам, потоково по row group.
-        """
-
-        result: dict[str, dict] = {}
-
-        for table in CONTENT_TABLES:
-
-            expected = self.manifest.content_sha256.get(table)
-
-            if not self.exists(table):
-                result[table] = {"status": "missing", "expected": expected, "actual": None}
-                continue
-
-            digest = ContentDigest()
-
-            for _, chunk in self.iter_row_groups(table):
-                digest.extend(chunk.to_pylist())
-
-            actual = digest.value()
-
-            result[table] = {
-                "status": "ok" if expected == actual else ("unlisted" if expected is None else "mismatch"),
-                "expected": expected,
-                "actual": actual,
-                "rows": digest.rows,
             }
 
         return result
@@ -770,14 +723,13 @@ def iter_event_types(table: pa.Table) -> Iterator[tuple[str, pa.Table]]:
 
 
 __all__ = [
-    "CONTENT_TABLES",
-    "COVERAGE_SCHEMA",
     "ContentDigest",
     "DTYPE_MAP",
     "ENVELOPE_SCHEMA",
     "EXPECTED_SCHEMAS",
     "EventTypeInfo",
     "FieldInfo",
+    "MAIN_TABLES",
     "MANIFEST_NAME",
     "ParsedPayload",
     "REQUIRED_FILES",
@@ -786,7 +738,6 @@ __all__ = [
     "RawManifest",
     "SourceInfo",
     "TABLE_FILES",
-    "TRUTH_PREFIX",
     "iter_event_types",
     "parse_payloads",
     "read_manifest",

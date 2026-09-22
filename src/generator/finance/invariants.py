@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -22,6 +21,16 @@ from dataclasses import dataclass
 #   по заблокированной карте нет одобренных покупок
 #   операции депозита лежат внутри жизни договора
 # ============================================================
+
+
+def _family_of(product_id: str | None) -> str | None:
+    """
+    Семейство продукта по каталогу генератора.
+    """
+
+    from ..world import products as product_catalog
+
+    return product_catalog.catalog().family_of(product_id)
 
 
 CREDIT_EVENTS = frozenset(
@@ -73,89 +82,6 @@ class Violation:
         return f"{self.check}: {self.client_id}: {self.detail}"
 
 
-# ============================================================
-# ПОТЕРЯННОЕ НАБЛЮДЕНИЕ
-# ============================================================
-#
-# Сбой источника не доносит запись до выгрузки. Деньги по ней
-# двигались, и остаток следующей наблюдаемой строки её учитывает,
-# поэтому в наблюдаемой цепочке образуется разрыв.
-#
-# Разрыв допустим ТОЛЬКО там, где его объясняет потерянная
-# строка этого же счёта. Ничем не объяснённый разрыв остаётся
-# нарушением: именно так отличается честная потеря наблюдения от
-# сломанной арифметики.
-#
-# Скрытая истина сюда приходит из truth и нужна проверкам и
-# отчёту генератора. Препроцессинг её не читает и ищет разрывы
-# по самой выгрузке.
-# ============================================================
-
-
-UNOBSERVED_KIND = "unobserved_row"
-
-
-def unobserved_rows(truth_events: list) -> list[dict]:
-    """
-    Строки, потерянные наблюдением, из скрытой истории клиента.
-    """
-
-    out: list[dict] = []
-
-    for row in truth_events:
-
-        if row.get("kind") != UNOBSERVED_KIND:
-            continue
-
-        value = row.get("value")
-
-        data = json.loads(value) if isinstance(value, str) else dict(value or {})
-
-        data["event_time"] = row["ts"]
-
-        out.append(data)
-
-    return out
-
-
-def _signed(row: dict) -> int:
-    """
-    Знаковое движение по счёту клиента.
-    """
-
-    amount = int(row.get("amount") or 0)
-
-    return amount if row.get("direction") == "credit" else -amount
-
-
-def _pending_by_account(unobserved) -> dict[str, list[tuple]]:
-    """
-    Потерянные движения по счетам, в порядке времени события.
-    """
-
-    pending: dict[str, list[tuple]] = defaultdict(list)
-
-    for row in unobserved:
-
-        account = row.get("account_id")
-
-        if account is None or row.get("status") not in (None, "approved"):
-            continue
-
-        # Снимок остатка денег не двигает: его сумма это сам
-        # остаток, а не проводка. Потерянный снимок ничего в
-        # цепочке не объясняет.
-        if row.get("event_type") == "balance_snapshot":
-            continue
-
-        pending[account].append((row["event_time"], _signed(row), row.get("counterparty")))
-
-    for items in pending.values():
-        items.sort(key=lambda item: item[0])
-
-    return pending
-
-
 def authoritative(events: list) -> list:
     """
     Лента клиента в порядке выгрузки.
@@ -193,13 +119,9 @@ def repeated_event_ids(events: list) -> list:
 
     return sorted(key for key, count in seen.items() if count > 1)
 
-def check_client(events: list, unobserved=()) -> list:
+def check_client(events: list) -> list:
     """
     Все финансовые инварианты одного клиента.
-
-    unobserved: строки, которые сбой источника не донёс до
-    выгрузки. Разрыв цепочки остатков считается объяснённым
-    ровно на их сумму и только на том же счёте.
     """
 
     if not events:
@@ -227,28 +149,6 @@ def check_client(events: list, unobserved=()) -> list:
 
     last_balance: dict[str, int] = {}
 
-    pending = _pending_by_account(unobserved)
-    cursor: dict[str, int] = defaultdict(int)
-
-    def missing_before(account: str, moment) -> int:
-        """
-        Сумма потерянных наблюдением движений счёта, случившихся
-        не позже этого момента и ещё не учтённых.
-        """
-
-        items = pending.get(account)
-
-        if not items:
-            return 0
-
-        total = 0
-
-        while cursor[account] < len(items) and items[cursor[account]][0] <= moment:
-            total += items[cursor[account]][1]
-            cursor[account] += 1
-
-        return total
-
     for event in ordered:
 
         kind = event["event_type"]
@@ -271,13 +171,11 @@ def check_client(events: list, unobserved=()) -> list:
 
         amount = int(payload.get("amount") or 0)
 
-        missing = missing_before(account, event["event_time"])
-
         if kind == "balance_snapshot":
-            if account in last_balance and last_balance[account] + missing != int(balance):
+            if account in last_balance and last_balance[account] != int(balance):
                 fail(
                     "balance_snapshot_matches_chain",
-                    f"{account}: снимок {balance} против цепочки {last_balance[account] + missing}",
+                    f"{account}: снимок {balance} против цепочки {last_balance[account]}",
                 )
             last_balance[account] = int(balance)
             continue
@@ -287,7 +185,7 @@ def check_client(events: list, unobserved=()) -> list:
         signed = amount if direction == "credit" else -amount
 
         if account in last_balance:
-            expected = last_balance[account] + missing + signed
+            expected = last_balance[account] + signed
             if expected != int(balance):
                 fail(
                     "balance_after_chain",
@@ -389,14 +287,19 @@ def check_client(events: list, unobserved=()) -> list:
         if not contract:
             continue
 
-        if kind == "product_opened" and payload.get("product_family") in ("deposit", "deposit_certificate"):
+        # Семейство продукта событие больше не несёт: его знает
+        # каталог по product_id.
+        if kind == "product_opened" and _family_of(payload.get("product_id")) in (
+            "deposit",
+            "deposit_certificate",
+        ):
             deposit_open[contract] = event["event_time"]
         elif kind == "product_closed":
             deposit_closed[contract] = event["event_time"]
         elif kind in ("deposit_topup", "deposit_withdrawal", "interest_credit"):
             opened = deposit_open.get(contract)
             # Договор из предыстории в ленте не открывался:
-            # его состояние описано opening_state покрытия.
+            # он вошёл в окно уже открытым.
             if opened is not None and event["event_time"] < opened:
                 fail("deposit_before_open", f"{kind} по договору {contract} раньше открытия")
 
@@ -462,17 +365,12 @@ def check_client(events: list, unobserved=()) -> list:
     return problems
 
 
-def check_money_conservation(events: list, unobserved=()) -> list:
+def check_money_conservation(events: list) -> list:
     """
     Изменение совокупного клиентского баланса объясняется
     чистыми внешними потоками и проводками между клиентскими
     и банковскими счетами. Внутренние переводы взаимно
     сокращаются и в общее изменение не входят.
-
-    Движение, потерянное наблюдением, в выгрузке строкой не
-    представлено, но остаток его учёл: оно входит во внешний
-    поток по тем же правилам, что и наблюдаемое. Потеря раньше
-    первого наблюдения счёта уже сидит в его начальном остатке.
     """
 
     if not events:
@@ -486,9 +384,6 @@ def check_money_conservation(events: list, unobserved=()) -> list:
     last_balance: dict[str, int] = {}
 
     external = 0
-
-    pending = _pending_by_account(unobserved)
-    cursor: dict[str, int] = defaultdict(int)
 
     for event in ordered:
 
@@ -507,14 +402,6 @@ def check_money_conservation(events: list, unobserved=()) -> list:
 
         if account is None or balance is None:
             continue
-
-        items = pending.get(account) or ()
-
-        while cursor[account] < len(items) and items[cursor[account]][0] <= event["event_time"]:
-            _, signed_lost, counterparty_lost = items[cursor[account]]
-            cursor[account] += 1
-            if account in last_balance and counterparty_lost != "own_account":
-                external += signed_lost
 
         amount = int(payload.get("amount") or 0)
         direction = payload.get("direction")
@@ -552,21 +439,13 @@ def check_money_conservation(events: list, unobserved=()) -> list:
     return []
 
 
-def check_all(events_by_client: dict, unobserved_by_client: dict | None = None) -> list:
-    """
-    unobserved_by_client: клиент -> строки, потерянные наблюдением
-    (из скрытой истины). Без них любая потеря источника выглядит
-    разрывом арифметики.
-    """
+def check_all(events_by_client: dict) -> list:
 
     problems: list[Violation] = []
 
-    lost = unobserved_by_client or {}
-
     for client_id, events in events_by_client.items():
-        rows = lost.get(client_id, ())
-        problems.extend(check_client(events, rows))
-        problems.extend(check_money_conservation(events, rows))
+        problems.extend(check_client(events))
+        problems.extend(check_money_conservation(events))
 
         for event_id in repeated_event_ids(events):
             problems.append(Violation("repeated_event_id", client_id, event_id))
@@ -575,7 +454,6 @@ def check_all(events_by_client: dict, unobserved_by_client: dict | None = None) 
 
 
 __all__ = [
-    "UNOBSERVED_KIND",
     "CREDIT_EVENTS",
     "DEBIT_EVENTS",
     "MONEY_EVENTS",
@@ -586,5 +464,4 @@ __all__ = [
     "check_client",
     "check_money_conservation",
     "repeated_event_ids",
-    "unobserved_rows",
 ]

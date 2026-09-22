@@ -79,7 +79,6 @@ class Batch:
     # --- каналы ---
     calendar: np.ndarray = field(default_factory=lambda: np.zeros((0, 6), dtype=np.float32))
     hours_to_cutoff: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float64))
-    coverage_at_cutoff: np.ndarray = field(default_factory=lambda: np.zeros((0, 0), dtype=np.int8))
     history_age_days: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float64))
     history_age_known: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool))
 
@@ -293,7 +292,6 @@ def collate(samples: list[Sample]) -> Batch:
         history_rows=history_rows,
         calendar=calendar,
         hours_to_cutoff=to_cutoff,
-        coverage_at_cutoff=_stack([item.coverage_at_cutoff for item in samples], np.int8),
         history_age_days=age,
         history_age_known=~np.isnan(age),
         value_offsets=value_offsets,

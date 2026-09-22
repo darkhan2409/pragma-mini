@@ -213,15 +213,6 @@ def render_report_md(report: dict) -> str:
                 + ", ".join(f"{name} {count}" for name, count in sorted(item["dependencies"].items()))
                 + "\n"
             )
-
-    out.append("\n## Доступность источников\n")
-
-    out.append(
-        f"\nПорядок колонки: {', '.join(report['sources'])}. "
-        f"Коды состояний: {', '.join(f'{number} = {name}' for number, name in enumerate(report['coverage_states']))}. "
-        "Это состояние на срез, одно на пример.\n"
-    )
-
     if report["limitations"]:
         out.append("\n## Ограничения\n")
         out.extend(f"- {item}" for item in sorted(report["limitations"])[:20])

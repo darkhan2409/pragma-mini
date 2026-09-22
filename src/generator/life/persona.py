@@ -6,7 +6,15 @@ from datetime import datetime, timedelta
 
 from .. import params as params_module
 from .. import config
-from ..rng import NS_PERSONA, keyed_rng, numpy_rng, stable_hash, stable_unit, state_cache
+from ..rng import (
+    NS_ONBOARDING,
+    NS_PERSONA,
+    keyed_rng,
+    numpy_rng,
+    stable_hash,
+    stable_unit,
+    state_cache,
+)
 from ..world import communities, geography
 from .traits import Traits, draw_traits
 
@@ -22,7 +30,7 @@ from .traits import Traits, draw_traits
 #   -> цифровая зрелость -> роль Home Credit -> режим активности
 #
 # Наблюдаемая часть уезжает в профиль, скрытая остаётся
-# в truth и в RAW не попадает никогда.
+# внутри симуляции и в выгрузку не попадает никогда.
 # ============================================================
 
 
@@ -60,7 +68,7 @@ class Persona:
     employer_id: str | None
     true_income: int
     declared_income: int
-    salary_day: int
+    income_day: int
     mandatory_share: float
     rent_share: float
 
@@ -251,9 +259,9 @@ def draw_persona(client_ordinal: int) -> Persona:
     declared_income = int(min(high_bound, max(low_bound, declared_income)))
 
     if income_type == "pensioner":
-        salary_day = int(rng.integers(*settings.income.pension_day_range))
+        income_day = int(rng.integers(*settings.income.pension_day_range))
     else:
-        salary_day = int(rng.integers(*settings.income.salary_day_range))
+        income_day = int(rng.integers(*settings.income.salary_day_range))
 
     mandatory_low, mandatory_high = population.mandatory_share_by_stage[life_stage]
     mandatory_share = float(rng.uniform(mandatory_low, mandatory_high))
@@ -333,7 +341,7 @@ def draw_persona(client_ordinal: int) -> Persona:
         employer_id=employer_id,
         true_income=true_income,
         declared_income=declared_income,
-        salary_day=salary_day,
+        income_day=income_day,
         mandatory_share=mandatory_share,
         rent_share=rent_share,
         relationship_start=relationship_start,
@@ -348,4 +356,85 @@ def draw_persona(client_ordinal: int) -> Persona:
     )
 
 
-__all__ = ["PENSION_AGE", "Persona", "draw_persona"]
+@state_cache
+def app_adoption(client_ordinal: int) -> datetime | None:
+    """
+    Когда клиент установил приложение.
+
+    Приложение — норма, а не исключение: его ставит подавляющее
+    большинство. Небольшая доля не ставит никогда, и это не
+    дефект данных, а часть жизни: остаются люди, которые ходят
+    в отделение.
+
+    Дата установки всегда попадает ВНУТРЬ окна наблюдения.
+    """
+
+    settings = params_module.active().defects
+
+    persona = draw_persona(client_ordinal)
+
+    rng = keyed_rng(NS_ONBOARDING, client_ordinal, 1)
+
+    digital = persona.trait("digital_affinity")
+
+    # Цифровая склонность двигает вероятность мягко: разница
+    # между самым и наименее цифровым клиентом — проценты, а не
+    # разы. Приложением пользуются почти все.
+    probability = settings.app_adoption_share * (0.94 + 0.12 * digital)
+
+    if rng.random() >= min(0.995, probability):
+        return None
+
+    # Раньше начала наблюдения приложения быть не может, как и
+    # раньше того дня, когда человек стал клиентом.
+    start = max(config.HISTORY_START, persona.relationship_start)
+
+    # Половина окна на то, чтобы установить: у большинства это
+    # случается вскоре после начала отношений с банком.
+    span_days = max(1, (config.HISTORY_END - start).days)
+
+    offset = int(rng.integers(0, max(1, span_days // 2)))
+
+    adopted = start + timedelta(days=offset)
+
+    if adopted >= config.HISTORY_END:
+        adopted = start
+
+    return adopted.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+@state_cache
+def consent_date(client_ordinal: int) -> datetime | None:
+    """
+    Когда клиент дал согласие на коммуникации.
+    """
+
+    settings = params_module.active().defects
+
+    persona = draw_persona(client_ordinal)
+
+    if not persona.consent_marketing:
+        return None
+
+    rng = keyed_rng(NS_ONBOARDING, client_ordinal, 2)
+
+    if rng.random() >= settings.consent_share:
+        return None
+
+    start = persona.relationship_start
+
+    given = start + timedelta(days=int(rng.integers(0, 200)))
+
+    if given >= config.HISTORY_END:
+        return None
+
+    return given.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+__all__ = [
+    "PENSION_AGE",
+    "Persona",
+    "app_adoption",
+    "consent_date",
+    "draw_persona",
+]

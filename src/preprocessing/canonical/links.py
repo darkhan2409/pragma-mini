@@ -5,7 +5,6 @@ from datetime import datetime
 from pathlib import Path
 
 import pyarrow as pa
-import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 
@@ -185,7 +184,7 @@ def scan_entities(mentions: pa.Table, seen: dict[tuple[str, str], dict]) -> None
             item["opened"] = True
 
 
-def check_entities(seen: dict[tuple[str, str], dict], coverage: pa.Table, history_start: datetime) -> dict:
+def check_entities(seen: dict[tuple[str, str], dict], history_start: datetime) -> dict:
     """
     У каждой ли наблюдаемой сущности есть наблюдаемое открытие.
 
@@ -194,14 +193,6 @@ def check_entities(seen: dict[tuple[str, str], dict], coverage: pa.Table, histor
 
     if not seen:
         return {"entities": 0}
-
-    pre_window: dict[str, int] = {}
-
-    if coverage.num_rows:
-        for row in coverage.select(["client_id", "opening_state_values"]).to_pylist():
-            for key, value in row["opening_state_values"] or []:
-                if key == "contracts_before_window" and value:
-                    pre_window[row["client_id"]] = max(pre_window.get(row["client_id"], 0), int(value))
 
     per_kind: dict[str, dict] = {}
 
@@ -235,8 +226,6 @@ def check_entities(seen: dict[tuple[str, str], dict], coverage: pa.Table, histor
 
         if item["first_event_time"] is not None and item["first_event_time"] < history_start:
             slot["reasons"][REASON_BEFORE_WINDOW] += 1
-        elif item["client_id"] in pre_window:
-            slot["reasons"][REASON_PRE_WINDOW_CONTRACTS] += 1
         else:
             slot["reasons"][REASON_UNKNOWN] += 1
 
@@ -248,8 +237,8 @@ def check_entities(seen: dict[tuple[str, str], dict], coverage: pa.Table, histor
         "by_kind": dict(sorted(per_kind.items())),
         "rule": (
             "открытие ищется среди наблюдаемых переходов и только там, где оно определено; "
-            "отсутствие открытия объясняется первым упоминанием до начала окна или заявленным "
-            "opening_state клиента, иначе остаётся ненаблюдаемым и не достраивается"
+            "отсутствие открытия объясняется первым упоминанием до начала окна, иначе "
+            "остаётся ненаблюдаемым и не достраивается"
         ),
     }
 
@@ -324,14 +313,13 @@ def build_link_report(
     events_path: Path,
     entity_scan: dict[tuple[str, str], dict],
     transfers: pa.Table,
-    coverage: pa.Table,
     history_start: datetime,
 ) -> dict:
 
     return {
         "causes": check_causes(events_path),
         "transfers": check_transfers(transfers),
-        "entities": check_entities(entity_scan, coverage, history_start),
+        "entities": check_entities(entity_scan, history_start),
         "chains": check_chains(events_path),
     }
 

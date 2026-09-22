@@ -658,17 +658,12 @@ def emit_product_closed(state: ClientState, ts: datetime, contract, reason: str)
             "product_closed",
             ts + timedelta(seconds=240),
             {
+                # Закрытие условий не назначает: сумма, срок и
+                # ставка остались в событии открытия договора.
                 "product_id": contract.product_id,
-                "product_code": contract.product_code,
-                "product_version": contract.product_version,
-                "tariff_version": contract.tariff_version,
-                "product_family": contract.product_family,
                 "contract_id": contract.contract_id,
                 "account_id": contract.account_id,
                 "card_id": contract.card_id,
-                "amount_or_limit": contract.amount_or_limit,
-                "term": contract.term,
-                "rate": contract.rate,
                 "reason": reason,
             },
         )

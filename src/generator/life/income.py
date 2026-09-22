@@ -7,7 +7,7 @@ from .. import params as params_module
 from .. import config
 from ..rng import NS_INCOME, keyed_rng, stable_hash
 from . import calendar as cal
-from .persona import Persona
+from .persona import PENSION_AGE, Persona
 from .stress import level_at
 
 
@@ -104,13 +104,56 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
             kind=primary_kind,
             payer=payer,
             schedule=schedule,
-            payday=persona.salary_day,
+            payday=persona.income_day,
             landing=_landing(persona, primary_kind, rng),
             base_amount=persona.true_income,
             valid_from=min(config.HISTORY_START, persona.relationship_start),
             valid_to=None,
         )
     ]
+
+    # Пенсия по возрасту тому, кто пенсионером по типу дохода не
+    # объявлен. Профиль называет его пенсионером с того дня, как
+    # ему исполнилось PENSION_AGE, и без этого потока запись была
+    # бы ярлыком без денег: продукты с условием requires_pension
+    # открывались человеку, у которого пенсии нет вовсе.
+    #
+    # Она НЕ заменяет заработок: работающий пенсионер получает и
+    # зарплату, и выплату. Поэтому это отдельный поток, а не
+    # смена основного.
+    if persona.income_type != "pensioner":
+
+        # 29 февраля переносится на 28-е: replace на невисокосный
+        # год иначе падает.
+        born = persona.birth_date
+
+        turns = born.replace(
+            year=born.year + PENSION_AGE,
+            day=28 if (born.month, born.day) == (2, 29) else born.day,
+        )
+
+        if turns < config.HISTORY_END:
+
+            pension_rng = keyed_rng(NS_INCOME, persona.client_ordinal, 5)
+
+            amount = max(
+                settings.state_pension_floor,
+                int(persona.true_income * pension_rng.uniform(*settings.state_pension_of_income)),
+            )
+
+            streams.append(
+                IncomeStream(
+                    stream_id=f"inc_{persona.client_ordinal}_pension",
+                    kind="pension",
+                    payer="state_pension",
+                    schedule="monthly",
+                    payday=int(pension_rng.integers(*settings.pension_day_range)),
+                    landing=_landing(persona, "pension", pension_rng),
+                    base_amount=amount,
+                    valid_from=max(turns, min(config.HISTORY_START, persona.relationship_start)),
+                    valid_to=None,
+                )
+            )
 
     # Второй поток: подработка, аренда, помощь семьи.
     if rng.random() < settings.second_stream_share:
@@ -163,9 +206,22 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
         if primary.valid_to is not None and primary.valid_to <= event.ts:
             continue
 
-        streams[primary_position] = replace(primary, valid_to=event.ts)
-
         item_rng = keyed_rng(NS_INCOME, persona.client_ordinal, 2, int(event.ts.toordinal()))
+
+        # Смена работы у самого края окна до среза ничего не
+        # меняет: новое место начинается уже за границей выгрузки,
+        # и человек продолжает получать на прежнем. Закрыть поток
+        # и не открыть новый значило бы оставить его вообще без
+        # дохода на ровном месте — анкета обещала бы деньги,
+        # которых в ленте нет.
+        #
+        # У потери работы всё иначе: там поток кончается по самому
+        # событию, и отсутствие дохода к срезу это правда.
+        if event.kind == "job_change":
+            if event.ts + timedelta(days=int(event.payload.get("gap_days", 0))) >= config.HISTORY_END:
+                continue
+
+        streams[primary_position] = replace(primary, valid_to=event.ts)
 
         if event.kind == "job_loss":
 

@@ -44,8 +44,13 @@ EVENT_KINDS = (
 # Событие -> какие поля профиля оно меняет.
 PROFILE_EFFECT = {
     "move": ("region", "city"),
-    "job_change": ("industry", "declared_income", "salary_day"),
-    "job_loss": ("income_type", "declared_income"),
+    # Новая работа возвращает занятость: без income_type анкета
+    # навсегда оставалась «безработный», хотя зарплата уже идёт.
+    "job_change": ("income_type", "industry", "declared_income", "income_day"),
+    # Потеря работы уносит с собой и отрасль, и день выплаты:
+    # оставленные от прошлого места, они сообщали о клиенте то,
+    # чего уже нет.
+    "job_loss": ("income_type", "industry", "declared_income", "income_day"),
     "income_up": ("declared_income",),
     "income_down": ("declared_income",),
     "child_birth": ("children",),

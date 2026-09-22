@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -31,10 +30,9 @@ from .schema import (
     REJECTS_SCHEMA,
     SCHEMA_VERSION,
     TRANSFERS_SCHEMA,
-    coverage_schema,
     payload_columns,
 )
-from .sidecars import build_coverage, build_profile
+from .sidecars import build_profile
 
 
 # ============================================================
@@ -55,14 +53,13 @@ from .sidecars import build_coverage, build_profile
 
 
 STAGE = "canonical"
-STAGE_VERSION = "5.0.0"
+STAGE_VERSION = "7.0.0"
 
 STATUS_OK = "ok"
 STATUS_ROW_COUNT_MISMATCH = "row_count_mismatch"
 
 EVENTS_FILE = "events.parquet"
 PROFILE_FILE = "profile.parquet"
-COVERAGE_FILE = "coverage.parquet"
 CLIENT_INDEX_FILE = "client_index.parquet"
 MENTIONS_FILE = "entities/mentions.parquet"
 TRANSFERS_FILE = "entities/transfers.parquet"
@@ -84,16 +81,14 @@ def build_client_index(raw: RawDataset) -> dict[str, int]:
     Плотный внутренний индекс клиента: устойчивый номер в
     лексикографическом порядке client_id.
 
-    Список собирается из покрытия, профиля и ленты: клиент без
-    событий не исчезает, а клиент, которого нет в покрытии, не
-    теряется.
+    Список собирается из профиля и ленты: клиент без событий не
+    исчезает, а клиент без профиля не теряется.
     """
 
     ids: set[str] = set()
 
-    for table in ("source_coverage", "profile"):
-        if raw.exists(table):
-            ids.update(raw.read(table, ["client_id"]).column("client_id").to_pylist())
+    if raw.exists("profile"):
+        ids.update(raw.read("profile", ["client_id"]).column("client_id").to_pylist())
 
     for _, chunk in raw.iter_row_groups("events", ["client_id"]):
         ids.update(pc.unique(chunk.column("client_id")).to_pylist())
@@ -225,9 +220,6 @@ def build_group(
     profile_table, profile_report = build_profile(raw, client_index)
     write_table(out_dir / PROFILE_FILE, profile_table)
 
-    coverage_table, coverage_report = build_coverage(raw, client_index)
-    write_table(out_dir / COVERAGE_FILE, coverage_table)
-
     transfers_table = order_transfers(transfers)
     write_table(out_dir / TRANSFERS_FILE, transfers_table, TRANSFERS_SCHEMA)
 
@@ -288,13 +280,12 @@ def build_group(
         out_dir / EVENTS_FILE,
         entity_scan,
         transfers_table,
-        coverage_table,
-        manifest.history_start,
+        manifest.period_start,
     )
 
     # --- отчёт ---
 
-    raw_rows = manifest.rows.get("events", 0)
+    raw_rows = manifest.events_rows
 
     status = STATUS_OK if events_rows == raw_rows else STATUS_ROW_COUNT_MISMATCH
 
@@ -312,7 +303,6 @@ def build_group(
             "difference": events_rows - raw_rows,
             "rule": "одна строка RAW это одна строка canonical: дубли и конфликты остаются с пометкой",
             "profile": profile_table.num_rows,
-            "coverage": coverage_table.num_rows,
             "mentions": mentions_rows,
             "transfer_sides": transfers_table.num_rows,
             "repeated_ids": len(dedupe),
@@ -342,7 +332,6 @@ def build_group(
             "ambiguous_rows": flags.get("ambiguous_local_time", 0),
         },
         "profile": profile_report,
-        "coverage": coverage_report,
         "links": link_report,
         "registry": {
             "file": REGISTRY_FILE,
@@ -355,7 +344,6 @@ def build_group(
     outputs = [
         out_dir / EVENTS_FILE,
         out_dir / PROFILE_FILE,
-        out_dir / COVERAGE_FILE,
         out_dir / CLIENT_INDEX_FILE,
         out_dir / MENTIONS_FILE,
         out_dir / TRANSFERS_FILE,
@@ -399,7 +387,6 @@ def render_canonical_md(report: dict) -> str:
                 ["строк canonical", rows["canonical_events"]],
                 ["разница", rows["difference"]],
                 ["версии профиля", rows["profile"]],
-                ["строки покрытия", rows["coverage"]],
                 ["упоминания сущностей", rows["mentions"]],
                 ["стороны переводов", rows["transfer_sides"]],
                 ["повторов event_id", rows["repeated_ids"]],
@@ -536,22 +523,14 @@ def render_canonical_md(report: dict) -> str:
         )
 
     profile = report["profile"]
-    coverage = report["coverage"]
 
-    out.append("\n## Профиль и покрытие\n")
+    out.append("\n## Профиль\n")
     out.append(
         _md_table(
             [
                 ["версий профиля", profile["rows"]],
                 ["клиентов в профиле", profile["clients"]],
                 ["правило профиля", profile["rule"]],
-                ["строк покрытия", coverage["rows"]],
-                ["opening_state", ", ".join(f"{k}={v}" for k, v in coverage["opening_state"].items())],
-                [
-                    "ключи opening_state",
-                    ", ".join(f"{k}={v}" for k, v in coverage["opening_state_keys"].items()) or "—",
-                ],
-                ["правило покрытия", coverage["rule"]],
             ],
             ["показатель", "значение"],
         )
@@ -568,7 +547,6 @@ def render_canonical_md(report: dict) -> str:
                 ["из них разных имён", registry["counts"]["distinct_payload_names"]],
                 ["конверт", registry["counts"]["by_owner_kind"]["envelope"]],
                 ["профиль", registry["counts"]["by_owner_kind"]["profile"]],
-                ["покрытие", registry["counts"]["by_owner_kind"]["coverage"]],
                 ["производные", registry["counts"]["by_owner_kind"]["derived"]],
             ],
             ["показатель", "значение"],
@@ -585,7 +563,6 @@ __all__ = [
     "REPORT_JSON_FILE",
     "REPORT_MD_FILE",
     "locate_clients",
-    "COVERAGE_FILE",
     "REPEATS_FILE",
     "EVENTS_FILE",
     "MENTIONS_FILE",

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -13,7 +12,6 @@ import pyarrow.parquet as pq
 from .artifacts import read_json
 from .canonical.build import (
     CLIENT_INDEX_FILE,
-    COVERAGE_FILE,
     EVENTS_FILE,
     PROFILE_FILE,
 )
@@ -49,7 +47,7 @@ from .canonical.entities import ENTITY_FIELDS, TRANSFER_SIDES, TRANSITIONS
 
 
 STAGE = "history"
-STAGE_VERSION = "5.0.0"
+STAGE_VERSION = "7.0.0"
 
 # Колонки canonical, которые НЕ выдаются как знание клиента.
 #
@@ -77,20 +75,6 @@ ENTITY_STATE: dict[tuple[str, str], str] = {
 }
 
 # Состояния покрытия, выводимые ТОЛЬКО из датированных полей.
-COVERAGE_NOT_LAUNCHED = "source_not_launched"
-COVERAGE_NOT_SEEN = "client_not_seen_yet"
-COVERAGE_ENDED = "ended"
-COVERAGE_AVAILABLE = "available"
-
-# Недатированные причины: они описывают выгрузку целиком и не
-# могут быть отнесены к конкретной дате.
-#
-# source_outage сюда больше не входит: покрытие называет дни
-# сбоя поимённо, и причина стала датированной.
-UNDATED_REASONS: frozenset[str] = frozenset(
-    {"no_consent", "client_not_onboarded"}
-)
-
 PAIR_VISIBLE = "counterpart_visible"
 PAIR_NOT_VISIBLE = "counterpart_not_visible"
 # Обе стороны у одного человека: перевод между своими счетами.
@@ -109,37 +93,6 @@ class HistoryError(ValueError):
 # ============================================================
 # СОСТОЯНИЯ
 # ============================================================
-
-
-@dataclass(frozen=True)
-class SourceState:
-    source: str
-    state: str
-    first_available_at: datetime | None
-    first_seen: datetime | None
-    last_available_at: datetime | None
-    # Недатированная причина выгрузки: она описывает весь период
-    # наблюдения, а не момент cutoff, и в state не входит. Но
-    # знать её нужно: «клиент не подключён» и «нет согласия»
-    # означают, что источник к этому клиенту НЕПРИМЕНИМ, а не
-    # что он молчал.
-    reason: str | None = None
-    # Дни, в которые источник не донёс строки до витрины. Причина
-    # source_outage без них была бессодержательной: «сбой был»
-    # без ответа на вопрос когда.
-    outage_days: tuple[str, ...] = ()
-
-    def as_dict(self) -> dict:
-        return {
-            "source": self.source,
-            "state": self.state,
-            "first_available_at": self.first_available_at,
-            "first_seen": self.first_seen,
-            "last_available_at": self.last_available_at,
-            "reason": self.reason,
-            "outage_days": list(self.outage_days),
-        }
-
 
 @dataclass(frozen=True)
 class EntityState:
@@ -195,8 +148,6 @@ class Relationship:
     observed_days: int | None
     history_incomplete: bool
     incomplete_reasons: tuple[str, ...]
-    closed_at: datetime | None
-    closed_reason: str | None
 
     def as_dict(self) -> dict:
         return {
@@ -204,8 +155,6 @@ class Relationship:
             "observed_days": self.observed_days,
             "history_incomplete": self.history_incomplete,
             "incomplete_reasons": list(self.incomplete_reasons),
-            "closed_at": self.closed_at,
-            "closed_reason": self.closed_reason,
         }
 
 
@@ -218,11 +167,9 @@ class ClientHistory:
     counts: dict[str, int]
     profile: dict | None
     profile_meta: dict
-    coverage: list[SourceState]
     entities: list[EntityState]
     transfers: list[TransferSide]
     relationship: Relationship
-    products: dict[str, dict]
     limitations: list[str]
 
     @property
@@ -236,11 +183,9 @@ class ClientHistory:
             "cutoff": self.cutoff,
             "counts": self.counts,
             "profile": self.profile_meta,
-            "coverage": [item.as_dict() for item in self.coverage],
             "entities": [item.as_dict() for item in self.entities],
             "transfers": [item.as_dict() for item in self.transfers],
             "relationship": self.relationship.as_dict(),
-            "products": self.products,
             "limitations": self.limitations,
         }
 
@@ -260,14 +205,14 @@ class CanonicalStore:
 
     REPORT_FILE = "canonical_report.json"
 
-    def __init__(self, directory: Path, products: pa.Table | None = None):
+    def __init__(self, directory: Path):
 
         self.directory = Path(directory)
 
         self.report = read_json(self.directory / self.REPORT_FILE)
 
-        self.extract_time = datetime.fromisoformat(self.report["raw"]["extract_time"])
-        self.history_start = datetime.fromisoformat(self.report["raw"]["history_start"])
+        self.period_end = datetime.fromisoformat(self.report["raw"]["period_end"])
+        self.period_start = datetime.fromisoformat(self.report["raw"]["period_start"])
 
         self._events = pq.ParquetFile(self.directory / EVENTS_FILE)
 
@@ -276,17 +221,10 @@ class CanonicalStore:
         self.by_idx = {row["client_idx"]: row for row in self.clients}
 
         self._profile = pq.read_table(self.directory / PROFILE_FILE)
-        self._coverage = pq.read_table(self.directory / COVERAGE_FILE)
 
         self._profile_rows: dict[str, list[dict]] = {}
         for row in self._profile.to_pylist():
             self._profile_rows.setdefault(row["client_id"], []).append(row)
-
-        self._coverage_rows: dict[str, list[dict]] = {}
-        for row in self._coverage.to_pylist():
-            self._coverage_rows.setdefault(row["client_id"], []).append(row)
-
-        self.products = products
 
         self._transfers: tuple[dict, dict] | None = None
         self._group_cache: tuple[int, pa.Table] | None = None
@@ -351,9 +289,6 @@ class CanonicalStore:
 
     def profile_rows(self, client_id: str) -> list[dict]:
         return self._profile_rows.get(client_id, [])
-
-    def coverage_rows(self, client_id: str) -> list[dict]:
-        return self._coverage_rows.get(client_id, [])
 
     # --- переводы ---
 
@@ -536,112 +471,6 @@ def profile_of(rows: list[dict]) -> tuple[dict | None, dict]:
     meta["state"] = "known"
 
     return rows[0], meta
-
-
-# ============================================================
-# ПОКРЫТИЕ
-# ============================================================
-
-
-def _outages_before(
-    value,
-    first_seen: datetime | None,
-    last_available: datetime | None,
-    cutoff: datetime,
-) -> tuple[str, ...]:
-    """
-    Дни сбоя, о которых на этот момент уже известно.
-
-    Отрезок закрыт с трёх сторон:
-
-      сбой будущего в состояние на дату не входит — на cutoff
-      банк его ещё не пережил;
-
-      сбой до первого наблюдения клиента ничего не отнял у того,
-      чего ещё не было;
-
-      сбой после конца покрытия — после ухода клиента или
-      закрытия источника — тоже ничего не отнял: наблюдать к
-      тому моменту было уже нечего.
-    """
-
-    if not value:
-        return ()
-
-    days = [str(item) for item in json.loads(value)]
-
-    floor = None if first_seen is None else first_seen.date().isoformat()
-
-    ceiling = cutoff.date().isoformat()
-
-    if last_available is not None:
-        ceiling = min(ceiling, last_available.date().isoformat())
-
-    return tuple(
-        day
-        for day in days
-        if day < ceiling and (floor is None or day >= floor)
-    )
-
-
-def coverage_as_of(rows: list[dict], cutoff: datetime) -> tuple[list[SourceState], list[str]]:
-    """
-    Состояние источника на дату по ДАТИРОВАННЫМ полям.
-
-    Итоговые статусы выгрузки (partial, ended, none) и причины без
-    даты известности (no_consent, client_not_onboarded) в
-    состояние не входят: они описывают весь период наблюдения, а не
-    момент cutoff.
-
-    Дни сбоя датированы, поэтому они в состояние ВХОДЯТ — но
-    только те, что уже случились к cutoff.
-    """
-
-    states: list[SourceState] = []
-    undated: set[str] = set()
-
-    for row in sorted(rows, key=lambda item: item["source"]):
-
-        first_available = row["first_available_at"]
-        first_seen = row["first_seen"]
-        last_available = row["last_available_at"]
-
-        if first_available is not None and first_available >= cutoff:
-            state = COVERAGE_NOT_LAUNCHED
-        elif first_seen is None or first_seen >= cutoff:
-            state = COVERAGE_NOT_SEEN
-        elif last_available is not None and last_available < cutoff:
-            state = COVERAGE_ENDED
-        else:
-            state = COVERAGE_AVAILABLE
-
-        if row.get("coverage_reason") in UNDATED_REASONS:
-            undated.add(row["coverage_reason"])
-
-        states.append(
-            SourceState(
-                source=row["source"],
-                state=state,
-                first_available_at=first_available,
-                first_seen=first_seen,
-                last_available_at=last_available,
-                reason=row.get("coverage_reason"),
-                outage_days=_outages_before(
-                    row.get("outage_days"), first_seen, last_available, cutoff
-                ),
-            )
-        )
-
-    notes: list[str] = []
-
-    if undated:
-        notes.append(
-            "итоговые причины покрытия "
-            + ", ".join(sorted(undated))
-            + " не датированы и в состояние на дату не входят: они описывают всю выгрузку"
-        )
-
-    return states, notes
 
 
 # ============================================================
@@ -887,7 +716,7 @@ def transfers_as_of(index: tuple[dict, dict], client_id: str, cutoff: datetime) 
 
 
 def relationship_as_of(
-    coverage: list[dict],
+    events,
     cutoff: datetime,
     history_start: datetime,
     profile: dict | None,
@@ -895,28 +724,24 @@ def relationship_as_of(
     """
     Наблюдаемое начало отношений и честная оговорка о неполноте.
 
-    first_seen это начало наблюдения источником, а не обязательно
-    знакомство с банком: более ранний период может быть просто не
-    виден.
+    Начало это первая запись клиента в выгрузке. Более раннего
+    периода у банка нет: витрины покрытия, которая объявляла бы
+    знакомство отдельно от событий, больше не существует, и
+    правило чтения одно — если события нет, значит клиент его
+    не совершал.
     """
 
-    starts = [row["first_seen"] for row in coverage if row["first_seen"] is not None and row["first_seen"] < cutoff]
+    observed_start = None
 
-    observed_start = min(starts) if starts else None
+    if events.num_rows:
+        first = events.column("event_time")[0].as_py()
+        if first is not None and first < cutoff:
+            observed_start = first
 
     reasons: list[str] = []
 
-    pre_window = 0
-    for row in coverage:
-        for key, value in row.get("opening_state_values") or []:
-            if key == "contracts_before_window" and value:
-                pre_window = max(pre_window, int(value))
-
     if observed_start is not None and observed_start <= history_start:
         reasons.append("наблюдение начинается с границы выгрузки: более ранний период неизвестен")
-
-    if pre_window:
-        reasons.append(f"opening_state объявляет {pre_window} договор(ов) до начала окна")
 
     observed_days = (cutoff - observed_start).days if observed_start is not None else None
 
@@ -928,113 +753,13 @@ def relationship_as_of(
                 f"наблюдается {observed_days // 30} мес."
             )
 
-    closed_at = None
-    closed_reason = None
-
-    for row in coverage:
-        end = row["last_available_at"]
-        if end is not None and end < cutoff and row.get("coverage_reason") == "relationship_closed":
-            if closed_at is None or end < closed_at:
-                closed_at = end
-                closed_reason = row["coverage_reason"]
-
     return Relationship(
         observed_start=observed_start,
         observed_days=observed_days,
         history_incomplete=bool(reasons),
         incomplete_reasons=tuple(reasons),
-        closed_at=closed_at,
-        closed_reason=closed_reason,
     )
 
-
-# ============================================================
-# СПРАВОЧНИК ПРОДУКТОВ
-# ============================================================
-
-
-def product_key(product_id: str, product_version=None, tariff_version=None) -> str:
-    """
-    Адрес строки справочника: продукт и названная событием версия.
-
-    Прежний продукт версии не называет, поэтому обе её части
-    остаются пустыми.
-    """
-
-    return f"{product_id}|v{product_version}|t{tariff_version}"
-
-
-def products_as_of(products: pa.Table | None, events: pa.Table, cutoff: datetime) -> dict[str, dict]:
-    """
-    Атрибуты продуктов, названных видимыми событиями, по версии
-    условий самого события.
-
-    Справочник с несколькими версиями не размножает событие: берётся
-    ровно та строка, которую событие называет, и только если она уже
-    известна к cutoff.
-
-    Прежний продукт перехода версии не называет: для него берётся
-    последняя версия, известная к cutoff.
-    """
-
-    if products is None or events.num_rows == 0 or "product_id" not in events.column_names:
-        return {}
-
-    wanted: set[tuple] = set()
-
-    columns = ["product_id", "product_version", "tariff_version", "previous_product_id"]
-
-    for row in events.select([name for name in columns if name in events.column_names]).to_pylist():
-
-        if row.get("product_id"):
-            wanted.add((row["product_id"], row.get("product_version"), row.get("tariff_version")))
-
-        if row.get("previous_product_id"):
-            wanted.add((row["previous_product_id"], None, None))
-
-    if not wanted:
-        return {}
-
-    catalogue = products.to_pylist()
-
-    out: dict[str, dict] = {}
-
-    for product_id, product_version, tariff_version in sorted(wanted, key=lambda item: str(item)):
-
-        candidates = [
-            row
-            for row in catalogue
-            if row["product_id"] == product_id
-            and (product_version is None or row["product_version"] == product_version)
-            and (tariff_version is None or row["tariff_version"] == tariff_version)
-        ]
-
-        known = [row for row in candidates if row["valid_from"] is None or row["valid_from"] < cutoff]
-
-        key = product_key(product_id, product_version, tariff_version)
-
-        if not candidates:
-            out[key] = {"state": "not_in_catalogue"}
-            continue
-
-        if not known:
-            out[key] = {"state": "catalogue_version_unknown_at_cutoff"}
-            continue
-
-        row = max(known, key=lambda item: (item["valid_from"] or datetime.min, item["product_version"]))
-
-        out[key] = {
-            "state": "known",
-            "product_code": row["product_code"],
-            "product_family": row["product_family"],
-            "product_name": row["product_name"],
-            "status": row["status"],
-            "valid_from": row["valid_from"],
-            "product_version": row["product_version"],
-            "tariff_version": row["tariff_version"],
-        }
-
-    return out
 
 
 # ============================================================
@@ -1047,9 +772,9 @@ def history_as_of(store: CanonicalStore, client: str | int, cutoff: datetime) ->
     Что банк знал о клиенте строго до cutoff.
     """
 
-    if cutoff > store.extract_time:
+    if cutoff > store.period_end:
         raise HistoryError(
-            f"cutoff {cutoff.isoformat()} позже границы выгрузки {store.extract_time.isoformat()}: "
+            f"cutoff {cutoff.isoformat()} позже границы выгрузки {store.period_end.isoformat()}: "
             "за ней у банка нет ничего"
         )
 
@@ -1064,15 +789,11 @@ def history_as_of(store: CanonicalStore, client: str | int, cutoff: datetime) ->
     profile_rows = store.profile_rows(client_id)
     profile, profile_meta = profile_of(profile_rows)
 
-    coverage_rows = store.coverage_rows(client_id)
-    coverage, coverage_notes = coverage_as_of(coverage_rows, cutoff)
-
     entities = entity_states_as_of(events, cutoff)
     transfers = transfers_as_of(store.transfer_index, client_id, cutoff)
-    relationship = relationship_as_of(coverage_rows, cutoff, store.history_start, profile)
-    products = products_as_of(store.products, events, cutoff)
+    relationship = relationship_as_of(events, cutoff, store.period_start, profile)
 
-    limitations = list(coverage_notes)
+    limitations: list[str] = []
 
     limitations.extend(relationship.incomplete_reasons)
 
@@ -1091,11 +812,9 @@ def history_as_of(store: CanonicalStore, client: str | int, cutoff: datetime) ->
         counts=counts,
         profile=profile,
         profile_meta=profile_meta,
-        coverage=coverage,
         entities=entities,
         transfers=transfers,
         relationship=relationship,
-        products=products,
         limitations=limitations,
     )
 
@@ -1112,19 +831,14 @@ __all__ = [
     "PAIR_VISIBLE",
     "STAGE",
     "STAGE_VERSION",
-    "UNDATED_REASONS",
     "CanonicalStore",
     "ClientHistory",
     "EntityState",
     "HistoryError",
     "Relationship",
-    "SourceState",
     "TransferSide",
-    "coverage_as_of",
     "entity_states_as_of",
     "history_as_of",
-    "product_key",
-    "products_as_of",
     "profile_of",
     "relationship_as_of",
     "transfers_as_of",
