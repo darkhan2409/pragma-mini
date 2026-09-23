@@ -37,8 +37,13 @@ from torch import nn
 # F.scaled_dot_product_attention выбирает блочное ядро и тратит
 # 12 МиБ на то же самое точное вычисление.
 #
-# Маски внимания здесь нет, и она не нужна: клиенты считаются по
-# одному, заполнителя во входе не существует.
+# Клиент по одному (этап 12) идёт без маски и без заполнителя.
+# Несколько клиентов сразу (обучение) лежат по оси batch:
+# [B, H, d], позиции [B, H] и маска [B, H]. Внимание каждого
+# клиента видит только свою строку batch, а заполнитель в конце
+# короткой истории исключён из ключей маской. Это внимание С
+# заполнителем, а не упакованное: заменить его на varlen-ядро
+# можно внутри Block, не трогая вызывающих.
 # ============================================================
 
 
@@ -74,18 +79,25 @@ class TimeRoPE(nn.Module):
 
     def angles(self, position: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        (cos, sin) формы [L, head_dim] по позициям [L].
+        (cos, sin) по позициям.
+
+        Позиции [L] дают [L, head_dim] — одна история. Позиции
+        [B, L] дают [B, 1, L, head_dim]: у каждого клиента свои
+        моменты, а единичная ось встаёт на место оси голов.
 
         Углы считаются в float32 независимо от типа активаций:
         разрешение log-секунд терять нельзя.
         """
 
-        freqs = position[:, None].float() * self.inv_freq[None, :]
+        freqs = position[..., None].float() * self.inv_freq
 
         # Частоты ДУБЛИРУЮТСЯ, а не чередуются: пара это i и
         # i + head_dim/2. Это схема LLaMA, и поворот ниже устроен
         # под неё.
         angles = torch.cat([freqs, freqs], dim=-1)
+
+        if position.dim() == 2:
+            angles = angles[:, None]
 
         return angles.cos(), angles.sin()
 
@@ -98,9 +110,10 @@ class TimeRoPE(nn.Module):
 
     def rotate(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
         """
-        Поворот [..., L, head_dim] при cos/sin формы [L, head_dim].
+        Поворот [B, H, L, head_dim] при cos/sin формы [L, head_dim]
+        или [B, 1, L, head_dim].
 
-        Оси головы и батча добираются бродкастом по хвостовым
+        Недостающие оси добираются бродкастом по хвостовым
         размерностям, поэтому отдельного None здесь нет.
         """
 
@@ -143,7 +156,13 @@ class Block(nn.Module):
         rope: TimeRoPE,
         cos: torch.Tensor,
         sin: torch.Tensor,
+        keys: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """
+        keys — булева маска ключей внимания [B, 1, 1, L]: True там,
+        где позиция настоящая. Так её понимает SDPA: True значит
+        «участвует во внимании». None — заполнителя нет.
+        """
 
         batch, length, dim = x.shape
 
@@ -162,7 +181,9 @@ class Block(nn.Module):
 
         # Масштаб 1/sqrt(head_dim) внутри SDPA, руками не пишется.
         attention = F.scaled_dot_product_attention(
-            query, key, value, dropout_p=self.dropout if self.training else 0.0
+            query, key, value,
+            attn_mask=keys,
+            dropout_p=self.dropout if self.training else 0.0,
         )
 
         x = x + self.drop(self.out(attention.transpose(1, 2).reshape(batch, length, dim)))
@@ -172,7 +193,7 @@ class Block(nn.Module):
 
 class HistoryEncoder(nn.Module):
     """
-    Стек блоков по истории одного клиента.
+    Стек блоков по историям клиентов.
     """
 
     def __init__(
@@ -206,9 +227,15 @@ class HistoryEncoder(nn.Module):
 
             self.rope = TimeRoPE(self.dim // heads, base=rope_base)
 
-    def forward(self, sequence: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        sequence: torch.Tensor,
+        positions: torch.Tensor,
+        mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """
-        [1, L, d] и [L] -> [1, L, d].
+        [1, L, d] и [L] -> [1, L, d] — одна история, как на этапе 12.
+        [B, L, d], [B, L] и маска [B, L] -> [B, L, d] — несколько.
 
         Углы считаются один раз на всю историю и переиспользуются
         всеми блоками: лестница частот у них общая.
@@ -216,12 +243,27 @@ class HistoryEncoder(nn.Module):
 
         cos, sin = self.rope.angles(positions)
 
+        # Маска, в которой всё настоящее, внимание не меняет, а
+        # быстрое ядро SDPA с маской недоступно: её не передают.
+        keys = None
+
+        if mask is not None and not bool(mask.all()):
+            keys = mask[:, None, None, :]
+
         x = sequence
 
         for layer in self.layers:
-            x = layer(x, self.rope, cos, sin)
+            x = layer(x, self.rope, cos, sin, keys)
 
-        return self.norm(x)
+        x = self.norm(x)
+
+        # Заполнитель наружу не выходит нулём только после нормы:
+        # до неё он был бы bias LayerNorm. Настоящих позиций он и
+        # так не касался — ключом он исключён маской.
+        if mask is not None:
+            x = x * mask[..., None].to(x.dtype)
+
+        return x
 
 
 @contextmanager

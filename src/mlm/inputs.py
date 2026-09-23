@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable, Iterator
 
 import numpy as np
 import pyarrow as pa
@@ -14,7 +15,7 @@ from src.masking.apply import apply
 from src.masking.build import MASKED_SCHEMA
 from src.masking.choose import choose
 from src.masking.settings import MASKED_FILE, MaskingConfig, masked_dir
-from src.tokenization.specials import MASK, UNK, load_special_tokens
+from src.tokenization.specials import MASK, PAD, UNK, load_special_tokens
 
 
 # ============================================================
@@ -34,9 +35,10 @@ from src.tokenization.specials import MASK, UNK, load_special_tokens
 # value_ids_source не читается: исходное значение цели уже лежит
 # в labels, и второй его копии не нужно.
 #
-# Заполнитель наружу не выходит: каждый массив обрезан по
-# настоящей длине своего клиента. Поэтому [PAD] не может попасть
-# ни во вход модели, ни в потери — его там просто нет.
+# Заполнитель наружу не выходит: каждый массив клиента обрезан по
+# его настоящей длине. [PAD] появляется только при сборке прохода
+# из нескольких клиентов (model.collate), всегда вместе с маской и
+# меткой -100, поэтому в потери он не попадает.
 #
 # labels и reason в модель НЕ подаются. Первое уходит в потери,
 # второе в отчёт.
@@ -45,6 +47,11 @@ from src.tokenization.specials import MASK, UNK, load_special_tokens
 # лету тем же маскером этапа 08 (choose + apply) по
 # немаскированным value_ids из 07_batches: так каждая эпоха
 # получает свою маску. val, test и отчёт читают 08_masked.
+#
+# Группа строк 07_batches здесь — только единица хранения и
+# чтения. Сколько клиентов модель считает за один проход, решает
+# не она, а micro_batches: клиенты идут потоком и собираются по
+# бюджету позиций.
 # ============================================================
 
 
@@ -120,6 +127,10 @@ class Client:
         return int(self.event_starts.size)
 
     @property
+    def profile_n_tokens(self) -> int:
+        return int(self.profile_key_ids.size)
+
+    @property
     def n_targets(self) -> int:
         return int((self.labels != IGNORE).sum())
 
@@ -149,6 +160,7 @@ class Source:
 
         self.mask_id = specials[MASK]
         self.unknown_id = specials[UNK]
+        self.pad_id = specials[PAD]
 
         if masking is not None:
             return
@@ -196,6 +208,17 @@ class Source:
             self._client(index, row, here, there)
             for row, (here, there) in enumerate(zip(batch, masked))
         ]
+
+    def clients(self) -> Iterator[Client]:
+        """
+        Клиенты группы по одному, в порядке файла.
+
+        В памяти держится одна группа строк: файл читается по мере
+        прохода, а не целиком.
+        """
+
+        for index in range(self.count):
+            yield from self.batch(index)
 
     def _mask(self, index: int, row: dict) -> dict:
         """
@@ -254,6 +277,49 @@ class Source:
                _bools(batch["target_event_mask"][:n_events]), self.mask_id)
 
         return client
+
+
+def cost(client: Client) -> int:
+    """
+    Во сколько позиций обходится клиент одному проходу модели.
+
+    Каждая позиция проходит хотя бы один трансформер:
+
+      n_tokens          — токены событий, энкодер события;
+      profile_n_tokens  — токены анкеты, энкодер анкеты;
+      n_events + 1      — позиции истории: по одной на событие и
+                          одна на вектор анкеты в слоте [USR].
+    """
+
+    return client.n_tokens + client.profile_n_tokens + client.n_events + 1
+
+
+def micro_batches(clients: Iterable[Client], token_budget: int) -> Iterator[list[Client]]:
+    """
+    Клиенты подряд, собранные в проходы модели по бюджету.
+
+    Клиент добавляется, пока сумма стоимостей не превысит бюджет;
+    следующий, который превысил бы его, открывает новый проход.
+    Клиент дороже всего бюджета не теряется: он идёт отдельным
+    проходом. Пустых проходов не бывает.
+    """
+
+    batch: list[Client] = []
+    spent = 0
+
+    for client in clients:
+
+        price = cost(client)
+
+        if batch and spent + price > token_budget:
+            yield batch
+            batch, spent = [], 0
+
+        batch.append(client)
+        spent += price
+
+    if batch:
+        yield batch
 
 
 def _open(path: Path, schema: pa.Schema, command: str) -> pq.ParquetFile:
@@ -330,4 +396,6 @@ __all__ = [
     "Client",
     "InputError",
     "Source",
+    "cost",
+    "micro_batches",
 ]

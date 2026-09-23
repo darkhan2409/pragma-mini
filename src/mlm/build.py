@@ -13,7 +13,7 @@ from src.tokenization.finalvocab import FrozenArtifacts
 from src.tokenization.specials import UNK, load_special_tokens
 
 from .inputs import IGNORE, Client, Source
-from .model import Model, Predicted, load_model, to_tensors
+from .model import Model, Predicted, collate, load_model
 from .report import Piece, Shot, render
 from .settings import (
     PREVIEW_FILE,
@@ -40,7 +40,7 @@ from .version import IMPLEMENTATION_VERSION
 #
 # Сам проход дифференцируемый и живёт в model.py. Здесь он
 # вызывается под no_grad, потому что это отчёт: градиенты нужны
-# обучению, а не диагностике. Это единственное место с no_grad.
+# обучению, а не диагностике. Внутри самого прохода no_grad нет.
 #
 # ВАЖНО. Всё, что тут посчитано, посчитано НЕОБУЧЕННОЙ моделью.
 # Потери около ln(размер словаря) означают ровно случайное
@@ -135,9 +135,11 @@ def build_group(
 
             for client in source.batch(number):
 
-                # no_grad стоит ЗДЕСЬ и только здесь: это отчёт.
+                # no_grad стоит ЗДЕСЬ: это отчёт. Отчёт поклиентный,
+                # поэтому micro-batch здесь из одного клиента —
+                # через то же ядро, что и обучение.
                 with torch.no_grad():
-                    out = model(to_tensors(client, device))
+                    out = model(collate([client], source.pad_id, device))
 
                 rows, shot = _rows(client, out, names, config, unknown_id, shot)
 
