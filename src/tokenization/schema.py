@@ -125,12 +125,6 @@ class SemanticSchema:
         self.keys_version = registry["keys_version"]
         self.projection_version = PROJECTION_VERSION
 
-        self.ambiguous = tuple(
-            (tuple(item["keys"]), item["reason"]) for item in registry.get("ambiguous", ())
-        )
-        self.allowed_sharing = tuple(
-            (item["key"], tuple(item["sources"]), item["reason"]) for item in registry.get("allowed_sharing", ())
-        )
 
         self.keys: dict[str, KeyInfo] = {}
 

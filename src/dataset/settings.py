@@ -7,7 +7,6 @@ from typing import Any, Mapping
 
 from src.generator.config import DATA_DIR
 
-from .version import SCHEMA_VERSION
 
 
 # ============================================================
@@ -192,8 +191,6 @@ class DatasetConfig:
     Решения человека о сборке набора.
     """
 
-    schema_version: int = SCHEMA_VERSION
-
     context: ContextPolicy = field(default_factory=ContextPolicy)
 
     # Сколько примеров лежит в одной группе строк parquet.
@@ -208,7 +205,6 @@ class DatasetConfig:
 
     def as_dict(self) -> dict:
         return {
-            "schema_version": self.schema_version,
             "context": self.context.as_dict(),
             "row_group_samples": self.row_group_samples,
         }

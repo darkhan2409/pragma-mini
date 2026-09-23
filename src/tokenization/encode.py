@@ -21,9 +21,17 @@ from .specials import EVT, UNK, USR
 # Число и категория занимают одну позицию, текст — столько,
 # сколько кусков дал BPE, и все они делят один key_id.
 #
-# positions это номер куска ВНУТРИ значения, а не порядок полей
-# события. Порядок полей смысла не несёт вовсе: событие это
-# набор пар, а его границы задаются отдельно.
+# Границы значений задаёт positions, и другого их описания в
+# формате нет: ноль начинает новое значение, дальше идут 1, 2, …
+# — куски того же значения. Разбор однозначен потому, что
+# значений нулевой длины не бывает: отсутствующее поле пары не
+# создаёт вовсе, поэтому нулей ровно столько, сколько значений.
+#
+# Два соседних значения с одним ключом остаются двумя: каждое
+# начинает свой ноль, и на key_id правило не смотрит.
+#
+# Порядок полей смысла не несёт: событие это набор пар, а его
+# границы задаются отдельно.
 #
 # Пары существуют только у того, что есть. Отсутствующее поле в
 # последовательность не попадает вовсе, и пустой после
@@ -55,21 +63,19 @@ class EncodedRecord:
     Позиция 0 это ведущий маркер. Он занимает место в массивах
     модели, потому что модель обязана его видеть, но
     СОДЕРЖАТЕЛЬНЫМ значением не является: в n_values он не
-    входит и собственного span не получает.
+    входит.
 
-    Разница не косметическая. Маркер не имеет ключа, его нечего
-    предсказывать, и маскировать его нельзя. Если бы он лежал
-    среди значений, любой потребитель, который ходит по spans,
-    считал бы его обычным полем и однажды спрятал бы под маской.
+    Разница не косметическая. Маркер стоит на нулевой позиции,
+    как и начало любого значения, и по одному positions его не
+    отличить. Поэтому разбор всегда начинается со следующего
+    токена: иначе потребитель, ищущий значения, однажды принял
+    бы маркер за обычное поле и спрятал бы его под маской.
     """
 
     lead: str = ""
     key_ids: list[int] = field(default_factory=list)
     value_ids: list[int] = field(default_factory=list)
     positions: list[int] = field(default_factory=list)
-    value_starts: list[int] = field(default_factory=list)
-    value_lengths: list[int] = field(default_factory=list)
-    value_keys: list[str] = field(default_factory=list)
     unknown_keys: list[str] = field(default_factory=list)
 
     @property
@@ -80,10 +86,10 @@ class EncodedRecord:
     def n_values(self) -> int:
         """
         Сколько содержательных значений в записи. Маркер сюда не
-        входит.
+        входит: его ноль в разбор не попадает.
         """
 
-        return len(self.value_starts)
+        return sum(1 for position in self.positions[self.content_start:] if position == 0)
 
     @property
     def content_start(self) -> int:
@@ -106,11 +112,11 @@ class EncodedRecord:
         self.value_ids.append(token_id)
         self.positions.append(0)
 
-    def add(self, key: str, key_id: int, value_ids: list[int]) -> None:
-
-        self.value_starts.append(len(self.key_ids))
-        self.value_lengths.append(len(value_ids))
-        self.value_keys.append(key)
+    def add(self, key_id: int, value_ids: list[int]) -> None:
+        """
+        Пара ключ/значение: ноль открывает значение, дальше идут
+        номера его кусков.
+        """
 
         for position, value_id in enumerate(value_ids):
             self.key_ids.append(key_id)
@@ -119,15 +125,12 @@ class EncodedRecord:
 
     def check(self) -> None:
         """
-        Длины согласованы, маркер на своём месте, а span'ы
-        покрывают все позиции содержимого без дыр и нахлёстов.
+        Длины согласованы, маркер на своём месте, а positions
+        разбираются на значения без разрывов.
         """
 
         if not (len(self.key_ids) == len(self.value_ids) == len(self.positions)):
             raise EncodeError("массивы записи разной длины")
-
-        if not (len(self.value_starts) == len(self.value_lengths) == len(self.value_keys)):
-            raise EncodeError("массивы span'ов разной длины")
 
         if self.lead:
 
@@ -140,15 +143,23 @@ class EncodedRecord:
             if self.positions[0] != 0:
                 raise EncodeError("маркер обязан стоять на позиции 0")
 
-        covered = self.content_start
+        # Содержимое обязано начаться с нуля, а куски значения —
+        # идти подряд: позиция либо открывает значение, либо
+        # продолжает предыдущую ровно на единицу. Первый токен с
+        # positions = 3 не пройдёт ни одну из двух веток.
+        expected = 0
 
-        for start, length in zip(self.value_starts, self.value_lengths):
-            if start != covered:
-                raise EncodeError(f"span значения начинается в {start}, а покрыто {covered}")
-            covered += length
+        for index in range(self.content_start, len(self.positions)):
 
-        if covered != len(self.key_ids):
-            raise EncodeError(f"span'ы покрывают {covered} позиций из {len(self.key_ids)}")
+            position = self.positions[index]
+
+            if position != 0 and position != expected:
+                raise EncodeError(
+                    f"в позиции {index} стоит {position}, а куски значения идут "
+                    f"подряд от нуля (ожидалось {expected})"
+                )
+
+            expected = position + 1
 
 
 def _text_value_ids(artifacts: FrozenArtifacts, key: str, value: object,
@@ -250,7 +261,7 @@ def encode_values(
         if ids is None:
             continue
 
-        record.add(key, key_id, ids)
+        record.add(key_id, ids)
 
     record.unknown_keys.sort()
     record.check()

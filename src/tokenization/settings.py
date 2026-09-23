@@ -7,7 +7,6 @@ from typing import Any, Mapping
 
 from src.generator.config import DATA_DIR
 
-from .version import SCHEMA_VERSION
 
 
 # ============================================================
@@ -217,8 +216,13 @@ def default_numeric_encoders() -> dict[str, NumericEncoder]:
     Кодировщик каждого числового ключа смыслового реестра.
 
     Деньги режутся по train: их разброс свойство популяции.
-    Сроки, возраст, ставка, доли и счётчики заданы бизнесом:
-    их границы известны заранее и от выборки зависеть не должны.
+    Возраст, ставка, доли и длительность отношений заданы
+    бизнесом: их границы известны заранее и от выборки зависеть
+    не должны.
+
+    Сроков и счётчиков здесь нет вовсе: у них важно точное
+    значение, а не порядок величины, поэтому реестр объявил их
+    категориями и каждое число получает свой токен.
     """
 
     money = "сумма в тенге: разброс свойство популяции, границы считает train"
@@ -259,9 +263,6 @@ def default_numeric_encoders() -> dict[str, NumericEncoder]:
             zero=ZERO_SEPARATE,
         ),
         # --- сроки ---
-        "term": _fixed((3, 6, 12, 24, 36, 60), "типовые сроки договоров в месяцах"),
-        "requested_term": _fixed((3, 6, 12, 24, 36, 60), "запрошенный срок в месяцах"),
-        "approved_term": _fixed((3, 6, 12, 24, 36, 60), "одобренный срок в месяцах"),
         "profile_relationship_months": _fixed(
             (6, 12, 24, 36, 60, 120), "длительность отношений с банком в месяцах"
         ),
@@ -272,15 +273,10 @@ def default_numeric_encoders() -> dict[str, NumericEncoder]:
             "использование лимита долей: ноль это отдельное состояние «лимитом не пользуются»",
             zero=ZERO_SEPARATE,
         ),
-        "rate": _fixed((0.05, 0.10, 0.15, 0.20, 0.25, 0.35), "годовая ставка долей"),
-        # --- счётчики ---
-        # У счётчиков ноль уже отдельный диапазон, поэтому первая
-        # граница начинается с двойки: интервал между нулём и
-        # единицей пуст по природе целого числа.
-        "installment_no": _fixed((2, 4, 7, 13, 25), "номер платежа в графике", zero=ZERO_SEPARATE),
-        "profile_children": _fixed((2, 3, 4), "число детей", zero=ZERO_SEPARATE),
-        "profile_contracts_count": _fixed((2, 3, 5), "число договоров", zero=ZERO_SEPARATE),
-        "profile_active_contracts": _fixed((2, 3, 5), "число действующих договоров", zero=ZERO_SEPARATE),
+        # Ставки объявлены каталогом продуктов и лежат в [0.06, 0.24],
+        # сгущаясь к 0.17. Прежние границы (0.05 … 0.35) сводили
+        # почти все объявленные ставки в одну корзину [0.15, 0.20).
+        "rate": _fixed((0.10, 0.14, 0.16, 0.17, 0.18, 0.20), "годовая ставка долей"),
         # --- без шкалы ---
         "original_amount": NumericEncoder(
             method=METHOD_UNFITTED,
@@ -291,72 +287,12 @@ def default_numeric_encoders() -> dict[str, NumericEncoder]:
         ),
     }
 
-    for name in ("profile_children_old", "profile_children_new"):
-        encoders[name] = _fixed(
-            (2, 3, 4),
-            "прежнее и новое число детей делят шкалу с самим полем профиля",
-            zero=ZERO_SEPARATE,
-            fit_source="profile_children",
-        )
-
     return encoders
 
 
 # ------------------------------------------------------------
 # ДОМЕНЫ КАТЕГОРИАЛЬНЫХ ЗНАЧЕНИЙ
 # ------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class ValueDomain:
-    """
-    Несколько ключей, значения которых берутся из одного
-    множества и потому делят коды.
-    """
-
-    name: str
-    keys: tuple[str, ...]
-    reason: str
-
-    def as_dict(self) -> dict:
-        return {"name": self.name, "keys": list(self.keys), "reason": self.reason}
-
-    @staticmethod
-    def from_dict(data: Mapping[str, Any]) -> "ValueDomain":
-
-        unknown = set(data) - {"name", "keys", "reason"}
-
-        if unknown:
-            raise ConfigError(f"неизвестные поля домена: {sorted(unknown)}")
-
-        return ValueDomain(str(data["name"]), tuple(str(key) for key in data["keys"]), str(data.get("reason", "")))
-
-
-def default_value_domains() -> tuple[ValueDomain, ...]:
-    """
-    Объединения, у каждого из которых названа причина.
-
-    По умолчанию домен это сам ключ: одинаковое написание ещё
-    ничего не значит. Здесь перечислено только то, где множество
-    значений доказуемо одно.
-    """
-
-    # Объединять пока нечего: каждый ключ кодируется своим
-    # словарём, и одинаковое написание общего множества значений
-    # не доказывает.
-    #
-    # Два объединения напрашиваются и отклонены осознанно:
-    #
-    #   profile_<поле> и его _old/_new — смысл один, но
-    #   физический тип разный: у профиля булево и число, у
-    #   изменения профиля строка. Пока смысловой слой не
-    #   типизирует old_value и new_value по самому полю, общий
-    #   домен склеил бы true и "true" под одним смыслом;
-    #
-    #   merchant_city и profile_city — город точки это место
-    #   покупки, а город профиля место жизни: реестр объявил их
-    #   несовместимыми.
-    return ()
 
 
 # ------------------------------------------------------------
@@ -414,8 +350,6 @@ class BpeConfig:
 @dataclass(frozen=True)
 class TokenizerConfig:
 
-    schema_version: int = SCHEMA_VERSION
-
     # Группа, на которой разрешено учиться. Другой у V1 нет:
     # разрешение выдаёт разделение препроцессинга.
     fit_group: str = "train"
@@ -439,8 +373,6 @@ class TokenizerConfig:
     # токенизатор следует реестру и лишь называет противоречие.
     text_keys_as_categorical: tuple[str, ...] = ()
 
-    value_domains: tuple[ValueDomain, ...] = field(default_factory=default_value_domains)
-
     numeric_encoders: dict[str, NumericEncoder] = field(default_factory=default_numeric_encoders)
 
     bpe: BpeConfig = field(default_factory=BpeConfig)
@@ -459,24 +391,11 @@ class TokenizerConfig:
             if encoder.fit_source is not None and encoder.fit_source not in self.numeric_encoders:
                 raise ConfigError(f"ключ {key}: источник шкалы {encoder.fit_source!r} не объявлен")
 
-        seen: dict[str, str] = {}
-
-        for domain in self.value_domains:
-
-            if len(domain.keys) < 2:
-                raise ConfigError(f"домен {domain.name}: объединять нечего")
-
-            for key in domain.keys:
-                if key in seen:
-                    raise ConfigError(f"ключ {key} объявлен в двух доменах: {seen[key]} и {domain.name}")
-                seen[key] = domain.name
-
         if self.quantile_sample_k < 1000:
             raise ConfigError("выборка для квантилей меньше тысячи значений не даёт устойчивых границ")
 
     def as_dict(self) -> dict:
         return {
-            "schema_version": self.schema_version,
             "fit_group": self.fit_group,
             "quantile_sample_k": self.quantile_sample_k,
             "quantile_algorithm": self.quantile_algorithm,
@@ -484,7 +403,6 @@ class TokenizerConfig:
             "numeric_min_clients": self.numeric_min_clients,
             "distinct_cap": self.distinct_cap,
             "text_keys_as_categorical": list(self.text_keys_as_categorical),
-            "value_domains": [domain.as_dict() for domain in self.value_domains],
             "numeric_encoders": {key: encoder.as_dict() for key, encoder in sorted(self.numeric_encoders.items())},
             "bpe": self.bpe.as_dict(),
             "max_pieces_per_value": self.max_pieces_per_value,
@@ -506,12 +424,6 @@ class TokenizerConfig:
         for key, item in data.get("numeric_encoders", {}).items():
             encoders[str(key)] = NumericEncoder.from_dict(item)
 
-        domains = (
-            tuple(ValueDomain.from_dict(item) for item in data["value_domains"])
-            if "value_domains" in data
-            else base.value_domains
-        )
-
         config = replace(
             base,
             fit_group=str(data.get("fit_group", base.fit_group)),
@@ -521,7 +433,6 @@ class TokenizerConfig:
             numeric_min_clients=int(data.get("numeric_min_clients", base.numeric_min_clients)),
             distinct_cap=int(data.get("distinct_cap", base.distinct_cap)),
             text_keys_as_categorical=tuple(str(key) for key in data.get("text_keys_as_categorical", ())),
-            value_domains=domains,
             numeric_encoders=encoders,
             bpe=BpeConfig.from_dict(data["bpe"]) if "bpe" in data else base.bpe,
             max_pieces_per_value=int(data.get("max_pieces_per_value", base.max_pieces_per_value)),
@@ -576,11 +487,9 @@ __all__ = [
     "NEGATIVE_INVALID",
     "NumericEncoder",
     "TokenizerConfig",
-    "ValueDomain",
     "ZERO_IN_RANGE",
     "ZERO_SEPARATE",
     "default_numeric_encoders",
-    "default_value_domains",
     "tokenized_dir",
     "vocab_path",
 ]

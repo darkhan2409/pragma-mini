@@ -37,8 +37,9 @@ from .specials import UNK
 # токенами, а не копия выгрузки.
 #
 # client_id и event_time сохраняются: по ним датасет группирует
-# и сортирует. Границы значений внутри записи сохраняются тоже —
-# без них последовательность ID это просто числа.
+# и сортирует. Границы значений отдельными массивами не лежат:
+# их задаёт positions, где ноль начинает значение, а 1, 2, …
+# продолжают его кусками BPE.
 #
 # Клиент без событий остаётся в профиле, а событий у него может
 # быть ноль: выдумывать покупки и сессии токенизатор не вправе.
@@ -59,8 +60,6 @@ EVENTS_SCHEMA = pa.schema(
         ("key_ids", pa.list_(pa.int32())),
         ("value_ids", pa.list_(pa.int32())),
         ("positions", pa.list_(pa.int32())),
-        ("value_starts", pa.list_(pa.int32())),
-        ("value_lengths", pa.list_(pa.int32())),
         ("calendar", pa.list_(pa.float32())),
     ]
 )
@@ -71,8 +70,6 @@ PROFILE_SCHEMA = pa.schema(
         ("key_ids", pa.list_(pa.int32())),
         ("value_ids", pa.list_(pa.int32())),
         ("positions", pa.list_(pa.int32())),
-        ("value_starts", pa.list_(pa.int32())),
-        ("value_lengths", pa.list_(pa.int32())),
     ]
 )
 
@@ -184,8 +181,6 @@ def encode_group(
                         "key_ids": record.key_ids,
                         "value_ids": record.value_ids,
                         "positions": record.positions,
-                        "value_starts": record.value_starts,
-                        "value_lengths": record.value_lengths,
                         "calendar": list(event.calendar),
                     }
                 )
@@ -217,8 +212,6 @@ def encode_group(
                             "key_ids": record.key_ids,
                             "value_ids": record.value_ids,
                             "positions": record.positions,
-                            "value_starts": record.value_starts,
-                            "value_lengths": record.value_lengths,
                         }
                     ],
                     schema=PROFILE_SCHEMA,

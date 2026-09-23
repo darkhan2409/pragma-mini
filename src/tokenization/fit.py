@@ -117,28 +117,6 @@ def _check_config(config: TokenizerConfig, schema: SemanticSchema) -> None:
             "кодировщики объявлены для ключей, которых нет среди числовых: " + ", ".join(extra)
         )
 
-    unknown_domain_keys = sorted(
-        key for domain in config.value_domains for key in domain.keys if key not in schema.keys
-    )
-
-    if unknown_domain_keys:
-        raise FitError("домены значений ссылаются на неизвестные ключи: " + ", ".join(unknown_domain_keys))
-
-    for domain in config.value_domains:
-
-        kinds = {schema.info(key).value_kind for key in domain.keys}
-
-        if len(kinds) > 1:
-            raise FitError(f"домен {domain.name} объединяет ключи разных видов значения: {sorted(kinds)}")
-
-        for group, reason in schema.ambiguous:
-            shared = sorted(set(domain.keys) & set(group))
-            if len(shared) > 1:
-                raise FitError(
-                    f"домен {domain.name} объединяет ключи, объявленные несовместимыми в реестре "
-                    f"({', '.join(shared)}): {reason}"
-                )
-
     unknown_overrides = sorted(set(config.text_keys_as_categorical) - set(schema.text_keys))
 
     if unknown_overrides:

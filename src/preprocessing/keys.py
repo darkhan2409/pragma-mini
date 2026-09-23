@@ -34,7 +34,7 @@ from .projection import EVENT_TYPE_FIELD, SEMANTIC_PAYLOAD_FIELDS, validate_proj
 # ============================================================
 
 
-KEYS_VERSION = "10.0.0"
+KEYS_VERSION = "12.0.0"
 
 
 # ------------------------------------------------------------
@@ -90,6 +90,12 @@ UNITS: dict[str, str] = {
 NUMERIC = "numeric"
 CATEGORICAL = "categorical"
 TEXT = "text"
+
+# Единица счётчика. Счётчики объявлены категориями: у них важно
+# точное значение, а не порядок величины, поэтому число получает
+# свой токен. Числом при этом быть не перестаёт, и привод типа
+# опирается на эту единицу.
+COUNT = "count"
 
 # Поля, смысл которых зависит не от источника, а от значения
 # соседнего поля. Прямого ключа у них нет: он выдаётся по
@@ -155,15 +161,19 @@ DIRECT_KEYS: dict[str, SemanticKey] = {
     # --- договор и продукт ---
     "migration_reason": _k("migration_reason", CATEGORICAL, "причина перехода между продуктами"),
     "amount_or_limit": SemanticKey("amount_or_limit", NUMERIC, "сумма договора или кредитный лимит", unit="KZT"),
-    "term": SemanticKey("term", NUMERIC, "срок договора", unit="months"),
+    # Срок это выбор из каталожного меню, а не величина: между
+    # 12 и 18 месяцами промежуточных сроков не существует.
+    "term": SemanticKey("term", CATEGORICAL, "срок договора", unit="months"),
     "rate": SemanticKey("rate", NUMERIC, "номинальная ставка договора", unit="fraction_per_year"),
     # --- заявка ---
     "requested_amount": SemanticKey("requested_amount", NUMERIC, "запрошенная клиентом сумма", unit="KZT"),
-    "requested_term": SemanticKey("requested_term", NUMERIC, "запрошенный срок", unit="months"),
+    "requested_term": SemanticKey("requested_term", CATEGORICAL, "запрошенный срок", unit="months"),
     "approved_amount": SemanticKey("approved_amount", NUMERIC, "одобренная банком сумма", unit="KZT"),
-    "approved_term": SemanticKey("approved_term", NUMERIC, "одобренный срок", unit="months"),
+    "approved_term": SemanticKey("approved_term", CATEGORICAL, "одобренный срок", unit="months"),
     # --- график и просрочка ---
-    "installment_no": SemanticKey("installment_no", NUMERIC, "номер платежа в графике", unit="count"),
+    # Номер платежа: первый платёж и второй это разные факты,
+    # и диапазон «от 2 до 4» стирает ровно эту разницу.
+    "installment_no": SemanticKey("installment_no", CATEGORICAL, "номер платежа в графике", unit=COUNT),
     "amount_due": SemanticKey("amount_due", NUMERIC, "сумма планового платежа", unit="KZT"),
     "amount_paid": SemanticKey("amount_paid", NUMERIC, "фактически уплаченная сумма", unit="KZT"),
     "principal_outstanding": SemanticKey("principal_outstanding", NUMERIC, "остаток основного долга", unit="KZT"),
@@ -261,16 +271,19 @@ BY_SOURCE_KEYS: dict[str, dict[str, SemanticKey]] = {
 
 PROFILE_NUMERIC: dict[str, tuple[str, str | None]] = {
     "age": ("возраст клиента", "years"),
-    "children": ("число детей", "count"),
     "declared_income": ("заявленный доход", "KZT"),
     "relationship_months": ("месяцев отношений с банком по данным профиля", "months"),
-    "contracts_count": ("договоров всего по данным профиля", "count"),
-    "active_contracts": ("действующих договоров по данным профиля", "count"),
     "credit_limit": ("кредитный лимит клиента", "KZT"),
     "credit_utilization": ("доля использования лимита", "fraction"),
 }
 
+# Счётчики лежат здесь, а не среди чисел: у них важно точное
+# значение. Единицу им даёт таблица UNITS, и по ней же привод
+# типа узнаёт, что строка изменения профиля это целое число.
 PROFILE_CATEGORICAL: dict[str, str] = {
+    "children": "число детей",
+    "contracts_count": "договоров всего по данным профиля",
+    "active_contracts": "действующих договоров по данным профиля",
     "gender": "пол",
     "family_status": "семейное положение",
     "education": "образование",
@@ -292,7 +305,7 @@ PROFILE_KEYS: dict[str, SemanticKey] = {
         for name, (description, unit) in PROFILE_NUMERIC.items()
     },
     **{
-        name: SemanticKey(f"profile_{name}", CATEGORICAL, description)
+        name: SemanticKey(f"profile_{name}", CATEGORICAL, description, unit=UNITS.get(name))
         for name, description in PROFILE_CATEGORICAL.items()
     },
 }
@@ -372,41 +385,6 @@ PROFILE_CHANGE_KEYS: dict[str, tuple[SemanticKey, SemanticKey]] = {
 # отдельный числовой канал, он словарём не кодируется.
 # ------------------------------------------------------------
 
-
-# ------------------------------------------------------------
-# СПОРНЫЕ ОБЪЕДИНЕНИЯ
-# ------------------------------------------------------------
-#
-# Пары, которые выглядят одинаково, но склеивать их нельзя.
-# Список ведётся руками: он объясняет решения таблицы.
-# ------------------------------------------------------------
-
-AMBIGUOUS: tuple[tuple[tuple[str, ...], str], ...] = (
-    (("transaction_amount", "amount_or_limit", "approved_amount", "requested_amount", "amount_due", "amount_paid"),
-     "все в тенге, но это разные показатели: проводка, лимит договора, решение банка, запрос клиента и график"),
-    (("operation_channel", "application_channel", "communication_channel", "case_channel"),
-     "канал у операции, заявки, сообщения и обращения берётся из разных множеств значений"),
-    (("operation_status", "app_operation_status", "case_status"),
-     "исход операции, операции в приложении и обращения описываются разными словарями"),
-    (("operation_reason", "product_event_reason", "loan_event_reason"),
-     "основание операции, продуктового события и кредитного события это три разных перечня"),
-    (("application_decision", "fraud_decision"),
-     "решение по заявке и решение антифрода не сравнимы"),
-    (("fraud_resolution", "case_resolution"),
-     "исход проверки мошенничества и исход обращения в поддержку это разные вещи"),
-    (("merchant_city", "profile_city", "profile_region"),
-     "город операции это место покупки, а город и регион профиля это место жизни клиента"),
-    (("merchant_category", "mcc"),
-     "категория точки и код MCC описывают одно и то же разными перечнями: "
-     "внутренняя категория подробнее кода"),
-    (("is_online", "is_subscription", "delivered", "confirmed", "device_new"),
-     "булевы значения разных фактов: истина у одного ничего не говорит об истине у другого"),
-    (("amount_to_declared_income", "amount_to_limit", "amount_to_balance_after", "amount_to_client_average"),
-     "все безразмерные отношения, но знаменатели разные: доход, лимит договора, остаток счёта и прошлое клиента"),
-    (("profile_declared_income_new", "profile_city_new", "profile_children_new"),
-     "новое значение профиля наследует смысл изменённого поля: деньги, город и количество детей "
-     "не один текстовый ключ"),
-)
 
 # Явно разрешённые объединения одного смысла из разных источников.
 ALLOWED_SHARING: tuple[tuple[str, tuple[str, ...], str], ...] = (
@@ -603,7 +581,6 @@ def keys_registry(catalogue: dict) -> dict:
         },
         "counts": {"keys": len(rows), "by_value_kind": dict(sorted(by_kind.items()))},
         "keys": dict(sorted(rows.items())),
-        "ambiguous": [{"keys": list(group), "reason": reason} for group, reason in AMBIGUOUS],
         "allowed_sharing": [
             {"key": key, "sources": list(sources), "reason": reason}
             for key, sources, reason in ALLOWED_SHARING
@@ -613,7 +590,6 @@ def keys_registry(catalogue: dict) -> dict:
 
 __all__ = [
     "ALLOWED_SHARING",
-    "AMBIGUOUS",
     "BY_SOURCE_KEYS",
     "CATEGORICAL",
     "CHANGEABLE_PROFILE_FIELDS",
