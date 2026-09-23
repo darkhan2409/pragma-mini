@@ -18,6 +18,7 @@ from .finance.entities import (
     CONTRACT_CLOSED,
     Application,
     Card,
+    LoanState,
 )
 from .finance.ledger import COUNTERPART_BANK
 from .life import calendar as cal
@@ -57,6 +58,9 @@ from .world.relationships import masked_name
 
 
 CREDIT_FAMILIES = ("cash_loan", "credit_card", "refinance", "installment")
+
+# Семейства, у которых договор это кредит с графиком.
+LOAN_FAMILIES = ("cash_loan", "refinance", "installment")
 
 
 def _age_limit(persona, ts, income, dpd, loans) -> bool:
@@ -310,7 +314,7 @@ def _on_adoption(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     rng = event_rng(NS_ADOPTION, state.ordinal, ts.toordinal(), 0, COMPONENT_CONTENT)
 
-    _migrate_products(sim, state, ts, rng)
+    _migrate_products(sim, state, ts, rng, voluntary=True)
 
     pool = adoption_module.candidates(
         persona,
@@ -581,26 +585,28 @@ def _cancel_unfunded(state: ClientState, ts: datetime, contract) -> None:
 
 
 def _activate_product(
-    sim, state: ClientState, contract, view, ts: datetime, rng, disburse: bool = True,
+    sim, state: ClientState, contract, view, ts: datetime, rng,
+    previous: LoanState | None = None,
 ) -> None:
     """
     Первое действие по новому договору: выдача кредита,
     зачисление на депозит, оплата страховки.
 
-    disburse=False — договор принял долг прежнего кредита, и
-    денег по нему не выдаётся.
+    previous — кредит, долг которого принял этот договор. Денег
+    по такому договору не выдаётся, а просрочка прежнего графика
+    переходит в новый.
     """
 
     family = contract.product_family
 
-    if family in ("cash_loan", "refinance", "installment"):
+    if family in LOAN_FAMILIES:
+
+        if not _can_activate(state, family, contract.amount_or_limit, ts):
+            return
 
         account = state.primary_card_account(ts)
 
-        if account is None or contract.amount_or_limit is None:
-            return
-
-        if family != "installment" and disburse:
+        if family != "installment" and previous is None:
             _emit_money(
                 state,
                 ts + timedelta(minutes=5),
@@ -631,7 +637,14 @@ def _activate_product(
             autopay=rng.random() < params_module.active().products.autopay_share,
         )
 
+        if previous is not None:
+            loan_rules.carry_arrears(loan, previous)
+
         state.loans[contract.contract_id] = loan
+
+        # Ближайший взнос — первый ещё не наступивший: перенесённые
+        # просроченные взносы стоят в графике раньше него.
+        upcoming = next((item for item in loan.schedule if item.status == "scheduled"), None)
 
         state.emit(
             state.factory.make(
@@ -640,11 +653,11 @@ def _activate_product(
                 {
                     "contract_id": contract.contract_id,
                     "installment_no": len(loan.schedule),
-                    "amount_due": loan.schedule[0].amount if loan.schedule else None,
+                    "amount_due": upcoming.amount if upcoming else None,
                     "amount_paid": None,
                     "principal_outstanding": loan.principal_outstanding,
-                    "days_past_due": 0,
-                    "due_date": loan.schedule[0].due_date.date().isoformat() if loan.schedule else None,
+                    "days_past_due": loan.dpd,
+                    "due_date": upcoming.due_date.date().isoformat() if upcoming else None,
                     "reason": "annuity",
                 },
             )
@@ -752,8 +765,28 @@ def _activate_product(
         )
 
 
+def _can_activate(state: ClientState, family: str, amount, ts: datetime) -> bool:
+    """
+    Можно ли завести кредит по договору: деньги выдаются и
+    списываются через основную карту, без неё и без суммы
+    кредита нет.
+    """
+
+    if family not in LOAN_FAMILIES:
+        return True
+
+    return amount is not None and state.primary_card_account(ts) is not None
+
+
 def _on_tariff_check(sim, state: ClientState, ts: datetime, payload: dict) -> None:
+
     _apply_new_versions(state, ts)
+
+    # Принудительная миграция это решение банка, как и смена
+    # тарифа: от активности клиента она не зависит.
+    rng = event_rng(NS_ADOPTION, state.ordinal, ts.toordinal(), 1, COMPONENT_CONTENT)
+
+    _migrate_products(sim, state, ts, rng, voluntary=False)
 
 
 def _apply_new_versions(state: ClientState, ts: datetime) -> None:
@@ -1479,15 +1512,22 @@ def _on_support_check(sim, state: ClientState, ts: datetime, payload: dict) -> N
         state.pending_notice = True
 
 
-def _migrate_products(sim, state: ClientState, ts: datetime, rng) -> None:
+def _migrate_products(sim, state: ClientState, ts: datetime, rng, voluntary: bool) -> None:
     """
     Переход на продукт-преемник: добровольный по предложению,
     принудительный по уведомлению.
+
+    voluntary=True — только добровольные переходы: это решение
+    клиента, и оно случается в его активный день. Иначе — все
+    остальные политики: их решает банк, каждый день.
     """
 
     from .engine_credit import close_loan
 
     for view, target, policy in adoption_module.migration_targets(ts, state.held_codes(ts)):
+
+        if (policy == "voluntary") != voluntary:
+            continue
 
         contract = next(
             (
@@ -1520,14 +1560,26 @@ def _migrate_products(sim, state: ClientState, ts: datetime, rng) -> None:
 
         loan = state.loans.get(contract.contract_id)
 
-        transferred = loan is not None and not loan.closed
+        if loan is not None and loan.closed:
+            loan = None
 
-        if transferred:
+        if loan is not None:
+            # Новый график строится только на непросроченном теле:
+            # просроченные взносы переедут в него сами, со своими
+            # сроками, и тело не посчитается дважды.
+            amount = max(0, loan.principal_outstanding - loan_rules.overdue_principal(loan))
+
+        # Условия активации проверяются ДО закрытия прежнего
+        # договора: иначе долг закрылся бы, а новый кредит не
+        # завёлся, и деньги клиента пропали бы вместе с ним.
+        if not _can_activate(state, target.family, amount, ts + timedelta(minutes=12)):
+            continue
+
+        if loan is not None:
 
             # Долг переходит в договор-преемник, а не выдаётся
             # заново: новые деньги клиенту не приходят, прежний
             # график закрывается без платежа.
-            amount = loan_rules.payoff_amount(loan)
             loan.principal_outstanding = 0
             close_loan(state, ts, loan, early=False, reason="migrated_to_successor")
 
@@ -1548,7 +1600,7 @@ def _migrate_products(sim, state: ClientState, ts: datetime, rng) -> None:
 
         _activate_product(
             sim, state, fresh, target, ts + timedelta(minutes=12), rng,
-            disburse=not transferred,
+            previous=loan,
         )
 
         return

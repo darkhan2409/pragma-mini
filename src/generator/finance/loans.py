@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from datetime import datetime
 
 from .. import params as params_module
@@ -249,6 +250,50 @@ def overdue_interest(state: LoanState) -> int:
     )
 
 
+def overdue_principal(state: LoanState) -> int:
+    """
+    Непогашенное тело взносов, срок которых уже наступил.
+    """
+
+    return sum(
+        max(0, item.principal - item.principal_paid)
+        for item in state.schedule
+        if item.status in ("due", "partially_paid", "missed")
+    )
+
+
+def carry_arrears(state: LoanState, previous: LoanState) -> None:
+    """
+    Просрочка прежнего договора переходит в договор-преемник.
+
+    Неоплаченные взносы со сроком переносятся копиями, с теми же
+    сроками, статусами и оплатами, и встают перед новым графиком.
+    Новый график построен только на непросроченном теле, поэтому
+    тело перенесённых взносов добавляется к остатку отдельно:
+    вместе выходит ровно прежний долг. DPD дальше считается от
+    самого раннего неоплаченного срока, а уже пройденные вехи
+    просрочки не регистрируются повторно.
+    """
+
+    carried = [
+        replace(item)
+        for item in previous.schedule
+        if item.status in ("due", "partially_paid", "missed") and item.outstanding > 0
+    ]
+
+    # Если всё оставшееся тело уже просрочено, новый график пуст:
+    # взнос с нулевой суммой был бы выдуманным обязательством.
+    fresh = [item for item in state.schedule if item.amount > 0]
+
+    for number, item in enumerate(carried + fresh, start=1):
+        item.number = number
+
+    state.schedule = carried + fresh
+    state.principal_outstanding += overdue_principal(previous)
+    state.dpd = previous.dpd
+    state.delinquency_marks = previous.delinquency_marks
+
+
 def payoff_amount(state: LoanState) -> int:
     """
     Сколько нужно, чтобы закрыть кредит досрочно.
@@ -353,6 +398,7 @@ __all__ = [
     "apply_payment",
     "arrears_amount",
     "build_schedule",
+    "carry_arrears",
     "days_past_due",
     "debt_service",
     "due_today",
@@ -360,6 +406,7 @@ __all__ = [
     "milestone_reached",
     "open_loan",
     "overdue_interest",
+    "overdue_principal",
     "payoff_amount",
     "register_due",
     "restructure",
