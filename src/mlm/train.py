@@ -22,8 +22,9 @@ from .settings import ConfigError, MlmConfig, checkpoint_path
 #   python -m src.mlm.train [--epochs N] [--max-steps N] [--config путь]
 #                           [--masking-config путь]
 #
-# Вход: data/07_batches/train и начальные веса энкодеров из этапов
-# 09-12. Выход: data/14_train/checkpoint.pt.
+# Вход: data/07_batches/train, для validation data/07_batches/val
+# и data/08_masked/val; начальные веса энкодеров из этапов 09-12.
+# Выход: data/14_train/checkpoint.pt.
 #
 # Маска train НЕ читается из data/08_masked/train: каждая эпоха
 # разыгрывает её заново тем же маскером этапа 08 по
@@ -44,6 +45,10 @@ from .settings import ConfigError, MlmConfig, checkpoint_path
 # его целям: потери клиента взвешиваются числом его целей, иначе
 # клиент с одной целью весил бы столько же, сколько клиент с
 # сотней.
+#
+# После каждой полностью пройденной эпохи та же модель считает
+# потери на val: фиксированная маска data/08_masked/val, eval и
+# no_grad, без backward и шага. Среднее — по всем целям val.
 # ============================================================
 
 
@@ -58,6 +63,42 @@ def for_epoch(masking: MaskingConfig, epoch: int) -> MaskingConfig:
     """
 
     return replace(masking, seed=stable_hash("epoch", masking.seed, epoch) % (2 ** 31))
+
+
+def validate(model, source, device) -> tuple[float | None, int]:
+    """
+    Потери обучаемой модели на группе source, без обновления весов.
+
+    Модель передаётся готовой: это тот же экземпляр, что только
+    что учился. Своих весов validation не грузит. Среднее берётся
+    по всем целям группы, как у потерь батча train; клиент без
+    целей в среднее не входит. Группа без целей даёт None.
+    """
+
+    import torch
+
+    from .model import to_tensors
+
+    model.eval()
+
+    total = 0.0
+    targets = 0
+
+    with torch.no_grad():
+
+        for number in range(source.count):
+
+            for client in source.batch(number):
+
+                out = model(to_tensors(client, device))
+
+                if out.count == 0:
+                    continue
+
+                total += out.loss.item() * out.count
+                targets += out.count
+
+    return (total / targets if targets else None), targets
 
 
 def train(
@@ -92,8 +133,6 @@ def train(
     # генератора: одинаковый конфиг обязан давать одинаковые веса.
     torch.manual_seed(config.seed)
 
-    model.train()
-
     # Параметры всей модели: общая таблица эмбеддингов, энкодеры
     # события, анкеты и истории и проекция головы.
     optimizer = torch.optim.AdamW(
@@ -102,16 +141,27 @@ def train(
         weight_decay=config.weight_decay,
     )
 
+    # val с фиксированной маской из 08_masked: открывается сразу,
+    # чтобы нехватка файлов стала видна до первого шага.
+    val_source = Source("val")
+
     epoch = 0
     step = 0
 
     for epoch in range(1, epochs + 1):
 
+        # Каждая эпоха начинается в режиме обучения: validation
+        # прошлой эпохи оставил модель в eval, и dropout был выключен.
+        model.train()
+
         source = Source("train", masking=for_epoch(masking, epoch))
+
+        stopped = False
 
         for number in range(source.count):
 
             if max_steps is not None and step >= max_steps:
+                stopped = True
                 break
 
             optimizer.zero_grad(set_to_none=True)
@@ -133,6 +183,16 @@ def train(
             step += 1
 
             print(f"epoch={epoch} step={step} loss={loss.item():.4f}")
+
+        # Эпоха, прерванная --max-steps, не пройдена целиком:
+        # validation считается только после полной эпохи.
+        if not stopped:
+
+            val_loss, val_targets = validate(model, val_source, device)
+
+            shown = f"{val_loss:.4f}" if val_loss is not None else "n/a"
+
+            print(f"epoch={epoch} val_loss={shown} val_targets={val_targets}")
 
         if max_steps is not None and step >= max_steps:
             break
@@ -236,7 +296,7 @@ def main(argv: list[str] | None = None) -> None:
     raise SystemExit(args.handler(args))
 
 
-__all__ = ["build_parser", "for_epoch", "main", "run_training", "train"]
+__all__ = ["build_parser", "for_epoch", "main", "run_training", "train", "validate"]
 
 
 if __name__ == "__main__":
