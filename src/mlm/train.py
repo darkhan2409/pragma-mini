@@ -32,23 +32,28 @@ from .settings import ConfigError, MlmConfig, checkpoint_path
 # маскирования и номера эпохи, поэтому одна и та же эпоха даёт
 # одну и ту же маску, а соседние эпохи — разные.
 #
-# Шаг обучения это ОДИН граф на батч:
+# Клиенты идут потоком и собираются в micro-batch по бюджету
+# позиций (inputs.micro_batches, token_budget). Группа строк
+# 07_batches — только хранение, а не батч модели.
 #
-#   батч -> InputEmbedding -> Event -> Profile -> History -> MLM
-#        -> потери -> backward -> step
+#   micro-batch -> ОДИН проход: InputEmbedding -> Event -> Profile
+#               -> History -> MLM -> потери -> backward
+#   grad_accum_steps micro-batch'ей -> один шаг оптимизатора
+#
+# backward идёт по сумме потерь целей micro-batch, а перед шагом
+# градиенты делятся на число целей окна: шаг получает градиент
+# среднего по ВСЕМ целям окна, и цель в маленьком micro-batch
+# весит столько же, сколько в большом. step — шаг оптимизатора,
+# --max-steps ограничивает именно их.
 #
 # Промежуточные parquet этапов 09-12 сюда не читаются: через файл
 # градиент не течёт. Весь проход собран в model.Model, и здесь он
 # вызывается без no_grad.
 #
-# Единица прохода модели — клиент. Потери батча — среднее по всем
-# его целям: потери клиента взвешиваются числом его целей, иначе
-# клиент с одной целью весил бы столько же, сколько клиент с
-# сотней.
-#
 # После каждой полностью пройденной эпохи та же модель считает
 # потери на val: фиксированная маска data/08_masked/val, eval и
-# no_grad, без backward и шага. Среднее — по всем целям val.
+# no_grad, те же micro-batch'и, без backward и шага. Среднее — по
+# всем целям val.
 # ============================================================
 
 
@@ -65,19 +70,22 @@ def for_epoch(masking: MaskingConfig, epoch: int) -> MaskingConfig:
     return replace(masking, seed=stable_hash("epoch", masking.seed, epoch) % (2 ** 31))
 
 
-def validate(model, source, device) -> tuple[float | None, int]:
+def validate(model, source, device, token_budget: int) -> tuple[float | None, int]:
     """
     Потери обучаемой модели на группе source, без обновления весов.
 
     Модель передаётся готовой: это тот же экземпляр, что только
-    что учился. Своих весов validation не грузит. Среднее берётся
-    по всем целям группы, как у потерь батча train; клиент без
-    целей в среднее не входит. Группа без целей даёт None.
+    что учился. Своих весов validation не грузит. Клиенты идут
+    теми же micro-batch'ами, что и в обучении, по одному проходу
+    модели на каждый. Среднее берётся по всем целям группы;
+    micro-batch без целей в него не входит. Группа без целей даёт
+    None.
     """
 
     import torch
 
-    from .model import to_tensors
+    from .inputs import micro_batches
+    from .model import collate
 
     model.eval()
 
@@ -86,17 +94,15 @@ def validate(model, source, device) -> tuple[float | None, int]:
 
     with torch.no_grad():
 
-        for number in range(source.count):
+        for clients in micro_batches(source.clients(), token_budget):
 
-            for client in source.batch(number):
+            out = model(collate(clients, source.pad_id, device))
 
-                out = model(to_tensors(client, device))
+            if out.count == 0:
+                continue
 
-                if out.count == 0:
-                    continue
-
-                total += out.loss.item() * out.count
-                targets += out.count
+            total += out.loss.item() * out.count
+            targets += out.count
 
     return (total / targets if targets else None), targets
 
@@ -108,7 +114,7 @@ def train(
     masking: MaskingConfig,
 ) -> dict:
     """
-    Проход по батчам train с обновлением весов всей модели.
+    Проход по micro-batch'ам train с обновлением весов всей модели.
     """
 
     # torch импортируется здесь, а не в шапке: без него команда
@@ -116,8 +122,8 @@ def train(
     import torch
 
     from .build import _device
-    from .inputs import Source
-    from .model import load_model, to_tensors
+    from .inputs import Source, micro_batches
+    from .model import collate, load_model
 
     device = _device(config.device)
 
@@ -141,12 +147,53 @@ def train(
         weight_decay=config.weight_decay,
     )
 
+    optimizer.zero_grad(set_to_none=True)
+
     # val с фиксированной маской из 08_masked: открывается сразу,
     # чтобы нехватка файлов стала видна до первого шага.
     val_source = Source("val")
 
     epoch = 0
     step = 0
+
+    # Окно накопления: сколько micro-batch'ей в нём, сколько целей
+    # и сумма потерь по целям.
+    window_batches = 0
+    window_targets = 0
+    window_loss = 0.0
+
+    def close_window() -> None:
+        """
+        Шаг оптимизатора по накопленному окну.
+
+        backward шёл по СУММЕ потерь целей каждого micro-batch,
+        поэтому деление градиентов на число целей окна даёт
+        градиент среднего по всем целям окна: цель одного
+        micro-batch весит столько же, сколько цель другого. Окно
+        без целей шага не делает — weight decay AdamW иначе
+        сдвинул бы веса без обучающего сигнала.
+        """
+
+        nonlocal step, window_batches, window_targets, window_loss
+
+        if window_targets > 0:
+
+            for parameter in model.parameters():
+                if parameter.grad is not None:
+                    parameter.grad.div_(window_targets)
+
+            optimizer.step()
+
+            step += 1
+
+            print(
+                f"epoch={epoch} step={step} loss={window_loss / window_targets:.4f} "
+                f"targets={window_targets} micro_batches={window_batches}"
+            )
+
+        optimizer.zero_grad(set_to_none=True)
+
+        window_batches, window_targets, window_loss = 0, 0, 0.0
 
     for epoch in range(1, epochs + 1):
 
@@ -158,37 +205,38 @@ def train(
 
         stopped = False
 
-        for number in range(source.count):
+        for clients in micro_batches(source.clients(), config.token_budget):
 
+            # Предел считает шаги оптимизатора. Проверка стоит перед
+            # новым micro-batch'ем: окно к этому моменту пустое,
+            # потому что шаг закрывает окно.
             if max_steps is not None and step >= max_steps:
                 stopped = True
                 break
 
-            optimizer.zero_grad(set_to_none=True)
+            # Один проход модели на весь micro-batch.
+            out = model(collate(clients, source.pad_id, device))
 
-            outputs = [model(to_tensors(client, device)) for client in source.batch(number)]
+            window_batches += 1
 
-            targets = sum(out.count for out in outputs)
+            if out.count > 0:
+                (out.loss * out.count).backward()
+                window_targets += out.count
+                window_loss += out.loss.item() * out.count
 
-            # Без целей шагу нечему учить: нулевые градиенты всё
-            # равно сдвинули бы веса через weight decay.
-            if targets == 0:
-                continue
+            if window_batches == config.grad_accum_steps:
+                close_window()
 
-            loss = sum(out.loss * out.count for out in outputs) / targets
-
-            loss.backward()
-            optimizer.step()
-
-            step += 1
-
-            print(f"epoch={epoch} step={step} loss={loss.item():.4f}")
+        # Неполное окно в конце эпохи не выбрасывается: его
+        # градиенты нормируются по его настоящему числу целей.
+        if not stopped and window_batches:
+            close_window()
 
         # Эпоха, прерванная --max-steps, не пройдена целиком:
         # validation считается только после полной эпохи.
         if not stopped:
 
-            val_loss, val_targets = validate(model, val_source, device)
+            val_loss, val_targets = validate(model, val_source, device, config.token_budget)
 
             shown = f"{val_loss:.4f}" if val_loss is not None else "n/a"
 

@@ -77,6 +77,15 @@ class MlmConfig:
     learning_rate: float = 3e-4
     weight_decay: float = 0.01
 
+    # Предел стоимости одного прохода модели (micro-batch) в
+    # позициях — формула в inputs.cost. Клиент дороже предела идёт
+    # отдельным micro-batch'ем.
+    token_budget: int = 16384
+
+    # Сколько micro-batch'ей копят градиент до одного шага
+    # оптимизатора.
+    grad_accum_steps: int = 1
+
     def validate(self) -> None:
 
         if not 0.0 <= self.label_smoothing < 1.0:
@@ -94,7 +103,7 @@ class MlmConfig:
                 f"weight_decay не может быть отрицательным, получено {self.weight_decay}"
             )
 
-        for name in ("top_k", "events_per_chunk"):
+        for name in ("top_k", "events_per_chunk", "token_budget", "grad_accum_steps"):
 
             value = getattr(self, name)
 
@@ -115,6 +124,8 @@ class MlmConfig:
             "device": self.device,
             "learning_rate": self.learning_rate,
             "weight_decay": self.weight_decay,
+            "token_budget": self.token_budget,
+            "grad_accum_steps": self.grad_accum_steps,
         }
 
     @staticmethod
@@ -136,6 +147,8 @@ class MlmConfig:
             device=str(data.get("device", base.device)),
             learning_rate=float(data.get("learning_rate", base.learning_rate)),
             weight_decay=float(data.get("weight_decay", base.weight_decay)),
+            token_budget=int(data.get("token_budget", base.token_budget)),
+            grad_accum_steps=int(data.get("grad_accum_steps", base.grad_accum_steps)),
         )
 
         config.validate()
