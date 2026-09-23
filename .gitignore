@@ -13,6 +13,10 @@ data/02_preprocessed/
 data/03_vocab/
 data/04_tokenized/
 data/05_dataset/
+data/06_temporal/
+data/07_batches/
+data/08_masked/
+data/09_embeddings/
 data/runs/
 
 *.pt
