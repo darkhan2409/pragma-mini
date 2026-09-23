@@ -83,6 +83,16 @@ def _landing(persona: Persona, kind: str, rng) -> str:
     return rng.weighted(weights)
 
 
+def employer_schedule(employer_id: str) -> str:
+    """
+    График зарплаты работодателя: один на всех его сотрудников.
+    """
+
+    weights = params_module.active().income.schedule_weights["salary"]
+
+    return str(keyed_rng(NS_INCOME, stable_hash("schedule", employer_id) % (2 ** 31), 11).weighted(weights))
+
+
 def build_streams(persona: Persona, events: tuple) -> tuple:
     """
     Потоки дохода клиента с их сроками действия.
@@ -95,6 +105,11 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
     primary_kind = settings.primary_kind_by_income_type.get(persona.income_type, "salary")
 
     schedule = rng.weighted(settings.schedule_weights.get(primary_kind, {"monthly": 1.0}))
+
+    # Зарплату по графику платит работодатель: у коллег он общий.
+    # Личный розыгрыш выше оставлен, чтобы не сдвинуть следующие.
+    if primary_kind == "salary" and persona.employer_id is not None:
+        schedule = employer_schedule(persona.employer_id)
 
     payer = persona.employer_id or f"payer_{stable_hash('payer', persona.client_ordinal) % 10 ** 8:08d}"
 
@@ -276,11 +291,13 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
 
         employer = f"emp_{stable_hash('employer', persona.client_ordinal, int(event.ts.toordinal())) % 10 ** 9:09d}"
 
-        schedule = item_rng.weighted(settings.schedule_weights["salary"])
-
-        # День выплаты назначает новый работодатель. Прежний личный
-        # розыгрыш оставлен пустым, чтобы не сдвинуть следующие.
+        # График и день выплаты назначает новый работодатель.
+        # Прежние личные розыгрыши оставлены пустыми, чтобы не
+        # сдвинуть следующие.
+        item_rng.weighted(settings.schedule_weights["salary"])
         item_rng.integers(1, 29)
+
+        schedule = employer_schedule(employer)
 
         streams.append(
             IncomeStream(
@@ -658,6 +675,7 @@ __all__ = [
     "IncomeStream",
     "Payout",
     "build_streams",
+    "employer_schedule",
     "monthly_income",
     "payouts",
     "vacation_payouts",
