@@ -121,6 +121,16 @@ def _weighted(rng, mapping: dict) -> str:
     return keys[-1]
 
 
+def employer_payday(employer_id: str) -> int:
+    """
+    День зарплаты работодателя: один на всех его сотрудников.
+    """
+
+    low, high = params_module.active().income.salary_day_range
+
+    return int(low + stable_hash("payday", employer_id) % max(1, high - low))
+
+
 @state_cache
 def draw_persona(client_ordinal: int) -> Persona:
     """
@@ -260,6 +270,12 @@ def draw_persona(client_ordinal: int) -> Persona:
         income_day = int(rng.integers(*settings.income.pension_day_range))
     else:
         income_day = int(rng.integers(*settings.income.salary_day_range))
+
+    # День зарплаты назначает работодатель, а не сотрудник: у
+    # коллег он общий. Личный розыгрыш выше оставлен, чтобы не
+    # сдвинуть следующие черты персоны.
+    if employer_id is not None:
+        income_day = employer_payday(employer_id)
 
     mandatory_low, mandatory_high = population.mandatory_share_by_stage[life_stage]
     mandatory_share = float(rng.uniform(mandatory_low, mandatory_high))
@@ -434,4 +450,5 @@ __all__ = [
     "app_adoption",
     "consent_date",
     "draw_persona",
+    "employer_payday",
 ]
