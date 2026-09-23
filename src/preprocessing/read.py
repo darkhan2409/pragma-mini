@@ -14,13 +14,12 @@ from .keys import (
     DYNAMIC_FIELDS,
     NUMERIC,
     PROFILE_KEYS,
-    REFERENCE_KEYS,
     SemanticKey,
     key_for,
     profile_change_keys,
 )
-from .projection import ENTITY_REFS, EVENT_TYPE_FIELD, LocalRefs, model_event
-from .settings import group_dir, raw_group_dir
+from .projection import EVENT_TYPE_FIELD, model_event
+from .settings import PreprocessingConfig, group_dir, raw_group_dir
 
 
 # ============================================================
@@ -64,7 +63,6 @@ class ClientEvent:
     client_id: str
     event_time: datetime
     source: str
-    stable_event_index: int
     values: dict[str, object] = field(default_factory=dict)
 
     # Час, день недели и день месяца на окружности: отдельный
@@ -85,7 +83,6 @@ class ClientEvent:
             "client_id": self.client_id,
             "event_time": self.event_time,
             "source": self.source,
-            "stable_event_index": self.stable_event_index,
             "values": dict(self.values),
             "calendar": list(self.calendar),
         }
@@ -138,6 +135,10 @@ class Group:
         self.group = group
         self.directory = group_dir(group)
         self.profile_path = raw_group_dir(group) / Group.PROFILE_FILE
+
+        # Пояс банка нужен ровно для календаря: event_time
+        # остаётся в UTC и в UTC же сравнивается с cutoff.
+        self.timezone = PreprocessingConfig.load(None).bank_timezone()
 
         events_path = self.directory / EVENTS_FILE
 
@@ -240,20 +241,27 @@ class Group:
         table = self.events_table(client_id)
 
         if cutoff is not None and table.num_rows:
-            table = table.filter(pc.less(table.column("event_time"), pa.scalar(cutoff)))
-
-        refs = LocalRefs()
+            # Срез и время события живут в одной шкале — UTC.
+            moment = pa.scalar(cutoff, type=pa.timestamp("us", tz="UTC"))
+            table = table.filter(pc.less(table.column("event_time"), moment))
 
         rows = table.to_pylist()
 
-        calendars = calendar_features([row["event_time"] for row in rows]) if rows else []
+        # Календарь считается по местному времени банка: перевод
+        # пояса живёт внутри calendar_features и наружу не
+        # выходит. Само event_time ниже кладётся как есть, в UTC.
+        calendars = (
+            calendar_features([row["event_time"] for row in rows], self.timezone)
+            if rows
+            else []
+        )
 
         events: list[ClientEvent] = []
         notes: list[str] = []
 
         for index, row in enumerate(rows):
 
-            values, problems = event_values(row, row["source"], refs)
+            values, problems = event_values(row, row["source"])
 
             notes.extend(problems)
 
@@ -262,7 +270,6 @@ class Group:
                     client_id=row["client_id"],
                     event_time=row["event_time"],
                     source=row["source"],
-                    stable_event_index=row["stable_event_index"],
                     values=values,
                     calendar=tuple(float(value) for value in calendars[index]),
                 )
@@ -293,29 +300,22 @@ class Group:
 # ============================================================
 
 
-def event_values(row: dict, source: str, refs: LocalRefs) -> tuple[dict[str, object], list[str]]:
+def event_values(row: dict, source: str) -> tuple[dict[str, object], list[str]]:
     """
     Значения одного события под смысловыми ключами.
 
     Состав берёт модельная проекция: наружу проходит ровно то,
-    что ей разрешено. Сырые идентификаторы становятся локальными
-    ссылками внутри клиента.
+    что ей разрешено.
     """
 
-    fields = model_event(row, refs).fields
+    fields = model_event(row).fields
 
     values: dict[str, object] = {}
-
-    reference_names = {name for name, _prefix in ENTITY_REFS.values()}
 
     for name, value in fields.items():
 
         if name == EVENT_TYPE_FIELD:
             values[DIRECT_KEYS[EVENT_TYPE_FIELD].key] = value
-            continue
-
-        if name in reference_names:
-            values[REFERENCE_KEYS[name].key] = value
             continue
 
         if name in DYNAMIC_FIELDS:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .projection import ENTITY_REFS, EVENT_TYPE_FIELD, SEMANTIC_PAYLOAD_FIELDS, validate_projection
+from .projection import EVENT_TYPE_FIELD, SEMANTIC_PAYLOAD_FIELDS, validate_projection
 
 
 # ============================================================
@@ -34,7 +34,7 @@ from .projection import ENTITY_REFS, EVENT_TYPE_FIELD, SEMANTIC_PAYLOAD_FIELDS, 
 # ============================================================
 
 
-KEYS_VERSION = "9.0.0"
+KEYS_VERSION = "10.0.0"
 
 
 # ------------------------------------------------------------
@@ -91,13 +91,6 @@ NUMERIC = "numeric"
 CATEGORICAL = "categorical"
 TEXT = "text"
 
-VALUE_KINDS: tuple[str, ...] = (NUMERIC, CATEGORICAL, TEXT)
-
-# Локальная ссылка это не четвёртый вид значения, а отдельная
-# роль: ACCOUNT_1 ничего не означает сам по себе и связывает
-# события одного клиента. Значением модели он не становится.
-REFERENCE = "reference"
-
 # Поля, смысл которых зависит не от источника, а от значения
 # соседнего поля. Прямого ключа у них нет: он выдаётся по
 # field_name в profile_change_keys.
@@ -116,7 +109,6 @@ class SemanticKey:
     kind: str
     description: str
     unit: str | None = None
-    temporal: str | None = None
     derived_from: tuple[str, ...] = ()
 
     def as_dict(self) -> dict:
@@ -124,14 +116,13 @@ class SemanticKey:
             "key": self.key,
             "value_kind": self.kind,
             "unit": self.unit,
-            "temporal": self.temporal,
             "derived_from": list(self.derived_from),
             "description": self.description,
         }
 
 
-def _k(key: str, kind: str, description: str, temporal: str | None = None) -> SemanticKey:
-    return SemanticKey(key=key, kind=kind, description=description, unit=UNITS.get(key), temporal=temporal)
+def _k(key: str, kind: str, description: str) -> SemanticKey:
+    return SemanticKey(key=key, kind=kind, description=description, unit=UNITS.get(key))
 
 
 # ------------------------------------------------------------
@@ -152,8 +143,6 @@ DIRECT_KEYS: dict[str, SemanticKey] = {
     "balance_after": SemanticKey("balance_after", NUMERIC, "остаток счёта после проводки", unit="KZT"),
     "direction": _k("direction", CATEGORICAL, "направление по счёту клиента: списание или зачисление"),
     "decline_reason": _k("decline_reason", CATEGORICAL, "причина отказа по операции"),
-    "accrual_period": _k("accrual_period", CATEGORICAL, "период начисления периодической суммы",
-                         temporal="месяц начисления"),
     # --- торговая точка ---
     "merchant_name": _k("merchant_name", TEXT, "название точки в терминальной строке"),
     "merchant_category": _k("merchant_category", CATEGORICAL, "категория точки"),
@@ -191,7 +180,7 @@ DIRECT_KEYS: dict[str, SemanticKey] = {
     # Закрытый перечень кодов предложения (cash_loan, credit_card,
     # cashback и далее), а не свободный текст: разбивать его на
     # куски нечего. Идентификатором предложения он при этом не
-    # является — тот остаётся ссылкой offer_ref.
+    # является — тот остаётся внутренним полем выгрузки.
     "offer": _k("offer", CATEGORICAL, "код предложения баннера: не идентификатор предложения"),
     # --- приложение ---
     "firebase_screen": _k("firebase_screen", CATEGORICAL, "экран приложения"),
@@ -258,15 +247,6 @@ BY_SOURCE_KEYS: dict[str, dict[str, SemanticKey]] = {
         "app_screens": _k("app_domain", CATEGORICAL, "раздел приложения"),
         "app_operations": _k("app_domain", CATEGORICAL, "раздел приложения"),
     },
-}
-
-
-# Локальные ссылки: смысла значения не несут, но связывают события
-# одного клиента. Роль отдельная, значением модели они не
-# становятся автоматически.
-REFERENCE_KEYS: dict[str, SemanticKey] = {
-    name: SemanticKey(name, REFERENCE, f"локальная ссылка на наблюдаемую сущность клиента ({column})")
-    for column, (name, _prefix) in ENTITY_REFS.items()
 }
 
 
@@ -558,7 +538,6 @@ def _all_declared_keys() -> list[SemanticKey]:
     """
 
     out: list[SemanticKey] = [
-        *REFERENCE_KEYS.values(),
         *PROFILE_KEYS.values(),
     ]
 
@@ -593,9 +572,6 @@ def keys_registry(catalogue: dict) -> dict:
 
             row = rows.setdefault(key.key, {**key.as_dict(), "physical_fields": []})
             row["physical_fields"].append(f"{event_type}.{name}")
-
-    for key in REFERENCE_KEYS.values():
-        rows.setdefault(key.key, {**key.as_dict(), "physical_fields": ["derived:local_ref"]})
 
     for name, key in PROFILE_KEYS.items():
         rows.setdefault(key.key, {**key.as_dict(), "physical_fields": [f"profile.{name}"]})
@@ -649,10 +625,7 @@ __all__ = [
     "PROFILE_CHANGE_KEYS",
     "PROFILE_KEYS",
     "PROFILE_NUMERIC",
-    "REFERENCE",
-    "REFERENCE_KEYS",
     "TEXT",
-    "VALUE_KINDS",
     "KeysError",
     "SemanticKey",
     "key_for",

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -25,19 +25,59 @@ PRODUCT_TIMELINE_PATH = REFERENCE_DIR / "home_product_timeline.json"
 # ВХОД генератора: названия точек берутся отсюда, а не
 # выдумываются по слогам. MCC в справочнике нет намеренно —
 # его даёт внутренняя категория генератора.
-MERCHANT_REFERENCE_PATH = REFERENCE_DIR / "merchants_2gis.json"
+MERCHANT_REFERENCE_PATH = REFERENCE_DIR / "merchants.json"
 
-# Контракт v12: конверт из ЧЕТЫРЁХ колонок — client_id,
+# Контракт v13: конверт из ЧЕТЫРЁХ колонок — client_id,
 # event_time, source, payload, — а тип события лежит внутри
 # payload под ключом type. Идентификатора записи и причинных
 # ссылок нет. Выгрузка это две таблицы, events.parquet и
 # profile.parquet; справочники остались входом генератора, а в
-# событие попадают только поля выбранного объекта. Выгрузка v11
-# под эти правила не подходит.
-GENERATOR_VERSION = "10.0"
-SCHEMA_VERSION = 12
+# событие попадают только поля выбранного объекта.
+#
+# Отличие v13 от v12 одно: event_time выгружается СТРОКОЙ
+# ISO 8601 со смещением, а не готовым timestamp. Генератор
+# пишет читаемое время так, как его отдала бы банковская
+# система, а приводит его к UTC препроцессинг.
+GENERATOR_VERSION = "11.0"
+SCHEMA_VERSION = 13
 
 SEED = 42
+
+
+# ============================================================
+# ВРЕМЯ СОБЫТИЯ
+# ============================================================
+#
+# У генератора один явно объявленный часовой пояс: время
+# Казахстана, UTC+05:00. Пояс задан смещением, а не именем
+# зоны, и намеренно: смещение видно в самой строке выгрузки,
+# одинаково читается на любой машине и не зависит ни от
+# базы часовых поясов системы, ни от перевода стрелок.
+#
+# Локальное время БЕЗ смещения в выгрузку не попадает никогда:
+# по нему нельзя однозначно восстановить момент.
+# ============================================================
+
+TIMEZONE = timezone(timedelta(hours=5), "Asia/Almaty")
+
+TIMEZONE_NAME = "Asia/Almaty"
+
+
+def event_time_text(moment: datetime) -> str:
+    """
+    Время события строкой ISO 8601 со смещением.
+
+    Миллисекунды пишутся только тогда, когда они у
+    события есть: нули в долях секунды говорили бы о точности,
+    которой у записи нет.
+    """
+
+    stamped = moment.replace(tzinfo=TIMEZONE) if moment.tzinfo is None else moment.astimezone(TIMEZONE)
+
+    if stamped.microsecond:
+        return stamped.isoformat(timespec="milliseconds")
+
+    return stamped.isoformat(timespec="seconds")
 
 
 # ============================================================
@@ -135,7 +175,8 @@ def activate_horizon(start: datetime, end: datetime) -> None:
 # Идентификатора записи в конверте нет, как нет ни точности
 # времени, ни версии, ни метки связи.
 #
-# event_time — точное время события. Деловая связь живёт
+# event_time — точное время события строкой ISO 8601 со
+# смещением часового пояса. Деловая связь живёт
 # деловыми ключами payload: contract_id, account_id, card_id,
 # application_id, case_id, offer_id, session_id, transfer_id и
 # merchant_id называют сущность, частью которой запись

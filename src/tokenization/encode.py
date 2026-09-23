@@ -35,8 +35,9 @@ from .specials import EVT, UNK, USR
 # объявленный предел кусков, это явная ошибка, а не молчаливо
 # укороченный текст.
 #
-# Ссылки на сущности в embedding не входят: они едут рядом
-# служебной колонкой для будущего Masker и датасета.
+# Идентификаторов сущностей в значениях нет вовсе: их не
+# пропускает препроцессинг, и связи между договорами, счетами
+# и картами модели не передаются.
 # ============================================================
 
 
@@ -213,7 +214,6 @@ def encode_values(
     values: dict[str, object],
     lead: str,
     limit: int,
-    links: frozenset[str] = frozenset(),
 ) -> EncodedRecord:
     """
     Пары одной записи: ведущий маркер, затем значения по
@@ -230,11 +230,6 @@ def encode_values(
     emit: list[tuple[int, str, object]] = []
 
     for key, value in values.items():
-
-        if key in links:
-            # Ссылка кодом не становится: она уезжает в
-            # метаданные связи рядом с записью.
-            continue
 
         if value is None:
             # Поля нет — и пары нет.
@@ -263,17 +258,15 @@ def encode_values(
     return record
 
 
-def encode_event(artifacts: FrozenArtifacts, event: ClientEvent, limit: int,
-                 links: frozenset[str] = frozenset()) -> EncodedRecord:
+def encode_event(artifacts: FrozenArtifacts, event: ClientEvent, limit: int) -> EncodedRecord:
     """
     Одно событие: ведущий [EVT] и пары его значений.
     """
 
-    return encode_values(artifacts, event.model_values(), EVT, limit, links)
+    return encode_values(artifacts, event.model_values(), EVT, limit)
 
 
-def encode_profile(artifacts: FrozenArtifacts, history: ClientHistory, limit: int,
-                   links: frozenset[str] = frozenset()) -> EncodedRecord:
+def encode_profile(artifacts: FrozenArtifacts, history: ClientHistory, limit: int) -> EncodedRecord:
     """
     Представление профиля: ведущий [USR] и пары его значений.
 
@@ -281,63 +274,13 @@ def encode_profile(artifacts: FrozenArtifacts, history: ClientHistory, limit: in
     ничего не знает, и выдумывать пустые поля незачем.
     """
 
-    return encode_values(artifacts, history.profile or {}, USR, limit, links)
-
-
-def references(event: ClientEvent, links: frozenset[str]) -> dict[str, str]:
-    """
-    Локальные ссылки события: связь, а не значение.
-    """
-
-    return {key: value for key, value in sorted(event.values.items()) if key in links}
-
-
-def decode_record(artifacts: FrozenArtifacts, record: EncodedRecord) -> list[dict]:
-    """
-    Читаемая расшифровка записи: что стоит в каждой позиции.
-    """
-
-    out: list[dict] = []
-
-    if record.lead:
-        out.append(
-            {
-                "key": record.lead,
-                "key_id": record.key_ids[0],
-                "value_ids": [record.value_ids[0]],
-                "decoded": [artifacts.describe(record.value_ids[0])],
-                "marker": True,
-            }
-        )
-
-    for key, start, length in zip(record.value_keys, record.value_starts, record.value_lengths):
-
-        ids = record.value_ids[start : start + length]
-
-        item = {
-            "key": key,
-            "key_id": record.key_ids[start],
-            "value_ids": ids,
-            "positions": record.positions[start : start + length],
-            "decoded": [artifacts.describe(value_id) for value_id in ids],
-        }
-
-        # У текста куски читаются по отдельности плохо: рядом
-        # кладётся собранный обратно текст.
-        if artifacts.kind(key) == "text" and artifacts.bpe.enabled:
-            item["decoded_text"] = artifacts.decode_text(ids)
-
-        out.append(item)
-
-    return out
+    return encode_values(artifacts, history.profile or {}, USR, limit)
 
 
 __all__ = [
     "EncodeError",
     "EncodedRecord",
-    "decode_record",
     "encode_event",
     "encode_profile",
     "encode_values",
-    "references",
 ]

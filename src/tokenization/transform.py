@@ -13,7 +13,6 @@ from src.preprocessing.settings import PreprocessingConfig
 
 from .encode import EncodeError, encode_event, encode_profile
 from .finalvocab import FrozenArtifacts
-from .schema import SemanticSchema
 from .settings import TokenizerConfig, tokenized_dir
 from .specials import UNK
 
@@ -56,7 +55,7 @@ PROFILE_FILE = "profile.parquet"
 EVENTS_SCHEMA = pa.schema(
     [
         ("client_id", pa.string()),
-        ("event_time", pa.timestamp("us")),
+        ("event_time", pa.timestamp("us", tz="UTC")),
         ("key_ids", pa.list_(pa.int32())),
         ("value_ids", pa.list_(pa.int32())),
         ("positions", pa.list_(pa.int32())),
@@ -142,10 +141,6 @@ def encode_group(
 
     _clear(directory)
 
-    # Ссылки на сущности кода не получают: их состав знает
-    # смысловой реестр, а не словарь.
-    links = frozenset(SemanticSchema.open().link_keys)
-
     counters = Counters()
 
     events_writer = TableWriter(directory / EVENTS_FILE, EVENTS_SCHEMA)
@@ -166,10 +161,10 @@ def encode_group(
             for event in history.events:
 
                 try:
-                    record = encode_event(artifacts, event, config.max_pieces_per_value, links)
+                    record = encode_event(artifacts, event, config.max_pieces_per_value)
                 except EncodeError as error:
                     raise TransformError(
-                        f"клиент {client_id}, событие {event.stable_event_index}: {error}"
+                        f"клиент {client_id}, событие {event.event_time.isoformat()}: {error}"
                     ) from error
 
                 _count_unknown(artifacts, record, counters)
@@ -202,7 +197,7 @@ def encode_group(
 
             # --- профиль ---
 
-            record = encode_profile(artifacts, history, config.max_pieces_per_value, links)
+            record = encode_profile(artifacts, history, config.max_pieces_per_value)
 
             _count_unknown(artifacts, record, counters)
 

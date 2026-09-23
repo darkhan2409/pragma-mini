@@ -2,18 +2,27 @@ from __future__ import annotations
 
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Iterator
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from ..rawdata import RawDataset, RawManifest, event_types_of, iter_event_types, parse_payloads
+from ..rawdata import (
+    TYPE_KEY,
+    RawContractError,
+    RawDataset,
+    RawManifest,
+    event_types_of,
+    iter_event_types,
+    parse_event_time,
+    parse_payloads,
+)
 from ..settings import PreprocessingConfig
 from .schema import (
-    DERIVED_NAMES,
     ENVELOPE_NAMES,
+    NORMALIZED_FIELDS,
+    TS_UTC,
     events_schema,
     payload_columns,
 )
@@ -40,17 +49,16 @@ from .schema import (
 
 class CanonicalError(ValueError):
     """
-    Вход необрабатываем: строка не даёт построить порядок,
-    версию или связь. Этап останавливается с названием поля и
-    номером строки, а не падает исключением Python где-то
+    Вход необрабатываем: строка не разбирается по контракту или
+    не даёт построить порядок. Этап останавливается с названием
+    поля и номером строки, а не падает исключением Python где-то
     глубже и не выбрасывает строку молча.
     """
 
 
 # Структурно обязательные поля конверта. Паспорт блокирует
 # выгрузку с пустым значением здесь, но canonical не полагается
-# на то, что его запускали: проверка повторяется до сортировки,
-# индексов и связей.
+# на то, что его запускали: проверка повторяется до сортировки.
 REQUIRED_ENVELOPE_FIELDS: tuple[str, ...] = (
     "client_id",
     "event_time",
@@ -80,15 +88,6 @@ def require_envelope(batch: pa.Table) -> None:
             "Выгрузка необрабатываема: проверка RAW называет такую строку до начала обработки"
         )
 
-
-# Тип события, чья сумма это сам остаток, а не движение по счёту.
-# Объявляется явно: по каталогу ключей такое свойство не видно.
-SNAPSHOT_EVENT_TYPES: frozenset[str] = frozenset({"balance_snapshot"})
-
-TEXT_NORMALIZATION = {
-    "version": "1.0.0",
-    "rule": "Unicode NFKC, схлопывание пробелов, единый регистр casefold; исходное значение сохраняется рядом",
-}
 
 def normalize_text(value: str | None) -> str | None:
     """
@@ -308,95 +307,6 @@ def parse_batch(manifest: RawManifest, batch: pa.Table, payload_names: list[str]
 # считается он по самой выгрузке: ничего, кроме неё, у
 # canonical нет.
 #
-# Строки одного счёта с одинаковым event_time считаются группой:
-# порядок внутри секунды в ленте задаёт приоритет типа события,
-# а не очередь проводок, поэтому сверяется итог группы.
-# ============================================================
-
-
-def balance_chain_gaps(
-    runs: list[tuple[int, int]],
-    event_type,
-    event_time,
-    stable_index,
-    raw_row,
-    account_id,
-    amount,
-    direction,
-    status,
-    balance_after,
-) -> np.ndarray:
-    """
-    Отмечает строки, чей остаток не продолжает предыдущий.
-
-    Участвуют только одобренные денежные строки с известным
-    счётом и остатком.
-    """
-
-    rows = len(event_type)
-
-    gap = np.zeros(rows, dtype=bool)
-
-    if not rows:
-        return gap
-
-    for lo, hi in runs:
-
-        order = sorted(range(lo, hi), key=lambda index: (stable_index[index], raw_row[index]))
-
-        per_account: dict[object, list[int]] = {}
-
-        for index in order:
-
-            # Снимок остатка статуса не несёт: он не операция, а
-            # сообщение о том, сколько на счёте лежит. Из цепочки
-            # остатков его выбрасывать нельзя — именно он её и
-            # подтверждает.
-            if (
-                status[index] != "approved"
-                and event_type[index] not in SNAPSHOT_EVENT_TYPES
-            ):
-                continue
-
-            if account_id[index] is None or balance_after[index] is None:
-                continue
-
-            per_account.setdefault(account_id[index], []).append(index)
-
-        for positions in per_account.values():
-
-            previous: int | None = None
-            start = 0
-
-            while start < len(positions):
-
-                stop = start + 1
-
-                while stop < len(positions) and event_time[positions[stop]] == event_time[positions[start]]:
-                    stop += 1
-
-                group = positions[start:stop]
-                start = stop
-
-                delta = 0
-
-                for index in group:
-                    if event_type[index] in SNAPSHOT_EVENT_TYPES:
-                        continue
-                    value = int(amount[index] or 0)
-                    delta += value if direction[index] == "credit" else -value
-
-                final = int(balance_after[group[-1]])
-
-                if previous is not None and previous + delta != final:
-                    for index in group:
-                        gap[index] = True
-
-                previous = final
-
-    return gap
-
-
 # ============================================================
 # СБОРКА ПАЧКИ
 # ============================================================
@@ -413,177 +323,105 @@ def build_batch(
     batch: pa.Table,
     payload_names: list[str],
     schema: pa.Schema,
-    client_index: dict[str, int],
 ) -> BatchResult:
+    """
+    Пачка строк RAW в очищенную таблицу смысловых полей.
+    """
 
     manifest = raw.manifest
     rows = batch.num_rows
 
-    # До разбора, сортировки, версий и связей: дальше по коду
-    # пустое обязательное поле превращается либо в исключение
+    # До разбора и сортировки: дальше по коду пустое
+    # обязательное поле превращается либо в исключение
     # сравнения, либо в невидимую строку.
     require_envelope(batch)
 
     parsed = parse_batch(manifest, batch, payload_names)
 
-    client_id = np.asarray(batch.column("client_id").to_pylist(), dtype=object)
-    runs = _client_runs(client_id)
-
-    # --- клиентский индекс ---
-
-    client_idx = np.empty(rows, dtype=np.int64)
-
-    event_time = batch.column("event_time").to_numpy(zero_copy_only=False).astype("datetime64[us]")
-    raw_row = np.asarray(batch.column("raw_row").to_pylist(), dtype=np.int64)
-
-    # Причинный порядок внутри одной секунды задаёт приоритет типа
-    # события из контракта: договор открыт, потом график,
-    # потом выдача. Приоритет в данные не пишется и токеном не
-    # становится; неизвестный тип уходит в конец секунды.
-    priority_of = manifest.event_type_priority
-    last_priority = len(priority_of)
-    event_type = parsed.table.column("type").to_pylist()
-    priority = np.asarray(
-        [priority_of.get(name, last_priority) for name in event_type],
-        dtype=np.int64,
-    )
-
-    stable_index = np.empty(rows, dtype=np.int64)
-
-    for lo, hi in runs:
-
-        # Индекс клиента берётся из общего реестра: он не зависит
-        # от порядка пачек и одинаков во всех таблицах слоя.
-        index = client_index[str(client_id[lo])]
-        client_idx[lo:hi] = index
-
-        # Номер события в истории клиента: строки упорядочены
-        # по времени, приоритету типа и своему месту в RAW.
-        # Идентификатора записи нет, версий и дублей тоже: каждая
-        # строка это отдельное событие, и место у неё своё.
-        positions = sorted(
-            range(lo, hi),
-            key=lambda position: (
-                event_time[position],
-                priority[position],
-                raw_row[position],
-            ),
-        )
-
-        for rank, position in enumerate(positions):
-            stable_index[position] = rank
-
-    # --- наблюдаемость ---
-
-    period_start = np.datetime64(manifest.period_start, "us")
-    period_end = np.datetime64(manifest.period_end, "us")
-
-    before_window = event_time < period_start
-    after_extract = event_time >= period_end
-
-    # --- неоднозначное местное время ---
-
-    ambiguous = np.zeros(rows, dtype=bool)
-    for interval in config.ambiguous_local_intervals:
-        start = np.datetime64(interval.start, "us")
-        end = np.datetime64(interval.end, "us")
-        ambiguous |= (event_time >= start) & (event_time < end)
-
-    # --- разрыв цепочки остатков ---
-
-    def payload_column(name: str) -> list:
-        if name not in parsed.table.column_names:
-            return [None] * rows
-        return parsed.table.column(name).to_pylist()
-
-    chain_gap = balance_chain_gaps(
-        runs,
-        event_type,
-        event_time,
-        stable_index,
-        raw_row,
-        payload_column("account_id"),
-        payload_column("amount"),
-        payload_column("direction"),
-        payload_column("status"),
-        payload_column("balance_after"),
-    )
-
-    # --- пропуски с известной причиной ---
+    # --- время ---
     #
-    # Правило схемы говорит, С КАКОЙ даты источник начал
-    # собирать поле. Пусто ДО этой даты — известная причина;
-    # пусто после — обычный пропуск без объяснения. Раньше знак
-    # сравнения стоял наоборот, и причина приписывалась ровно
-    # тем строкам, у которых её нет.
+    # Время выгрузки строкой приводится к UTC здесь и больше
+    # нигде: дальше по конвейеру ездит нормализованный момент.
+    try:
+        moments = [parse_event_time(text) for text in batch.column("event_time").to_pylist()]
+    except RawContractError as error:
+        raise CanonicalError(str(error)) from error
 
-    known_missing: list[list[str] | None] = [None] * rows
-
-    source = np.asarray(batch.column("source").to_pylist(), dtype=object)
-
-    for rule in manifest.schema_changes:
-        name = rule.get("field")
-        if name not in parsed.table.column_names:
-            continue
-        since = np.datetime64(datetime.fromisoformat(str(rule["from"])), "us")
-        is_null = pc.is_null(parsed.table.column(name)).to_numpy(zero_copy_only=False)
-        mask = (source == rule.get("source")) & (event_time < since) & is_null
-        for position in np.flatnonzero(mask):
-            entry = f"{name}={rule.get('reason', 'not_collected')}"
-            if known_missing[int(position)] is None:
-                known_missing[int(position)] = [entry]
-            else:
-                known_missing[int(position)].append(entry)
-
-    # --- нормализованный текст ---
-
-    def normalized(name: str) -> pa.Array:
-        if name not in parsed.table.column_names:
-            return pa.nulls(rows, pa.string())
-        values = parsed.table.column(name).to_pylist()
-        return pa.array([normalize_text(value) for value in values], pa.string())
-
-    # --- сборка ---
+    # --- состав строки ---
 
     columns: dict[str, pa.Array | pa.ChunkedArray] = {
-        name: batch.column(name) for name in ENVELOPE_NAMES
+        name: batch.column(name) for name in ENVELOPE_NAMES if name != "event_time"
     }
 
-    derived = {
-        "client_idx": pa.array(client_idx),
-        "stable_event_index": pa.array(stable_index),
-        "before_window": pa.array(before_window),
-        "at_or_after_extract": pa.array(after_extract),
-        "ambiguous_local_time": pa.array(ambiguous),
-        "balance_chain_gap": pa.array(chain_gap),
-        "known_missing": pa.array(known_missing, pa.list_(pa.string())),
-        "merchant_name_norm": normalized("merchant_name"),
-        "counterparty_norm": normalized("counterparty"),
-        "raw_file": pa.array(["events.parquet"] * rows, pa.string()),
-        "raw_row_group": batch.column("raw_row_group"),
-        "raw_row": batch.column("raw_row"),
-    }
-
-    assert set(derived) == set(DERIVED_NAMES), "производные колонки разошлись со схемой"
-
-    columns.update(derived)
+    columns["event_time"] = pa.array(moments, type=TS_UTC)
 
     for name in payload_names:
-        columns[name] = parsed.table.column(name)
+
+        column = parsed.table.column(name)
+
+        # Нормализованный текст ложится в само поле: исходное
+        # написание рядом не хранится.
+        if name in NORMALIZED_FIELDS:
+            column = pa.array([normalize_text(value) for value in column.to_pylist()], pa.string())
+
+        columns[name] = column
 
     table = pa.table(columns).select(schema.names).cast(schema)
 
-    # Строки клиента идут по времени, приоритету типа и месту в
-    # RAW: тот же порядок, что задаёт stable_event_index.
-    order = pa.compute.sort_indices(
-        table,
-        sort_keys=[
-            ("client_id", "ascending"),
-            ("stable_event_index", "ascending"),
-        ],
+    if table.num_rows != rows:
+        raise CanonicalError(f"пачка собрана из {table.num_rows} строк вместо {rows}")
+
+    return BatchResult(table.take(_order(table, manifest.event_type_priority)))
+
+
+# Колонка приоритета существует только на время сортировки.
+# Имя с двумя подчёркиваниями не может совпасть со смысловым
+# ключом: ключи приходят из каталога payload, а там такие
+# имена не объявляются.
+_PRIORITY = "__type_priority"
+
+
+def _order(table: pa.Table, priority: dict[str, int]) -> pa.Array:
+    """
+    Устойчивый порядок строк внутри клиента:
+
+      1. event_time по возрастанию;
+      2. при равном времени — причинный приоритет типа события:
+         заявка раньше решения по ней, открытие счёта раньше
+         движения по нему. Одинаковое время это ограничение
+         точности записи, а не свидетельство, что решение
+         приняли раньше заявки;
+      3. при равном времени и типе — источник и дальше
+         остальные смысловые поля в порядке имени.
+
+    Приоритет объявлен порядком EVENT_TYPES в контракте
+    генератора и приходит сюда манифестом выгрузки. Тип, которого
+    в контракте нет, сюда не доходит: его останавливает разбор
+    payload. Значение приоритета в ленту не пишется — по нему
+    только сортируют.
+
+    Порядок зависит только от самих данных: ни номера строки в
+    RAW, ни другого служебного ключа рядом нет, и два прогона
+    одной выгрузки дают один файл.
+    """
+
+    leading = ["client_id", "event_time", _PRIORITY, TYPE_KEY, "source"]
+
+    rest = sorted(name for name in table.column_names if name not in leading)
+
+    unknown = len(priority)
+
+    ranked = table.append_column(
+        _PRIORITY,
+        pa.array(
+            [priority.get(name, unknown) for name in table.column(TYPE_KEY).to_pylist()],
+            pa.int16(),
+        ),
     )
 
-    return BatchResult(table.take(order))
+    keys = [(name, "ascending", "at_end") for name in leading + rest]
+
+    return pc.sort_indices(ranked, sort_keys=keys)
 
 
 def canonical_schema(manifest: RawManifest) -> pa.Schema:
@@ -591,11 +429,8 @@ def canonical_schema(manifest: RawManifest) -> pa.Schema:
 
 
 __all__ = [
-    "SNAPSHOT_EVENT_TYPES",
     "CanonicalError",
-    "TEXT_NORMALIZATION",
     "BatchResult",
-    "balance_chain_gaps",
     "build_batch",
     "canonical_schema",
     "iter_client_batches",

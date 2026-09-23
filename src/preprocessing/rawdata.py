@@ -4,7 +4,7 @@ import hashlib
 import json
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -17,6 +17,7 @@ from src.generator.config import (
     EVENT_TYPE_PRIORITY,
     SCHEMA_CHANGES,
     SOURCE_LAUNCH,
+    TIMEZONE,
     key_catalogue,
 )
 from src.generator.profile import PROFILE_SCHEMA
@@ -49,7 +50,7 @@ from .artifacts import sha256_file
 
 MANIFEST_NAME = "manifest.json"
 
-EXPECTED_SCHEMA_VERSION = 12
+EXPECTED_SCHEMA_VERSION = 13
 
 # Файлы, без которых группа не обрабатывается. Справочников
 # рядом с выгрузкой нет: они остались входом генератора.
@@ -82,7 +83,7 @@ REQUIRED_MANIFEST_KEYS: tuple[str, ...] = (
 ENVELOPE_SCHEMA = pa.schema(
     [
         ("client_id", pa.string()),
-        ("event_time", pa.timestamp("us")),
+        ("event_time", pa.string()),
         ("source", pa.string()),
         ("payload", pa.string()),
     ]
@@ -113,6 +114,57 @@ PY_TYPES: dict[str, tuple[type, ...]] = {
     "float": (int, float),
     "bool": (bool,),
 }
+
+
+# Время в выгрузке это СТРОКА ISO 8601 со смещением:
+# "2025-03-18T19:32:00+05:00". Локальное время без смещения
+# контрактом запрещено: по нему момент восстанавливается
+# неоднозначно, и при переводе стрелок одна и та же запись
+# означала бы два разных момента.
+UTC = timezone.utc
+
+
+def to_utc(moment: datetime) -> datetime:
+    """
+    Дата контракта в UTC.
+
+    Даты запуска источников и смен схемы объявлены в
+    местном времени банка, а сравниваются с нормализованным
+    временем события. Без приведения граница съехала бы на
+    смещение пояса.
+    """
+
+    stamped = moment.replace(tzinfo=TIMEZONE) if moment.tzinfo is None else moment
+
+    return stamped.astimezone(UTC)
+
+
+def parse_event_time(text: object) -> datetime:
+    """
+    Момент события из строки выгрузки, приведённый к UTC.
+
+    Разбор строгий: непонятная запись или запись без
+    смещения останавливает этап. Угадывать пояс по косвенным
+    признакам значило бы выдумать время.
+    """
+
+    if not isinstance(text, str) or not text.strip():
+        raise RawContractError(f"event_time {text!r}: пустое время")
+
+    try:
+        moment = datetime.fromisoformat(text.strip())
+    except ValueError as error:
+        raise RawContractError(
+            f"event_time {text!r} не читается как ISO 8601: {error}"
+        ) from error
+
+    if moment.tzinfo is None:
+        raise RawContractError(
+            f"event_time {text!r} без часового пояса: момент по такой записи "
+            "восстанавливается неоднозначно"
+        )
+
+    return moment.astimezone(UTC)
 
 
 class RawContractError(ValueError):
@@ -209,14 +261,14 @@ class RawManifest:
         return {
             name: SourceInfo(
                 source=name,
-                available_from=self.period_start if launch is None else launch,
+                available_from=self.period_start if launch is None else to_utc(launch),
             )
             for name, launch in SOURCE_LAUNCH.items()
         }
 
     @property
     def schema_changes(self) -> tuple[dict, ...]:
-        return tuple(dict(item) for item in SCHEMA_CHANGES)
+        return tuple({**item, "from": to_utc(_dt(item["from"]))} for item in SCHEMA_CHANGES)
 
     @property
     def rows(self) -> dict[str, int]:
@@ -238,12 +290,17 @@ class RawManifest:
             "schema_version": self.schema_version,
             "period_start": self.period_start.isoformat(),
             "period_end": self.period_end.isoformat(),
+            "timezone": "UTC: время выгрузки приведено при чтении",
             "events_rows": self.events_rows,
             "profile_rows": self.profile_rows,
             "events_sha256": self.events_sha256,
             "profile_sha256": self.profile_sha256,
             "manifest_sha256": self.sha256,
         }
+
+
+def _dt(value) -> datetime:
+    return value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
 
 
 def _parse_catalogue(data: dict) -> dict[str, EventTypeInfo]:
@@ -324,8 +381,10 @@ def read_manifest(raw_dir: Path) -> RawManifest:
             f"schema_version манифеста {schema_version}, поддерживается {EXPECTED_SCHEMA_VERSION}"
         )
 
-    period_start = datetime.fromisoformat(data["period_start"])
-    period_end = datetime.fromisoformat(data["period_end"])
+    # Окно выгрузки объявлено тем же форматом, что и события:
+    # двух разных правил чтения времени в одной выгрузке быть не должно.
+    period_start = parse_event_time(data["period_start"])
+    period_end = parse_event_time(data["period_end"])
 
     if period_start >= period_end:
         raise RawContractError(
@@ -342,39 +401,6 @@ def read_manifest(raw_dir: Path) -> RawManifest:
         profile_sha256=str(data["profile_sha256"]),
         sha256=hashlib.sha256(raw_bytes).hexdigest(),
     )
-
-
-# ============================================================
-# КОНТРОЛЬНАЯ СУММА СОДЕРЖИМОГО
-# ============================================================
-#
-# Сумма blake2b-отпечатков строк по модулю 2**128 плюс число
-# строк: порядок строк не важен. Нужна там, где сравниваются
-# НАБОРЫ строк, а не файлы: каталоги мира у разных групп и
-# корпус срезов.
-# ============================================================
-
-
-class ContentDigest:
-
-    MODULUS = 2 ** 128
-
-    def __init__(self) -> None:
-        self.total = 0
-        self.rows = 0
-
-    def add(self, row: dict) -> None:
-        payload = json.dumps(row, sort_keys=True, ensure_ascii=False, default=str)
-        digest = hashlib.blake2b(payload.encode("utf-8"), digest_size=16).digest()
-        self.total = (self.total + int.from_bytes(digest, "little")) % self.MODULUS
-        self.rows += 1
-
-    def extend(self, rows: list) -> None:
-        for row in rows:
-            self.add(row)
-
-    def value(self) -> str:
-        return hashlib.sha256(f"{self.total}:{self.rows}".encode("utf-8")).hexdigest()
 
 
 # ============================================================
@@ -879,12 +905,14 @@ def check_raw(raw_dir: Path) -> "RawDataset":
         if empty:
             _fail(f"events.parquet, строка {offset + int(empty[0])}: пустой client_id")
 
-        moments = chunk.column("event_time")
-
-        undated = pc.indices_nonzero(pc.is_null(moments)).to_pylist()
-
-        if undated:
-            _fail(f"events.parquet, строка {offset + int(undated[0])}: пустое event_time")
+        # Время разбирается сразу здесь: нечитаемая строка или
+        # запись без смещения останавливает этап до того, как
+        # хоть что-то будет записано.
+        for index, text in enumerate(chunk.column("event_time").to_pylist()):
+            try:
+                parse_event_time(text)
+            except RawContractError as error:
+                _fail(f"events.parquet, строка {offset + index}: {error}")
 
         unknown = sorted(
             {
@@ -943,7 +971,6 @@ def iter_event_types(table: pa.Table) -> Iterator[tuple[str, pa.Table]]:
 
 
 __all__ = [
-    "ContentDigest",
     "DTYPE_MAP",
     "ENVELOPE_SCHEMA",
     "EXPECTED_SCHEMAS",

@@ -313,7 +313,11 @@ def build_sample(
         positions=_ints(positions),
         event_starts=_ints(event_starts),
         event_lengths=_ints(event_lengths),
-        event_time=np.asarray(moments, dtype="datetime64[us]"),
+        # Время уже в UTC, и numpy хранит его без пояса: пояс
+        # снимается явно, чтобы никто не пересчитал его вторично.
+        event_time=np.asarray(
+            [moment.replace(tzinfo=None) for moment in moments], dtype="datetime64[us]"
+        ),
         calendar=np.asarray(calendar, dtype=np.float32),
         value_starts=_ints(value_starts),
         value_lengths=_ints(value_lengths),

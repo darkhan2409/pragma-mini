@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 from datetime import datetime
 from multiprocessing import Pool
 from pathlib import Path
@@ -36,6 +37,11 @@ from .world import communities
 # числа воркеров, ни от размера чанка, ни от порядка завершения.
 #
 # Выгрузка это ДВЕ таблицы: events.parquet и profile.parquet.
+#
+# event_time выгружается СТРОКОЙ ISO 8601 со смещением
+# часового пояса, как его отдала бы банковская система.
+# Перевод в UTC и timestamp — работа препроцессинга, а не
+# генератора.
 # Конверт события — четыре колонки, тип события внутри payload.
 # Справочники мерчантов, продуктов и географии рядом не
 # выкладываются: они вход генератора, а в событие попадают
@@ -50,7 +56,7 @@ from .world import communities
 EVENTS_SCHEMA = pa.schema(
     [
         ("client_id", pa.string()),
-        ("event_time", pa.timestamp("us")),
+        ("event_time", pa.string()),
         ("source", pa.string()),
         ("payload", pa.string()),
     ]
@@ -443,8 +449,9 @@ def generate_dataset(
     # статично и живёт в коде, а не в копии рядом с данными.
     manifest = {
         "schema_version": SCHEMA_VERSION,
-        "period_start": config.HISTORY_START.isoformat(),
-        "period_end": config.HISTORY_END.isoformat(),
+        "timezone": config.TIMEZONE_NAME,
+        "period_start": config.event_time_text(config.HISTORY_START),
+        "period_end": config.event_time_text(config.HISTORY_END),
         "events_rows": counts["events"],
         "profile_rows": counts["profile"],
         "events_sha256": _file_sha256(out / TABLES["events"][0]),
@@ -526,6 +533,12 @@ def generate_group(
 
 
 def main() -> None:
+
+    # Сообщения генератора на русском, а консоль Windows по
+    # умолчанию живёт не в UTF-8. Без этой строки вывод
+    # рассыпается в кракозябры, как и у остальных команд.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
 
     parser = argparse.ArgumentParser(
         description="Генерация RAW: одна группа за запуск по config.DATASETS",

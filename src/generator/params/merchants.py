@@ -21,36 +21,10 @@ class MerchantParams:
     # тысяч точек, 0.05 достаточно для smoke.
     catalog_scale: float = 1.0
 
-    # Сколько сетей на категорию: национальных и локальных.
-    national_brands_per_category: tuple = (2, 9)
-    regional_brands_per_category: tuple = (1, 6)
-    local_brands_per_settlement: tuple = (0, 4)
-
-    # Тяжесть хвоста популярности сетей и точек.
+    # Тяжесть хвоста популярности сетей и точек. Это параметр
+    # симуляции: из справочника популярность не выводится.
     brand_zipf_alpha: float = 1.05
     outlet_zipf_alpha: float = 0.85
-
-    # Доля национальных сетей в обороте категории.
-    national_share: dict = field(
-        default_factory=lambda: {
-            "grocery": 0.62, "market": 0.05, "convenience": 0.30,
-            "fastfood": 0.70, "restaurant": 0.28, "coffee": 0.58, "delivery": 0.86,
-            "pharmacy": 0.66, "medical": 0.30, "lab": 0.72,
-            "fuel": 0.78, "car_service": 0.22, "parking": 0.40,
-            "taxi": 0.92, "transit": 0.98, "car_rental": 0.55, "micromobility": 0.90,
-            "airline": 0.95, "railway": 0.99, "hotel": 0.35, "travel": 0.60,
-            "clothing": 0.60, "shoes": 0.58, "home_goods": 0.55, "furniture": 0.50,
-            "electronics": 0.82, "appliances": 0.80,
-            "telecom": 0.99, "internet": 0.95, "subscription": 0.97,
-            "utilities": 0.99,
-            "education": 0.35, "kids": 0.55, "books": 0.60,
-            "entertainment": 0.45, "cinema": 0.80, "sports": 0.42, "beauty": 0.18, "cosmetics": 0.72,
-            "marketplace": 0.96, "ecom": 0.70,
-            "government": 1.0, "fines": 1.0, "taxes": 1.0,
-            "financial": 0.85, "charity": 0.70,
-            "pets": 0.40, "tobacco": 0.35, "gambling": 0.75,
-        }
-    )
 
     # Ценовые сегменты сетей.
     price_segment_weights: dict = field(

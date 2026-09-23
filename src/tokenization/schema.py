@@ -8,7 +8,6 @@ from src.preprocessing.keys import (
     DYNAMIC_FIELDS,
     DIRECT_KEYS,
     NUMERIC,
-    REFERENCE,
     TEXT,
     KeysError,
     key_for,
@@ -40,15 +39,14 @@ ORIGIN_PROFILE = "profile"
 ORIGIN_PROFILE_CHANGE = "profile_change"
 ORIGIN_CATALOG = "catalog"
 ORIGIN_DERIVED = "derived"
-ORIGIN_REFERENCE = "reference"
 
 # Ключи профиля наблюдаются один раз на клиента: версия профиля
 # на fit_end это один факт, а не сто повторов по числу покупок.
 WEIGHT_PER_EVENT = "per_event"
 WEIGHT_PER_CLIENT = "per_client"
 
-# Виды значения, которые получают код в словаре. Ссылка кода не
-# получает: она метаданная связи.
+# Виды значения, которые получают код в словаре. Других видов
+# нет: каждый ключ реестра становится значением модели.
 MODEL_FEATURE_KINDS: tuple[str, ...] = (NUMERIC, CATEGORICAL, TEXT)
 
 
@@ -63,7 +61,6 @@ class KeyInfo:
     key: str
     value_kind: str
     unit: str | None
-    temporal: str | None
     derived_from: tuple[str, ...]
     description: str
     physical_fields: tuple[str, ...]
@@ -79,7 +76,6 @@ class KeyInfo:
             "key": self.key,
             "value_kind": self.value_kind,
             "unit": self.unit,
-            "temporal": self.temporal,
             "derived_from": list(self.derived_from),
             "description": self.description,
             "physical_fields": list(self.physical_fields),
@@ -96,9 +92,6 @@ def _origin(physical_field: str) -> str:
 
     if physical_field == "envelope":
         return ORIGIN_ENVELOPE
-
-    if physical_field == "derived:local_ref":
-        return ORIGIN_REFERENCE
 
     if physical_field.startswith("derived:"):
         return ORIGIN_DERIVED
@@ -154,7 +147,6 @@ class SemanticSchema:
                 key=key,
                 value_kind=row["value_kind"],
                 unit=row.get("unit"),
-                temporal=row.get("temporal"),
                 derived_from=tuple(row.get("derived_from") or ()),
                 description=row.get("description", ""),
                 physical_fields=physical,
@@ -227,10 +219,6 @@ class SemanticSchema:
         return tuple(key for key, info in self.keys.items() if info.is_model_feature)
 
     @property
-    def link_keys(self) -> tuple[str, ...]:
-        return self.of_kind(REFERENCE)
-
-    @property
     def numeric_keys(self) -> tuple[str, ...]:
         return self.of_kind(NUMERIC)
 
@@ -287,7 +275,6 @@ __all__ = [
     "ORIGIN_PAYLOAD",
     "ORIGIN_PROFILE",
     "ORIGIN_PROFILE_CHANGE",
-    "ORIGIN_REFERENCE",
     "WEIGHT_PER_CLIENT",
     "WEIGHT_PER_EVENT",
     "KeyInfo",

@@ -23,18 +23,22 @@ from .dictionaries import CATEGORY_BY_NAME, CATEGORY_NAMES
 # ни одного: ни по слогам, ни по суффиксам, ни запасным путём.
 # Терминальную строку разрешено оформлять по-разному — регистр,
 # номер филиала, город, префикс агрегатора, — но название в ней
-# всегда принадлежит существующей сети.
+# всегда принадлежит существующей точке.
 #
-# Справочник покрывает 19 категорий из 49, поэтому у каждой
-# внутренней категории объявлено соответствие. Где разумного
-# соответствия нет, точка остаётся БЕЗЫМЯННОЙ: merchant_id и
-# merchant_name пусты, а категория, MCC, город и цена на месте.
-# Операция при этом происходит: банк видел трату, но имени
-# продавца в этой ленте нет.
+# Название берётся ТОЛЬКО из тех, что справочник подтвердил в
+# этом самом поселении. Подтверждения нет — точка остаётся
+# БЕЗЫМЯННОЙ: merchant_id и merchant_name пусты, а категория,
+# MCC, город и цена на месте. Операция при этом происходит: банк
+# видел трату, но имени продавца в этой ленте нет. То же самое,
+# когда для внутренней категории нет соответствия в справочнике:
+# он покрывает 19 категорий из 49.
 #
-# Популярность сетей и точек имеет тяжёлый хвост: несколько
-# сетей собирают большую часть оборота, а десятки тысяч точек
-# встречаются считанные разы.
+# ЧТО ЗДЕСЬ НЕ ИЗ ИСТОЧНИКА. Ценовой сегмент, популярность,
+# распределение точек, часы работы, доля онлайна и шум
+# терминальной строки — параметры симуляции. Справочник о них
+# ничего не говорит, и выводить их из него нельзя: сколько раз
+# название встретилось в выборочном поиске — это свойство
+# выгрузки, а не размер сети и не доля рынка.
 #
 # MCC справочник не даёт ни в одном источнике, поэтому код
 # категории по-прежнему назначает внутренняя категория.
@@ -125,24 +129,29 @@ _SEGMENT_ORDER = {"budget": 0, "mid": 1, "premium": 2, "luxury": 3}
 
 @dataclass(frozen=True)
 class Brand:
+    """
+    Сеть поселения: подтверждённое название и параметры
+    симуляции вокруг него.
+
+    Из справочника здесь только name. Ценовой сегмент и
+    популярность придуманы генератором и о настоящей компании
+    ничего не утверждают.
+    """
+
     merchant_id: str
     name: str
     category: str
     sector: str
-    scope: str
-    region: str | None
     price_segment: str
     popularity: float
-    is_aggregator: bool
 
 
 @dataclass(frozen=True)
 class Outlet:
     outlet_id: str
-    # Сети у точки может не быть вовсе: категории нет в
-    # справочнике, и выдумывать ей имя нечем.
+    # Сети у точки может не быть вовсе: подтверждённого названия
+    # для этого поселения нет, и выдумывать его нечем.
     merchant_id: str | None
-    brand: str | None
     merchant_name: str | None
     category: str
     subcategory: str
@@ -166,36 +175,25 @@ class Outlet:
 # ============================================================
 
 
+def _zipf_weights(count: int, alpha: float) -> tuple:
+    return tuple(1.0 / ((index + 1) ** alpha) for index in range(count))
+
+
 @state_cache
-def _region_names(source_category: str, region: str) -> tuple:
+def brands_for(category_name: str, settlement_name: str) -> tuple:
     """
-    Имена категории справочника, встреченные в поселениях
-    региона.
-    """
+    Сети, доступные в поселении: по одной на каждое название,
+    подтверждённое справочником ИМЕННО ЗДЕСЬ.
 
-    seen: list[str] = []
+    Ни национальных, ни региональных сетей здесь нет. Справочник
+    не знает, какая сеть крупнее: он знает только, что такое имя
+    в этом городе встречено. Название из другого города сюда не
+    попадает, и списка «на случай если ничего не нашлось» нет —
+    пустой ответ значит безымянные точки.
 
-    for settlement in geography.settlements():
-
-        if settlement.region != region:
-            continue
-
-        for name in reference.names_in(settlement.name, source_category):
-            if name not in seen:
-                seen.append(name)
-
-    return tuple(seen)
-
-
-def _reference_pool(category_name: str, scope: str, key: str) -> tuple:
-    """
-    Имена справочника, подходящие сети этого охвата.
-
-    Голова списка по частоте — это и есть национальные сети:
-    «Magnum» встречается в справочнике сотни раз. Региональной
-    и местной сети достаётся то, что встречено именно там, а
-    если там не встречено ничего — хвост списка категории со
-    сдвигом по ключу, чтобы соседние места не получили одно имя.
+    Порядок сетей задаёт ключ генератора, а не алфавит
+    справочника и не число записей в нём: иначе место в
+    выборочном поиске стало бы утверждением о популярности.
     """
 
     source = REFERENCE_CATEGORY[category_name]
@@ -203,199 +201,47 @@ def _reference_pool(category_name: str, scope: str, key: str) -> tuple:
     if source is None:
         return ()
 
-    catalog = reference.names_of_category(source)
+    names = reference.names_in(settlement_name, source)
 
-    if not catalog:
+    if not names:
         return ()
 
-    head_size = min(len(catalog), params_module.active().merchants.national_brands_per_category[1])
+    settings = params_module.active().merchants
+    category = CATEGORY_BY_NAME[category_name]
+    settlement = geography.by_name(settlement_name)
 
-    head = catalog[:head_size]
-
-    if scope == "national":
-        return head
-
-    nearby = (
-        reference.names_in(key, source)
-        if scope == "local"
-        else _region_names(source, key)
+    order = sorted(
+        names,
+        key=lambda name: stable_hash("brand_order", category_name, settlement_name, name),
     )
 
-    local = tuple(name for name in nearby if name not in set(head))
-
-    if local:
-        return local
-
-    tail = catalog[head_size:] or catalog
-
-    offset = stable_hash(scope, category_name, key) % len(tail)
-
-    return tail[offset:] + tail[:offset]
-
-
-def _zipf_weights(count: int, alpha: float) -> tuple:
-    return tuple(1.0 / ((index + 1) ** alpha) for index in range(count))
-
-
-@state_cache
-def _national_brands(category_name: str) -> tuple:
-
-    settings = params_module.active().merchants
-    category = CATEGORY_BY_NAME[category_name]
-
-    pool = _reference_pool(category_name, "national", "")
-
-    # Категории нет в справочнике: сетей у неё не будет, а точки
-    # останутся безымянными.
-    if not pool:
-        return ()
-
-    rng = keyed_rng(NS_MERCHANT, stable_hash("national", category_name) % (2 ** 31))
-
-    low, high = settings.national_brands_per_category
-    count = min(max(1, rng.integers(low, high + 1)), len(pool))
-
-    weights = _zipf_weights(count, settings.brand_zipf_alpha)
+    weights = _zipf_weights(len(order), settings.brand_zipf_alpha)
 
     segments = list(settings.price_segment_weights)
     segment_weights = [settings.price_segment_weights[item] for item in segments]
 
     brands = []
 
-    for index in range(count):
+    for index, name in enumerate(order):
 
-        item_rng = keyed_rng(NS_MERCHANT, stable_hash("national_brand", category_name, index) % (2 ** 31))
-
-        name = pool[index % len(pool)]
+        # Сегмент привязан к сети, а не к точке: одна и та же
+        # сеть стоит одинаково во всех поселениях.
+        item_rng = keyed_rng(NS_MERCHANT, stable_hash("brand", category_name, name) % (2 ** 31))
 
         brands.append(
             Brand(
-                merchant_id=f"mc_{stable_hash('national', category_name, index) % 10 ** 10:010d}",
+                merchant_id=f"mc_{stable_hash('merchant', category_name, name) % 10 ** 10:010d}",
                 name=name,
                 category=category_name,
                 sector=category.sector,
-                scope="national",
-                region=None,
                 price_segment=str(item_rng.choice(segments, p=segment_weights)),
                 popularity=weights[index],
-                is_aggregator=category_name in ("delivery", "marketplace", "taxi", "micromobility"),
             )
         )
-
-    return tuple(brands)
-
-
-@state_cache
-def _regional_brands(category_name: str, region: str) -> tuple:
-
-    settings = params_module.active().merchants
-    category = CATEGORY_BY_NAME[category_name]
-
-    pool = _reference_pool(category_name, "regional", region)
-
-    if not pool:
-        return ()
-
-    rng = keyed_rng(NS_MERCHANT, stable_hash("regional", category_name, region) % (2 ** 31))
-
-    low, high = settings.regional_brands_per_category
-    count = min(max(1, rng.integers(low, high + 1)), len(pool))
-
-    weights = _zipf_weights(count, settings.brand_zipf_alpha)
-
-    segments = list(settings.price_segment_weights)
-    segment_weights = [settings.price_segment_weights[item] for item in segments]
-
-    brands = []
-
-    for index in range(count):
-
-        item_rng = keyed_rng(
-            NS_MERCHANT, stable_hash("regional_brand", category_name, region, index) % (2 ** 31)
-        )
-
-        name = pool[index % len(pool)]
-
-        brands.append(
-            Brand(
-                merchant_id=f"mc_{stable_hash('regional', category_name, region, index) % 10 ** 10:010d}",
-                name=name,
-                category=category_name,
-                sector=category.sector,
-                scope="regional",
-                region=region,
-                price_segment=str(item_rng.choice(segments, p=segment_weights)),
-                popularity=weights[index] * 0.45,
-                is_aggregator=False,
-            )
-        )
-
-    return tuple(brands)
-
-
-@state_cache
-def _local_brands(category_name: str, settlement_name: str) -> tuple:
-
-    settings = params_module.active().merchants
-    category = CATEGORY_BY_NAME[category_name]
-
-    pool = _reference_pool(category_name, "local", settlement_name)
-
-    if not pool:
-        return ()
-
-    rng = keyed_rng(NS_MERCHANT, stable_hash("local", category_name, settlement_name) % (2 ** 31))
-
-    low, high = settings.local_brands_per_settlement
-    count = min(rng.integers(low, high + 1), len(pool))
-
-    if count <= 0:
-        return ()
-
-    brands = []
-
-    for index in range(count):
-
-        item_rng = keyed_rng(
-            NS_MERCHANT, stable_hash("local_brand", category_name, settlement_name, index) % (2 ** 31)
-        )
-
-        name = pool[index % len(pool)]
-
-        brands.append(
-            Brand(
-                merchant_id=f"mc_{stable_hash('local', category_name, settlement_name, index) % 10 ** 10:010d}",
-                name=name,
-                category=category_name,
-                sector=category.sector,
-                scope="local",
-                region=None,
-                price_segment="budget" if item_rng.random() < 0.7 else "mid",
-                popularity=0.20 / (index + 1),
-                is_aggregator=False,
-            )
-        )
-
-    return tuple(brands)
-
-
-def brands_for(category_name: str, settlement: geography.Settlement) -> tuple:
-    """
-    Сети, доступные в поселении: национальные, региональные
-    и локальные.
-    """
-
-    settings = params_module.active().merchants
 
     allowed = set(settings.segment_availability[settlement.settlement_type])
 
-    pool = (
-        _national_brands(category_name)
-        + _regional_brands(category_name, settlement.region)
-        + _local_brands(category_name, settlement.name)
-    )
-
-    filtered = tuple(brand for brand in pool if brand.price_segment in allowed)
+    filtered = tuple(brand for brand in brands if brand.price_segment in allowed)
 
     if filtered:
         return filtered
@@ -403,9 +249,7 @@ def brands_for(category_name: str, settlement: geography.Settlement) -> tuple:
     # В маленьком поселении доступных сегментов может не
     # оказаться вовсе. Тогда остаётся самый дешёвый вариант:
     # без единой точки категория просто не существует.
-    cheapest = min(pool, key=lambda brand: _SEGMENT_ORDER.get(brand.price_segment, 9)) if pool else None
-
-    return (cheapest,) if cheapest is not None else ()
+    return (min(brands, key=lambda brand: _SEGMENT_ORDER.get(brand.price_segment, 9)),)
 
 
 # ============================================================
@@ -518,31 +362,22 @@ def outlet(settlement_name: str, category_name: str, index: int) -> Outlet:
     settlement = geography.by_name(settlement_name)
     category = CATEGORY_BY_NAME[category_name]
 
-    pool = brands_for(category_name, settlement)
+    pool = brands_for(category_name, settlement_name)
 
     rng = keyed_rng(
         NS_MERCHANT, stable_hash("outlet", settlement_name, category_name, index) % (2 ** 31)
     )
 
-    # Сетей может не быть: категории нет в справочнике. Тогда
-    # точка безымянная — торговля состоялась, а имени продавца
-    # в ленте нет.
+    # Сетей может не быть: подтверждённых названий для этого
+    # поселения и категории справочник не даёт. Тогда точка
+    # безымянная — торговля состоялась, а имени продавца в
+    # ленте нет.
     brand: Brand | None = None
 
     if pool:
-
-        national = tuple(item for item in pool if item.scope == "national")
-        others = tuple(item for item in pool if item.scope != "national")
-
-        national_share = settings.merchants.national_share.get(category_name, 0.4)
-
-        if national and (not others or rng.random() < national_share):
-            chosen = national
-        else:
-            chosen = others or national
-
-        brand = chosen[
-            int(rng.choice(len(chosen), p=[item.popularity for item in chosen]))
+        total = sum(item.popularity for item in pool)
+        brand = pool[
+            int(rng.choice(len(pool), p=[item.popularity / total for item in pool]))
         ]
 
     district = settlement.districts[rng.integers(0, len(settlement.districts))]
@@ -555,11 +390,11 @@ def outlet(settlement_name: str, category_name: str, index: int) -> Outlet:
     elif rng.random() < hours["extended_share"]:
         closing = min(24, closing + 2)
 
-    # Без сети масштаба у точки нет, и онлайн-витриной её делает
-    # только сама категория.
-    is_online = rng.random() < category.online_share and (
-        brand is None or brand.scope == "national"
-    )
+    # Онлайн-витриной точку делает её категория. Раньше здесь
+    # стояло дополнительное условие «только у национальной
+    # сети», но масштаб сети из справочника не выводится, и
+    # условия больше нет.
+    is_online = rng.random() < category.online_share
 
     subcategory = category.subcategories[rng.integers(0, len(category.subcategories))]
 
@@ -572,7 +407,6 @@ def outlet(settlement_name: str, category_name: str, index: int) -> Outlet:
     return Outlet(
         outlet_id=f"ot_{stable_hash('outlet', settlement_name, category_name, index) % 10 ** 12:012d}",
         merchant_id=brand.merchant_id if brand is not None else None,
-        brand=brand.name if brand is not None else None,
         merchant_name=_terminal_name(brand, settlement, index, rng) if brand is not None else None,
         category=category_name,
         subcategory=subcategory,
@@ -619,7 +453,6 @@ def foreign_outlet(country: str, category_name: str, index: int) -> Outlet:
     return Outlet(
         outlet_id=f"ot_{stable_hash('foreign', country, category_name, index) % 10 ** 12:012d}",
         merchant_id=None,
-        brand=None,
         merchant_name=None,
         category=category_name,
         subcategory=category.subcategories[0],

@@ -56,7 +56,7 @@ SAMPLES_SCHEMA = pa.schema(
         ("positions", pa.list_(pa.int32())),
         ("event_starts", pa.list_(pa.int32())),
         ("event_lengths", pa.list_(pa.int32())),
-        ("event_time", pa.list_(pa.timestamp("us"))),
+        ("event_time", pa.list_(pa.timestamp("us", tz="UTC"))),
         ("calendar", pa.list_(pa.float32())),
 
         # --- границы значений, включая составные ---
