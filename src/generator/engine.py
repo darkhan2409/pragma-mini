@@ -11,6 +11,7 @@ from .behaviour import needs as needs_module
 from .behaviour import sessions as session_module
 from . import config
 from .world import merchants as merchant_catalog
+from .world.relationships import masked_name
 from .finance import cards as card_rules
 from .finance import loans as loan_rules
 from .finance.entities import (
@@ -18,6 +19,7 @@ from .finance.entities import (
 )
 from .finance.ledger import COUNTERPART_BANK, COUNTERPART_GOVERNMENT
 from .life import calendar as cal
+from .life import events as life_events_module
 from .life import household as household_module
 from .life import lifecycle as lifecycle_module
 from .life import stress as stress_module
@@ -256,8 +258,7 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
         needs_module.daily_intents(persona, state.habits, day, state.state, factor, silenced)
     ):
         add(intent.ts, "purchase",
-            {"intent": intent, "index": index, "budget": budget,
-             "factor": factor, "stress": stress})
+            {"intent": intent, "index": index, "factor": factor, "stress": stress})
 
     # --- наличные ---
 
@@ -430,7 +431,11 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
             owned_families=state.owned_families(day),
             candidate_families=families,
             dpd=live_dpd,
-            in_pause=lifecycle_module.pause_at(state.pauses, day) is not None,
+            silent=(
+                state.last_client_event is not None
+                and (day - state.last_client_event).days
+                >= params_module.active().lifecycle.winback_after_silence_days
+            ),
             stress=stress,
             pending_notice=state.pending_notice,
             fraud_alert=state.fraud_alert_at is not None and (day - state.fraud_alert_at).days <= 5,
@@ -488,6 +493,14 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
 
         add(day.replace(hour=23, minute=30), "loan_check", {"contract_id": contract_id})
 
+    # --- новые условия для действующих договоров ---
+    #
+    # Смена тарифа это решение банка, и от активности клиента
+    # она не зависит: пауза в день вступления не должна её терять.
+
+    if day >= persona.relationship_start:
+        add(day.replace(hour=0, minute=5), "tariff_check", {})
+
     # --- органический интерес к продукту ---
 
     if day >= persona.relationship_start and "purchases" not in silenced:
@@ -531,10 +544,9 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
             "purchase",
             {
                 "intent": needs_module.Intent(
-                    ts=moment, category=category, zone="other", from_routine=False
+                    ts=moment, category=category, zone="other"
                 ),
                 "index": 900 + index,
-                "budget": budget,
                 "factor": factor * float(event.payload.get("amount_factor") or 1.0),
                 "stress": stress,
             },
@@ -943,6 +955,38 @@ def _on_registration(sim, state: ClientState, ts: datetime, payload: dict) -> No
     _update_profile(state, ts, moment=ts)
 
 
+# Назначение платежа, которое банк видит у зачисления. Сроки
+# выплаты (раньше, позже, частями) банк знает только из самой
+# ленты, а не из подписи платежа: их в поле нет.
+_INCOME_PURPOSES = ("bonus", "annual_bonus", "vacation_pay")
+_INCOME_KINDS = ("salary", "pension", "social_benefit", "severance")
+
+
+def _income_purpose(payout) -> str:
+
+    if payout.outcome in _INCOME_PURPOSES:
+        return payout.outcome
+
+    return payout.kind if payout.kind in _INCOME_KINDS else "transfer"
+
+
+# Подпись плательщика в выписке. Внутренний код плательщика
+# (payer_…, emp_…) банк клиенту не показывает: частный плательщик
+# назван так же, как любой другой контрагент, государство — своим
+# именем. Выходное пособие платит тот же работодатель, что и
+# зарплату, и подписано оно так же.
+_INCOME_PAYERS = {
+    "salary": "Employer",
+    "severance": "Employer",
+    "pension": "State pension fund",
+    "social_benefit": "State benefits",
+}
+
+
+def _income_counterparty(payout) -> str:
+    return _INCOME_PAYERS.get(payout.kind) or masked_name(payout.payer)
+
+
 def _on_income(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     payout = payload["payout"]
@@ -978,8 +1022,8 @@ def _on_income(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         {
             "channel": "system",
             "mcc": MCC_SALARY,
-            "counterparty": payout.payer if payout.kind != "salary" else "Employer",
-            "reason": payout.outcome,
+            "counterparty": _income_counterparty(payout),
+            "reason": _income_purpose(payout),
             "merchant_country": "KZ",
         },
     )
@@ -1122,7 +1166,6 @@ def _on_subscription(sim, state: ClientState, ts: datetime, payload: dict) -> No
 def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     intent = payload["intent"]
-    budget = payload["budget"]
 
     persona = state.persona
 
@@ -1132,17 +1175,9 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
     # бюджет месяца, остаток на счёте и зарплатный цикл.
     factor = payload["factor"]
 
-    travel = None
     foreign = None
 
-    vacation = None
-
-    for event in state.life_events:
-        if event.kind != "vacation":
-            continue
-        if event.ts <= ts < event.ts + timedelta(days=int(event.payload.get("days", 0))):
-            vacation = event
-            break
+    vacation = life_events_module.active_vacation(state.life_events, ts)
 
     if vacation is not None and vacation.payload.get("abroad"):
         foreign = str(
@@ -1151,7 +1186,7 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     choice = merchant_choice.choose_outlet(
         persona, state.habits, intent.category, ts, rng,
-        travel_settlement=travel, foreign_country=foreign,
+        foreign_country=foreign,
     )
 
     if choice is None:
@@ -1182,7 +1217,7 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         **merchant_catalog.payload_fields(choice.outlet),
         "is_online": choice.outlet.is_online,
         "is_subscription": False,
-        "reason": "routine" if intent.from_routine else "purchase",
+        "reason": "purchase",
     }
 
     if not sources:
@@ -1486,7 +1521,7 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
                             # банк их только зачислил.
                             "channel": "system",
                             "counterparty": "Own account",
-                            "reason": "topup_before_transfer",
+                            "reason": "transfer",
                             "mcc": MCC_TRANSFER,
                             "merchant_country": "KZ",
                         },
@@ -1624,8 +1659,6 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
 
 def graph_counterpart_name(state: ClientState) -> str:
-    from .world.relationships import masked_name
-
     return masked_name(state.client_id)
 
 

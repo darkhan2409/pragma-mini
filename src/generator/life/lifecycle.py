@@ -42,12 +42,8 @@ STATE_CLOSED = "closed_relationship"
 @dataclass(frozen=True)
 class Pause:
     kind: str
-    reason: str
     start: datetime
-    planned_end: datetime
     actual_end: datetime
-    return_trigger: str
-    reason_known_to_bank: bool
 
     def covers(self, ts: datetime) -> bool:
         return self.start <= ts < self.actual_end
@@ -96,12 +92,8 @@ def plan_pauses(persona: Persona, events: tuple) -> tuple:
         return (
             Pause(
                 kind="full",
-                reason="lost_interest",
                 start=begin,
-                planned_end=config.HISTORY_END,
                 actual_end=config.HISTORY_END,
-                return_trigger="none",
-                reason_known_to_bank=False,
             ),
         )
 
@@ -132,23 +124,7 @@ def plan_pauses(persona: Persona, events: tuple) -> tuple:
         if any(not (finish <= left or begin >= right) for left, right in occupied):
             continue
 
-        reasons = settings.pause_reasons[kind]
-
-        trigger = item_rng.weighted(settings.return_triggers)
-
-        pauses.append(
-            Pause(
-                kind=kind,
-                reason=str(item_rng.choice(reasons)),
-                start=begin,
-                planned_end=begin + timedelta(days=planned_days),
-                actual_end=finish,
-                return_trigger=trigger if finish < config.HISTORY_END else "none",
-                reason_known_to_bank=bool(
-                    item_rng.random() < settings.pause_reason_becomes_known_share
-                ),
-            )
-        )
+        pauses.append(Pause(kind=kind, start=begin, actual_end=finish))
 
         occupied.append((begin, finish))
 

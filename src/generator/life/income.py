@@ -624,8 +624,6 @@ def monthly_income(streams: tuple, ts: datetime) -> int:
     Ожидаемый месячный доход домохозяйства на дату.
     """
 
-    settings = params_module.active().income
-
     total = 0
 
     for stream in streams:

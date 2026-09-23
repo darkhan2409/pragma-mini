@@ -370,8 +370,6 @@ def build_habits(persona: Persona, events: tuple) -> Habits:
 
 def bill_amount(bill: Bill, ts: datetime, region: str, rng) -> int:
 
-    settings = params_module.active().amounts
-
     amount = bill.base_amount * rng.lognormal(0.0, bill.sigma)
 
     if bill.kind == "utilities":

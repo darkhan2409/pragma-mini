@@ -151,8 +151,6 @@ def build_graph(community_id: int, members: tuple, personas: dict) -> CommunityG
 
     settings = params_module.active().relationships
 
-    rng = keyed_rng(NS_GRAPH, community_id)
-
     households: dict[int, str] = {}
 
     pool = list(members)

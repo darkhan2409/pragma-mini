@@ -254,7 +254,6 @@ class ProductParams:
                 "debit_card": ("digital_affinity", 1.5),
                 "insurance": ("risk_tolerance", -0.9),
             },
-            "first_use_delay_days": (0, 21),
             "notice_days_default": 30,
         }
     )

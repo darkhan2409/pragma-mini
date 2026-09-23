@@ -127,7 +127,7 @@ def _on_installment_due(sim, state: ClientState, ts: datetime, payload: dict) ->
 
     item = payload["installment"]
 
-    event = state.emit(
+    state.emit(
         state.factory.make(
             "installment_due",
             ts,
@@ -203,7 +203,7 @@ def _withdraw_from_deposit(state: ClientState, ts: datetime, target, amount: int
 
     moved = _own_transfer(
         state, ts, "deposit_withdrawal", deposit.account_id, target.account_id,
-        amount, deposit.contract_id, "withdrawal_before_payment",
+        amount, deposit.contract_id, "own_transfer",
     )
 
     if not moved:
@@ -262,7 +262,7 @@ def _topup_before_payment(state: ClientState, ts: datetime, amount: int, rng) ->
             # ни в другом случае.
             "channel": "atm" if from_cash else "system",
             "counterparty": "Own account",
-            "reason": "topup_before_installment",
+            "reason": "cash_deposit" if from_cash else "transfer",
             "mcc": MCC_CASH if from_cash else MCC_TRANSFER,
             "merchant_country": "KZ",
         },
@@ -568,7 +568,7 @@ def _on_loan_check(sim, state: ClientState, ts: datetime, payload: dict) -> None
         chance *= 0.4 + 1.6 * discipline
         chance *= max(0.1, 1.0 - stress)
 
-        if rng.random() < chance and state.ledger.payment_sources(ts, loan_rules.payoff_amount(loan)):
+        if rng.random() < chance and _payment_sources(state, ts, loan_rules.payoff_amount(loan)):
             close_loan(state, ts, loan, early=True)
             return
 
@@ -584,7 +584,7 @@ def close_loan(state: ClientState, ts: datetime, loan, early: bool, reason: str 
 
         payoff = loan_rules.payoff_amount(loan)
 
-        sources = state.ledger.payment_sources(ts, payoff)
+        sources = _payment_sources(state, ts, payoff)
 
         if not sources:
             return

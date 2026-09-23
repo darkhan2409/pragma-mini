@@ -37,6 +37,7 @@ from .rng import (
 from .simulate import ClientState, _application_id
 from .world import geography, merchants as merchant_catalog, products as product_catalog
 from .world.dictionaries import FUNNEL_SCREENS, MCC_CASH, MCC_TRANSFER
+from .world.relationships import masked_name
 
 
 # ============================================================
@@ -121,7 +122,7 @@ def _debt_service_fits(state: ClientState, candidate, ts: datetime, amount, term
 
     ratio = float(settings.bank_rules.get("max_debt_service_ratio", 0.5))
 
-    income = max(1, int(state.persona.declared_income))
+    income = state.bank_income()
 
     open_loans = _open_loans(state)
 
@@ -162,7 +163,7 @@ def _approval(
 
     if family in CREDIT_FAMILIES:
 
-        base += settings.approval_income_factor * min(1.0, persona.declared_income / 700_000)
+        base += settings.approval_income_factor * min(1.0, state.bank_income() / 700_000)
         base += settings.approval_discipline_factor * (persona.trait("financial_discipline", ts) - 0.5)
         base -= settings.approval_stress_penalty * stress
 
@@ -186,7 +187,7 @@ def _approval(
     open_loans = len(_open_loans(state))
 
     for reason, rule in REJECT_CASCADE:
-        if rule(persona, ts, persona.declared_income, state.worst_dpd(), open_loans):
+        if rule(persona, ts, state.bank_income(), state.worst_dpd(), open_loans):
             return False, reason
 
     if stress > 0.55:
@@ -308,8 +309,6 @@ def _on_adoption(sim, state: ClientState, ts: datetime, payload: dict) -> None:
     app_adopted = payload["app"]
 
     rng = event_rng(NS_ADOPTION, state.ordinal, ts.toordinal(), 0, COMPONENT_CONTENT)
-
-    _apply_new_versions(state, ts)
 
     _migrate_products(sim, state, ts, rng)
 
@@ -483,7 +482,6 @@ def _on_adoption(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         term,
         offer_id=application.offer_id,
         application_id=application.application_id,
-        not_before=decision_ts,
     )
 
     _activate_product(sim, state, contract, candidate.view, open_ts, rng)
@@ -553,7 +551,7 @@ def _gather_on_card(state: ClientState, ts: datetime, amount: int) -> bool:
             # ни в другом случае.
             "channel": "atm" if from_cash else "system",
             "counterparty": "Own account",
-            "reason": "deposit_funding",
+            "reason": "cash_deposit" if from_cash else "transfer",
             "mcc": MCC_CASH if from_cash else MCC_TRANSFER,
             "merchant_country": "KZ",
         },
@@ -582,10 +580,15 @@ def _cancel_unfunded(state: ClientState, ts: datetime, contract) -> None:
     emit_product_closed(state, moment, contract, "not_funded")
 
 
-def _activate_product(sim, state: ClientState, contract, view, ts: datetime, rng) -> None:
+def _activate_product(
+    sim, state: ClientState, contract, view, ts: datetime, rng, disburse: bool = True,
+) -> None:
     """
     Первое действие по новому договору: выдача кредита,
     зачисление на депозит, оплата страховки.
+
+    disburse=False — договор принял долг прежнего кредита, и
+    денег по нему не выдаётся.
     """
 
     family = contract.product_family
@@ -597,17 +600,7 @@ def _activate_product(sim, state: ClientState, contract, view, ts: datetime, rng
         if account is None or contract.amount_or_limit is None:
             return
 
-        opened = next(
-            (
-                event
-                for event in reversed(state.events)
-                if event.event_type == "product_opened"
-                and event.payload.get("contract_id") == contract.contract_id
-            ),
-            None,
-        )
-
-        if family != "installment":
+        if family != "installment" and disburse:
             _emit_money(
                 state,
                 ts + timedelta(minutes=5),
@@ -759,6 +752,10 @@ def _activate_product(sim, state: ClientState, contract, view, ts: datetime, rng
         )
 
 
+def _on_tariff_check(sim, state: ClientState, ts: datetime, payload: dict) -> None:
+    _apply_new_versions(state, ts)
+
+
 def _apply_new_versions(state: ClientState, ts: datetime) -> None:
     """
     Новая версия продукта касается действующего договора только
@@ -906,7 +903,9 @@ def _fraud_transfer(state: ClientState, account, ts, amount, episode, step, rng)
     с нового устройства.
     """
 
-    subject = "session" if episode.kind == "account_takeover" else "account"
+    # Объект проверки — сама операция. Отдельный объект для
+    # захвата доступа называл бы вид эпизода прямо в поле.
+    subject = "transfer"
 
     if episode.kind == "account_takeover" and step.kind == "strike":
         _emit_takeover_login(state, ts - timedelta(minutes=4))
@@ -917,7 +916,9 @@ def _fraud_transfer(state: ClientState, account, ts, amount, episode, step, rng)
         # Мошенническая операция сессии клиента не принадлежит:
         # ни app_operation, ни session_id у неё нет.
         "channel": "ecom",
-        "counterparty": f"P. {counterpart[-4:]}",
+        # Имя в том же виде, что у любого другого получателя:
+        # особый формат выдавал бы мошенническую ногу сам по себе.
+        "counterparty": masked_name(counterpart),
         "mcc": MCC_TRANSFER,
         "merchant_country": "KZ",
         "reason": "transfer",
@@ -973,6 +974,10 @@ def _emit_takeover_login(state: ClientState, ts: datetime) -> None:
                 "amount": None,
                 "error_code": None,
                 "device_new": True,
+                # Вход открывает сессию, как любой другой вход:
+                # запись без session_id выделялась бы из ленты.
+                "session_id": session_id,
+                "contract_id": None,
             },
         )
     )
@@ -1033,12 +1038,13 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
 
     # Тревожность считается от доли месячного дохода, а не от
     # подсказки шага: у пробной покупки подсказка это сумма в
-    # тенге, и доля всегда упиралась бы в единицу.
-    share = amount / max(1, state.persona.true_income)
+    # тенге, и доля всегда упиралась бы в единицу. Доход тот,
+    # что знает банк.
+    share = amount / state.bank_income()
 
-    band = fraud_behaviour.score_band(episode.kind, step.kind, step.foreign, share)
+    alert_rng = event_rng(NS_FRAUD, state.ordinal, ts.toordinal(), payload["position"], COMPONENT_OUTCOME)
 
-    alert = state.emit(
+    state.emit(
         state.factory.make(
             "fraud_alert",
             alert_ts,
@@ -1046,8 +1052,8 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
                 "subject": subject,
                 "card_id": card.card_id if card and subject == "card" else None,
                 "account_id": account.account_id,
-                "score_band": band,
-                "rule_code": fraud_behaviour.rule_code(episode.kind),
+                "score_band": fraud_behaviour.score_band(step.foreign, share, alert_rng),
+                "rule_code": fraud_behaviour.rule_code(episode.kind, alert_rng),
             },
         )
     )
@@ -1100,7 +1106,10 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
                 decision_ts + timedelta(seconds=10),
                 dict(
                     state.card_facts(card),
-                    reason="compromise" if compromised else "fraud_suspicion",
+                    # В момент блокировки банк знает только
+                    # подозрение: скомпрометирована ли карта, решит
+                    # разбор, и его исход выгрузка покажет позже.
+                    reason="fraud_suspicion",
                 ),
             )
         )
@@ -1325,6 +1334,15 @@ def _new_profile_value(state: ClientState, name: str, event):
 
     payload = event.payload
 
+    # Потеря работы меняет анкету только там, где она оборвала
+    # зарплату: у кого зарплатного потока не было, деньги идут
+    # прежние, и «безработный» в анкете противоречил бы ленте.
+    if event.kind == "job_loss" and not any(
+        item.kind == "salary" and item.valid_to == event.ts
+        for item in state.income_streams
+    ):
+        return None
+
     if name == "region":
         return payload.get("region")
 
@@ -1341,7 +1359,13 @@ def _new_profile_value(state: ClientState, name: str, event):
         return geography.by_name(target).public_name or CLEAR
 
     if name == "children":
-        return payload.get("children_after")
+        # Банк узнаёт о рождениях со своими задержками, и порядок
+        # сообщений может не совпасть с порядком рождений. Каждое
+        # сообщение добавляет одного ребёнка к тому, что уже в
+        # анкете, а не ставит итоговое число: иначе анкета
+        # прыгала бы N -> N+2 -> N+1.
+        current = state.profile_values.get("children")
+        return int(state.persona.children if current is None else current) + 1
 
     if name == "family_status":
         return payload.get("family_status_after")
@@ -1461,6 +1485,8 @@ def _migrate_products(sim, state: ClientState, ts: datetime, rng) -> None:
     принудительный по уведомлению.
     """
 
+    from .engine_credit import close_loan
+
     for view, target, policy in adoption_module.migration_targets(ts, state.held_codes(ts)):
 
         contract = next(
@@ -1492,10 +1518,23 @@ def _migrate_products(sim, state: ClientState, ts: datetime, rng) -> None:
         if amount is None and target.family in ("deposit", "deposit_certificate"):
             continue
 
-        contract.status = CONTRACT_CLOSED
-        contract.closed_at = ts
+        loan = state.loans.get(contract.contract_id)
 
-        emit_product_closed(state, ts, contract, "migrated_to_successor")
+        transferred = loan is not None and not loan.closed
+
+        if transferred:
+
+            # Долг переходит в договор-преемник, а не выдаётся
+            # заново: новые деньги клиенту не приходят, прежний
+            # график закрывается без платежа.
+            amount = loan_rules.payoff_amount(loan)
+            loan.principal_outstanding = 0
+            close_loan(state, ts, loan, early=False, reason="migrated_to_successor")
+
+        else:
+            contract.status = CONTRACT_CLOSED
+            contract.closed_at = ts
+            emit_product_closed(state, ts, contract, "migrated_to_successor")
 
         fresh = sim._open_contract(
             state,
@@ -1507,13 +1546,17 @@ def _migrate_products(sim, state: ClientState, ts: datetime, rng) -> None:
             migration_reason="successor_offer" if policy == "voluntary" else "forced_migration",
         )
 
-        _activate_product(sim, state, fresh, target, ts + timedelta(minutes=12), rng)
+        _activate_product(
+            sim, state, fresh, target, ts + timedelta(minutes=12), rng,
+            disburse=not transferred,
+        )
 
         return
 
 
 _HANDLERS["support_check"] = _on_support_check
 _HANDLERS["adoption"] = _on_adoption
+_HANDLERS["tariff_check"] = _on_tariff_check
 def _on_card_block_request(sim, state: ClientState, ts: datetime, payload: dict) -> None:
     """
     Клиент блокирует карту сам.
@@ -1541,7 +1584,7 @@ def _on_card_block_request(sim, state: ClientState, ts: datetime, payload: dict)
 
     card_rules.block(card, ts, reason, days=days, permanent=lost)
 
-    blocked = state.emit(
+    state.emit(
         state.factory.make(
             "card_blocked",
             ts,

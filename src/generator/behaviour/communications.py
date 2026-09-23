@@ -118,7 +118,7 @@ def _campaign_weights(
     owned_families: frozenset,
     candidate_families: frozenset,
     dpd: int,
-    in_pause: bool,
+    silent: bool,
     stress: float,
     pending_notice: bool,
     fraud_alert: bool,
@@ -162,9 +162,9 @@ def _campaign_weights(
                 weight = 0.0
 
         elif campaign.purpose == "winback":
-            weight = 2.2 if in_pause else 0.0
+            weight = 2.2 if silent else 0.0
 
-        if in_pause and campaign.purpose == "offer":
+        if silent and campaign.purpose == "offer":
             # Клиенту, который замолчал, предложения почти не шлют.
             weight *= 0.15
 
@@ -324,7 +324,7 @@ def contacts_for_day(
     owned_families: frozenset,
     candidate_families: frozenset,
     dpd: int,
-    in_pause: bool,
+    silent: bool,
     stress: float,
     pending_notice: bool,
     fraud_alert: bool,
@@ -347,7 +347,7 @@ def contacts_for_day(
         return ()
 
     weights = _campaign_weights(
-        persona, day, owned_families, candidate_families, dpd, in_pause,
+        persona, day, owned_families, candidate_families, dpd, silent,
         stress, pending_notice, fraud_alert, days_to_due,
     )
 

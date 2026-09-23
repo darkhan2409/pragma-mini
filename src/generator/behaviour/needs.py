@@ -37,7 +37,6 @@ class Intent:
     ts: datetime
     category: str
     zone: str
-    from_routine: bool
     online_hint: bool | None = None
 
 
@@ -160,8 +159,6 @@ def daily_intents(
     if count <= 0:
         return ()
 
-    content_rng = event_rng(NS_NEEDS, persona.client_ordinal, day, 0, COMPONENT_CONTENT)
-
     has_job = persona.income_type in ("employed", "state_employee", "self_employed", "business_owner")
 
     routine = routine_for(
@@ -189,15 +186,11 @@ def daily_intents(
         item_rng = event_rng(NS_NEEDS, persona.client_ordinal, day, index + 1, COMPONENT_CONTENT)
         time_rng = event_rng(NS_NEEDS, persona.client_ordinal, day, index + 1, COMPONENT_TIME)
 
-        from_routine = item_rng.random() < routine_share
-
-        if from_routine and routine:
+        if item_rng.random() < routine_share and routine:
 
             step = routine[item_rng.integers(0, len(routine))]
 
-            if item_rng.random() > step.probability:
-                from_routine = False
-            else:
+            if item_rng.random() <= step.probability:
                 hour = item_rng.integers(step.hour_low, step.hour_high)
                 moment = ts.replace(
                     hour=int(hour),
@@ -206,7 +199,7 @@ def daily_intents(
                     microsecond=0,
                 )
                 intents.append(
-                    Intent(ts=moment, category=step.category, zone=step.zone, from_routine=True)
+                    Intent(ts=moment, category=step.category, zone=step.zone)
                 )
                 continue
 
@@ -222,7 +215,7 @@ def daily_intents(
             microsecond=0,
         )
 
-        intents.append(Intent(ts=moment, category=category, zone="other", from_routine=False))
+        intents.append(Intent(ts=moment, category=category, zone="other"))
 
     intents.sort(key=lambda item: item.ts)
 

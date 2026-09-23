@@ -51,10 +51,6 @@ class Posting:
         return self.amount > 0
 
 
-class InsufficientFunds(Exception):
-    pass
-
-
 # Счета, с которых не платят. Кредитный счёт — долг, а не деньги.
 # Вклад — деньги, но не платёжные: покупки, счета, переводы и
 # взносы идут с карт и текущих счетов, а со вклада деньги выводятся
@@ -330,7 +326,6 @@ __all__ = [
     "NON_PAYMENT_KINDS",
     "COUNTERPART_BANK",
     "COUNTERPART_GOVERNMENT",
-    "InsufficientFunds",
     "Ledger",
     "Posting",
 ]

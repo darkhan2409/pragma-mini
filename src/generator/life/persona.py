@@ -12,7 +12,6 @@ from ..rng import (
     keyed_rng,
     numpy_rng,
     stable_hash,
-    stable_unit,
     state_cache,
 )
 from ..world import communities, geography
@@ -79,7 +78,6 @@ class Persona:
     hcb_role: str
     visible_share: float
     activity_mode: str
-    consent_marketing: bool
     night_segment: bool
 
     # --- скрытый портрет ---
@@ -305,7 +303,10 @@ def draw_persona(client_ordinal: int) -> Persona:
         registered_in_window and rng.random() < population.registered_and_vanished_share
     )
 
-    consent_marketing = bool(rng.random() < 0.92)
+    # Здесь разыгрывалось второе, дублирующее согласие на рассылку.
+    # Розыгрыш оставлен пустым: без него сдвинулись бы все
+    # следующие черты персоны. Согласие решает consent_date.
+    rng.random()
 
     night_segment = bool(rng.random() < settings.activity.night_segment_share)
 
@@ -350,7 +351,6 @@ def draw_persona(client_ordinal: int) -> Persona:
         hcb_role=hcb_role,
         visible_share=visible_share,
         activity_mode=activity_mode,
-        consent_marketing=consent_marketing,
         night_segment=night_segment,
         traits=traits,
     )
@@ -412,9 +412,6 @@ def consent_date(client_ordinal: int) -> datetime | None:
     settings = params_module.active().defects
 
     persona = draw_persona(client_ordinal)
-
-    if not persona.consent_marketing:
-        return None
 
     rng = keyed_rng(NS_ONBOARDING, client_ordinal, 2)
 

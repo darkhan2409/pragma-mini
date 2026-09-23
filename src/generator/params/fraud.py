@@ -112,6 +112,34 @@ class FraudParams:
 
     block_decision_boost_high_band: float = 2.6
 
+    # Какое правило антифрода срабатывает. Правило смотрит на
+    # признаки операции, а не на скрытый вид эпизода: одно и то
+    # же правило ловит разные сценарии, и ложные тревоги тоже.
+    # Карточные виды ловятся правилами покупок, переводные —
+    # правилами переводов.
+    rule_weights: dict = field(
+        default_factory=lambda: {
+            "card_compromise": {
+                "R_CARD_VELOCITY": 0.45, "R_AMOUNT_ANOMALY": 0.25, "R_GEO_ANOMALY": 0.30,
+            },
+            "unusual_purchase": {
+                "R_CARD_VELOCITY": 0.20, "R_AMOUNT_ANOMALY": 0.55, "R_GEO_ANOMALY": 0.25,
+            },
+            "false_positive": {
+                "R_CARD_VELOCITY": 0.20, "R_AMOUNT_ANOMALY": 0.40, "R_GEO_ANOMALY": 0.40,
+            },
+            "suspicious_transfer": {
+                "R_TRANSFER_PATTERN": 0.55, "R_AMOUNT_ANOMALY": 0.35, "R_NEW_DEVICE": 0.10,
+            },
+            "social_engineering": {
+                "R_TRANSFER_PATTERN": 0.60, "R_AMOUNT_ANOMALY": 0.35, "R_NEW_DEVICE": 0.05,
+            },
+            "account_takeover": {
+                "R_TRANSFER_PATTERN": 0.35, "R_AMOUNT_ANOMALY": 0.20, "R_NEW_DEVICE": 0.45,
+            },
+        }
+    )
+
     score_band_thresholds: tuple = (0.42, 0.82)
 
     detection_delay_minutes: tuple = (1, 240)
@@ -128,6 +156,3 @@ class FraudParams:
 
     # Ложное срабатывание: обычная поездка или крупная покупка.
     false_positive_confirm_share: float = 0.86
-
-    # Восстановление активности после инцидента.
-    recovery_days: tuple = (7, 45)

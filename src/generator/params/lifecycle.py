@@ -46,6 +46,11 @@ class LifecycleParams:
     churn_risk_drop_ratio: float = 0.35
     churned_after_days_without_client_events: int = 180
 
+    # Сколько дней молчания банк ждёт, прежде чем звать клиента
+    # назад. Скрытую паузу банк не видит, он видит только
+    # отсутствие операций, и замечает его не в первый же день.
+    winback_after_silence_days: int = 30
+
     # Рост: клиентские события и обороты выросли к предыдущему кварталу.
     growing_ratio: float = 1.35
     stable_band: tuple = (0.80, 1.20)
@@ -81,32 +86,10 @@ class LifecycleParams:
         }
     )
 
-    pause_reasons: dict = field(
-        default_factory=lambda: {
-            "full": ("moved_abroad", "lost_interest", "switched_bank", "illness", "long_trip", "no_need"),
-            "app_only": ("phone_lost", "app_annoyance", "no_need", "switched_device"),
-            "cards_only": ("card_expired", "switched_card", "no_need"),
-            "other_bank": ("better_offer_elsewhere", "salary_project_moved", "family_account"),
-            "seasonal": ("seasonal_work", "summer_at_relatives", "study_break"),
-        }
-    )
-
-    # Причины возвращения.
-    return_triggers: dict = field(
-        default_factory=lambda: {
-            "offer": 0.30,
-            "life_event": 0.22,
-            "new_need": 0.26,
-            "pause_ended": 0.22,
-        }
-    )
-
-    # Банк узнаёт причину паузы только если клиент её сообщил.
-    pause_reason_becomes_known_share: float = 0.12
-
     # Отношения закрываются, когда закрыты все договоры и
-    # клиент не возвращается.
-    closed_relationship_after_days: int = 120
+    # клиент не возвращается. Порог обязан быть больше порога
+    # оттока: иначе закрытие наступает сразу и отток недостижим.
+    closed_relationship_after_days: int = 365
 
     # ------------------------------------------------------------
     # ЖИЗНЕННЫЕ СОБЫТИЯ
