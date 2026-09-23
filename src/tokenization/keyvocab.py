@@ -3,10 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.preprocessing.artifacts import read_json
-from src.preprocessing.keys import CATEGORICAL
 
 from .schema import SemanticSchema
-from .settings import KEY_VOCAB_FILE, TokenizerConfig, vocab_path
+from .settings import KEY_VOCAB_FILE, vocab_path
 
 
 # ============================================================
@@ -37,39 +36,6 @@ class KeyVocabError(ValueError):
     """
     Словарь ключей собрать или прочитать нельзя.
     """
-
-
-def domains_of(config: TokenizerConfig, schema: SemanticSchema) -> dict[str, str]:
-    """
-    Ключ -> имя домена значений.
-
-    По умолчанию домен у ключа свой: одинаковое написание ничего
-    не доказывает, и active у карты не то же самое, что active у
-    обращения. Объединение делается только явным списком с
-    причиной, и тогда ключи домена делят одни и те же номера
-    значений.
-    """
-
-    domain_of: dict[str, str] = {}
-
-    for domain in config.value_domains:
-
-        for key in domain.keys:
-
-            info = schema.info(key)
-
-            if info.value_kind != CATEGORICAL:
-                raise KeyVocabError(
-                    f"домен {domain.name} объединяет {key}, а он {info.value_kind}: "
-                    "общий домен бывает только у категорий"
-                )
-
-            domain_of[key] = domain.name
-
-    for key in sorted(schema.categorical_keys):
-        domain_of.setdefault(key, key)
-
-    return domain_of
 
 
 def build_key_vocab(specials: dict[str, int], schema: SemanticSchema) -> dict[str, int]:
@@ -134,7 +100,6 @@ def load_key_vocab(directory: Path | None = None) -> dict[str, int]:
 __all__ = [
     "KeyVocabError",
     "build_key_vocab",
-    "domains_of",
     "load_key_vocab",
     "next_id",
 ]

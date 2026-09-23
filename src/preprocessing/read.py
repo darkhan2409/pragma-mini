@@ -10,6 +10,8 @@ import pyarrow.parquet as pq
 from .calendar import calendar_features
 from .canonical.build import EVENTS_FILE
 from .keys import (
+    CATEGORICAL,
+    COUNT,
     DIRECT_KEYS,
     DYNAMIC_FIELDS,
     NUMERIC,
@@ -371,9 +373,18 @@ def _typed_profile_value(key: SemanticKey, raw: object, field_name: str) -> tupl
     """
     Значение профиля в виде своего ключа. Неразобранное число не
     подменяется текстом и признаком не становится.
+
+    Счётчик объявлен категорией, но числом быть не перестал.
+    Изменение профиля приходит строкой, и без привода «2» у
+    прежнего значения и 2 у самого поля стали бы разными записями
+    одного факта: словарь хранит запись значения вместе с его
+    типом. Дробный счётчик это ошибка, а не повод молча стать
+    числом с точкой.
     """
 
-    if key.kind != NUMERIC:
+    counter = key.kind == CATEGORICAL and key.unit == COUNT
+
+    if key.kind != NUMERIC and not counter:
         return raw, None
 
     text = str(raw)
@@ -382,6 +393,9 @@ def _typed_profile_value(key: SemanticKey, raw: object, field_name: str) -> tupl
         return int(text), None
     except ValueError:
         pass
+
+    if counter:
+        return None, f"значение профиля {field_name} не разобрано как целый счётчик: {text!r}"
 
     try:
         return float(text), None

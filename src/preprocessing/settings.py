@@ -39,8 +39,6 @@ GROUPS: tuple[str, ...] = ("train", "val", "test")
 
 GROUP_ALIASES: dict[str, str] = {"validation": "val", "valid": "val", "testing": "test"}
 
-SCHEMA_VERSION = 1
-
 # ------------------------------------------------------------
 # КАЛЕНДАРЬ
 # ------------------------------------------------------------
@@ -186,7 +184,6 @@ class PreprocessingConfig:
 
     def as_dict(self) -> dict:
         return {
-            "schema_version": SCHEMA_VERSION,
             "windows": {name: window.as_dict() for name, window in sorted(self.windows.items())},
             "timezone_hours": self.timezone_hours,
             "calendar": {

@@ -59,10 +59,6 @@ SAMPLES_SCHEMA = pa.schema(
         ("event_time", pa.list_(pa.timestamp("us", tz="UTC"))),
         ("calendar", pa.list_(pa.float32())),
 
-        # --- границы значений, включая составные ---
-        ("value_starts", pa.list_(pa.int32())),
-        ("value_lengths", pa.list_(pa.int32())),
-
         # --- что разрешено маскировать ---
         ("target_event_mask", pa.list_(pa.bool_())),
 
@@ -70,8 +66,6 @@ SAMPLES_SCHEMA = pa.schema(
         ("profile_key_ids", pa.list_(pa.int32())),
         ("profile_value_ids", pa.list_(pa.int32())),
         ("profile_positions", pa.list_(pa.int32())),
-        ("profile_value_starts", pa.list_(pa.int32())),
-        ("profile_value_lengths", pa.list_(pa.int32())),
     ]
 )
 
@@ -106,14 +100,10 @@ def _row(sample: Sample) -> dict:
         "event_lengths": sample.event_lengths.tolist(),
         "event_time": sample.event_time.tolist(),
         "calendar": sample.calendar.tolist(),
-        "value_starts": sample.value_starts.tolist(),
-        "value_lengths": sample.value_lengths.tolist(),
         "target_event_mask": sample.target_event_mask.tolist(),
         "profile_key_ids": sample.profile_key_ids.tolist(),
         "profile_value_ids": sample.profile_value_ids.tolist(),
         "profile_positions": sample.profile_positions.tolist(),
-        "profile_value_starts": sample.profile_value_starts.tolist(),
-        "profile_value_lengths": sample.profile_value_lengths.tolist(),
     }
 
 
@@ -192,7 +182,7 @@ def build_group(
             counters.samples += 1
             counters.events += sample.n_events
             counters.tokens += sample.n_tokens + sample.profile_tokens
-            counters.values += sample.n_values + int(sample.profile_value_starts.size)
+            counters.values += sample.n_values + sample.profile_n_values
             counters.profile_tokens += sample.profile_tokens
             eligible = int(sample.target_event_mask.sum())
 

@@ -5,7 +5,7 @@ from pathlib import Path
 from src.preprocessing.artifacts import read_json
 
 from .fit import TrainCorpus
-from .keyvocab import domains_of, next_id
+from .keyvocab import next_id
 from .scan import TYPE_BOOL, TYPE_FLOAT, TYPE_INT, TYPE_ORDER
 from .schema import SemanticSchema
 from .settings import VALUE_VOCAB_FILE, TokenizerConfig, vocab_path
@@ -23,10 +23,6 @@ from .settings import VALUE_VOCAB_FILE, TokenizerConfig, vocab_path
 # active у обращения это разные факты, и общий номер склеил бы
 # их. Поэтому значения сгруппированы по ключу, а плоской таблицы
 # «значение -> номер» здесь нет.
-#
-# Ключи, объединённые в общий домен явным списком с причиной,
-# делят одни и те же номера: одинаковое значение у них и правда
-# одно и то же.
 #
 # Ключ без наблюдений на train остаётся в файле с пустым
 # набором: «категория, которой мы не видели» и «поле не
@@ -85,23 +81,21 @@ def build_value_vocab(
     Категориальные значения train по ключам: ключ -> значение -> ID.
     """
 
-    domain_of = domains_of(config, schema)
+    known = set(schema.categorical_keys)
 
     # --- что встретилось на train ---
 
-    per_domain: dict[str, dict[tuple[str, str], int]] = {}
+    per_key: dict[str, dict[tuple[str, str], int]] = {}
 
     for (key, value_type, value), entry in sorted(train.statistics.categorical.items()):
 
-        domain = domain_of.get(key)
-
-        if domain is None:
+        if key not in known:
             raise ValuesError(
                 f"ключ {key} встретился в статистике, но категорией не объявлен: "
                 "статистика и реестр разошлись"
             )
 
-        slot = per_domain.setdefault(domain, {})
+        slot = per_key.setdefault(key, {})
 
         item = (value_type, value)
 
@@ -110,15 +104,13 @@ def build_value_vocab(
 
     # --- номера ---
 
-    first_id = next_id(key_vocab)
+    number = next_id(key_vocab)
 
-    ids_of_domain: dict[str, dict[str, int]] = {}
+    out: dict[str, dict[str, int]] = {}
 
-    number = first_id
+    for key in sorted(known):
 
-    for domain in sorted(set(domain_of.values()) | set(per_domain)):
-
-        ordered = sorted(per_domain.get(domain, {}), key=lambda item: sort_key(*item))
+        ordered = sorted(per_key.get(key, {}), key=lambda item: sort_key(*item))
 
         assigned: dict[str, int] = {}
         types: dict[str, str] = {}
@@ -126,12 +118,11 @@ def build_value_vocab(
         for value_type, text in ordered:
 
             # Значение в файле это запись, а не пара «тип, запись».
-            # У одного ключа тип один — это проверяет fit; в общем
-            # домене разные типы с одинаковой записью слились бы
-            # молча, и это останавливает этап.
+            # У одного ключа тип один, и это проверяет fit; если
+            # он всё же разошёлся, две записи слились бы молча.
             if text in assigned:
                 raise ValuesError(
-                    f"домен {domain}: запись {text!r} встретилась и как {types[text]}, и как "
+                    f"ключ {key}: запись {text!r} встретилась и как {types[text]}, и как "
                     f"{value_type}: одним номером это разные значения не становятся"
                 )
 
@@ -139,14 +130,9 @@ def build_value_vocab(
             types[text] = value_type
             number += 1
 
-        ids_of_domain[domain] = assigned
+        out[key] = assigned
 
-    # --- по ключам ---
-
-    return {
-        key: dict(ids_of_domain.get(domain_of[key], {}))
-        for key in sorted(schema.categorical_keys)
-    }
+    return out
 
 
 def load_value_vocab(directory: Path | None = None) -> dict[str, dict[str, int]]:

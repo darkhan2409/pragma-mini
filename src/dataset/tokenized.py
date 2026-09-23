@@ -33,6 +33,10 @@ from src.tokenization.transform import EVENTS_FILE, PROFILE_FILE
 # ключ/значение внутри самого события, и восстанавливается через
 # словарь. Второй записи одного и того же факта рядом нет.
 #
+# Границы значений тоже не хранятся: значение открывает
+# positions == 0, а 1, 2, … продолжают его кусками BPE. Нулевая
+# позиция записи это маркер, и в разбор она не входит.
+#
 # Ничего не кодируется и не пересчитывается: токены уже готовы.
 # ============================================================
 
@@ -59,17 +63,11 @@ class TokenizedEvent:
     key_ids: list[int]
     value_ids: list[int]
     positions: list[int]
-    value_starts: list[int]
-    value_lengths: list[int]
     calendar: list[float]
 
     @property
     def n_tokens(self) -> int:
         return len(self.key_ids)
-
-    @property
-    def n_values(self) -> int:
-        return len(self.value_starts)
 
 
 @dataclass
@@ -84,8 +82,6 @@ class TokenizedClient:
     profile_key_ids: list[int] = field(default_factory=list)
     profile_value_ids: list[int] = field(default_factory=list)
     profile_positions: list[int] = field(default_factory=list)
-    profile_value_starts: list[int] = field(default_factory=list)
-    profile_value_lengths: list[int] = field(default_factory=list)
 
     @property
     def n_events(self) -> int:
@@ -94,10 +90,6 @@ class TokenizedClient:
     @property
     def profile_tokens(self) -> int:
         return len(self.profile_key_ids)
-
-    @property
-    def profile_values(self) -> int:
-        return len(self.profile_value_starts)
 
 
 class TokenizedGroup:
@@ -193,17 +185,27 @@ class TokenizedGroup:
 
         Имя токена в финальном словаре это `value:<ключ>=<значение>`,
         поэтому тип читается без второй колонки рядом с данными.
+
+        Строка это одно событие, значит её нулевая позиция это
+        маркер [EVT]. Разбор начинается со следующей: значение
+        открывает positions == 0, а 1, 2, … это куски того же
+        значения, и на них смотреть незачем.
         """
 
         if self._event_type_key is None:
             return None
 
-        for start in row["value_starts"]:
+        positions = row["positions"]
 
-            if row["key_ids"][start] != self._event_type_key:
+        for index in range(1, len(positions)):
+
+            if positions[index] != 0:
                 continue
 
-            name = self.artifacts.describe(row["value_ids"][start])
+            if row["key_ids"][index] != self._event_type_key:
+                continue
+
+            name = self.artifacts.describe(row["value_ids"][index])
 
             prefix = f"{VALUE_PREFIX}{EVENT_TYPE_KEY}="
 
@@ -228,8 +230,6 @@ class TokenizedGroup:
                 key_ids=list(row["key_ids"]),
                 value_ids=list(row["value_ids"]),
                 positions=list(row["positions"]),
-                value_starts=list(row["value_starts"]),
-                value_lengths=list(row["value_lengths"]),
                 calendar=list(row["calendar"]),
             )
             for row in rows
@@ -246,8 +246,6 @@ class TokenizedGroup:
             profile_key_ids=list(profile["key_ids"]),
             profile_value_ids=list(profile["value_ids"]),
             profile_positions=list(profile["positions"]),
-            profile_value_starts=list(profile["value_starts"]),
-            profile_value_lengths=list(profile["value_lengths"]),
         )
 
 
