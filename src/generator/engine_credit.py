@@ -618,6 +618,8 @@ def close_loan(state: ClientState, ts: datetime, loan, early: bool, reason: str 
                 item.paid_amount = item.amount
                 item.principal_paid = item.principal
 
+        loan.dpd = 0
+
         state.emit(
             state.factory.make(
                 "early_repayment",
@@ -631,11 +633,14 @@ def close_loan(state: ClientState, ts: datetime, loan, early: bool, reason: str 
 
     loan.closed = True
 
+    # Просрочка на момент закрытия: у погашенного кредита она
+    # нулевая, а договор, отдавший долг преемнику, уходит с той,
+    # что была, — она продолжается в новом договоре.
     state.emit(
         state.factory.make(
             "loan_closed",
             ts + timedelta(seconds=210),
-            loan_payload(loan.contract_id, loan, days_past_due=0,
+            loan_payload(loan.contract_id, loan,
                          reason=reason or ("early" if early else "scheduled")),
         )
     )

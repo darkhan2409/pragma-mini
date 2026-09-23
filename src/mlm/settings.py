@@ -13,7 +13,8 @@ from src.generator.config import DATA_DIR
 # ============================================================
 #
 # Всё, что решает человек про голову: seed, сглаживание меток,
-# сколько предсказаний показывать, размер порции и устройство.
+# сколько предсказаний показывать, размер порции, устройство и
+# параметры оптимизатора обучения.
 #
 # Размерности, глубины и seed'ы четырёх энкодеров сюда НЕ
 # входят: они приходят из весов этапов 09-12 вместе с их
@@ -35,6 +36,14 @@ PREVIEW_FILE = "preview.html"
 WEIGHTS_FILE = "weights.pt"
 
 DEVICES = ("auto", "cpu", "cuda")
+
+# Чекпойнт обучения лежит отдельно от 13_mlm: отчёт очищает свой
+# каталог целиком и стёр бы его.
+#
+#   data/14_train/checkpoint.pt
+TRAIN_DIR = DATA_DIR / "14_train"
+
+CHECKPOINT_FILE = "checkpoint.pt"
 
 
 class ConfigError(ValueError):
@@ -64,11 +73,25 @@ class MlmConfig:
 
     device: str = "auto"
 
+    # AdamW обучения. Отчёт их не использует.
+    learning_rate: float = 3e-4
+    weight_decay: float = 0.01
+
     def validate(self) -> None:
 
         if not 0.0 <= self.label_smoothing < 1.0:
             raise ConfigError(
                 f"label_smoothing обязан лежать в [0, 1), получено {self.label_smoothing}"
+            )
+
+        if self.learning_rate <= 0.0:
+            raise ConfigError(
+                f"learning_rate обязан быть положительным, получено {self.learning_rate}"
+            )
+
+        if self.weight_decay < 0.0:
+            raise ConfigError(
+                f"weight_decay не может быть отрицательным, получено {self.weight_decay}"
             )
 
         for name in ("top_k", "events_per_chunk"):
@@ -90,6 +113,8 @@ class MlmConfig:
             "top_k": self.top_k,
             "events_per_chunk": self.events_per_chunk,
             "device": self.device,
+            "learning_rate": self.learning_rate,
+            "weight_decay": self.weight_decay,
         }
 
     @staticmethod
@@ -109,6 +134,8 @@ class MlmConfig:
             top_k=int(data.get("top_k", base.top_k)),
             events_per_chunk=int(data.get("events_per_chunk", base.events_per_chunk)),
             device=str(data.get("device", base.device)),
+            learning_rate=float(data.get("learning_rate", base.learning_rate)),
+            weight_decay=float(data.get("weight_decay", base.weight_decay)),
         )
 
         config.validate()
@@ -134,13 +161,24 @@ def mlm_dir(group: str) -> Path:
     return MLM_DIR / group
 
 
+def checkpoint_path() -> Path:
+    """
+    Чекпойнт обучения. Учится только train, поэтому группы в пути нет.
+    """
+
+    return TRAIN_DIR / CHECKPOINT_FILE
+
+
 __all__ = [
+    "CHECKPOINT_FILE",
     "DEVICES",
     "MLM_DIR",
     "PREVIEW_FILE",
     "TARGETS_FILE",
+    "TRAIN_DIR",
     "WEIGHTS_FILE",
     "ConfigError",
     "MlmConfig",
+    "checkpoint_path",
     "mlm_dir",
 ]

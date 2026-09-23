@@ -30,6 +30,7 @@ mini-pragma-events = "src.event.run:main"
 mini-pragma-profiles = "src.profile.run:main"
 mini-pragma-history = "src.history.run:main"
 mini-pragma-mlm = "src.mlm.run:main"
+mini-pragma-train = "src.mlm.train:main"
 
 [build-system]
 requires = ["setuptools>=68"]
