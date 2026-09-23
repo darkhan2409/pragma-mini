@@ -730,8 +730,15 @@ python -m src.mlm.train --epochs 3
 python -m src.mlm.train --max-steps 100
 ```
 
-Учится только `train`. Вход тот же, что у этапа 13: батчи, маски и начальные
-веса этапов 09–12. Результат: `data/14_train/checkpoint.pt` с
+Учится только `train`. Вход: батчи и начальные веса этапов 09–12.
+
+Маска `train` из `data/08_masked/train` при обучении **не читается**: каждая
+эпоха разыгрывает её заново тем же маскером этапа 08 (`choose` + `apply`) по
+немаскированным `value_ids` батчей. Правила и вероятности те же; меняется только
+seed — он выводится из seed маскирования и номера эпохи, поэтому одна и та же
+эпоха даёт одну и ту же маску, а соседние эпохи — разные. Конфиг маскирования
+передаётся `--masking-config`, тем же JSON, что у `python -m src.masking.run`.
+`val`, `test` и отчёт этапа 13 читают фиксированные маски из `data/08_masked`. Результат: `data/14_train/checkpoint.pt` с
 `model_state_dict`, `optimizer_state_dict`, `epoch`, `step` и конфигом.
 
 Шаг — это один граф на батч: `InputEmbedding → Event → Profile → History → MLM`,

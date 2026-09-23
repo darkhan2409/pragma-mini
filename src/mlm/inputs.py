@@ -10,9 +10,11 @@ import pyarrow.parquet as pq
 from src.batching.build import BATCHES_SCHEMA
 from src.batching.settings import BATCHES_FILE, batches_dir
 from src.embedding.inputs import CALENDAR_PER_EVENT
+from src.masking.apply import apply
 from src.masking.build import MASKED_SCHEMA
-from src.masking.settings import MASKED_FILE, masked_dir
-from src.tokenization.specials import MASK, load_special_tokens
+from src.masking.choose import choose
+from src.masking.settings import MASKED_FILE, MaskingConfig, masked_dir
+from src.tokenization.specials import MASK, UNK, load_special_tokens
 
 
 # ============================================================
@@ -38,6 +40,11 @@ from src.tokenization.specials import MASK, load_special_tokens
 #
 # labels и reason в модель НЕ подаются. Первое уходит в потери,
 # второе в отчёт.
+#
+# Обучение train читает маску не из файла, а разыгрывает её на
+# лету тем же маскером этапа 08 (choose + apply) по
+# немаскированным value_ids из 07_batches: так каждая эпоха
+# получает свою маску. val, test и отчёт читают 08_masked.
 # ============================================================
 
 
@@ -120,18 +127,32 @@ class Client:
 class Source:
     """
     Пара файлов группы, открытая один раз.
+
+    masking задан — маска не читается из 08_masked, а
+    разыгрывается при чтении батча по этому конфигу. Одинаковый
+    конфиг даёт одинаковую маску.
     """
 
-    def __init__(self, group: str):
+    def __init__(self, group: str, masking: MaskingConfig | None = None):
 
         self.group = group
+        self.masking = masking
 
         self.batches_path = batches_dir(group) / BATCHES_FILE
-        self.masked_path = masked_dir(group) / MASKED_FILE
+        self.masked_path = None if masking is not None else masked_dir(group) / MASKED_FILE
 
         self._batches = _open(
             self.batches_path, BATCHES_SCHEMA, f"python -m src.batching.run {group}"
         )
+
+        specials = load_special_tokens()
+
+        self.mask_id = specials[MASK]
+        self.unknown_id = specials[UNK]
+
+        if masking is not None:
+            return
+
         self._masked = _open(
             self.masked_path, MASKED_SCHEMA, f"python -m src.masking.run {group}"
         )
@@ -141,8 +162,6 @@ class Source:
                 f"батчей {self._batches.num_row_groups}, а масок "
                 f"{self._masked.num_row_groups}: файлы собраны в разное время"
             )
-
-        self.mask_id = load_special_tokens()[MASK]
 
     @property
     def count(self) -> int:
@@ -159,8 +178,14 @@ class Source:
                 f"номера от 0 до {self.count - 1}"
             )
 
-        batch = self._batches.read_row_group(index, columns=BATCH_COLUMNS).to_pylist()
-        masked = self._masked.read_row_group(index, columns=MASKED_COLUMNS).to_pylist()
+        if self.masking is not None:
+            batch = self._batches.read_row_group(
+                index, columns=BATCH_COLUMNS + ["value_ids"]
+            ).to_pylist()
+            masked = [self._mask(index, row) for row in batch]
+        else:
+            batch = self._batches.read_row_group(index, columns=BATCH_COLUMNS).to_pylist()
+            masked = self._masked.read_row_group(index, columns=MASKED_COLUMNS).to_pylist()
 
         if len(batch) != len(masked):
             raise InputError(
@@ -171,6 +196,20 @@ class Source:
             self._client(index, row, here, there)
             for row, (here, there) in enumerate(zip(batch, masked))
         ]
+
+    def _mask(self, index: int, row: dict) -> dict:
+        """
+        Строка масок, разыгранная тем же маскером, что и этап 08.
+        """
+
+        selection = choose(self.group, row, self.masking)
+
+        masked = apply(
+            row["client_id"], row, selection.choices, self.mask_id, self.unknown_id
+        )
+        masked["batch_index"] = index
+
+        return masked
 
     def _client(self, index: int, row: int, batch: dict, masked: dict) -> Client:
 

@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import replace
 from pathlib import Path
 
+from src.generator.rng import stable_hash
+from src.masking.settings import ConfigError as MaskingConfigError
+from src.masking.settings import MaskingConfig
 from src.preprocessing.run import EXIT_BLOCKED, EXIT_OK
 
 from .settings import ConfigError, MlmConfig, checkpoint_path
@@ -16,9 +20,16 @@ from .settings import ConfigError, MlmConfig, checkpoint_path
 # Одна команда, только на train:
 #
 #   python -m src.mlm.train [--epochs N] [--max-steps N] [--config путь]
+#                           [--masking-config путь]
 #
-# Вход: data/07_batches/train и data/08_masked/train; начальные
-# веса энкодеров из этапов 09-12. Выход: data/14_train/checkpoint.pt.
+# Вход: data/07_batches/train и начальные веса энкодеров из этапов
+# 09-12. Выход: data/14_train/checkpoint.pt.
+#
+# Маска train НЕ читается из data/08_masked/train: каждая эпоха
+# разыгрывает её заново тем же маскером этапа 08 по
+# немаскированным value_ids батчей. Seed эпохи выводится из seed
+# маскирования и номера эпохи, поэтому одна и та же эпоха даёт
+# одну и ту же маску, а соседние эпохи — разные.
 #
 # Шаг обучения это ОДИН граф на батч:
 #
@@ -36,7 +47,25 @@ from .settings import ConfigError, MlmConfig, checkpoint_path
 # ============================================================
 
 
-def train(config: MlmConfig, epochs: int, max_steps: int | None) -> dict:
+def for_epoch(masking: MaskingConfig, epoch: int) -> MaskingConfig:
+    """
+    Конфиг маскирования эпохи: те же вероятности, свой seed.
+
+    Маскер берёт всю случайность из seed конфига, поэтому смены
+    seed достаточно, чтобы эпоха получила новую маску. stable_hash
+    это blake2b: результат не зависит от процесса, в отличие от
+    встроенного hash().
+    """
+
+    return replace(masking, seed=stable_hash("epoch", masking.seed, epoch) % (2 ** 31))
+
+
+def train(
+    config: MlmConfig,
+    epochs: int,
+    max_steps: int | None,
+    masking: MaskingConfig,
+) -> dict:
     """
     Проход по батчам train с обновлением весов всей модели.
     """
@@ -73,12 +102,12 @@ def train(config: MlmConfig, epochs: int, max_steps: int | None) -> dict:
         weight_decay=config.weight_decay,
     )
 
-    source = Source("train")
-
     epoch = 0
     step = 0
 
     for epoch in range(1, epochs + 1):
+
+        source = Source("train", masking=for_epoch(masking, epoch))
 
         for number in range(source.count):
 
@@ -118,6 +147,7 @@ def train(config: MlmConfig, epochs: int, max_steps: int | None) -> dict:
             "epoch": epoch,
             "step": step,
             "config": config.as_dict(),
+            "masking": masking.as_dict(),
         },
         path,
     )
@@ -141,9 +171,13 @@ def run_training(args) -> int:
     try:
         config = MlmConfig.load(Path(args.config) if args.config else None)
 
-        result = train(config, args.epochs, args.max_steps)
+        masking = MaskingConfig.load(
+            Path(args.masking_config) if args.masking_config else None
+        )
 
-    except (ConfigError, InputError, MlmError, FileNotFoundError) as error:
+        result = train(config, args.epochs, args.max_steps, masking)
+
+    except (ConfigError, MaskingConfigError, InputError, MlmError, FileNotFoundError) as error:
         print(f"[train] {error}")
         return EXIT_BLOCKED
 
@@ -181,6 +215,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", type=Path, default=None,
         help="JSON с переопределениями конфига головы и оптимизатора",
     )
+    parser.add_argument(
+        "--masking-config", type=Path, default=None,
+        help="JSON конфига маскирования, тот же, что у python -m src.masking.run",
+    )
 
     parser.set_defaults(handler=run_training)
 
@@ -198,7 +236,7 @@ def main(argv: list[str] | None = None) -> None:
     raise SystemExit(args.handler(args))
 
 
-__all__ = ["build_parser", "main", "run_training", "train"]
+__all__ = ["build_parser", "for_epoch", "main", "run_training", "train"]
 
 
 if __name__ == "__main__":
