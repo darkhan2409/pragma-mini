@@ -7,7 +7,7 @@ from .. import params as params_module
 from .. import config
 from ..rng import NS_INCOME, keyed_rng, stable_hash
 from . import calendar as cal
-from .persona import PENSION_AGE, Persona
+from .persona import PENSION_AGE, Persona, employer_payday
 from .stress import level_at
 
 
@@ -274,13 +274,21 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
 
         index += 1
 
+        employer = f"emp_{stable_hash('employer', persona.client_ordinal, int(event.ts.toordinal())) % 10 ** 9:09d}"
+
+        schedule = item_rng.weighted(settings.schedule_weights["salary"])
+
+        # День выплаты назначает новый работодатель. Прежний личный
+        # розыгрыш оставлен пустым, чтобы не сдвинуть следующие.
+        item_rng.integers(1, 29)
+
         streams.append(
             IncomeStream(
                 stream_id=f"inc_{persona.client_ordinal}_{index}",
                 kind="salary",
-                payer=f"emp_{stable_hash('employer', persona.client_ordinal, int(event.ts.toordinal())) % 10 ** 9:09d}",
-                schedule=item_rng.weighted(settings.schedule_weights["salary"]),
-                payday=int(item_rng.integers(1, 29)),
+                payer=employer,
+                schedule=schedule,
+                payday=employer_payday(employer),
                 landing=_landing(persona, "salary", item_rng),
                 base_amount=int(max(60_000, primary.base_amount * factor)),
                 valid_from=restart,
@@ -447,17 +455,25 @@ def payouts(persona: Persona, streams: tuple, stress_episodes: tuple) -> tuple:
 
                 planned = cal.day_in_month(month, day)
 
-                # У общего работодателя день выплаты и её
-                # задержка общие для всех своих сотрудников.
-                payer_seed = (
-                    stable_hash(stream.payer) % (2 ** 31)
-                    if stream.kind == "salary" and str(stream.payer or "").startswith("emp_")
-                    else persona.client_ordinal
+                # Исход выплаты (ранняя, поздняя, частичная) и её час
+                # личные: они зависят от стресса и дисциплины самого
+                # клиента.
+                rng = keyed_rng(
+                    NS_INCOME, persona.client_ordinal, 5,
+                    stable_hash(stream.stream_id, cal.month_index(month), slot) % (2 ** 31),
                 )
 
-                rng = keyed_rng(
-                    NS_INCOME, payer_seed, 5,
-                    stable_hash(stream.stream_id, cal.month_index(month), slot) % (2 ** 31),
+                # Перенос с выходного у зарплаты работодателя общий
+                # для всех его сотрудников: день выплаты назначает он.
+                employer = stream.kind == "salary" and str(stream.payer or "").startswith("emp_")
+
+                calendar_rng = (
+                    keyed_rng(
+                        NS_INCOME, stable_hash(stream.payer) % (2 ** 31), 10,
+                        cal.month_index(month), slot,
+                    )
+                    if employer
+                    else rng
                 )
 
                 stress = level_at(stress_episodes, planned)
@@ -480,7 +496,12 @@ def payouts(persona: Persona, streams: tuple, stress_episodes: tuple) -> tuple:
                 elif outcome == "late":
                     moment += timedelta(days=int(rng.integers(*settings.late_days)))
 
-                if rng.random() < settings.weekend_shift_share:
+                if employer:
+                    # Место личного розыгрыша переноса пустое: иначе
+                    # сдвинулись бы час и частичная выплата.
+                    rng.random()
+
+                if calendar_rng.random() < settings.weekend_shift_share:
                     moment = _shift_for_calendar(moment)
 
                 moment = moment.replace(

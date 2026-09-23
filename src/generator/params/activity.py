@@ -49,21 +49,24 @@ class ActivityParams:
     )
 
     # Множитель по состоянию жизненного цикла.
+    #
+    # Только состояния, которые заданы НЕ лентой: срок с
+    # регистрации, скрытый стресс и нехватка денег на платёж.
+    # Ярлыки, выведенные из объёма действий (active, growing,
+    # stable, dormant, churn_risk, churned, returned,
+    # closed_relationship), поведения не меняют: ярлык описывает
+    # поведение, а не вызывает его. Иначе множитель на них
+    # замыкал круг — ноль у dormant не давал клиенту ни одного
+    # действия, чтобы выйти из молчания, спад у churn_risk
+    # углублял сам себя, рост у growing разгонял сам себя.
+    # Настоящее молчание задают скрытые паузы (silenced_streams).
     state_factor: dict = field(
         default_factory=lambda: {
             "prospect": 0.0,
             "onboarding": 0.55,
             "new_client": 0.85,
-            "active": 1.0,
-            "growing": 1.30,
-            "stable": 1.0,
             "financial_stress": 0.80,
             "delinquent": 0.65,
-            "dormant": 0.0,
-            "churn_risk": 0.45,
-            "churned": 0.0,
-            "returned": 0.90,
-            "closed_relationship": 0.0,
         }
     )
 

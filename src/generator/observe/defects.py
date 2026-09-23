@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 
 from .. import params as params_module
+from ..config import PAYLOAD_REQUIRED
 from ..rng import NS_OBSERVE, keyed_rng, stable_hash
 from .envelope import Event
 
@@ -17,6 +18,11 @@ from .envelope import Event
 #
 #   пропуски полей с причиной
 #   смена схемы: поле начинает собираться с определённой даты
+#
+# Несобранное поле ОТСУТСТВУЕТ, как любое неприменимое
+# (envelope.py): ключ удаляется, а не получает null. Обязательное
+# поле события дефект не трогает: без него запись нарушала бы
+# контракт, а не была бы просто неполной.
 #
 # Чего здесь БОЛЬШЕ НЕТ: дублей, исправлений и сбоев источника.
 # Запись приходит в выгрузку один раз и сразу окончательной, а
@@ -39,8 +45,8 @@ def _rng(event: Event, slot: int):
 
 def _apply_schema_change(event: Event) -> Event:
     """
-    Поле начинает собираться с определённой даты: до неё оно
-    пусто с причиной not_collected.
+    Поле начинает собираться с определённой даты: до неё его
+    в записи нет.
     """
 
     settings = params_module.active().defects
@@ -56,7 +62,7 @@ def _apply_schema_change(event: Event) -> Event:
 
         field = rule["field"]
 
-        if field not in payload or payload[field] is None:
+        if field not in payload or field in _required(event):
             continue
 
         moment = datetime.fromisoformat(rule["from"])
@@ -65,7 +71,7 @@ def _apply_schema_change(event: Event) -> Event:
             if not changed:
                 payload = dict(payload)
                 changed = True
-            payload[field] = None
+            del payload[field]
 
     return replace(event, payload=payload) if changed else event
 
@@ -94,12 +100,18 @@ def _apply_field_missing(event: Event, rng) -> Event:
             payload = dict(payload)
             changed = True
 
+        # GA4 пишет в обязательное поле экрана своё «(not set)»:
+        # это его настоящее значение, а не пропуск.
         if field == "firebase_screen":
             payload[field] = settings.ga4_not_set
-        else:
-            payload[field] = None
+        elif field not in _required(event):
+            del payload[field]
 
     return replace(event, payload=payload) if changed else event
+
+
+def _required(event: Event) -> frozenset:
+    return PAYLOAD_REQUIRED.get(event.event_type, frozenset())
 
 
 def apply(events: list) -> list:

@@ -145,6 +145,53 @@ def _favourites_for(
     return favourites
 
 
+def _carried_favourites(last: Era, settlement: str, fresh: dict) -> dict:
+    """
+    Любимые точки после переезда без смены привычек.
+
+    Клиент держится прежних сетей там, где они есть в новом
+    городе: сеть узнаётся по merchant_id, точка берётся самая
+    популярная из её точек в новом городе. Категория, где ни
+    одной прежней сети нет, получает новые любимые точки.
+    """
+
+    favourites = dict(fresh)
+
+    for category, previous in last.favourites.items():
+
+        old = {item.outlet_id: item for item in merchants.outlets_of(last.settlement, category)}
+
+        pool = merchants.outlets_of(settlement, category)
+
+        carried: list[Favourite] = []
+        seen: set[str] = set()
+
+        for item in previous:
+
+            brand = old[item.outlet_id].merchant_id if item.outlet_id in old else None
+
+            if brand is None:
+                continue
+
+            outlets = [outlet for outlet in pool if outlet.merchant_id == brand]
+
+            if not outlets:
+                continue
+
+            pick = max(outlets, key=lambda outlet: (outlet.popularity, outlet.outlet_id))
+
+            if pick.outlet_id in seen:
+                continue
+
+            seen.add(pick.outlet_id)
+            carried.append(Favourite(category=category, outlet_id=pick.outlet_id, weight=item.weight))
+
+        if carried:
+            favourites[category] = tuple(carried)
+
+    return favourites
+
+
 def _habit_categories(persona: Persona) -> tuple:
 
     settings = params_module.active().merchants
@@ -322,7 +369,12 @@ def build_habits(persona: Persona, events: tuple) -> Habits:
         else:
             continue
 
-        if rng.random() >= chance:
+        reset = rng.random() < chance
+
+        # Переезд меняет город всегда: покупки в старом городе
+        # после переезда противоречили бы анкете. От розыгрыша
+        # зависит только то, останутся ли любимые сети.
+        if not reset and event.kind != "move":
             continue
 
         last = eras[-1]
@@ -337,13 +389,18 @@ def build_habits(persona: Persona, events: tuple) -> Habits:
             districts = merchants.geography.by_name(place).districts
             work_district = districts[rng.integers(0, len(districts))]
 
+        favourites = _favourites_for(persona, settlement, categories, salt)
+
+        if not reset:
+            favourites = _carried_favourites(last, settlement, favourites)
+
         eras.append(
             Era(
                 valid_from=event.ts,
                 settlement=settlement,
                 home_district=home_district,
                 work_district=work_district,
-                favourites=_favourites_for(persona, settlement, categories, salt),
+                favourites=favourites,
                 cause=event.kind,
             )
         )

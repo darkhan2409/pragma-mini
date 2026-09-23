@@ -208,7 +208,36 @@ def _funnel(state: ClientState, application: Application, ts: datetime, approved
     """
     Воронка заявки в приложении: просмотр, форма, проверка,
     решение.
+
+    Экраны приложения живут только внутри сессии, а сессия
+    начинается со входа. Заявка открывает свою сессию: вход
+    незадолго до подачи, дальше экраны воронки. Сдвиг входа
+    берётся из хеша заявки, а не из rng: иначе сдвинулся бы
+    розыгрыш решения по ней.
     """
+
+    session_id = (
+        f"ses_{stable_hash('application', state.client_id, application.application_id) % 10 ** 12:012d}"
+    )
+
+    login_ts = ts - timedelta(seconds=20 + stable_hash("login", application.application_id) % 100)
+
+    state.emit(
+        state.factory.make(
+            "app_operation",
+            login_ts,
+            {
+                "domain": "auth",
+                "operation": "login",
+                "status": "success",
+                "amount": None,
+                "error_code": None,
+                "device_new": False,
+                "session_id": session_id,
+                "contract_id": None,
+            },
+        )
+    )
 
     moment = ts
 
@@ -228,6 +257,8 @@ def _funnel(state: ClientState, application: Application, ts: datetime, approved
                     "product_id": application.product_id,
                     "funnel_stage": stage,
                     "reject_reason": reject_reason if stage == "rejected" else None,
+                    "session_id": session_id,
+                    "application_id": application.application_id,
                 },
             )
         )
@@ -1459,6 +1490,23 @@ def _new_profile_value(state: ClientState, name: str, event):
 
         if event.kind == "job_loss":
             return CLEAR
+
+        # День зарплаты на новой работе назначает работодатель:
+        # анкета берёт его у нового зарплатного потока, иначе она
+        # разошлась бы с выплатами в ленте.
+        start = event.ts + timedelta(days=int(event.payload.get("gap_days", 0)))
+
+        salary = next(
+            (
+                item
+                for item in state.income_streams
+                if item.kind == "salary" and item.valid_from == start
+            ),
+            None,
+        )
+
+        if salary is not None:
+            return int(salary.payday)
 
         low, high = params_module.active().income.salary_day_range
         return int(
