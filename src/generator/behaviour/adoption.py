@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from .. import params as params_module
 from ..life.persona import Persona
@@ -416,22 +416,12 @@ def migration_targets(ts: datetime, held_codes: frozenset) -> tuple:
     return tuple(result)
 
 
-def first_use_delay(rng) -> timedelta:
-
-    settings = params_module.active().products.adoption
-
-    low, high = settings.get("first_use_delay_days", (0, 21))
-
-    return timedelta(days=int(rng.integers(low, high + 1)))
-
-
 __all__ = [
     "Candidate",
     "adoption_curve",
     "application_probability",
     "candidates",
     "eligible",
-    "first_use_delay",
     "migration_targets",
     "pick",
 ]

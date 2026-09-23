@@ -292,6 +292,15 @@ class ClientState:
                 return card
         return None
 
+    def bank_income(self) -> int:
+        """
+        Доход, который видит банк: заявленный в анкете с учётом
+        сообщённых изменений. Настоящий доход банку неизвестен,
+        поэтому ни сумма, ни одобрение от него не зависят.
+        """
+
+        return max(1, int(self.profile_values.get("declared_income") or self.persona.declared_income))
+
     def worst_dpd(self) -> int:
         return max((state.dpd for state in self.loans.values() if not state.closed), default=0)
 
@@ -546,7 +555,6 @@ class CommunitySimulation:
         previous_product_id: str | None = None,
         migration_reason: str | None = None,
         emit_events: bool = True,
-        not_before: datetime | None = None,
     ) -> Contract:
         """
         Открывает договор на версии продукта, действующей на дату
@@ -882,7 +890,7 @@ class CommunitySimulation:
 
         ratio = float(products.bank_rules.get("max_debt_service_ratio", 0.5))
 
-        income = max(1, int(state.persona.true_income))
+        income = state.bank_income()
 
         open_loans = tuple(loan for loan in state.loans.values() if not loan.closed)
 
@@ -971,7 +979,7 @@ class CommunitySimulation:
 
         ratio = float(products.bank_rules.get("max_debt_service_ratio", 0.5))
 
-        income = max(1, int(state.persona.true_income))
+        income = state.bank_income()
 
         open_loans = tuple(item for item in state.loans.values() if not item.closed)
 
@@ -1028,7 +1036,7 @@ class CommunitySimulation:
 
         terms = view.version_at(ts).terms
 
-        income = state.persona.true_income
+        income = state.bank_income()
 
         family = view.family
 
@@ -1106,21 +1114,9 @@ class CommunitySimulation:
         return None, None
 
 
-# ============================================================
-# ЗАПУСК
-# ============================================================
-
-
-def simulate_community(community_id: int, ordinals: tuple) -> CommunityResult:
-    from .engine import run_community
-
-    return run_community(community_id, ordinals)
-
-
 __all__ = [
     "Action",
     "ClientState",
     "CommunityResult",
     "CommunitySimulation",
-    "simulate_community",
 ]

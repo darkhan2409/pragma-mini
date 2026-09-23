@@ -155,8 +155,6 @@ def _card_statement(sim, state: ClientState, day: datetime, month: datetime) -> 
     это пропуск и просрочка, как у обычного кредита.
     """
 
-    settings = params_module.active().products
-
     month_index = cal.month_index(month)
 
     for contract_id, credit in list(state.card_credits.items()):
@@ -175,9 +173,7 @@ def _card_statement(sim, state: ClientState, day: datetime, month: datetime) -> 
 
         if interest > 0:
 
-            credit.accrued_interest += interest
-
-            _emit_money(
+            charged = _emit_money(
                 state,
                 day.replace(hour=23, minute=5),
                 "fee_charge",
@@ -193,6 +189,11 @@ def _card_statement(sim, state: ClientState, day: datetime, month: datetime) -> 
                     "merchant_country": "KZ",
                 },
             )
+
+            # Отклонённое списание в долг не ложится: иначе клиент
+            # платил бы проценты, которых нет в проводках.
+            if charged.payload.get("status") == "approved":
+                credit.accrued_interest += interest
 
         payment = card_rules.minimum_payment(credit, month_index)
 
@@ -230,7 +231,7 @@ def _card_statement(sim, state: ClientState, day: datetime, month: datetime) -> 
 def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_event, month_index) -> bool:
     """
     Платёж по карте: перевод со своего счёта на счёт карты.
-    Обе стороны помечены own_account, поэтому деньги клиента не
+    Обе стороны помечены Own account, поэтому деньги клиента не
     исчезают и не появляются.
     """
 
@@ -343,7 +344,7 @@ def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_ev
             # Списание по выписке делает сам банк, а не клиент.
             "channel": "system",
             "contract_id": contract_id,
-            "counterparty": "own_account",
+            "counterparty": "Own account",
             "reason": "card_statement",
             "mcc": MCC_TRANSFER,
             "merchant_country": "KZ",
@@ -368,7 +369,7 @@ def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_ev
         {
             "channel": "system",
             "contract_id": contract_id,
-            "counterparty": "own_account",
+            "counterparty": "Own account",
             "reason": "card_statement",
             "mcc": MCC_TRANSFER,
             "merchant_country": "KZ",
@@ -522,8 +523,6 @@ def _sweep_bills(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
 
 def month_end(sim, state: ClientState, day: datetime) -> None:
-
-    settings = params_module.active().products
 
     month = cal.month_start(day)
 

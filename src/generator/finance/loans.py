@@ -231,10 +231,22 @@ def milestone_reached(state: LoanState, dpd: int) -> int | None:
     return None
 
 
-def is_closed(state: LoanState) -> bool:
-    return state.principal_outstanding <= 0 and all(
-        item.status in ("paid", "scheduled") for item in state.schedule
-    ) and all(item.status == "paid" for item in state.schedule)
+def overdue_interest(state: LoanState) -> int:
+    """
+    Непогашенные проценты по взносам, срок которых уже наступил.
+
+    Тело этих взносов по-прежнему сидит в principal_outstanding:
+    оно уменьшается только оплатой. Поэтому к телу добавляются
+    только проценты, а не весь arrears_amount, иначе тело
+    просроченного взноса считалось бы дважды. Штрафов за
+    просрочку в модели нет.
+    """
+
+    return sum(
+        max(0, item.outstanding - max(0, item.principal - item.principal_paid))
+        for item in state.schedule
+        if item.status in ("due", "partially_paid", "missed")
+    )
 
 
 def payoff_amount(state: LoanState) -> int:
@@ -242,7 +254,7 @@ def payoff_amount(state: LoanState) -> int:
     Сколько нужно, чтобы закрыть кредит досрочно.
     """
 
-    return int(state.principal_outstanding + arrears_amount(state))
+    return int(state.principal_outstanding + overdue_interest(state))
 
 
 def monthly_payment(state: LoanState) -> int:
@@ -312,7 +324,7 @@ def restructure(state: LoanState, ts: datetime, extra_months: int) -> None:
     переносится в тело долга.
     """
 
-    outstanding = state.principal_outstanding + arrears_amount(state)
+    outstanding = payoff_amount(state)
 
     remaining = [item for item in state.schedule if item.status in ("scheduled",)]
 
@@ -329,7 +341,6 @@ def restructure(state: LoanState, ts: datetime, extra_months: int) -> None:
 
     state.schedule = kept + fresh
     state.principal_outstanding = outstanding
-    state.arrears = 0
     state.dpd = 0
     state.delinquency_marks = ()
     state.restructured = True
@@ -345,10 +356,10 @@ __all__ = [
     "days_past_due",
     "debt_service",
     "due_today",
-    "is_closed",
     "mark_missed",
     "milestone_reached",
     "open_loan",
+    "overdue_interest",
     "payoff_amount",
     "register_due",
     "restructure",

@@ -219,20 +219,6 @@ CLIENT_ACTION_EVENT_TYPES: frozenset[str] = frozenset(
     }
 )
 
-# Действие ЧУЖОЙ руки: деньги пришли снаружи, вернул мерчант,
-# перевёл родственник. Банк тут ни при чём, и клиент тоже.
-EXTERNAL_EVENT_TYPES: frozenset[str] = frozenset(
-    {
-        "salary_credit",
-        "pension_credit",
-        "other_income_credit",
-        "transfer_in",
-        "p2p_in",
-        "refund",
-        "chargeback",
-    }
-)
-
 
 # ============================================================
 # ТИПЫ СОБЫТИЙ
@@ -554,7 +540,7 @@ _spec(
     "fraud_alert",
     "antifraud",
     (
-        _f("subject", "str", False, LEVEL_OPERATION, "объект проверки: card, transfer, login"),
+        _f("subject", "str", False, LEVEL_OPERATION, "объект проверки: card, transfer"),
         _f("card_id", "str", True, LEVEL_CONTRACT, "карта"),
         _f("account_id", "str", True, LEVEL_CONTRACT, "счёт"),
         _f("score_band", "str", False, LEVEL_OPERATION, "полоса риска: low, medium, high"),
@@ -712,56 +698,6 @@ SCHEMA_CHANGES: tuple[dict, ...] = (
      "reason": "not_collected"},
     {"source": "banners", "field": "campaign_code", "from": "2025-01-15",
      "reason": "not_collected"},
-)
-
-
-# ============================================================
-# ЗАПРЕЩЁННЫЕ ПОЛЯ RAW
-# ============================================================
-#
-# Готовые ответы и скрытые причины не попадают в наблюдаемые
-# данные ни колонкой, ни ключом payload. Проверяется тестом
-# и proxy-leak audit.
-# ============================================================
-
-FORBIDDEN_RAW_FIELDS: frozenset[str] = frozenset(
-    {
-        "future_churn",
-        "will_default",
-        "will_churn",
-        "fraud_persona",
-        "is_fraudster",
-        "scenario",
-        "archetype",
-        "household_id",
-        "relation_type",
-        "employer_id",
-        "community_id",
-        "client_ordinal",
-        "stress_episode",
-        "stress_level",
-        "financial_discipline",
-        "risk_tolerance",
-        "spending_impulsivity",
-        "digital_affinity",
-        "price_sensitivity",
-        "merchant_loyalty",
-        "channel_preferences",
-        "mobility",
-        "sociality",
-        "fraud_vulnerability",
-        "credit_appetite",
-        "savings_propensity",
-        "true_income",
-        "hcb_role",
-        "activity_mode",
-        "pause_reason",
-        "clicked",
-        "campaign_clicked",
-        "life_event",
-        "trait_shift",
-        "lifecycle_state",
-    }
 )
 
 

@@ -111,7 +111,6 @@ def choose_outlet(
     ts: datetime,
     rng: KeyedRandom,
     online_hint: bool | None = None,
-    travel_settlement: str | None = None,
     foreign_country: str | None = None,
 ) -> Choice | None:
     """
@@ -126,7 +125,7 @@ def choose_outlet(
 
     era = habits.era_at(ts)
 
-    settlement_name = travel_settlement or era.settlement
+    settlement_name = era.settlement
 
     settlement = geography.by_name(settlement_name)
 

@@ -206,7 +206,6 @@ class LoanState:
     rate: float
     autopay: bool
     dpd: int = 0
-    arrears: int = 0
     delinquency_marks: tuple = ()
     closed: bool = False
     restructured: bool = False
@@ -294,18 +293,6 @@ class Offer:
     seen_at: datetime | None = None
 
 
-@dataclass
-class SupportCase:
-    case_id: str
-    client_id: str
-    topic: str
-    channel: str
-    opened_at: datetime
-    status: str = "open"
-    resolution: str | None = None
-    resolved_at: datetime | None = None
-
-
 __all__ = [
     "CardCreditState",
     "ACCOUNT_CARD",
@@ -330,5 +317,4 @@ __all__ = [
     "Installment",
     "LoanState",
     "Offer",
-    "SupportCase",
 ]

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from .behaviour import communications as comm_module
 from .behaviour import outcomes as outcome_module
 from . import config
+from . import params as params_module
 from .config import (
     SOURCE_AVAILABILITY,
 )
@@ -14,6 +15,7 @@ from .finance import loans as loan_rules
 from .finance.entities import CARD_BLOCKED, Offer
 from .finance.ledger import COUNTERPART_GOVERNMENT
 from .world.dictionaries import MCC_TRANSFER
+from .world.relationships import _external
 from .life import stress as stress_module
 from .rng import COMPONENT_OUTCOME, NS_SESSION, event_rng, stable_hash
 from .simulate import ClientState, _transfer_id, in_window
@@ -146,12 +148,9 @@ def _on_session(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             )
             if target_loan is None:
                 feasible = False
-            elif (
-                state.ledger.payment_capacity(step.ts) <= 0
-                and state.ledger.hidden_funds() <= 0
-            ):
-                # Платить нечем ни со счёта, ни из запаса: успех
-                # операции остался бы без денежного следствия.
+            elif not _can_repay(state, step.ts, loan_rules.arrears_amount(target_loan)):
+                # Платить нечем: успех операции остался бы без
+                # денежного следствия.
                 feasible = False
                 insufficient = True
 
@@ -285,7 +284,27 @@ def _on_session(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             _topup_deposit(state, step.ts, target_deposit, deposit_amount, session)
 
         if operation in TRANSFER_OPERATIONS:
-            _transfer_in_app(state, step.ts, operation, transfer_amount, transfer_pair, session)
+            _transfer_in_app(sim, state, step.ts, operation, transfer_amount, transfer_pair, session)
+
+
+def _can_repay(state: ClientState, ts: datetime, amount: int) -> bool:
+    """
+    Спишет ли repay_loan хоть что-то прямо сейчас.
+
+    Правило то же, что у самого платежа: кредитка не в счёт, а
+    частичный платёж не меньше минимальной доли. Подтягивание
+    денег из другого банка в приложении не ждут: клиент видит
+    нехватку на экране сразу.
+    """
+
+    from .engine_credit import _payment_capacity, _payment_sources
+
+    if _payment_sources(state, ts, amount):
+        return True
+
+    capacity = _payment_capacity(state, ts)
+
+    return capacity > 0 and capacity >= params_module.active().products.partial_payment_min_share * amount
 
 
 def _show_banners(state: ClientState, ts: datetime, session, rng, shown_offers: set) -> None:
@@ -300,8 +319,6 @@ def _show_banners(state: ClientState, ts: datetime, session, rng, shown_offers: 
 
     if ts < BANNERS_AVAILABLE_FROM:
         return
-
-    from . import params as params_module
 
     if rng.random() >= params_module.active().activity.banner_screen_share:
         return
@@ -324,7 +341,9 @@ def _show_banners(state: ClientState, ts: datetime, session, rng, shown_offers: 
         campaign = None
 
         if family:
-            offer_id = f"off_{stable_hash('banner', state.client_id, ts.toordinal(), index) % 10 ** 12:012d}"
+            # Показ уникален сессией, слотом и оффером: день и номер
+            # на экране повторяются в каждой сессии дня.
+            offer_id = f"off_{stable_hash('banner', state.client_id, session.session_id, slot, offer) % 10 ** 12:012d}"
             campaign = comm_module.campaign_for_family(family)
 
         # Секунда своя у каждого баннера экрана: два показа в одно
@@ -340,7 +359,7 @@ def _show_banners(state: ClientState, ts: datetime, session, rng, shown_offers: 
             "session_id": session.session_id,
         }
 
-        shown = state.emit(
+        state.emit(
             state.factory.make(
                 "banner_shown",
                 shown_at,
@@ -558,8 +577,6 @@ def _transfer_amount(state: ClientState, ts: datetime, rng) -> int:
     средств вместо сплошной.
     """
 
-    from . import params as params_module
-
     income = max(50_000, int(state.persona.true_income))
 
     wish = max(1_000, int(income * float(rng.uniform(0.02, 0.35)) / 1_000) * 1_000)
@@ -575,6 +592,7 @@ def _transfer_amount(state: ClientState, ts: datetime, rng) -> int:
 
 
 def _transfer_in_app(
+    sim,
     state: ClientState,
     ts: datetime,
     operation: str,
@@ -587,9 +605,9 @@ def _transfer_in_app(
 
     Перевод между своими счетами двигает деньги внутри клиента и
     записывается парой сторон. Перевод по телефону, карте или
-    шаблону уходит наружу одной ногой: встречная сторона живёт у
-    другого человека и наблюдается его собственной выгрузкой,
-    если он клиент этого банка.
+    шаблону клиенту этого банка тоже записывается парой: списание
+    у отправителя и зачисление у получателя. Перевод в другой банк
+    уходит наружу одной ногой.
     """
 
     if operation == "transfer_own":
@@ -600,7 +618,7 @@ def _transfer_in_app(
         source, target = pair
 
         # Перевод между своими счетами наблюдается парой сторон
-        # с отметкой own_account: деньги не покидают клиента.
+        # с отметкой Own account: деньги не покидают клиента.
         #
         # Стороны РАЗНЫЕ: со счёта списали (transfer_out), на счёт
         # зачислили (transfer_in). Один тип на обе ноги делал из
@@ -624,8 +642,6 @@ def _transfer_in_app(
 
         return
 
-    from .engine import graph_counterpart_name
-
     sources = state.ledger.payment_sources(ts, amount)
 
     if not sources:
@@ -633,25 +649,82 @@ def _transfer_in_app(
 
     account = sources[0]
 
-    # Вторая нога живёт у другого человека и наблюдается его
+    counterpart = _app_payee(sim, state, ts, session)
+
+    transfer_id = _transfer_id(
+        state.client_id, ts, _second_of_day(ts), scope=f"app:{session.session_id}"
+    )
+
+    body = {
+        "channel": "app",
+        "counterparty": counterpart.masked_name,
+        "mcc": MCC_TRANSFER,
+        "merchant_country": "KZ",
+        "reason": "transfer",
+        "session_id": session.session_id,
+        "transfer_id": transfer_id,
+    }
+
+    # Получатель — клиент этого банка: перевод внутренний, и
+    # зачисление видно в его ленте, как у планового перевода.
+    # Обе ноги или ни одной: на краю окна зачисление уже не
+    # попадает в выгрузку.
+    other = sim.clients.get(counterpart.client_ordinal) if counterpart.client_ordinal is not None else None
+    target = other.primary_card_account(ts) if other is not None else None
+
+    if target is not None and in_window(ts + timedelta(seconds=1)):
+
+        sent = _emit_money(
+            state, ts, "p2p_out", account.account_id, amount, "debit", target.account_id, body,
+        )
+
+        if sent.payload.get("status") == "approved":
+            from .engine import graph_counterpart_name
+
+            _emit_money(
+                other, ts + timedelta(seconds=1), "p2p_in", target.account_id, amount, "credit",
+                account.account_id,
+                {
+                    "channel": "system",
+                    "counterparty": graph_counterpart_name(state),
+                    "mcc": MCC_TRANSFER,
+                    "merchant_country": "KZ",
+                    "reason": "transfer",
+                    "transfer_id": transfer_id,
+                },
+            )
+
+        return
+
+    # Получатель в другом банке: вторая нога наблюдается его
     # собственной выгрузкой. transfer_id всё равно нужен: по нему
     # канонический слой узнаёт сторону перевода, а без него
     # списание выглядит покупкой без мерчанта.
     _emit_money(
         state, ts, "transfer_out", account.account_id, amount, "debit",
-        state.ledger.other_bank_id,
-        {
-            "channel": "app",
-            "counterparty": graph_counterpart_name(state),
-            "mcc": MCC_TRANSFER,
-            "merchant_country": "KZ",
-            "reason": "transfer",
-            "session_id": session.session_id,
-            "transfer_id": _transfer_id(
-                state.client_id, ts, _second_of_day(ts), scope=f"app:{session.session_id}"
-            ),
-        },
+        f"external:{counterpart.counterpart_id}", body,
     )
+
+
+def _app_payee(sim, state: ClientState, ts: datetime, session):
+    """
+    Кому клиент переводит из приложения.
+
+    Получатель это другой человек: деньги уходят из системы
+    клиента, а не на его же скрытый счёт. Берётся одна из живых
+    связей клиента; без связей — постоянный внешний получатель.
+    """
+
+    people = [
+        item.counterpart
+        for item in sim.graph.active(state.ordinal, ts)
+        if item.relation_type not in ("employer", "own_account_other_bank")
+    ]
+
+    if not people:
+        return _external("person", f"app_payee:{state.client_id}")
+
+    return people[stable_hash("app_payee", session.session_id, _second_of_day(ts)) % len(people)]
 
 
 def _own_transfer(
@@ -670,7 +743,7 @@ def _own_transfer(
 ) -> bool:
     """
     Перевод между своими счетами: две стороны с одинаковой
-    суммой и отметкой own_account, чтобы деньги не выглядели
+    суммой и отметкой Own account, чтобы деньги не выглядели
     ни внешним расходом, ни внешним доходом.
 
     Проводка одна: её делает первая нога, вторая только записывает
@@ -714,7 +787,7 @@ def _own_transfer(
         {
             "channel": "app" if session_id else "ecom",
             "contract_id": contract_id,
-            "counterparty": "own_account",
+            "counterparty": "Own account",
             "reason": reason,
             "merchant_country": "KZ",
             "transfer_id": transfer_id,
@@ -736,7 +809,7 @@ def _own_transfer(
             "contract_id": (
                 contract_id if credit_contract_id is _SAME_CONTRACT else credit_contract_id
             ),
-            "counterparty": "own_account",
+            "counterparty": "Own account",
             "reason": reason,
             "merchant_country": "KZ",
             "transfer_id": transfer_id,
@@ -774,6 +847,11 @@ def _on_communication(sim, state: ClientState, ts: datetime, payload: dict) -> N
     contact = payload["contact"]
 
     state.comm_fatigue += 1
+
+    # Сервисное сообщение и есть уведомление: после него повода
+    # для повышенного веса сервисных рассылок больше нет.
+    if contact.purpose == "service":
+        state.pending_notice = False
 
     product_id = None
 

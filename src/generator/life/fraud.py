@@ -42,8 +42,6 @@ class FraudEpisode:
     opens_case: bool
     chargeback: bool
     reissue: bool
-    recovery_days: int
-    is_mule_leg: bool = False
 
 
 def plan_episodes(persona: Persona, events: tuple) -> tuple:
@@ -183,7 +181,6 @@ def plan_episodes(persona: Persona, events: tuple) -> tuple:
                 opens_case=opens_case,
                 chargeback=chargeback,
                 reissue=reissue,
-                recovery_days=int(item_rng.integers(*settings.recovery_days)),
             )
         )
 
@@ -192,19 +189,4 @@ def plan_episodes(persona: Persona, events: tuple) -> tuple:
     return tuple(episodes)
 
 
-def in_recovery(episodes: tuple, ts: datetime) -> bool:
-    """
-    После инцидента клиент какое-то время осторожничает.
-    """
-
-    for episode in episodes:
-        if not episode.steps:
-            continue
-        last = episode.steps[-1].ts
-        if last <= ts < last + timedelta(days=episode.recovery_days):
-            return True
-
-    return False
-
-
-__all__ = ["FraudEpisode", "FraudStep", "in_recovery", "plan_episodes"]
+__all__ = ["FraudEpisode", "FraudStep", "plan_episodes"]

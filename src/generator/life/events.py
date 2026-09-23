@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
 from .. import params as params_module
@@ -140,8 +140,6 @@ def plan_events(persona: Persona) -> tuple:
 
     events: list[LifeEvent] = []
 
-    family_status = persona.family_status
-    counts: dict[str, int] = {}
 
     for kind in EVENT_KINDS:
 
@@ -186,8 +184,6 @@ def plan_events(persona: Persona) -> tuple:
                         item_rng.uniform(1.06, 1.30) if kind == "income_up" else item_rng.uniform(0.70, 0.94)
                     )
                 }
-            elif kind == "child_birth":
-                payload = {"children_after": persona.children + 1 + index}
             elif kind == "big_purchase":
                 payload = {
                     "category": str(
@@ -206,12 +202,6 @@ def plan_events(persona: Persona) -> tuple:
                 payload = {"months": int(item_rng.integers(1, 6))}
             elif kind == "education":
                 payload = {"months": int(item_rng.integers(3, 12))}
-            elif kind in ("wedding", "divorce"):
-                allowed = settings.life_event_requires.get(kind, ())
-                if family_status not in allowed:
-                    continue
-                family_status = "married" if kind == "wedding" else "divorced"
-                payload = {"family_status_after": family_status}
 
             known_share = settings.profile_change_known_share.get(kind, 0.0)
 
@@ -233,26 +223,37 @@ def plan_events(persona: Persona) -> tuple:
                 )
             )
 
-            counts[kind] = counts.get(kind, 0) + 1
-
     events.sort(key=lambda item: (item.ts, item.kind))
 
-    return tuple(events)
+    return tuple(_in_time_order(persona, events))
 
 
-def events_before(events: tuple, ts: datetime) -> tuple:
-    return tuple(item for item in events if item.ts <= ts)
+def _in_time_order(persona: Persona, events: list) -> list:
+    """
+    Семейное положение меняется по порядку ВРЕМЕНИ, а не
+    розыгрыша: даты разыгрываются независимо, и развод иначе мог
+    оказаться раньше свадьбы. Событие, которое в этот момент
+    невозможно, выпадает. Рождению значение не нужно: анкета
+    добавляет по ребёнку на каждое сообщение банку.
+    """
 
+    settings = params_module.active().lifecycle
 
-def latest_move(events: tuple, ts: datetime) -> LifeEvent | None:
+    family_status = persona.family_status
 
-    found = None
+    kept = []
 
-    for item in events:
-        if item.kind == "move" and item.ts <= ts:
-            found = item
+    for event in events:
 
-    return found
+        if event.kind in ("wedding", "divorce"):
+            if family_status not in settings.life_event_requires.get(event.kind, ()):
+                continue
+            family_status = "married" if event.kind == "wedding" else "divorced"
+            event = replace(event, payload={"family_status_after": family_status})
+
+        kept.append(event)
+
+    return kept
 
 
 def active_vacation(events: tuple, ts: datetime) -> LifeEvent | None:
@@ -266,24 +267,10 @@ def active_vacation(events: tuple, ts: datetime) -> LifeEvent | None:
     return None
 
 
-def active_illness(events: tuple, ts: datetime) -> LifeEvent | None:
-
-    for item in events:
-        if item.kind != "illness":
-            continue
-        if item.ts <= ts < item.ts + timedelta(days=int(item.payload.get("days", 0))):
-            return item
-
-    return None
-
-
 __all__ = [
     "EVENT_KINDS",
     "PROFILE_EFFECT",
     "LifeEvent",
-    "active_illness",
     "active_vacation",
-    "events_before",
-    "latest_move",
     "plan_events",
 ]
