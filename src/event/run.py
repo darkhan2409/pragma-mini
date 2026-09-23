@@ -7,7 +7,7 @@ from pathlib import Path
 from src.preprocessing.run import EXIT_BLOCKED, EXIT_OK
 from src.preprocessing.settings import GROUPS, normalize_group
 
-from .settings import ConfigError, EmbeddingConfig
+from .settings import ConfigError, EventConfig
 
 
 # ============================================================
@@ -16,15 +16,15 @@ from .settings import ConfigError, EmbeddingConfig
 #
 # Одна команда на группу:
 #
-#   python -m src.embedding.run train|val|test
+#   python -m src.event.run train|val|test
 #
-# Вход: data/07_batches/<group>/batches.parquet и
-# data/08_masked/<group>/masked.parquet, оба сразу.
-# Выход: data/09_embeddings/<group>/ — векторы всех токенов и
-# веса слоя.
+# Вход: data/07_batches, data/08_masked и веса входного слоя из
+# data/09_embeddings.
+# Выход: data/10_events/<group>/ — вектор каждого настоящего
+# события и веса энкодера.
 #
-# Этап считает вход модели и показывает его человеку. Энкодеров,
-# внимания, MLM-головы и обучения здесь нет.
+# Этап сворачивает токены события в вектор события. History
+# Encoder, профиль, TimeRoPE и обучение — не здесь.
 # ============================================================
 
 
@@ -36,32 +36,32 @@ def run_group(args) -> int:
     # необязательным дополнением, и без него команда обязана
     # сказать это внятно, а не упасть трассировкой импорта.
     try:
-        from src.tokenization.finalvocab import VocabError
+        from src.embedding.inputs import InputError
         from src.tokenization.specials import SpecialsError
 
-        from .build import build_group
-        from .inputs import InputError
+        from .build import EventError, build_group
+        from .gather import GatherError
 
     except ModuleNotFoundError as error:
         print(
-            f"[embedding] нет модуля {error.name}: этап считает тензоры, "
+            f"[event] нет модуля {error.name}: этап считает тензоры, "
             "установите зависимость командой pip install -e .[torch]"
         )
         return EXIT_BLOCKED
 
     try:
-        config = EmbeddingConfig.load(Path(args.config) if args.config else None)
+        config = EventConfig.load(Path(args.config) if args.config else None)
 
         report = build_group(group, config)
 
-    except (ConfigError, InputError, SpecialsError, VocabError) as error:
-        print(f"[embedding] группа {group}: {error}")
+    except (ConfigError, EventError, GatherError, InputError, SpecialsError) as error:
+        print(f"[event] группа {group}: {error}")
         return EXIT_BLOCKED
 
-    print(f"[embedding] группа {group} → {report['table']}")
+    print(f"[event] группа {group} → {report['table']}")
     print(f"    веса {report['weights']}")
     print(
-        f"    клиентов {report['clients']}, векторов {report['vectors']} "
+        f"    клиентов {report['clients']}, событий {report['events']} "
         f"по {report['dim']} чисел; {report['size'] / (1 << 20):.1f} МиБ"
     )
 
@@ -70,12 +70,12 @@ def run_group(args) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
 
-    parser = argparse.ArgumentParser(prog="python -m src.embedding.run")
+    parser = argparse.ArgumentParser(prog="python -m src.event.run")
 
     parser.add_argument("group", choices=GROUPS, help="группа: train, val или test")
     parser.add_argument(
         "--config", type=Path, default=None,
-        help="JSON с переопределениями конфига эмбеддингов",
+        help="JSON с переопределениями конфига энкодера события",
     )
 
     parser.set_defaults(handler=run_group)
