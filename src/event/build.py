@@ -1,0 +1,297 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pyarrow as pa
+import torch
+
+from src.embedding.inputs import Loaded, Source
+from src.embedding.layer import InputEmbedding
+from src.embedding.settings import WEIGHTS_FILE as EMBEDDING_WEIGHTS
+from src.embedding.settings import embeddings_dir
+from src.preprocessing.artifacts import TableWriter
+from src.tokenization.specials import EVT, USR, load_special_tokens
+
+from .encoder import Encoded, EventEncoder
+from .gather import Chunk, Events, calendar_of, chunks, gather
+from .settings import EVENTS_FILE, WEIGHTS_FILE, EventConfig, events_dir
+
+
+# ============================================================
+# ИДЕЯ
+# ============================================================
+#
+# У этапа два файла на выходе:
+#
+#   events.parquet — вектор каждого настоящего события группы;
+#   weights.pt     — веса энкодера.
+#
+# СТРОКА ЭТО ОДНО СОБЫТИЕ. Не клиент: у клиента событий бывают
+# десятки тысяч, и держать их одной ячейкой значило бы делать
+# файл, который не открывается. Заполнителя в файле нет вовсе —
+# только настоящие события, в хронологическом порядке, по клиенту
+# подряд.
+#
+# Вектор один: итоговый, ПОСЛЕ прибавления календаря. Он же
+# уходит в историю. Промежуточный вектор до календаря наружу не
+# пишется.
+#
+# Ключи, значения, границы событий и маски здесь не дублируются —
+# они лежат рядом в data/07_batches, и связь по паре
+# (client_id, event).
+#
+# ВАЖНО, чем этот файл НЕ является. Векторы посчитаны начальным
+# розыгрышем весов. При обучении они считаются заново, в прямом
+# проходе; замороженным входом обучения файл не является.
+# ============================================================
+
+
+EVENTS_SCHEMA = pa.schema(
+    [
+        # --- где лежит событие ---
+        ("batch_index", pa.int32()),
+        ("client_id", pa.string()),
+        ("event", pa.int32()),
+
+        # --- когда оно случилось: чтобы файл читался глазами ---
+        ("event_time", pa.timestamp("us", tz="UTC")),
+
+        # --- итоговый вектор события, d чисел ---
+        ("vector", pa.list_(pa.float32())),
+    ]
+)
+
+
+class EventError(ValueError):
+    """
+    Векторы событий собрать нельзя.
+    """
+
+
+def build_group(
+    group: str,
+    config: EventConfig,
+    directory: Path | None = None,
+) -> dict:
+    """
+    Векторы событий всей группы.
+    """
+
+    source = Source(group, with_calendar=True)
+
+    specials = load_special_tokens()
+
+    embedding = _embedding(group, specials)
+
+    config.check_dim(embedding.dim)
+
+    encoder = EventEncoder(
+        dim=embedding.dim,
+        layers=config.layers,
+        heads=config.heads,
+        feedforward=config.feedforward,
+        dropout=config.dropout,
+        seed=config.seed,
+    )
+
+    encoder.eval()
+
+    directory = Path(directory) if directory is not None else events_dir(group)
+
+    _clear(directory)
+
+    table_path = directory / EVENTS_FILE
+    weights_path = directory / WEIGHTS_FILE
+
+    writer = TableWriter(table_path, EVENTS_SCHEMA)
+
+    clients = 0
+    counted = 0
+    tokens = 0
+
+    try:
+        for number in range(source.count):
+
+            loaded = source.batch(number)
+
+            events = gather(loaded)
+
+            with torch.no_grad():
+                dated = encode(embedding, encoder, loaded, events, config)
+
+            writer.write(_table(loaded, events, dated))
+
+            clients += loaded.model.clients
+            counted += events.count
+            tokens += events.tokens
+
+    finally:
+        rows = writer.close()
+
+    _save(encoder, config, embedding.dim, weights_path)
+
+    return {
+        "group": group,
+        "table": str(table_path),
+        "weights": str(weights_path),
+        "dim": embedding.dim,
+        "seed": config.seed,
+        "layers": config.layers,
+        "heads": config.heads,
+        "rows": rows,
+        "batches": source.count,
+        "clients": clients,
+        "events": counted,
+        "tokens": tokens,
+        "size": table_path.stat().st_size,
+    }
+
+
+def encode(
+    embedding: InputEmbedding,
+    encoder: EventEncoder,
+    loaded: Loaded,
+    events: Events,
+    config: EventConfig,
+    sort: bool = True,
+) -> np.ndarray:
+    """
+    Итоговые векторы всех настоящих событий батча, в порядке
+    плоского списка.
+
+    Порядок ОБХОДА при этом другой: события идут от коротких к
+    длинным, и каждая порция кладётся на свои места по chunk.where.
+    """
+
+    dated = np.zeros((events.count, embedding.dim), dtype=np.float32)
+
+    for chunk in chunks(events, config.events_per_chunk, sort=sort):
+
+        dated[chunk.where] = encode_chunk(
+            embedding, encoder, loaded, chunk
+        ).dated.numpy()
+
+    return dated
+
+
+def encode_chunk(
+    embedding: InputEmbedding,
+    encoder: EventEncoder,
+    loaded: Loaded,
+    chunk: Chunk,
+) -> Encoded:
+    """
+    Одна порция событий через оба слоя.
+    """
+
+    model = loaded.model
+
+    rows = torch.from_numpy(chunk.client)[:, None]
+    column = torch.from_numpy(chunk.column)
+    pad = torch.from_numpy(chunk.pad)
+
+    tokens = embedding.embed(
+        model.key_ids[rows, column],
+        model.value_ids[rows, column],
+        model.positions[rows, column],
+        ~pad,
+    )
+
+    calendar = torch.from_numpy(calendar_of(loaded.calendar, chunk))
+
+    return encoder(tokens, pad, calendar)
+
+
+def _table(loaded: Loaded, events: Events, dated: np.ndarray) -> pa.Table:
+    """
+    Строки одного батча: по настоящему событию на строку.
+    """
+
+    model = loaded.model
+
+    moments = [
+        loaded.rows[int(client)]["event_time"][int(slot)]
+        for client, slot in zip(events.client, events.slot)
+    ]
+
+    return pa.table(
+        {
+            "batch_index": pa.array([model.batch_index] * events.count, pa.int32()),
+            "client_id": pa.array(
+                [model.client_ids[int(client)] for client in events.client], pa.string()
+            ),
+            "event": pa.array([int(slot) for slot in events.slot], pa.int32()),
+            "event_time": pa.array(moments, pa.timestamp("us", tz="UTC")),
+            "vector": pa.array(list(dated), type=pa.list_(pa.float32())),
+        },
+        schema=EVENTS_SCHEMA,
+    )
+
+
+def _embedding(group: str, specials: dict) -> InputEmbedding:
+    """
+    Входной слой этапа 09 со своими весами.
+    """
+
+    path = embeddings_dir(group) / EMBEDDING_WEIGHTS
+
+    if not path.exists():
+        raise EventError(f"нет {path}: выполните python -m src.embedding.run {group}")
+
+    saved = torch.load(path, map_location="cpu", weights_only=True)
+
+    layer = InputEmbedding(
+        vocab_size=int(saved["vocab_size"]),
+        dim=int(saved["dim"]),
+        seed=int(saved["seed"]),
+        markers=(specials[EVT], specials[USR]),
+    )
+
+    layer.load_state_dict(saved["state_dict"])
+
+    layer.eval()
+
+    return layer
+
+
+def _save(encoder: EventEncoder, config: EventConfig, dim: int, path: Path) -> None:
+    """
+    Веса энкодера рядом с векторами.
+
+    Веса входного слоя сюда не копируются: они лежат в
+    data/09_embeddings и остаются одним файлом на всю модель.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    torch.save(
+        {
+            "dim": dim,
+            "config": config.as_dict(),
+            "state_dict": encoder.state_dict(),
+        },
+        path,
+    )
+
+
+def _clear(directory: Path) -> None:
+    """
+    Каталог группы держит только свои два файла: прежний
+    результат стирается целиком.
+    """
+
+    directory.mkdir(parents=True, exist_ok=True)
+
+    for path in sorted(directory.iterdir()):
+        if path.is_file():
+            path.unlink()
+
+
+__all__ = [
+    "EVENTS_SCHEMA",
+    "EventError",
+    "build_group",
+    "encode",
+    "encode_chunk",
+]

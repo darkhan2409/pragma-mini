@@ -22,17 +22,13 @@ from src.generator.config import DATA_DIR
 # ============================================================
 
 
-# Один каталог на группу и три файла в нём: настоящий выход,
-# страница для человека и веса, которыми выход посчитан.
+# Один каталог на группу и два файла в нём: векторы и веса.
 #
 #   data/09_embeddings/<group>/embeddings.parquet
-#   data/09_embeddings/<group>/preview.html
 #   data/09_embeddings/<group>/weights.pt
 EMBEDDINGS_DIR = DATA_DIR / "09_embeddings"
 
 EMBEDDINGS_FILE = "embeddings.parquet"
-
-PREVIEW_FILE = "preview.html"
 
 WEIGHTS_FILE = "weights.pt"
 
@@ -116,7 +112,6 @@ def embeddings_dir(group: str) -> Path:
 __all__ = [
     "EMBEDDINGS_DIR",
     "EMBEDDINGS_FILE",
-    "PREVIEW_FILE",
     "WEIGHTS_FILE",
     "ConfigError",
     "EmbeddingConfig",

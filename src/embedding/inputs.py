@@ -40,11 +40,16 @@ from src.tokenization.specials import EVT, PAD, USR, load_special_tokens
 # Календарь и event_time_log тоже не читаются: они лежат в
 # batches.parquet, но в списке колонок их нет. Это вход
 # эмбеддингов, а не энкодера события.
+#
+# Энкодер события читает тот же файл и тем же кодом, но календарь
+# ему нужен. Поэтому у читателя есть один флаг: просить колонку
+# или нет. Обещание «эмбеддинги календаря не видят» от этого не
+# слабеет — его держит значение флага, а не отсутствие кода.
 # ============================================================
 
 
 # Что берётся из батчей. Календаря и временных позиций здесь
-# намеренно нет.
+# намеренно нет: их просят отдельно.
 BATCH_COLUMNS = [
     "batch_index",
     "client_id",
@@ -74,8 +79,14 @@ MASKED_COLUMNS = [
     "value_ids",
 ]
 
-# Что показывает отчёт и чего не видит слой.
-REPORT_COLUMNS = [
+# Шесть чисел на событие. Нужны энкодеру события, не входу.
+CALENDAR_COLUMN = "calendar"
+
+CALENDAR_PER_EVENT = 6
+
+# Устройство последовательности: границы событий и их время.
+# Слой их не видит — по ним собирают события те, кто идёт дальше.
+STRUCTURE_COLUMNS = [
     "client_id",
     "n_tokens",
     "n_events",
@@ -132,23 +143,6 @@ class BatchInput:
 
 
 @dataclass(frozen=True)
-class Checks:
-    """
-    Чем подтверждено, что два файла говорят об одном и том же.
-
-    Числа настоящие: столько позиций сравнено, а не «проверено».
-    """
-
-    clients: int
-    token_slots: int
-    profile_slots: int
-    compared_values: int
-    markers: int
-    pad_slots: int
-    profile_pad_slots: int
-
-
-@dataclass(frozen=True)
 class Loaded:
     """
     Батч целиком: вход слоя, материал отчёта и итоги сверки.
@@ -156,10 +150,11 @@ class Loaded:
 
     model: BatchInput
     rows: list[dict]
-    source_value_ids: np.ndarray
-    checks: Checks
-    batches_path: Path
-    masked_path: Path
+
+    # [B, E * 6], и только если календарь просили. Иначе None:
+    # пустая матрица выглядела бы как «календарь есть, просто
+    # нулевой».
+    calendar: np.ndarray | None = None
 
 
 class Source:
@@ -171,9 +166,15 @@ class Source:
     бы перечитывать одно и то же.
     """
 
-    def __init__(self, group: str):
+    def __init__(self, group: str, with_calendar: bool = False):
 
         self.group = group
+        self.with_calendar = with_calendar
+
+        self.columns = list(BATCH_COLUMNS)
+
+        if with_calendar:
+            self.columns.append(CALENDAR_COLUMN)
 
         self.batches_path = batches_dir(group) / BATCHES_FILE
         self.masked_path = masked_dir(group) / MASKED_FILE
@@ -207,7 +208,7 @@ class Source:
                 f"номера от 0 до {self.count - 1}"
             )
 
-        batch = self._batches.read_row_group(index, columns=BATCH_COLUMNS)
+        batch = self._batches.read_row_group(index, columns=self.columns)
         mask = self._masked.read_row_group(index, columns=MASKED_COLUMNS)
 
         if batch.num_rows == 0:
@@ -220,7 +221,7 @@ class Source:
 
         arrays = _arrays(batch, mask)
 
-        checks = _check(index, arrays, load_special_tokens())
+        _check(index, arrays, load_special_tokens())
 
         model = BatchInput(
             batch_index=index,
@@ -235,13 +236,25 @@ class Source:
             profile_token_mask=_tensor(arrays["profile_token_mask"], torch.bool),
         )
 
+        calendar = None
+
+        if self.with_calendar:
+            calendar = _matrix(
+                batch, CALENDAR_COLUMN, _width(batch, CALENDAR_COLUMN), np.float32
+            )
+
+            events = _width(batch, "event_mask")
+
+            if calendar.shape[1] != events * CALENDAR_PER_EVENT:
+                raise InputError(
+                    f"батч {index}: календарь из {calendar.shape[1]} чисел вместо "
+                    f"{events * CALENDAR_PER_EVENT} — не по шесть на событие"
+                )
+
         return Loaded(
             model=model,
-            rows=batch.select(REPORT_COLUMNS).to_pylist(),
-            source_value_ids=arrays["source_value_ids"],
-            checks=checks,
-            batches_path=self.batches_path,
-            masked_path=self.masked_path,
+            rows=batch.select(STRUCTURE_COLUMNS).to_pylist(),
+            calendar=calendar,
         )
 
 
@@ -340,9 +353,10 @@ def _tensor(values: np.ndarray, dtype) -> torch.Tensor:
     return torch.from_numpy(np.ascontiguousarray(values)).to(dtype)
 
 
-def _check(index: int, arrays: dict, specials: dict) -> Checks:
+def _check(index: int, arrays: dict, specials: dict) -> None:
     """
-    Пять сверок до объединения. Любая несовпавшая — отказ.
+    Пять сверок до объединения. Любая несовпавшая — отказ;
+    считать тут нечего, наружу идёт только согласие файлов.
     """
 
     pad = specials[PAD]
@@ -396,7 +410,7 @@ def _check(index: int, arrays: dict, specials: dict) -> Checks:
         )
 
     # 5. Заполнитель ровно там, где его обещает маска.
-    pad_slots = _check_padding(
+    _check_padding(
         index,
         arrays["client_id"],
         arrays["n_tokens"],
@@ -408,7 +422,7 @@ def _check(index: int, arrays: dict, specials: dict) -> Checks:
         arrays["token_mask"],
     )
 
-    profile_pad_slots = _check_padding(
+    _check_padding(
         index,
         arrays["client_id"],
         arrays["profile_n_tokens"],
@@ -420,15 +434,6 @@ def _check(index: int, arrays: dict, specials: dict) -> Checks:
         arrays["profile_token_mask"],
     )
 
-    return Checks(
-        clients=clients,
-        token_slots=clients * width,
-        profile_slots=clients * profile_width,
-        compared_values=int(arrays["source_value_ids"].size),
-        markers=int(marker.sum()),
-        pad_slots=pad_slots,
-        profile_pad_slots=profile_pad_slots,
-    )
 
 
 def _check_padding(
@@ -441,7 +446,7 @@ def _check_padding(
     key_ids: np.ndarray,
     value_ids: np.ndarray,
     token_mask: np.ndarray,
-) -> int:
+) -> None:
     """
     Маска обязана совпадать с тем, где лежит [PAD].
 
@@ -478,15 +483,14 @@ def _check_padding(
                 f"настоящих {what}{name}"
             )
 
-    return int(tail.sum())
-
 
 __all__ = [
     "BATCH_COLUMNS",
+    "CALENDAR_COLUMN",
+    "CALENDAR_PER_EVENT",
     "MASKED_COLUMNS",
-    "REPORT_COLUMNS",
+    "STRUCTURE_COLUMNS",
     "BatchInput",
-    "Checks",
     "InputError",
     "Loaded",
     "Source",

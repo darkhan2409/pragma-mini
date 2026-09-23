@@ -16,12 +16,13 @@ from __future__ import annotations
 # SCHEMA_VERSION — схема embeddings.parquet. Появилась вместе с
 # самим файлом: пока этап писал только страницу и веса, схемы у
 # него не было вовсе, и номера ей не заводили.
+
 # ============================================================
 
 
-FORMAT_VERSION = "2.0.0"
+FORMAT_VERSION = "2.2.0"
 
-IMPLEMENTATION_VERSION = "2.0.0"
+IMPLEMENTATION_VERSION = "2.3.0"
 
 SCHEMA_VERSION = 1
 

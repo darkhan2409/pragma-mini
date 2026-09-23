@@ -17,6 +17,10 @@ data/06_temporal/
 data/07_batches/
 data/08_masked/
 data/09_embeddings/
+data/10_events/
+data/11_profiles/
+data/12_history/
+data/13_mlm/
 data/runs/
 
 *.pt
