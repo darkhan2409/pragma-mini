@@ -738,7 +738,17 @@ python -m src.mlm.train --max-steps 100
 seed — он выводится из seed маскирования и номера эпохи, поэтому одна и та же
 эпоха даёт одну и ту же маску, а соседние эпохи — разные. Конфиг маскирования
 передаётся `--masking-config`, тем же JSON, что у `python -m src.masking.run`.
-`val`, `test` и отчёт этапа 13 читают фиксированные маски из `data/08_masked`. Результат: `data/14_train/checkpoint.pt` с
+`val`, `test` и отчёт этапа 13 читают фиксированные маски из `data/08_masked`.
+
+После каждой полностью пройденной эпохи та же модель считает потери на `val`:
+фиксированная маска, `eval` и `no_grad`, без `backward` и шага оптимизатора.
+Среднее — по всем целям `val`, как у потерь батча train:
+
+```
+epoch=1 val_loss=7.0123 val_targets=15420
+```
+
+Эпоха, прерванная `--max-steps`, validation не получает. Результат: `data/14_train/checkpoint.pt` с
 `model_state_dict`, `optimizer_state_dict`, `epoch`, `step` и конфигом.
 
 Шаг — это один граф на батч: `InputEmbedding → Event → Profile → History → MLM`,
