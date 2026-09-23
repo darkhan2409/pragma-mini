@@ -17,7 +17,12 @@ from .settings import GROUPS, PreprocessingConfig, group_dir, normalize_group, r
 #
 # Она читает data/01_raw/<group>, проверяет выгрузку, раскрывает
 # payload, приводит значения к объявленным типам, упорядочивает
-# события клиента и кладёт ДВА файла в data/02_preprocessed/<group>.
+# события клиента и кладёт ОДИН файл:
+#
+#   data/02_preprocessed/<group>/events.parquet
+#
+# Анкета остаётся в выгрузке и копии рядом не получает: менять в
+# ней нечего, а вторая копия разошлась бы с первой.
 #
 # Ни истории на дату, ни разделения, ни смыслового слоя рядом
 # больше нет: срез применяется позже, при сборке датасета, а
@@ -74,9 +79,6 @@ def run_preprocess(args) -> int:
         f"[{STAGE}] группа {group}: событий {result.events_rows}, "
         f"клиентов {result.clients} → {target}"
     )
-    print("    анкета не копируется: следующие этапы читают её из "
-          f"{raw_dir / 'profile.parquet'}")
-
     return EXIT_OK
 
 

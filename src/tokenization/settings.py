@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from src.generator.config import DATA_DIR
-from src.preprocessing.artifacts import dumps_json, sha256_bytes
 
 from .version import SCHEMA_VERSION
 
@@ -67,8 +66,9 @@ ZERO_SEPARATE = "separate"
 
 ZERO_POLICIES: tuple[str, ...] = (ZERO_IN_RANGE, ZERO_SEPARATE)
 
-# Минус: разрешён доменом или невозможен. Невозможное значение не
-# попадает в крайний бакет, оно помечается [INVALID].
+# Минус: разрешён доменом или невозможен. Невозможное значение в
+# крайний бакет не попадает: шкала на нём не учится, а при
+# кодировании оно становится [UNK].
 NEGATIVE_ALLOWED = "allowed"
 NEGATIVE_INVALID = "invalid"
 
@@ -344,23 +344,19 @@ def default_value_domains() -> tuple[ValueDomain, ...]:
     # Объединять пока нечего: каждый ключ кодируется своим
     # словарём, и одинаковое написание общего множества значений
     # не доказывает.
+    #
+    # Два объединения напрашиваются и отклонены осознанно:
+    #
+    #   profile_<поле> и его _old/_new — смысл один, но
+    #   физический тип разный: у профиля булево и число, у
+    #   изменения профиля строка. Пока смысловой слой не
+    #   типизирует old_value и new_value по самому полю, общий
+    #   домен склеил бы true и "true" под одним смыслом;
+    #
+    #   merchant_city и profile_city — город точки это место
+    #   покупки, а город профиля место жизни: реестр объявил их
+    #   несовместимыми.
     return ()
-
-
-# Объединения, которые напрашиваются, но в V1 не делаются.
-# Список ведётся руками: он объясняет решение, а не прячет его.
-DECLINED_DOMAINS: tuple[tuple[tuple[str, ...], str], ...] = (
-    (
-        ("profile_<поле>", "profile_<поле>_old", "profile_<поле>_new"),
-        "смысл один, но физический тип разный: у профиля булево и число, у изменения профиля строка. "
-        "Пока смысловой слой не типизирует old_value и new_value по самому полю, общий домен склеил бы "
-        "true и \"true\" в разные коды под одним смыслом",
-    ),
-    (
-        ("merchant_city", "profile_city"),
-        "город точки это место покупки, а город профиля место жизни: объявлено несовместимым в реестре",
-    ),
-)
 
 
 # ------------------------------------------------------------
@@ -435,10 +431,6 @@ class TokenizerConfig:
     numeric_min_values: int = 50
     numeric_min_clients: int = 5
 
-    # Порог редкости категорий. None значит «все наблюдавшиеся
-    # категории сохраняются целиком»; поиска «лучшего порога» нет.
-    rare_min_count: int | None = None
-
     # Предел точного подсчёта различных числовых значений.
     distinct_cap: int = 100_000
 
@@ -479,9 +471,6 @@ class TokenizerConfig:
                     raise ConfigError(f"ключ {key} объявлен в двух доменах: {seen[key]} и {domain.name}")
                 seen[key] = domain.name
 
-        if self.rare_min_count is not None and self.rare_min_count < 2:
-            raise ConfigError("порог редкости меньше двух не имеет смысла")
-
         if self.quantile_sample_k < 1000:
             raise ConfigError("выборка для квантилей меньше тысячи значений не даёт устойчивых границ")
 
@@ -493,18 +482,13 @@ class TokenizerConfig:
             "quantile_algorithm": self.quantile_algorithm,
             "numeric_min_values": self.numeric_min_values,
             "numeric_min_clients": self.numeric_min_clients,
-            "rare_min_count": self.rare_min_count,
             "distinct_cap": self.distinct_cap,
             "text_keys_as_categorical": list(self.text_keys_as_categorical),
             "value_domains": [domain.as_dict() for domain in self.value_domains],
-            "declined_domains": [{"keys": list(keys), "reason": reason} for keys, reason in DECLINED_DOMAINS],
             "numeric_encoders": {key: encoder.as_dict() for key, encoder in sorted(self.numeric_encoders.items())},
             "bpe": self.bpe.as_dict(),
             "max_pieces_per_value": self.max_pieces_per_value,
         }
-
-    def sha256(self) -> str:
-        return sha256_bytes(dumps_json(self.as_dict()).encode("utf-8"))
 
     @staticmethod
     def from_dict(data: Mapping[str, Any]) -> "TokenizerConfig":
@@ -516,16 +500,6 @@ class TokenizerConfig:
 
         if unknown:
             raise ConfigError(f"неизвестные ключи конфига: {sorted(unknown)}")
-
-        # declined_domains это запись решения, а не настройка.
-        # Прочитать её из собственного артефакта можно — иначе
-        # записанный нами же файл не читался бы обратно, — а
-        # поменять нельзя.
-        if "declined_domains" in data and data["declined_domains"] != declared["declined_domains"]:
-            raise ConfigError(
-                "declined_domains это запись принятого решения, а не настройка: "
-                "через файл конфигурации она не меняется"
-            )
 
         encoders = dict(base.numeric_encoders)
 
@@ -545,9 +519,6 @@ class TokenizerConfig:
             quantile_algorithm=str(data.get("quantile_algorithm", base.quantile_algorithm)),
             numeric_min_values=int(data.get("numeric_min_values", base.numeric_min_values)),
             numeric_min_clients=int(data.get("numeric_min_clients", base.numeric_min_clients)),
-            rare_min_count=(
-                None if data.get("rare_min_count") is None else int(data["rare_min_count"])
-            ),
             distinct_cap=int(data.get("distinct_cap", base.distinct_cap)),
             text_keys_as_categorical=tuple(str(key) for key in data.get("text_keys_as_categorical", ())),
             value_domains=domains,
@@ -598,7 +569,6 @@ __all__ = [
     "VALUE_VOCAB_FILE",
     "BpeConfig",
     "ConfigError",
-    "DECLINED_DOMAINS",
     "METHOD_FIXED",
     "METHOD_QUANTILE",
     "METHOD_UNFITTED",

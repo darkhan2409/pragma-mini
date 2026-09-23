@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime, tzinfo
+from typing import Sequence
+
 import numpy as np
 
 from .settings import CALENDAR_ENCODING
@@ -24,11 +27,16 @@ from .settings import CALENDAR_ENCODING
 # проходят BPE, не бакетизируются, не маскируются и не
 # предсказываются. В модель они приходят отдельным входом.
 #
-# Время в выгрузке наивное и записано в поясе контракта
-# (Asia/Almaty), поэтому час суток и день недели берутся из
-# значения как есть. Пояс объявлен в конфигурации, входит в
-# отпечаток этапа и в манифест: смена пояса или длины цикла
-# требует пересборки.
+# Считается по МЕСТНОМУ времени банка. event_time хранится в UTC
+# и в UTC же сортируется и сравнивается с cutoff, но циклы суток
+# и месяца принадлежат человеку: покупка в полночь по Алматы
+# обязана попасть в нулевой час, а зарплата — в своё местное
+# число месяца. В UTC оба цикла сдвинулись бы на смещение пояса,
+# и ночь выглядела бы вечером.
+#
+# Перевод пояса делается ЗДЕСЬ и только здесь, ради этих шести
+# чисел. Местное время нигде не сохраняется, и event_time от
+# него не меняется.
 # ============================================================
 
 
@@ -43,9 +51,14 @@ CYCLES = CALENDAR_ENCODING["cycles"]
 WEEK_SHIFT = 3
 
 
-def calendar_features(ts) -> np.ndarray:
+def calendar_features(moments: Sequence[datetime], tz: tzinfo) -> np.ndarray:
     """
     Час, день недели и день месяца события на единичной окружности.
+
+    moments — моменты в UTC, tz — пояс банка: время переводится в
+    местное здесь, потому что циклы суток и месяца считаются по
+    нему. Наружу возвращаются только шесть чисел, само время не
+    меняется.
 
     Колонки: sin/cos часа, sin/cos дня недели, sin/cos дня месяца.
 
@@ -55,7 +68,14 @@ def calendar_features(ts) -> np.ndarray:
     нумерацией с нуля: первое число это 0.
     """
 
-    moments = np.asarray(ts).astype("datetime64[us]")
+    # numpy часовых поясов не знает: после перевода пояс
+    # снимается, и дальше считается уже местное время.
+    local = [
+        (moment.astimezone(tz).replace(tzinfo=None) if moment is not None else None)
+        for moment in moments
+    ]
+
+    moments = np.asarray(local).astype("datetime64[us]")
 
     if moments.size == 0:
         return np.zeros((0, CALENDAR_FEATURES), dtype=np.float32)

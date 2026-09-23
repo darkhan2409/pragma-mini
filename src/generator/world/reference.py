@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -9,28 +9,31 @@ from ..config import MERCHANT_REFERENCE_PATH
 
 
 # ============================================================
-# СПРАВОЧНИК РЕАЛЬНЫХ МЕРЧАНТОВ
+# СПРАВОЧНИК РЕАЛЬНЫХ НАЗВАНИЙ
 # ============================================================
 #
-# reference/merchants_2gis.json — ВХОД генератора: названия
-# точек берутся оттуда, а не собираются из слогов. Наружу
-# справочник не выгружается: в событие попадают только поля
-# выбранной точки.
+# reference/merchants.json — ВХОД генератора: названия точек
+# берутся оттуда, а не собираются из слогов. Наружу справочник
+# не выгружается: в событие попадает только само название.
 #
-# Что берётся из записи справочника:
+# Что лежит в записи:
 #
-#   name                имя точки
-#   generator_category  категория; имена совпадают с внутренними
-#   city_resolved       город; сопоставляется с поселением
-#   source              2GIS или OpenStreetMap
+#   name             название точки, как его дал источник
+#   mapped_category  НАШЕ сопоставление категории генератора;
+#                    ни рубрикой источника, ни MCC оно не является
+#   city             город, но только если его назвал сам
+#                    источник; вычисленный по координатам город
+#                    в справочник не попал
 #
-# MCC в справочнике нет намеренно: ни 2ГИС, ни OpenStreetMap
-# его не публикуют, и он остаётся за внутренней категорией.
+# Источники названы в шапке файла целиком; у отдельной записи
+# ни источника, ни его идентификатора нет — генератору нужно
+# само название, а не ссылка на карточку в чужой базе.
 #
-# Частота имени в справочнике — это и есть масштаб сети:
-# «Magnum» встречается сотни раз, сельский магазин один раз.
-# Поэтому голова списка по частоте идёт национальным сетям,
-# хвост — местным.
+# Справочник отвечает ровно на один вопрос: какие названия
+# ПОДТВЕРЖДЕНЫ в этом городе. Ни масштаба сети, ни популярности,
+# ни доли рынка из него не выводится: число записей с одним
+# названием — это результат выборочного поиска, а не факт о
+# компании. Запись без города не подтверждает присутствие нигде.
 # ============================================================
 
 
@@ -61,30 +64,20 @@ _CITY_ALIASES: dict[str, str] = {
 
 
 @dataclass(frozen=True)
-class ReferenceOutlet:
+class ReferenceName:
+    """
+    Одно подтверждённое название.
+    """
+
     name: str
     category: str
-    # Поселение генератора; None, если город записи в географии
-    # генератора не назван.
+    # Поселение генератора; None, если города у записи нет или
+    # он не назван в географии генератора.
     settlement: str | None
-    source: str
 
 
 def _transliterate(text: str) -> str:
     return "".join(_TRANSLIT.get(letter, letter) for letter in text.lower())
-
-
-def _base_name(name: str, source: str) -> str:
-    """
-    Имя сети без пояснения. У 2ГИС после запятой идёт тип
-    организации («Magnum, супермаркет»), у OpenStreetMap имя
-    приходит как есть.
-    """
-
-    if source == "2GIS":
-        name = name.split(",")[0]
-
-    return " ".join(name.split()).strip()
 
 
 @lru_cache(maxsize=1)
@@ -125,7 +118,7 @@ def _settlement_of(city: str | None) -> str | None:
 
 
 @lru_cache(maxsize=1)
-def outlets() -> tuple[ReferenceOutlet, ...]:
+def entries() -> tuple[ReferenceName, ...]:
     """
     Справочник целиком. Читается один раз на процесс.
     """
@@ -135,24 +128,21 @@ def outlets() -> tuple[ReferenceOutlet, ...]:
 
     payload = json.loads(MERCHANT_REFERENCE_PATH.read_text(encoding="utf-8"))
 
-    items: list[ReferenceOutlet] = []
+    items: list[ReferenceName] = []
 
     for row in payload.get("merchants", ()):
 
-        source = row.get("source") or ""
-        name = _base_name(row.get("name") or "", source)
-
-        category = row.get("generator_category")
+        name = row.get("name") or ""
+        category = row.get("mapped_category")
 
         if not name or not category:
             continue
 
         items.append(
-            ReferenceOutlet(
+            ReferenceName(
                 name=name,
                 category=category,
-                settlement=_settlement_of(row.get("city_resolved")),
-                source=source,
+                settlement=_settlement_of(row.get("city")),
             )
         )
 
@@ -160,73 +150,37 @@ def outlets() -> tuple[ReferenceOutlet, ...]:
 
 
 @lru_cache(maxsize=1)
-def _names_by_category() -> dict[str, tuple[str, ...]]:
-    """
-    Категория -> имена по убыванию частоты в справочнике.
-    """
-
-    counts: dict[str, Counter] = defaultdict(Counter)
-
-    for item in outlets():
-        counts[item.category][item.name] += 1
-
-    return {
-        category: tuple(
-            name for name, _ in sorted(counter.items(), key=lambda pair: (-pair[1], pair[0]))
-        )
-        for category, counter in counts.items()
-    }
-
-
-@lru_cache(maxsize=1)
 def _names_by_place() -> dict[tuple[str, str], tuple[str, ...]]:
     """
-    (поселение, категория) -> имена по убыванию частоты.
+    (поселение, категория) -> подтверждённые там названия.
+
+    Порядок алфавитный и ничего не утверждает: справочник не
+    знает, какая сеть крупнее. Какое название достанется какой
+    точке, решает генератор своим ключом.
     """
 
-    counts: dict[tuple[str, str], Counter] = defaultdict(Counter)
+    names: dict[tuple[str, str], set[str]] = defaultdict(set)
 
-    for item in outlets():
+    for item in entries():
         if item.settlement is not None:
-            counts[(item.settlement, item.category)][item.name] += 1
+            names[(item.settlement, item.category)].add(item.name)
 
-    return {
-        place: tuple(
-            name for name, _ in sorted(counter.items(), key=lambda pair: (-pair[1], pair[0]))
-        )
-        for place, counter in counts.items()
-    }
-
-
-def names_of_category(category: str) -> tuple[str, ...]:
-    """
-    Все имена категории по всей стране, частые первыми.
-    """
-
-    return _names_by_category().get(category, ())
+    return {place: tuple(sorted(found)) for place, found in names.items()}
 
 
 def names_in(settlement: str, category: str) -> tuple[str, ...]:
     """
-    Имена категории, встреченные именно в этом поселении.
+    Названия категории, ПОДТВЕРЖДЁННЫЕ в этом поселении.
+
+    Пустой ответ значит, что подтверждения нет: точка останется
+    безымянной, а не получит название из другого города.
     """
 
     return _names_by_place().get((settlement, category), ())
 
 
-def covered_categories() -> frozenset[str]:
-    """
-    Категории, для которых в справочнике есть хоть одно имя.
-    Для остальных название точки остаётся процедурным.
-    """
-
-    return frozenset(_names_by_category())
-
-
 __all__ = [
-    "ReferenceOutlet",
-    "covered_categories",
+    "ReferenceName",
+    "entries",
     "names_in",
-    "names_of_category",
-    "outlets",
 ]

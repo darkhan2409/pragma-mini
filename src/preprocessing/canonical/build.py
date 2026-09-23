@@ -40,8 +40,8 @@ from .schema import SCHEMA_VERSION, payload_columns
 #   2. прочитать ленту и профиль;
 #   3. раскрыть payload вместе с ключом type;
 #   4. привести значения к объявленным типам;
-#   5. упорядочить события клиента по времени, приоритету типа
-#      и месту строки в RAW;
+#   5. упорядочить события клиента по времени, а при равном
+#      времени — по причинному приоритету типа события;
 #   6. записать ленту.
 #
 # Любая строка, которую нельзя разобрать по контракту,
@@ -54,7 +54,6 @@ from .schema import SCHEMA_VERSION, payload_columns
 
 
 STAGE = "preprocess"
-STAGE_VERSION = "11.0.0"
 
 EVENTS_FILE = "events.parquet"
 
@@ -94,8 +93,6 @@ def build_group(
     schema = canonical_schema(manifest)
     payload_names = [name for name, _ in payload_columns(manifest)]
 
-    client_index = _client_index(raw)
-
     _clear(out_dir)
 
     metadata = {
@@ -107,7 +104,7 @@ def build_group(
 
     for batch in iter_client_batches(raw, config.batch_clients):
 
-        result = build_batch(raw, config, batch, payload_names, schema, client_index)
+        result = build_batch(raw, config, batch, payload_names, schema)
 
         events_writer.write(result.table)
 
@@ -116,18 +113,15 @@ def build_group(
     return CanonicalResult(
         outputs=[out_dir / EVENTS_FILE],
         events_rows=events_rows,
-        clients=len(client_index),
+        clients=len(_clients(raw)),
     )
 
 
-def _client_index(raw: RawDataset) -> dict[str, int]:
+def _clients(raw: RawDataset) -> set[str]:
     """
-    Плотный внутренний номер клиента: устойчивый индекс в
-    лексикографическом порядке client_id.
-
-    Список собирается из профиля и ленты: клиент без событий не
-    исчезает, а клиент без профиля не теряется. Отдельным файлом
-    он не выкладывается — следующий этап считает его так же.
+    Клиенты выгрузки: и те, у кого есть события, и те, у кого
+    есть только анкета. В файл список не пишется: это число
+    для терминала.
     """
 
     ids: set[str] = set()
@@ -137,7 +131,7 @@ def _client_index(raw: RawDataset) -> dict[str, int]:
     for _, chunk in raw.iter_row_groups("events", ["client_id"]):
         ids.update(pc.unique(chunk.column("client_id")).to_pylist())
 
-    return {value: index for index, value in enumerate(sorted(ids))}
+    return ids
 
 
 def _clear(out_dir: Path) -> None:
@@ -164,7 +158,6 @@ __all__ = [
     "PERIOD_START_KEY",
     "SCHEMA_VERSION",
     "STAGE",
-    "STAGE_VERSION",
     "CanonicalResult",
     "build_group",
 ]

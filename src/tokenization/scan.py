@@ -7,7 +7,7 @@ from typing import Iterable
 
 from src.preprocessing.canonical.events import normalize_text
 from src.preprocessing.read import ClientHistory
-from src.preprocessing.keys import CATEGORICAL, NUMERIC, REFERENCE, TEXT
+from src.preprocessing.keys import CATEGORICAL, NUMERIC, TEXT
 
 from .schema import SemanticSchema, WEIGHT_PER_CLIENT
 
@@ -245,8 +245,6 @@ class FitStatistics:
     missing: dict[tuple[str, str], int] = field(default_factory=dict)
     unknown_keys: dict[str, int] = field(default_factory=dict)
 
-    reference_values: dict[str, int] = field(default_factory=dict)
-
     clients: int = 0
     events: int = 0
     values: int = 0
@@ -363,7 +361,7 @@ def scan(
 
         # --- события ---
 
-        for event in history.events:
+        for number, event in enumerate(history.events):
 
             stats.events += 1
 
@@ -371,7 +369,7 @@ def scan(
 
             if event_type is None:
                 raise ScanError(
-                    f"событие {event.stable_event_index} клиента {client_id} пришло без типа: "
+                    f"событие {number} клиента {client_id} пришло без типа: "
                     "смысловой слой обязан его выдавать"
                 )
 
@@ -379,7 +377,7 @@ def scan(
 
             values = event.model_values()
 
-            unit_prefix = f"{client_id}\x1f{event.stable_event_index}\x1f"
+            unit_prefix = f"{client_id}\x1f{number}\x1f"
 
             for key, value in sorted(values.items()):
 
@@ -387,13 +385,6 @@ def scan(
 
                 if info is None:
                     stats.unknown_keys[key] = stats.unknown_keys.get(key, 0) + 1
-                    continue
-
-                if info.value_kind == REFERENCE:
-                    # Ссылка кодом не становится: считается только
-                    # её наличие, чтобы отчёт показал, сколько
-                    # связей уходит в метаданные.
-                    stats.reference_values[key] = stats.reference_values.get(key, 0) + 1
                     continue
 
                 stats.values += 1

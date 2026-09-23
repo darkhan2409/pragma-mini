@@ -19,7 +19,12 @@ import pyarrow.parquet as pq
 # Всё, что попадает на диск, проходит через этот модуль, чтобы
 # два запуска на одних данных давали одинаковые байты:
 #
-#   - JSON с sort_keys, фиксированным отступом, '\n' на любой ОС;
+#   - JSON с фиксированным отступом и одинаковым переводом строки на
+#     любой ОС; порядок ключей задаёт тот, кто собрал словарь,
+#     и он обязан быть детерминированным. Алфавитная
+#     пересортировка здесь только путала бы: у словарей модели
+#     порядок это порядок ID, и bucket_10 встало бы между
+#     bucket_1 и bucket_2;
 #   - numpy-скаляры и datetime приводятся к обычным типам явно;
 #   - parquet пишется из pyarrow с явной схемой и без метаданных
 #     pandas (там лежит версия pandas);
@@ -75,7 +80,7 @@ def json_ready(value: Any) -> Any:
 
 
 def dumps_json(value: Any) -> str:
-    return json.dumps(json_ready(value), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    return json.dumps(json_ready(value), ensure_ascii=False, indent=2) + "\n"
 
 
 def write_text(path: Path, text: str) -> None:
@@ -149,10 +154,6 @@ class TableWriter:
         return self.rows
 
 
-def sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
 
@@ -161,43 +162,3 @@ def sha256_file(path: Path) -> str:
             digest.update(block)
 
     return digest.hexdigest()
-
-
-# ============================================================
-# MARKDOWN
-# ============================================================
-
-
-def _md_table(rows: list[list[Any]], header: list[str]) -> str:
-
-    lines = ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"]
-
-    for row in rows:
-        lines.append("| " + " | ".join(_md_cell(cell) for cell in row) + " |")
-
-    return "\n".join(lines) + "\n"
-
-
-def _md_cell(value: Any) -> str:
-
-    if value is None:
-        return "—"
-
-    if isinstance(value, bool):
-        return "да" if value else "нет"
-
-    if isinstance(value, float):
-        return f"{value:.4f}"
-
-    if isinstance(value, dict):
-        if not value:
-            return "—"
-        # Вложенный словарь в ячейке нечитаем: показываем размер.
-        if any(isinstance(item, (dict, list, tuple)) for item in value.values()):
-            return f"{len(value)} записей"
-        return ", ".join(f"{key}={_md_cell(item)}" for key, item in sorted(value.items()))
-
-    if isinstance(value, (list, tuple)):
-        return ", ".join(_md_cell(item) for item in value)
-
-    return str(value)

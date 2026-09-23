@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
-from ..config import RAW_DIR
+from ..config import RAW_DIR, TIMEZONE
 
 
 # ============================================================
@@ -50,6 +50,10 @@ def load(raw_dir: Path, client_id: str | None) -> dict:
         # нет. Читателю он нужен строкой, поэтому достаётся здесь.
         row["payload"] = json.loads(row["payload"])
         row["type"] = row["payload"].get("type", "—")
+
+        # Время в выгрузке строкой со смещением: отчёт
+        # показывает его как есть, в местном времени банка.
+        row["event_time"] = datetime.fromisoformat(row["event_time"])
 
     # Строки уже лежат в порядке ленты; сортировка только по
     # времени события, устойчиво, чтобы порядок не менялся.
@@ -188,7 +192,18 @@ def render(data: dict, limit: int | None, since: datetime | None,
 
 
 def _date(value: str | None) -> datetime | None:
-    return datetime.fromisoformat(value) if value else None
+    """
+    Граница отбора в том же поясе, что и выгрузка:
+    иначе наивная дата не сравнится с осознанным временем
+    события.
+    """
+
+    if not value:
+        return None
+
+    moment = datetime.fromisoformat(value)
+
+    return moment.replace(tzinfo=TIMEZONE) if moment.tzinfo is None else moment
 
 
 def main() -> None:

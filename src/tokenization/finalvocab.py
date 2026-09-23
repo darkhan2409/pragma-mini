@@ -245,15 +245,6 @@ class FrozenArtifacts:
 
         return name
 
-    def decode_text(self, ids: list[int]) -> str:
-        """
-        Собранный обратно текст по номерам его кусков.
-        """
-
-        local = [self.bpe_ids.index(token_id) for token_id in ids]
-
-        return self.bpe.decode(local)
-
     @staticmethod
     def load(directory: Path | None = None) -> "FrozenArtifacts":
         """

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pyarrow as pa
 
+from ..projection import model_role
 from ..rawdata import DTYPE_MAP, ENVELOPE_SCHEMA, RawManifest
 
 
@@ -26,62 +27,34 @@ from ..rawdata import DTYPE_MAP, ENVELOPE_SCHEMA, RawManifest
 # ============================================================
 
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 15
 
-TS = pa.timestamp("us")
-
-PAYLOAD_OK = "ok"
-PAYLOAD_UNPARSEABLE = "unparseable"
-PAYLOAD_NULL = "null_payload"
+# Время события в слое УЖЕ нормализовано: в выгрузке это
+# строка ISO 8601 со смещением, здесь — момент в UTC.
+# Второго перевода пояса ниже по конвейеру нет.
+TS_UTC = pa.timestamp("us", tz="UTC")
 
 
 # ------------------------------------------------------------
-# ПРОИЗВОДНЫЕ КОЛОНКИ
+# СОСТАВ СЛОЯ
 # ------------------------------------------------------------
 #
-# (имя, тип, dtype реестра, описание). Порядок фиксирован.
+# Только конверт и смысловые поля событий. Производных
+# и служебных колонок нет ни одной: ни внутреннего номера
+# клиента, ни номера события, ни трассировки к RAW, ни
+# признаков качества. Идентификаторов сущностей тоже нет:
+# модель строит вектор клиента по событиям, их типам,
+# значениям и времени, а не по точным связям между договорами
+# и счетами.
+#
+# Нормализованный текст ложится в само поле: двух записей
+# одного значения рядом не держим.
 # ------------------------------------------------------------
 
-DERIVED_COLUMNS: tuple[tuple[str, pa.DataType, str, str], ...] = (
-    ("client_idx", pa.int64(), "int", "плотный внутренний индекс клиента внутри группы"),
-    (
-        "stable_event_index",
-        pa.int64(),
-        "int",
-        "номер логического события клиента по (event_time, приоритет типа, номер строки RAW)",
-    ),
-    (
-        "before_window",
-        pa.bool_(),
-        "bool",
-        "событие произошло раньше period_start выгрузки: по контракту таких строк нет, "
-        "и колонка это проверка, а не описание",
-    ),
-    ("at_or_after_extract", pa.bool_(), "bool", "событие произошло на границе period_end или позже"),
-    ("ambiguous_local_time", pa.bool_(), "bool", "местное время попадает в объявленный неоднозначный интервал"),
-    (
-        "balance_chain_gap",
-        pa.bool_(),
-        "bool",
-        "остаток счёта не продолжает предыдущий наблюдаемый остаток: "
-        "между строками потеряно движение денег",
-    ),
-    (
-        "known_missing",
-        pa.list_(pa.string()),
-        "str",
-        "пропуски с известной причиной по датированному правилу схемы",
-    ),
-    ("merchant_name_norm", pa.string(), "str", "нормализованная копия merchant_name"),
-    ("counterparty_norm", pa.string(), "str", "нормализованная копия counterparty"),
-    ("raw_file", pa.string(), "str", "файл RAW, из которого взята строка"),
-    ("raw_row_group", pa.int32(), "int", "номер row group в файле RAW"),
-    ("raw_row", pa.int64(), "int", "номер строки в файле RAW"),
-)
-
-DERIVED_NAMES: tuple[str, ...] = tuple(name for name, _, _, _ in DERIVED_COLUMNS)
-
 ENVELOPE_NAMES: tuple[str, ...] = tuple(name for name in ENVELOPE_SCHEMA.names if name != "payload")
+
+# Поля, текст которых нормализуется на месте.
+NORMALIZED_FIELDS: tuple[str, ...] = ("merchant_name", "counterparty")
 
 
 def payload_columns(manifest: RawManifest) -> list[tuple[str, pa.DataType]]:
@@ -104,16 +77,21 @@ def payload_columns(manifest: RawManifest) -> list[tuple[str, pa.DataType]]:
                     "общая колонка невозможна"
                 )
 
-    return [(name, DTYPE_MAP[dtype]) for name, dtype in columns.items()]
+    # В слой проходят только смысловые поля. Фильтр позитивный:
+    # решает модельная проекция, а не список исключений здесь.
+    return [
+        (name, DTYPE_MAP[dtype])
+        for name, dtype in columns.items()
+        if model_role(name) == "semantic_field"
+    ]
 
 
 def events_schema(manifest: RawManifest) -> pa.Schema:
 
     fields: list[tuple[str, pa.DataType]] = [
-        (name, ENVELOPE_SCHEMA.field(name).type) for name in ENVELOPE_NAMES
+        (name, TS_UTC if name == "event_time" else ENVELOPE_SCHEMA.field(name).type)
+        for name in ENVELOPE_NAMES
     ]
-
-    fields += [(name, field_type) for name, field_type, _, _ in DERIVED_COLUMNS]
 
     fields += payload_columns(manifest)
 
@@ -121,9 +99,9 @@ def events_schema(manifest: RawManifest) -> pa.Schema:
 
 
 __all__ = [
-    "DERIVED_COLUMNS",
-    "DERIVED_NAMES",
     "ENVELOPE_NAMES",
+    "NORMALIZED_FIELDS",
+    "TS_UTC",
     "SCHEMA_VERSION",
     "events_schema",
     "payload_columns",

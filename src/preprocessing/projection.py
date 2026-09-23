@@ -87,7 +87,6 @@ SEMANTIC_PAYLOAD_FIELDS: dict[str, str] = {
     "approved_term": "одобренный срок",
     "days_past_due": "дней просрочки",
     "installment_no": "номер платежа в графике",
-    "accrual_period": "период начисления",
     # --- операция ---
     "direction": "направление по счёту клиента",
     "channel": "канал: pos, ecom, atm, app, branch, qr",
@@ -139,33 +138,6 @@ SEMANTIC_PAYLOAD_FIELDS: dict[str, str] = {
 
 
 # ------------------------------------------------------------
-# ЛОКАЛЬНЫЕ ССЫЛКИ
-# ------------------------------------------------------------
-#
-# Сырое имя поля -> (имя в fields, префикс значения).
-#
-# Номер выдаётся по первому появлению сущности в истории
-# клиента. Один и тот же идентификатор всегда получает одну
-# ссылку, разные клиенты нумеруются независимо.
-# ------------------------------------------------------------
-
-ENTITY_REFS: dict[str, tuple[str, str]] = {
-    "account_id": ("account_ref", "ACCOUNT"),
-    "card_id": ("card_ref", "CARD"),
-    "contract_id": ("contract_ref", "CONTRACT"),
-    "application_id": ("application_ref", "APPLICATION"),
-    "case_id": ("case_ref", "CASE"),
-    "offer_id": ("offer_ref", "OFFER"),
-    "merchant_id": ("merchant_ref", "MERCHANT"),
-    # Сессия приложения и перевод — такие же наблюдаемые сущности
-    # клиента: они различают шаги одной сессии и две ноги одного
-    # перевода. Сырой ключ наружу не выходит, выходит ссылка.
-    "session_id": ("session_ref", "SESSION"),
-    "transfer_id": ("transfer_ref", "TRANSFER"),
-}
-
-
-# ------------------------------------------------------------
 # ВНУТРЕННИЕ ПОЛЯ
 # ------------------------------------------------------------
 #
@@ -175,24 +147,29 @@ ENTITY_REFS: dict[str, tuple[str, str]] = {
 # ------------------------------------------------------------
 
 INTERNAL_FIELDS: dict[str, str] = {
-    # конверт
-    # payload
-    "product_id": "идентификатор продукта в каталоге банка: связывает события одного продукта",
+    # Идентификаторы сущностей. Модель строит общий вектор
+    # клиента по последовательности событий, их типам, значениям
+    # и времени; точные связи между договорами, счетами, картами,
+    # заявками, сессиями и переводами ей не передаются ни сырым
+    # ключом, ни локальной ссылкой.
+    "account_id": "идентификатор счёта",
+    "card_id": "идентификатор карты",
+    "contract_id": "идентификатор договора",
+    "application_id": "идентификатор заявки",
+    "case_id": "идентификатор обращения",
+    "offer_id": "идентификатор предложения",
+    "merchant_id": "идентификатор торговой точки",
+    "session_id": "идентификатор сессии приложения",
+    "transfer_id": "идентификатор перевода",
+    "product_id": "идентификатор продукта в каталоге банка",
     "previous_product_id": "идентификатор прежнего продукта при переходе",
-    "due_date": "плановая дата платежа: модель получает days_to_due, календарных дат в словарях нет",
-    # производные canonical
-    "client_idx": "внутренний индекс клиента в группе",
-    "stable_event_index": "внутренний номер логического события",
-    "before_window": "строка старше окна наблюдения",
-    "at_or_after_extract": "строка на границе выгрузки или позже",
-    "ambiguous_local_time": "признак качества времени",
-    "balance_chain_gap": "между наблюдаемыми строками потеряно движение денег, признак качества",
-    "known_missing": "причина пропуска по датированному правилу схемы",
-    "merchant_name_norm": "нормализованная копия текста",
-    "counterparty_norm": "нормализованная копия текста",
-    "raw_file": "трассировка к RAW",
-    "raw_row_group": "трассировка к RAW",
-    "raw_row": "трассировка к RAW",
+    # Календарь. Модель получает время отдельным каналом:
+    # нормализованным event_time и признаками календаря. Дата
+    # или месяц в словаре стали бы списком конкретных чисел, и
+    # первая же новая дата после train оказалась бы [UNK].
+    "due_date": "плановая дата платежа: календарных дат в словарях нет",
+    "accrual_period": "месяц начисления: это месяц самого события, "
+                      "и event_time уже его называет",
 }
 
 
@@ -270,43 +247,12 @@ class ModelEvent:
         }
 
 
-class LocalRefs:
-    """
-    Локальные ссылки одного клиента: сущность получает номер по
-    первому появлению в его истории и держит его дальше.
-    """
-
-    def __init__(self) -> None:
-        self._numbers: dict[tuple[str, str], str] = {}
-        self._counts: dict[str, int] = {}
-
-    def ref(self, column: str, value: str) -> str:
-
-        name, prefix = ENTITY_REFS[column]
-
-        key = (prefix, str(value))
-
-        known = self._numbers.get(key)
-
-        if known is None:
-            self._counts[prefix] = self._counts.get(prefix, 0) + 1
-            known = f"{prefix}_{self._counts[prefix]}"
-            self._numbers[key] = known
-
-        return known
-
-    @property
-    def size(self) -> int:
-        return len(self._numbers)
-
-
-def model_event(row: dict, refs: LocalRefs) -> ModelEvent:
+def model_event(row: dict) -> ModelEvent:
     """
     Строит модельное событие из строки очищенной истории.
 
     Проходит только то, что названо разрешённым: смысловые поля
-    payload, тип события, локальные ссылки и, где это осмысленно,
-    инициатор действия.
+    payload и тип события.
     """
 
     fields: dict = {EVENT_TYPE_FIELD: row[EVENT_TYPE_FIELD]}
@@ -315,12 +261,6 @@ def model_event(row: dict, refs: LocalRefs) -> ModelEvent:
         value = row.get(name)
         if value is not None:
             fields[name] = value
-
-    for column in ENTITY_REFS:
-        value = row.get(column)
-        if value is not None:
-            name, _ = ENTITY_REFS[column]
-            fields[name] = refs.ref(column, value)
 
     return ModelEvent(
         client_id=row["client_id"],
@@ -337,15 +277,12 @@ def model_event(row: dict, refs: LocalRefs) -> ModelEvent:
 
 def model_role(name: str) -> str:
     """
-    Судьба поля: смысловое значение, локальная ссылка или
-    внутреннее поле слоя.
+    Судьба поля: смысловое значение или внутреннее поле
+    слоя. Третьего исхода нет: локальных ссылок больше нет.
     """
 
     if name in SEMANTIC_PAYLOAD_FIELDS:
         return "semantic_field"
-
-    if name in ENTITY_REFS:
-        return "local_ref"
 
     return "internal"
 
@@ -353,8 +290,8 @@ def model_role(name: str) -> str:
 def validate_projection(payload_names: Iterable[str]) -> None:
     """
     Каждое имя payload выгрузки названо ровно один раз: либо
-    разрешено, либо превращается в ссылку, либо объявлено
-    внутренним. Незнакомое имя останавливает работу.
+    разрешено, либо объявлено внутренним. Незнакомое имя
+    останавливает работу.
     """
 
     unknown: list[str] = []
@@ -363,9 +300,7 @@ def validate_projection(payload_names: Iterable[str]) -> None:
     for name in sorted(set(payload_names)):
 
         places = sum(
-            1
-            for table in (SEMANTIC_PAYLOAD_FIELDS, ENTITY_REFS, INTERNAL_FIELDS)
-            if name in table
+            1 for table in (SEMANTIC_PAYLOAD_FIELDS, INTERNAL_FIELDS) if name in table
         )
 
         if places == 0:
@@ -377,7 +312,7 @@ def validate_projection(payload_names: Iterable[str]) -> None:
         raise ProjectionError(
             "поля выгрузки не классифицированы модельной проекцией: "
             + ", ".join(unknown)
-            + ". Назовите каждое либо смысловым, либо ссылкой, либо внутренним"
+            + ". Назовите каждое либо смысловым, либо внутренним"
         )
 
     if twice:
@@ -385,13 +320,11 @@ def validate_projection(payload_names: Iterable[str]) -> None:
 
 
 __all__ = [
-    "ENTITY_REFS",
     "EVENT_TYPE_FIELD",
     "CLIENT_ACTION_EVENT_TYPES",
     "INTERNAL_FIELDS",
     "PROJECTION_VERSION",
     "SEMANTIC_PAYLOAD_FIELDS",
-    "LocalRefs",
     "ModelEvent",
     "ProjectionError",
     "model_event",

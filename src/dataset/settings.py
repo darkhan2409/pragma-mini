@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from src.generator.config import DATA_DIR
-from src.preprocessing.artifacts import dumps_json, sha256_bytes
 
 from .version import SCHEMA_VERSION
 
@@ -213,9 +212,6 @@ class DatasetConfig:
             "context": self.context.as_dict(),
             "row_group_samples": self.row_group_samples,
         }
-
-    def sha256(self) -> str:
-        return sha256_bytes(dumps_json(self.as_dict()).encode("utf-8"))
 
     @staticmethod
     def from_dict(data: Mapping[str, Any]) -> "DatasetConfig":

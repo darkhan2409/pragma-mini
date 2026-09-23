@@ -24,12 +24,6 @@ from src.preprocessing.settings import GroupWindow
 # ============================================================
 
 
-class TargetsError(ValueError):
-    """
-    Признак цели посчитать нельзя.
-    """
-
-
 def eligible(event_time: datetime, window: GroupWindow) -> bool:
     """
     Событие лежит в периоде будущих целей своей группы.
@@ -43,6 +37,5 @@ def eligible(event_time: datetime, window: GroupWindow) -> bool:
 
 
 __all__ = [
-    "TargetsError",
     "eligible",
 ]

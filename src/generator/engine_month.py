@@ -1038,10 +1038,14 @@ def assign_balances(state: ClientState, tape: list) -> None:
 
 
 def _row(event) -> dict:
+    """
+    Строка выгрузки: время уходит читаемой строкой со
+    смещением, а не готовым timestamp.
+    """
 
     return {
         "client_id": event.client_id,
-        "event_time": event.event_time,
+        "event_time": config.event_time_text(event.event_time),
         "source": event.source,
         "payload": json.dumps(event.payload, ensure_ascii=False, separators=(",", ":"), default=str),
     }
