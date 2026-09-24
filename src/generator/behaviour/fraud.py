@@ -44,8 +44,25 @@ def score_band(foreign: bool, amount_share: float, rng) -> str:
     return "low"
 
 
-def rule_code(kind: str, rng) -> str:
-    return str(rng.weighted(params_module.active().fraud.rule_weights[kind]))
+def rule_code(subject: str, foreign: bool, rng) -> str:
+    """
+    Правило, по которому сработал антифрод.
+
+    Как и полоса риска, правило видит только операцию: на чём
+    сработало и из какой страны. Вид эпизода ему неизвестен —
+    иначе код правила сам называл бы, настоящая это тревога или
+    ложная, и модель читала бы ответ вместо того, чтобы его
+    предсказывать.
+    """
+
+    settings = params_module.active().fraud
+
+    weights = dict(settings.rule_weights.get(subject, settings.rule_weights["card"]))
+
+    if foreign and "R_GEO_ANOMALY" in weights:
+        weights["R_GEO_ANOMALY"] *= settings.rule_geo_boost
+
+    return str(rng.weighted(weights))
 
 
 __all__ = ["rule_code", "score_band"]

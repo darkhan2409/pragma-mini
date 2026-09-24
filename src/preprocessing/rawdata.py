@@ -50,7 +50,7 @@ from .artifacts import sha256_file
 
 MANIFEST_NAME = "manifest.json"
 
-EXPECTED_SCHEMA_VERSION = 13
+EXPECTED_SCHEMA_VERSION = 14
 
 # Файлы, без которых группа не обрабатывается. Справочников
 # рядом с выгрузкой нет: они остались входом генератора.
@@ -70,8 +70,15 @@ MAIN_TABLES: tuple[str, ...] = ("events", "profile")
 
 REQUIRED_MANIFEST_KEYS: tuple[str, ...] = (
     "schema_version",
+    "generator_version",
     "period_start",
     "period_end",
+    "seed",
+    "world_seed",
+    "total_clients",
+    "community_size",
+    "generation_config_sha256",
+    "reference_sha256",
     "events_rows",
     "profile_rows",
     "events_sha256",
@@ -239,6 +246,11 @@ class RawManifest:
     profile_sha256: str
     sha256: str
 
+    # Происхождение выгрузки: чем и с какими параметрами она
+    # получена. Препроцессинг им не пользуется — он нужен тому,
+    # кто спросит, откуда взялись данные.
+    provenance: dict
+
     @property
     def catalogue(self) -> dict[str, EventTypeInfo]:
         return _static_catalogue()
@@ -400,6 +412,16 @@ def read_manifest(raw_dir: Path) -> RawManifest:
         events_sha256=str(data["events_sha256"]),
         profile_sha256=str(data["profile_sha256"]),
         sha256=hashlib.sha256(raw_bytes).hexdigest(),
+        provenance={
+            "generator_version": str(data["generator_version"]),
+            "seed": int(data["seed"]),
+            "world_seed": int(data["world_seed"]),
+            "total_clients": int(data["total_clients"]),
+            "community_size": int(data["community_size"]),
+            "chunk_clients": data.get("chunk_clients"),
+            "generation_config_sha256": str(data["generation_config_sha256"]),
+            "reference_sha256": dict(data["reference_sha256"]),
+        },
     )
 
 

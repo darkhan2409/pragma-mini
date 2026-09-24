@@ -690,7 +690,7 @@ class CommunitySimulation:
 
             activation = ts + timedelta(days=int(rng.integers(low, high + 1)), hours=int(rng.integers(1, 20)))
 
-            if activation >= config.HISTORY_END:
+            if activation >= config.PLANNING_END:
                 activation = ts
 
             card.activated_at = activation

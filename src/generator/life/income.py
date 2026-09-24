@@ -147,7 +147,7 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
             day=28 if (born.month, born.day) == (2, 29) else born.day,
         )
 
-        if turns < config.HISTORY_END:
+        if turns < config.PLANNING_END:
 
             pension_rng = keyed_rng(NS_INCOME, persona.client_ordinal, 5)
 
@@ -233,7 +233,7 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
         # У потери работы всё иначе: там поток кончается по самому
         # событию, и отсутствие дохода к срезу это правда.
         if event.kind == "job_change":
-            if event.ts + timedelta(days=int(event.payload.get("gap_days", 0))) >= config.HISTORY_END:
+            if event.ts + timedelta(days=int(event.payload.get("gap_days", 0))) >= config.PLANNING_END:
                 continue
 
         streams[primary_position] = replace(primary, valid_to=event.ts)
@@ -282,7 +282,7 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
         else:
             restart = event.ts + timedelta(days=int(event.payload.get("gap_days", 0)))
 
-        if restart >= config.HISTORY_END:
+        if restart >= config.PLANNING_END:
             continue
 
         factor = float(event.payload.get("income_factor", item_rng.uniform(0.85, 1.35)))
@@ -392,7 +392,11 @@ def payouts(persona: Persona, streams: tuple, stress_episodes: tuple) -> tuple:
     for stream in streams:
 
         start = max(stream.valid_from, config.HISTORY_START)
-        stop = min(stream.valid_to or config.HISTORY_END, config.HISTORY_END)
+        # Горизонт планирования, а не конец выгрузки: следующая
+        # зарплата читается решением о трате (engine.py:191-203),
+        # и обрыв списка на границе окна менял бы поведение в
+        # последние недели.
+        stop = min(stream.valid_to or config.PLANNING_END, config.PLANNING_END)
 
         if stop <= start:
             continue
@@ -644,7 +648,7 @@ def vacation_payouts(persona: Persona, streams: tuple, events: tuple) -> tuple:
 
         ts = event.ts - timedelta(days=int(rng.integers(1, 5)))
 
-        if not (config.HISTORY_START <= ts < config.HISTORY_END) or not salary.active_at(ts):
+        if not (config.HISTORY_START <= ts < config.PLANNING_END) or not salary.active_at(ts):
             continue
 
         amount = int(salary.base_amount * rng.uniform(*settings.vacation_pay_of_income))

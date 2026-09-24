@@ -114,6 +114,19 @@ def _write_json(path: Path, payload: dict) -> None:
     os.replace(temporary, path)
 
 
+def _read_json(path: Path, what: str) -> dict:
+    """
+    JSON черновика. Битый файл — ошибка данных прогона, а не
+    поломка генератора, поэтому наружу идёт GenerationError с
+    именем файла, а не исключение из недр json.
+    """
+
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise GenerationError(f"{what} {path.name} нечитаем: {error}") from error
+
+
 def _batch_marker(out: Path, index: int) -> Path:
     return out / PARTS_DIR / f"batch-{index:05d}.json"
 
@@ -188,10 +201,16 @@ def _run_batch(job: tuple) -> tuple:
     out = Path(out_dir)
 
     counts: dict[str, int] = {}
+    digests: dict[str, str] = {}
 
     for name, (_, schema) in TABLES.items():
+        part = out / PARTS_DIR / f"{name}-{batch_index:05d}.parquet"
         counts[name] = len(rows[name])
-        _write(out / PARTS_DIR / f"{name}-{batch_index:05d}.parquet", rows[name], schema)
+        _write(part, rows[name], schema)
+        # Число строк не описывает содержимое: подменённая часть
+        # прежней длины прошла бы в итог незамеченной. Маркер
+        # подписывает сам файл.
+        digests[name] = _file_sha256(part)
 
     # Маркер пишется ПОСЛЕДНИМ и целиком: пачка готова только
     # тогда, когда все её part-файлы на месте. Итоговые суммы
@@ -203,6 +222,7 @@ def _run_batch(job: tuple) -> tuple:
             "batch": batch_index,
             "communities": list(community_ids),
             "counts": counts,
+            "sha256": digests,
         },
     )
 
@@ -214,7 +234,7 @@ def _run_batch(job: tuple) -> tuple:
 # ============================================================
 
 
-def _merge_parts(out: Path, name: str, batches: int) -> int:
+def _merge_parts(out: Path, name: str, batches: int, digests: dict[int, str]) -> int:
     """
     Склейка part-файлов в итоговую таблицу.
 
@@ -245,6 +265,17 @@ def _merge_parts(out: Path, name: str, batches: int) -> int:
             raise GenerationError(
                 f"пачка {index}: маркер есть, а части {part.name} нет — "
                 "черновик повреждён, прогон нужно начать заново"
+            )
+
+        # Число строк содержимого не описывает: часть той же
+        # длины с другими значениями прошла бы незамеченной.
+        # Сверяется подпись, которую маркер поставил при записи.
+        actual = _file_sha256(part)
+
+        if actual != digests[index]:
+            raise GenerationError(
+                f"пачка {index}: содержимое {part.name} не совпадает с подписью "
+                "маркера — черновик повреждён, прогон нужно начать заново"
             )
 
         table = pq.read_table(part)
@@ -367,7 +398,7 @@ def generate_dataset(
 
     if resume and run_path.exists():
 
-        stored = json.loads(run_path.read_text(encoding="utf-8"))
+        stored = _read_json(run_path, "карточка прогона")
 
         if stored != card:
             differing = sorted(
@@ -417,6 +448,10 @@ def generate_dataset(
     # тот же манифест, что и сборка без остановки.
     counts = {name: 0 for name in TABLES}
 
+    # Подписи частей, обещанные маркерами: по ним сверяется
+    # содержимое каждой готовой части перед склейкой.
+    digests: dict[str, dict[int, str]] = {name: {} for name in TABLES}
+
     for index in range(len(batches)):
 
         marker = _batch_marker(out, index)
@@ -426,14 +461,23 @@ def generate_dataset(
                 f"пачка {index} не завершена: без её маркера датасет собирать нельзя"
             )
 
-        record = json.loads(marker.read_text(encoding="utf-8"))
+        record = _read_json(marker, "маркер пачки")
+
+        promised = record.get("sha256")
+
+        if not isinstance(promised, dict):
+            raise GenerationError(
+                f"маркер пачки {index} без подписей частей: черновик собран "
+                "прежней версией генератора, продолжить его нельзя"
+            )
 
         for name in counts:
             counts[name] += int(record["counts"][name])
+            digests[name][index] = str(promised[name])
 
     for name in TABLES:
 
-        merged = _merge_parts(out, name, len(batches))
+        merged = _merge_parts(out, name, len(batches), digests[name])
 
         # Склеенное обязано сойтись с обещанным маркерами: иначе
         # манифест назовёт строки, которых в файле нет.
@@ -443,15 +487,33 @@ def generate_dataset(
                 f"{counts[name]} — черновик повреждён, прогон нужно начать заново"
             )
 
-    # Технический паспорт выгрузки: версия контракта, окно,
-    # число строк и sha256 двух основных файлов. Всё остальное —
-    # схема событий, приоритеты типов, доступность источников —
-    # статично и живёт в коде, а не в копии рядом с данными.
+    # Технический паспорт выгрузки: версия контракта, окно, число
+    # строк, sha256 двух основных файлов и происхождение.
+    #
+    # Происхождение записано здесь, а не только в карточке
+    # прогона: карточка удаляется при успехе, и готовая выгрузка
+    # оставалась без единого следа того, каким seed и какими
+    # параметрами получена. Схема событий, приоритеты типов и
+    # доступность источников по-прежнему живут в коде, а не в
+    # копии рядом с данными.
     manifest = {
         "schema_version": SCHEMA_VERSION,
+        "generator_version": GENERATOR_VERSION,
         "timezone": config.TIMEZONE_NAME,
         "period_start": config.event_time_text(config.HISTORY_START),
         "period_end": config.event_time_text(config.HISTORY_END),
+        "seed": seed,
+        "world_seed": rng_module.current_world_seed(),
+        "total_clients": total_clients,
+        "community_size": size,
+        # Размер чанка данные не меняет, но меняет раскладку
+        # групп строк в parquet, а значит и sha256 файла.
+        "chunk_clients": chunk_clients,
+        "generation_config_sha256": settings.fingerprint(),
+        "reference_sha256": {
+            "merchants": _file_sha256(config.MERCHANT_REFERENCE_PATH),
+            "product_timeline": _file_sha256(config.PRODUCT_TIMELINE_PATH),
+        },
         "events_rows": counts["events"],
         "profile_rows": counts["profile"],
         "events_sha256": _file_sha256(out / TABLES["events"][0]),

@@ -70,7 +70,7 @@ def plan_pauses(persona: Persona, events: tuple) -> tuple:
         hour=0, minute=0, second=0, microsecond=0
     )
 
-    span_days = (config.HISTORY_END - start).days
+    span_days = (config.PLANNING_END - start).days
 
     if span_days <= 40:
         return ()
@@ -93,7 +93,7 @@ def plan_pauses(persona: Persona, events: tuple) -> tuple:
             Pause(
                 kind="full",
                 start=begin,
-                actual_end=config.HISTORY_END,
+                actual_end=config.PLANNING_END,
             ),
         )
 
@@ -118,8 +118,8 @@ def plan_pauses(persona: Persona, events: tuple) -> tuple:
 
         finish = begin + timedelta(days=actual_days)
 
-        if finish > config.HISTORY_END:
-            finish = config.HISTORY_END
+        if finish > config.PLANNING_END:
+            finish = config.PLANNING_END
 
         if any(not (finish <= left or begin >= right) for left, right in occupied):
             continue

@@ -38,8 +38,8 @@ MERCHANT_REFERENCE_PATH = REFERENCE_DIR / "merchants.json"
 # ISO 8601 со смещением, а не готовым timestamp. Генератор
 # пишет читаемое время так, как его отдала бы банковская
 # система, а приводит его к UTC препроцессинг.
-GENERATOR_VERSION = "11.0"
-SCHEMA_VERSION = 13
+GENERATOR_VERSION = "12.0"
+SCHEMA_VERSION = 14
 
 SEED = 42
 
@@ -101,6 +101,25 @@ HISTORY_END = datetime(2026, 9, 1)
 # Реестр договоров старше окна наблюдения.
 REGISTRY_START = datetime(2018, 1, 1)
 
+# ГОРИЗОНТ ПЛАНИРОВАНИЯ — до какой даты симуляция строит планы
+# клиента: жизненные события, паузы, стресс, мошенничество,
+# потоки дохода, подписки, дату прихода в банк и установки
+# приложения.
+#
+# Он НЕ равен концу выгрузки и от него не зависит. Иначе продление
+# окна переписывало бы уже случившееся: число планируемых событий
+# считалось от длины окна, а их даты раскладывались по ней же, и
+# удлинение окна раздвигало даты задним числом.
+#
+# Теперь окно выгрузки только ОБРЕЗАЕТ ленту. Клиент живёт по
+# одному плану, а сколько от этой жизни попадёт в выгрузку —
+# решает граница.
+#
+# Значение выбрано по самому дальнему объявленному окну
+# (DATASETS ниже): так плотность событий остаётся той же, что
+# была, а не размазывается по лишним годам.
+PLANNING_END = datetime(2026, 9, 1)
+
 
 # ============================================================
 # ИСТОЧНИКИ
@@ -158,6 +177,14 @@ def activate_horizon(start: datetime, end: datetime) -> None:
 
     if start < REGISTRY_START:
         raise ValueError(f"история начинается раньше реестра договоров: {start} < {REGISTRY_START}")
+
+    # Планы строятся до PLANNING_END; окно, выходящее за него,
+    # получило бы обрезанную жизнь клиента вместо продолжения.
+    if end > PLANNING_END:
+        raise ValueError(
+            f"конец окна {end} дальше горизонта планирования {PLANNING_END}: "
+            "поднимите PLANNING_END, иначе планы кончатся раньше выгрузки"
+        )
 
     HISTORY_START = start
     HISTORY_END = end
@@ -769,21 +796,21 @@ class DatasetGroup:
 
 DATASETS: dict[str, DatasetGroup] = {
     "train": DatasetGroup(
-        clients=1,
+        clients=200,
         history_start=datetime(2024, 1, 1),
         history_end=datetime(2026, 1, 1),
-        seed=494,
+        seed=100,
     ),
     "val": DatasetGroup(
-        clients=10,
+        clients=50,
         history_start=datetime(2024, 1, 1),
         history_end=datetime(2026, 5, 1),
-        seed=501,
+        seed=200,
     ),
     "test": DatasetGroup(
-        clients=10,
+        clients=50,
         history_start=datetime(2024, 1, 1),
         history_end=datetime(2026, 9, 1),
-        seed=502,
+        seed=300,
     ),
 }

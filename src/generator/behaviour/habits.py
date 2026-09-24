@@ -284,7 +284,7 @@ def _subscriptions(persona: Persona, settlement: str) -> tuple:
     result: list[Subscription] = []
 
     first_month = cal.month_index(config.HISTORY_START)
-    last_month = cal.month_index(config.HISTORY_END)
+    last_month = cal.month_index(config.PLANNING_END)
 
     for index in range(count):
 
