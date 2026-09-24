@@ -1,0 +1,46 @@
+{
+  "code_state": "b2842186797d6e4d66d33b6389822150920ff91f2c7ff4b397214867d57086b1",
+  "clients_compared": 32,
+  "same_client_set": true,
+  "differing": {
+    "pauses": 28,
+    "life_events": 31,
+    "income_streams": 5,
+    "stress_episodes": 8,
+    "fraud_episodes": 1
+  },
+  "payouts_count_differs": 32,
+  "payouts_prefix_differs": 21,
+  "example": {
+    "client": "c019502258728",
+    "short": [
+      [
+        "2024-01-05 11:43:39",
+        75000
+      ],
+      [
+        "2024-02-09 08:56:34",
+        75300
+      ],
+      [
+        "2024-03-07 12:18:55",
+        75700
+      ]
+    ],
+    "long": [
+      [
+        "2024-01-05 11:43:39",
+        75000
+      ],
+      [
+        "2024-02-09 08:56:34",
+        75300
+      ],
+      [
+        "2024-03-07 12:18:55",
+        75700
+      ]
+    ]
+  },
+  "verdict": "подготовка расходится"
+}

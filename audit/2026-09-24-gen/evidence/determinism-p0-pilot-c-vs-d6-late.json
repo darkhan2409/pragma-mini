@@ -1,0 +1,36 @@
+{
+  "left": "p0-pilot-c",
+  "right": "d6-late",
+  "prefix": "2026-01-01",
+  "expect": "same",
+  "files_identical": {
+    "events.parquet": false,
+    "profile.parquet": false,
+    "manifest.json": false
+  },
+  "tables": [
+    {
+      "table": "events",
+      "schema": true,
+      "prefix_cutoff": "2026-01-01T00:00:00+05:00",
+      "rows_left": 134658,
+      "rows_right": 129550,
+      "rows": false,
+      "order": false,
+      "text": false,
+      "payload": false,
+      "values": false
+    },
+    {
+      "table": "profile",
+      "schema": true,
+      "rows_left": 64,
+      "rows_right": 64,
+      "rows": true,
+      "order": true,
+      "values": false
+    }
+  ],
+  "data_identical": false,
+  "verdict": "FAIL"
+}

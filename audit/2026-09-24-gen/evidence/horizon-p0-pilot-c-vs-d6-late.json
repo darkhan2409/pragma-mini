@@ -1,0 +1,39 @@
+{
+  "short": "p0-pilot-c",
+  "long": "d6-late",
+  "boundary": "2026-01-01",
+  "rows_short": 134658,
+  "rows_long": 129550,
+  "clients_short": 64,
+  "clients_long": 62,
+  "same_client_set": false,
+  "clients_with_identical_prefix": 0,
+  "clients_differing": 64,
+  "first_difference": {
+    "index": 0,
+    "short": {
+      "client": "c584040371990",
+      "time": "2024-10-05T12:00:00+05:00",
+      "source": "product_events",
+      "type": "account_opened"
+    },
+    "long": {
+      "client": "c584040371990",
+      "time": "2025-01-09T12:00:00+05:00",
+      "source": "product_events",
+      "type": "account_opened"
+    }
+  },
+  "earliest_client_change": {
+    "client": "c019502258728",
+    "short": {
+      "time": "2024-07-07T22:56:00+05:00",
+      "type": "purchase"
+    },
+    "long": {
+      "time": "2024-07-10T07:26:54+05:00",
+      "type": "pension_credit"
+    }
+  },
+  "verdict": "FAIL"
+}

@@ -1,0 +1,35 @@
+{
+  "left": "d4-chunk32",
+  "right": "d4-chunk256",
+  "prefix": null,
+  "expect": "same",
+  "files_identical": {
+    "events.parquet": false,
+    "profile.parquet": false,
+    "manifest.json": false
+  },
+  "tables": [
+    {
+      "table": "events",
+      "schema": true,
+      "rows_left": 590334,
+      "rows_right": 590334,
+      "rows": true,
+      "order": true,
+      "text": true,
+      "payload": true,
+      "values": true
+    },
+    {
+      "table": "profile",
+      "schema": true,
+      "rows_left": 256,
+      "rows_right": 256,
+      "rows": true,
+      "order": true,
+      "values": true
+    }
+  ],
+  "data_identical": true,
+  "verdict": "PASS"
+}

@@ -1,0 +1,35 @@
+{
+  "left": "p0-pilot-c",
+  "right": "d7-world7",
+  "prefix": null,
+  "expect": "differ",
+  "files_identical": {
+    "events.parquet": false,
+    "profile.parquet": false,
+    "manifest.json": false
+  },
+  "tables": [
+    {
+      "table": "events",
+      "schema": true,
+      "rows_left": 134658,
+      "rows_right": 130994,
+      "rows": false,
+      "order": false,
+      "text": false,
+      "payload": false,
+      "values": false
+    },
+    {
+      "table": "profile",
+      "schema": true,
+      "rows_left": 64,
+      "rows_right": 64,
+      "rows": true,
+      "order": true,
+      "values": false
+    }
+  ],
+  "data_identical": false,
+  "verdict": "PASS"
+}
