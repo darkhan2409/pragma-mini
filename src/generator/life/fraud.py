@@ -61,7 +61,7 @@ def plan_episodes(persona: Persona, events: tuple) -> tuple:
     rate *= 1.0 + (settings.travel_exposure_factor - 1.0) * mobility
 
     start = max(config.HISTORY_START, persona.relationship_start)
-    span_days = (config.HISTORY_END - start).days
+    span_days = (config.PLANNING_END - start).days
 
     if span_days <= 30:
         return ()

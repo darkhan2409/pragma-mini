@@ -115,30 +115,25 @@ class FraudParams:
     # Какое правило антифрода срабатывает. Правило смотрит на
     # признаки операции, а не на скрытый вид эпизода: одно и то
     # же правило ловит разные сценарии, и ложные тревоги тоже.
-    # Карточные виды ловятся правилами покупок, переводные —
-    # правилами переводов.
+    # Правило выбирается по тому, НА ЧЁМ сработал антифрод:
+    # покупка ловится карточными правилами, перевод —
+    # переводными. Вид эпизода сюда не входит намеренно: иначе
+    # код правила сам называл бы, настоящая это тревога или
+    # ложная, а банк в момент тревоги вида не знает.
     rule_weights: dict = field(
         default_factory=lambda: {
-            "card_compromise": {
-                "R_CARD_VELOCITY": 0.45, "R_AMOUNT_ANOMALY": 0.25, "R_GEO_ANOMALY": 0.30,
+            "card": {
+                "R_CARD_VELOCITY": 0.35, "R_AMOUNT_ANOMALY": 0.35, "R_GEO_ANOMALY": 0.30,
             },
-            "unusual_purchase": {
-                "R_CARD_VELOCITY": 0.20, "R_AMOUNT_ANOMALY": 0.55, "R_GEO_ANOMALY": 0.25,
-            },
-            "false_positive": {
-                "R_CARD_VELOCITY": 0.20, "R_AMOUNT_ANOMALY": 0.40, "R_GEO_ANOMALY": 0.40,
-            },
-            "suspicious_transfer": {
-                "R_TRANSFER_PATTERN": 0.55, "R_AMOUNT_ANOMALY": 0.35, "R_NEW_DEVICE": 0.10,
-            },
-            "social_engineering": {
-                "R_TRANSFER_PATTERN": 0.60, "R_AMOUNT_ANOMALY": 0.35, "R_NEW_DEVICE": 0.05,
-            },
-            "account_takeover": {
-                "R_TRANSFER_PATTERN": 0.35, "R_AMOUNT_ANOMALY": 0.20, "R_NEW_DEVICE": 0.45,
+            "transfer": {
+                "R_TRANSFER_PATTERN": 0.50, "R_AMOUNT_ANOMALY": 0.35, "R_NEW_DEVICE": 0.15,
             },
         }
     )
+
+    # Чужая страна усиливает географическое правило. Страна
+    # операции банку видна, поэтому такой сдвиг законен.
+    rule_geo_boost: float = 2.5
 
     score_band_thresholds: tuple = (0.42, 0.82)
 

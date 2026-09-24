@@ -10,6 +10,7 @@ from typing import Any, Callable, Sequence
 
 import numpy as np
 
+from . import config
 from .config import SEED
 
 
@@ -54,11 +55,32 @@ def current_world_seed() -> int:
     return int(_STATE["world_seed"])
 
 
-def state_key() -> tuple[int, int, str]:
-    return (int(_STATE["seed"]), int(_STATE["world_seed"]), str(_STATE["fingerprint"]))
+def state_key() -> tuple:
+    """
+    Всё, от чего зависит закэшированное значение.
+
+    Горизонт входит сюда наравне с seed: часть кэшируемых величин
+    его читает (персона, подключение приложения, согласие,
+    продуктовый каталог), и без него второй прогон в том же
+    процессе получал значения, посчитанные под прежним окном.
+    Читается он по месту, а не копией: activate_horizon
+    переприсваивает глобалы.
+    """
+
+    return (
+        int(_STATE["seed"]),
+        int(_STATE["world_seed"]),
+        str(_STATE["fingerprint"]),
+        config.HISTORY_START,
+        config.HISTORY_END,
+    )
 
 
 _CACHES: list[dict] = []
+
+# Отличает «записи нет» от «записано None». Функция, законно
+# вернувшая None, иначе пересчитывалась бы при каждом обращении.
+_MISSING = object()
 
 
 def clear_caches() -> None:
@@ -78,8 +100,8 @@ def state_cache(func: Callable) -> Callable:
 
     def wrapper(*args):
         key = (state_key(), args)
-        hit = cache.get(key)
-        if hit is None:
+        hit = cache.get(key, _MISSING)
+        if hit is _MISSING:
             hit = func(*args)
             cache[key] = hit
         return hit
@@ -192,6 +214,16 @@ _NORMAL = NormalDist()
 
 _UNIT = float(2 ** 64)
 
+# Наибольшее число float64, строго меньшее единицы.
+#
+# Деление uint64 на 2**64 даёт ровно 1.0 у 1024 верхних значений:
+# шаг сетки float64 около единицы равен 2**-53, и всё, что ближе,
+# округляется вверх. Тогда chance(1.0) становилось ложным, а
+# int(u * size) выходило за границу списка. Случай редкий
+# (примерно 5.6e-17 на розыгрыш), но последствие — падение всего
+# прогона, поэтому граница прижимается здесь, в одном месте.
+_BELOW_ONE = math.nextafter(1.0, 0.0)
+
 
 class KeyedRandom:
 
@@ -209,7 +241,9 @@ class KeyedRandom:
 
         self._index += 1
 
-        return int.from_bytes(digest, "little") / _UNIT
+        value = int.from_bytes(digest, "little") / _UNIT
+
+        return value if value < 1.0 else _BELOW_ONE
 
     def integers(self, low: int, high: int | None = None) -> int:
         if high is None:
@@ -272,7 +306,10 @@ class KeyedRandom:
         u = self.random()
 
         if p is None:
-            index = int(u * size)
+            # Ограничение то же, что у взвешенной ветки ниже:
+            # random() уже не даёт единицы, но индекс не должен
+            # зависеть от этого на слово.
+            index = min(int(u * size), size - 1)
         else:
             cumulative = list(accumulate(max(0.0, float(x)) for x in p))
             total = cumulative[-1]

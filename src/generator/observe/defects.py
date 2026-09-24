@@ -33,14 +33,44 @@ from .envelope import Event
 # ============================================================
 
 
-def _rng(event: Event, slot: int):
+def _keys(events: list) -> list:
     """
-    Ключ случайности события: клиент и номер выдачи. Номер живёт
-    в памяти симуляции, в выгрузку не попадает и от места строки
-    в файле не зависит.
+    Ключ случайности каждого события: клиент, тип, время, сумма и
+    номер среди совпадающих по всему этому.
+
+    Номер выдачи для этого не годится. Событие, датированное за
+    концом окна, короткая выгрузка не создаёт вовсе
+    (engine_products.py:1351 и соседние), и нумерация всех
+    следующих событий клиента съезжает на единицу — вместе с ней
+    съезжали бы дефекты наблюдения, хотя сами события те же.
+    Ключ по содержанию от границы выгрузки не зависит.
+
+    От места строки в файле он тоже не зависит: считается по
+    самому событию, а вставка другого события ничего не двигает.
     """
 
-    return keyed_rng(NS_OBSERVE, stable_hash(event.client_id, event.ordinal) % (2 ** 31), slot)
+    seen: dict[tuple, int] = {}
+
+    result: list[int] = []
+
+    for event in events:
+
+        moment = event.event_time.isoformat()
+        amount = event.payload.get("amount")
+
+        group = (event.event_type, moment, amount)
+
+        index = seen[group] = seen.get(group, 0) + 1
+
+        result.append(
+            stable_hash(event.client_id, event.event_type, moment, amount, index) % (2 ** 31)
+        )
+
+    return result
+
+
+def _rng(key: int, slot: int):
+    return keyed_rng(NS_OBSERVE, key, slot)
 
 
 def _apply_schema_change(event: Event) -> Event:
@@ -125,9 +155,9 @@ def apply(events: list) -> list:
 
     observed: list[Event] = []
 
-    for event in events:
+    for event, key in zip(events, _keys(events)):
 
-        rng = _rng(event, 1)
+        rng = _rng(key, 1)
 
         current = _apply_schema_change(event)
         current = _apply_field_missing(current, rng)
@@ -149,12 +179,12 @@ def plan_refunds(purchases: list) -> list:
 
     planned = []
 
-    for event in purchases:
+    for event, key in zip(purchases, _keys(purchases)):
 
         if event.payload.get("status") != "approved":
             continue
 
-        rng = _rng(event, 5)
+        rng = _rng(key, 5)
 
         amount = int(event.payload.get("amount") or 0)
 

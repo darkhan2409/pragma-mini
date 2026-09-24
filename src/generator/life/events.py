@@ -135,7 +135,7 @@ def plan_events(persona: Persona) -> tuple:
 
     settings = params_module.active().lifecycle
 
-    span_days = (config.HISTORY_END - config.HISTORY_START).days
+    span_days = (config.PLANNING_END - config.HISTORY_START).days
     years = span_days / 365.25
 
     events: list[LifeEvent] = []
@@ -208,7 +208,7 @@ def plan_events(persona: Persona) -> tuple:
             if known_share > 0.0 and item_rng.random() < known_share:
                 delay = item_rng.integers(*settings.profile_change_delay_days)
                 known_at = ts + timedelta(days=int(delay))
-                if known_at >= config.HISTORY_END:
+                if known_at >= config.PLANNING_END:
                     known_at = None
             else:
                 known_at = None

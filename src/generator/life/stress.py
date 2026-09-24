@@ -108,7 +108,7 @@ def plan_episodes(persona: Persona, events: tuple) -> tuple:
 
     candidates = _trigger_events(persona, events)
 
-    span_days = (config.HISTORY_END - config.HISTORY_START).days
+    span_days = (config.PLANNING_END - config.HISTORY_START).days
     years = span_days / 365.25
 
     shock_rng = keyed_rng(NS_STRESS, persona.client_ordinal, 2)

@@ -1117,7 +1117,7 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
                 "card_id": card.card_id if card and subject == "card" else None,
                 "account_id": account.account_id,
                 "score_band": fraud_behaviour.score_band(step.foreign, share, alert_rng),
-                "rule_code": fraud_behaviour.rule_code(episode.kind, alert_rng),
+                "rule_code": fraud_behaviour.rule_code(subject, step.foreign, alert_rng),
             },
         )
     )
@@ -1137,7 +1137,17 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
                 "card_id": card.card_id if card and subject == "card" else None,
                 "account_id": account.account_id,
                 "decision": decision,
-                "resolution": episode.client_response if episode.client_response != "no_response" else None,
+                # Ответа клиента здесь нет и быть не может: решение
+                # выпускается через минуты после тревоги, а клиент
+                # к этому моменту ещё ничего не сказал. Прежде сюда
+                # клалось episode.client_response, разыгранный при
+                # подготовке клиента, и по его отсутствию
+                # однозначно исключался вид false_positive —
+                # у него ответ «промолчал» не выпадает никогда.
+                # Ответ становится наблюдаемым позже и своим
+                # событием: спор превращается в обращение
+                # (case_opened) через час-двадцать.
+                "resolution": None,
             },
         )
     )
@@ -1200,8 +1210,12 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
 
         state.fraud_disputes.add(episode_key)
 
+        # Тема обращения — по тому, что клиент увидел: карту
+        # заблокировали или пришла тревога. Прежде она бралась от
+        # скрытого вида эпизода и была двоичным пересказом
+        # «ложная тревога или настоящая».
         case = support_module.open_case(
-            state.persona, "fraud_alert" if episode.kind != "false_positive" else "card_blocked",
+            state.persona, "card_blocked" if blocked else "fraud_alert",
             decision_ts + timedelta(hours=int(rng.integers(1, 20))),
             len(state.cases),
         )
@@ -1263,7 +1277,10 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
     unblock_ts = decision_ts + timedelta(hours=int(rng.integers(*settings.unblock_delay_hours)))
 
     if unblock_ts < config.HISTORY_END:
-        unblock_card(state, unblock_ts, card, "confirmed_by_client")
+        # Причина нейтральная: прежняя строка «confirmed_by_client»
+        # была прямым пересказом скрытого ответа клиента и
+        # переживала бы правку самого fraud_decision.
+        unblock_card(state, unblock_ts, card, "fraud_check_closed")
 
 
 def _reissue_card(state: ClientState, card, ts: datetime, reason: str = "fraud_reissue") -> None:

@@ -320,7 +320,7 @@ def build_graph(community_id: int, members: tuple, personas: dict) -> CommunityG
                 end_share = settings.relation_end_share_per_year.get(relation_type)
 
                 if end_share and item_rng.random() < end_share:
-                    offset = item_rng.integers(60, max(61, (config.HISTORY_END - start).days))
+                    offset = item_rng.integers(60, max(61, (config.PLANNING_END - start).days))
                     valid_to = start + timedelta(days=int(offset))
 
                 relationships.append(

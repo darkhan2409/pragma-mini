@@ -306,7 +306,7 @@ def draw_persona(client_ordinal: int) -> Persona:
     registered_in_window = bool(rng.random() < population.registration_in_window_share)
 
     if registered_in_window:
-        span = (config.HISTORY_END - config.HISTORY_START).days - population.registration_margin_days
+        span = (config.PLANNING_END - config.HISTORY_START).days - population.registration_margin_days
         offset = int(rng.integers(1, max(2, span)))
         relationship_start = config.HISTORY_START + timedelta(days=offset)
     else:
@@ -407,13 +407,13 @@ def app_adoption(client_ordinal: int) -> datetime | None:
 
     # Половина окна на то, чтобы установить: у большинства это
     # случается вскоре после начала отношений с банком.
-    span_days = max(1, (config.HISTORY_END - start).days)
+    span_days = max(1, (config.PLANNING_END - start).days)
 
     offset = int(rng.integers(0, max(1, span_days // 2)))
 
     adopted = start + timedelta(days=offset)
 
-    if adopted >= config.HISTORY_END:
+    if adopted >= config.PLANNING_END:
         adopted = start
 
     return adopted.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -438,7 +438,7 @@ def consent_date(client_ordinal: int) -> datetime | None:
 
     given = start + timedelta(days=int(rng.integers(0, 200)))
 
-    if given >= config.HISTORY_END:
+    if given >= config.PLANNING_END:
         return None
 
     return given.replace(hour=0, minute=0, second=0, microsecond=0)
