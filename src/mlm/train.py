@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import math
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -10,7 +12,7 @@ from src.masking.settings import ConfigError as MaskingConfigError
 from src.masking.settings import MaskingConfig
 from src.preprocessing.run import EXIT_BLOCKED, EXIT_OK
 
-from .settings import ConfigError, MlmConfig, checkpoint_path
+from .settings import ConfigError, MlmConfig, best_checkpoint_path, checkpoint_path
 
 
 # ============================================================
@@ -20,11 +22,12 @@ from .settings import ConfigError, MlmConfig, checkpoint_path
 # Одна команда, только на train:
 #
 #   python -m src.mlm.train [--epochs N] [--max-steps N] [--config путь]
-#                           [--masking-config путь]
+#                           [--masking-config путь] [--resume]
 #
 # Вход: data/07_batches/train, для validation data/07_batches/val
 # и data/08_masked/val; начальные веса энкодеров из этапов 09-12.
-# Выход: data/14_train/checkpoint.pt.
+# Выход: data/14_train/checkpoint.pt (последнее состояние) и
+# data/14_train/best_checkpoint.pt (лучший val_loss).
 #
 # Маска train НЕ читается из data/08_masked/train: каждая эпоха
 # разыгрывает её заново тем же маскером этапа 08 по
@@ -44,8 +47,13 @@ from .settings import ConfigError, MlmConfig, checkpoint_path
 # backward идёт по сумме потерь целей micro-batch, а перед шагом
 # градиенты делятся на число целей окна: шаг получает градиент
 # среднего по ВСЕМ целям окна, и цель в маленьком micro-batch
-# весит столько же, сколько в большом. step — шаг оптимизатора,
-# --max-steps ограничивает именно их.
+# весит столько же, сколько в большом. Затем норма градиента
+# ограничивается max_grad_norm, делается шаг AdamW и шаг
+# расписания LR. step — шаг оптимизатора, --max-steps ограничивает
+# именно их.
+#
+# LR: линейный разгон за warmup_steps шагов, затем cosine до
+# min_learning_rate к концу горизонта (lr_factor).
 #
 # Промежуточные parquet этапов 09-12 сюда не читаются: через файл
 # градиент не течёт. Весь проход собран в model.Model, и здесь он
@@ -54,8 +62,36 @@ from .settings import ConfigError, MlmConfig, checkpoint_path
 # После каждой полностью пройденной эпохи та же модель считает
 # потери на val: фиксированная маска data/08_masked/val, eval и
 # no_grad, те же micro-batch'и, без backward и шага. Среднее — по
-# всем целям val.
+# всем целям val. По нему обновляется лучший чекпойнт и считается
+# early stopping.
+#
+# --resume продолжает с checkpoint.pt: веса, AdamW, расписание,
+# счётчики, генераторы случайности и место внутри эпохи.
 # ============================================================
+
+
+# Всё, без чего продолжение невозможно.
+CHECKPOINT_KEYS = (
+    "model_state_dict",
+    "optimizer_state_dict",
+    "scheduler_state_dict",
+    "epoch",
+    "epoch_complete",
+    "micro_batches_done",
+    "step",
+    "best_val_loss",
+    "epochs_without_improvement",
+    "config",
+    "masking",
+    "rng_state",
+    "cuda_rng_state",
+)
+
+
+class CheckpointError(ValueError):
+    """
+    Чекпойнт нельзя прочитать или продолжить.
+    """
 
 
 def for_epoch(masking: MaskingConfig, epoch: int) -> MaskingConfig:
@@ -69,6 +105,89 @@ def for_epoch(masking: MaskingConfig, epoch: int) -> MaskingConfig:
     """
 
     return replace(masking, seed=stable_hash("epoch", masking.seed, epoch) % (2 ** 31))
+
+
+def lr_factor(done: int, warmup: int, total: int, floor: float) -> float:
+    """
+    Множитель к learning_rate для шага done + 1.
+
+    done — сколько шагов оптимизатора уже сделано. Разгон:
+    (done + 1) / warmup, поэтому первый шаг уже учит, а шаг warmup
+    идёт с полным LR. Дальше cosine от 1 до floor =
+    min_learning_rate / learning_rate к шагу total; после total
+    множитель остаётся floor.
+    """
+
+    if done < warmup:
+        return (done + 1) / warmup
+
+    progress = min(1.0, (done - warmup) / max(1, total - warmup))
+
+    return floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+
+def horizon(config: MlmConfig, masking: MaskingConfig, epochs: int, max_steps: int | None) -> int:
+    """
+    Сколько шагов оптимизатора займёт обучение — конец cosine.
+
+    Число micro-batch'ей эпохи считается по длинам клиентов, без
+    масок и модели: разбиение от маски не зависит. Окно без целей
+    шага не делает, поэтому это верхняя оценка.
+    """
+
+    from .inputs import Source, micro_batches
+
+    count = sum(
+        1 for _ in micro_batches(Source("train", masking=masking).sizes(), config.token_budget)
+    )
+
+    total = math.ceil(count / config.grad_accum_steps) * epochs
+
+    return min(total, max_steps) if max_steps is not None else total
+
+
+def load_checkpoint(path: Path) -> dict:
+    """
+    Чекпойнт целиком, проверенный до того, как им что-то заменят.
+    """
+
+    import torch
+
+    if not path.exists():
+        raise CheckpointError(
+            f"чекпойнта {path} нет: продолжать нечего, запустите обучение без --resume"
+        )
+
+    try:
+        state = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception as error:
+        raise CheckpointError(f"{path} не читается: {error}") from error
+
+    missing = [key for key in CHECKPOINT_KEYS if key not in state]
+
+    if missing:
+        raise CheckpointError(
+            f"{path}: нет полей {missing} — чекпойнт старого формата, продолжить его нельзя"
+        )
+
+    return state
+
+
+def save_checkpoint(state: dict, path: Path) -> None:
+    """
+    Запись через временный файл: прерванная запись не портит
+    прежний чекпойнт.
+    """
+
+    import torch
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    temporary = path.with_name(path.name + ".tmp")
+
+    torch.save(state, temporary)
+
+    os.replace(temporary, path)
 
 
 def validate(model, source, device, token_budget: int) -> tuple[float | None, int]:
@@ -115,9 +234,14 @@ def train(
     epochs: int,
     max_steps: int | None,
     masking: MaskingConfig,
+    resume: bool = False,
 ) -> dict:
     """
     Проход по micro-batch'ам train с обновлением весов всей модели.
+
+    epochs и max_steps — общие пределы от начала обучения, в том
+    числе при resume. При resume config и masking берутся из
+    чекпойнта.
     """
 
     # torch импортируется здесь, а не в шапке: без него команда
@@ -128,6 +252,17 @@ def train(
     from .inputs import Source, micro_batches
     from .model import load_model, pack
     from .varlen import autocast
+
+    latest_path = checkpoint_path()
+    best_path = best_checkpoint_path()
+
+    # Чекпойнт читается и проверяется первым: ни один файл не
+    # пишется, пока продолжение не собрано целиком.
+    state = load_checkpoint(latest_path) if resume else None
+
+    if state is not None:
+        config = MlmConfig.from_dict(state["config"])
+        masking = MaskingConfig.from_dict(state["masking"])
 
     device = _device(config.device)
 
@@ -140,10 +275,6 @@ def train(
         attention_backend=config.attention_backend,
     )
 
-    # Dropout энкодеров берёт случайность из глобального
-    # генератора: одинаковый конфиг обязан давать одинаковые веса.
-    torch.manual_seed(config.seed)
-
     # Параметры всей модели: общая таблица эмбеддингов, энкодеры
     # события, анкеты и истории и проекция головы.
     optimizer = torch.optim.AdamW(
@@ -152,14 +283,83 @@ def train(
         weight_decay=config.weight_decay,
     )
 
+    total = horizon(config, masking, epochs, max_steps)
+
+    floor = config.min_learning_rate / config.learning_rate
+
+    # LambdaLR считает свои шаги сам: scheduler.step() вызывается
+    # только после настоящего optimizer.step(), поэтому его счётчик
+    # и есть число сделанных шагов оптимизатора.
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, lambda done: lr_factor(done, config.warmup_steps, total, floor)
+    )
+
+    if state is None:
+        # Dropout энкодеров берёт случайность из глобального
+        # генератора: одинаковый конфиг обязан давать одинаковые веса.
+        torch.manual_seed(config.seed)
+
+        step, best, stale = 0, None, 0
+        first_epoch, skip = 1, 0
+
+    else:
+        # Порядок важен: оптимизатор грузится после создания
+        # расписания, иначе LR из чекпойнта затёрло бы начальным.
+        try:
+            model.load_state_dict(state["model_state_dict"])
+            optimizer.load_state_dict(state["optimizer_state_dict"])
+            scheduler.load_state_dict(state["scheduler_state_dict"])
+        except (RuntimeError, ValueError, KeyError) as error:
+            raise CheckpointError(f"{latest_path} не подходит к модели: {error}") from error
+
+        # Те же генераторы, что были в момент сохранения: dropout
+        # (в том числе flash-attn) продолжается той же случайностью.
+        torch.set_rng_state(state["rng_state"])
+
+        if device.type == "cuda" and state["cuda_rng_state"] is not None:
+            torch.cuda.set_rng_state(state["cuda_rng_state"], device)
+
+        step = int(state["step"])
+        best = state["best_val_loss"]
+        stale = int(state["epochs_without_improvement"])
+
+        # Полная эпоха — продолжаем со следующей. Неполная (её
+        # прервал --max-steps) — с той же, пропуская уже пройденные
+        # micro-batch'и: порядок клиентов и маска эпохи
+        # детерминированы, а окно на остановке было пустым.
+        if state["epoch_complete"]:
+            first_epoch, skip = int(state["epoch"]) + 1, 0
+        else:
+            first_epoch, skip = int(state["epoch"]), int(state["micro_batches_done"])
+
+        if (
+            stale >= config.early_stopping_patience
+            or first_epoch > epochs
+            or (max_steps is not None and step >= max_steps)
+        ):
+            return {
+                "checkpoint": str(latest_path),
+                "epoch": int(state["epoch"]),
+                "step": step,
+                "best_val_loss": best,
+                "epochs_without_improvement": stale,
+                "device": str(device),
+                "reason": "nothing",
+            }
+
     optimizer.zero_grad(set_to_none=True)
 
     # val с фиксированной маской из 08_masked: открывается сразу,
     # чтобы нехватка файлов стала видна до первого шага.
     val_source = Source("val")
 
-    epoch = 0
-    step = 0
+    if state is None:
+        # Новое обучение: лучший чекпойнт прошлого прогона к нему
+        # не относится. Последний и так перезаписывается.
+        best_path.unlink(missing_ok=True)
+
+    epoch = first_epoch
+    reason = "epochs"
 
     # Окно накопления: сколько micro-batch'ей в нём, сколько целей
     # и сумма потерь по целям.
@@ -174,9 +374,11 @@ def train(
         backward шёл по СУММЕ потерь целей каждого micro-batch,
         поэтому деление градиентов на число целей окна даёт
         градиент среднего по всем целям окна: цель одного
-        micro-batch весит столько же, сколько цель другого. Окно
-        без целей шага не делает — weight decay AdamW иначе
-        сдвинул бы веса без обучающего сигнала.
+        micro-batch весит столько же, сколько цель другого. Клип
+        стоит после деления: ограничивается норма именно этого
+        среднего. Окно без целей шага не делает — ни оптимизатора,
+        ни расписания: weight decay AdamW иначе сдвинул бы веса без
+        обучающего сигнала.
         """
 
         nonlocal step, window_batches, window_targets, window_loss
@@ -187,20 +389,49 @@ def train(
                 if parameter.grad is not None:
                     parameter.grad.div_(window_targets)
 
+            torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
+
+            lr = optimizer.param_groups[0]["lr"]
+
             optimizer.step()
+            scheduler.step()
 
             step += 1
 
             print(
                 f"epoch={epoch} step={step} loss={window_loss / window_targets:.4f} "
-                f"targets={window_targets} micro_batches={window_batches}"
+                f"targets={window_targets} micro_batches={window_batches} lr={lr:.2e}"
             )
 
         optimizer.zero_grad(set_to_none=True)
 
         window_batches, window_targets, window_loss = 0, 0, 0.0
 
-    for epoch in range(1, epochs + 1):
+    def snapshot(complete: bool, done: int) -> dict:
+        """
+        Всё состояние для продолжения. done — сколько micro-batch'ей
+        эпохи пройдено; у полной эпохи он не нужен и равен нулю.
+        """
+
+        return {
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "epoch": epoch,
+            "epoch_complete": complete,
+            "micro_batches_done": done,
+            "step": step,
+            "best_val_loss": best,
+            "epochs_without_improvement": stale,
+            "config": config.as_dict(),
+            "masking": masking.as_dict(),
+            "rng_state": torch.get_rng_state(),
+            "cuda_rng_state": (
+                torch.cuda.get_rng_state(device) if device.type == "cuda" else None
+            ),
+        }
+
+    for epoch in range(first_epoch, epochs + 1):
 
         # Каждая эпоха начинается в режиме обучения: validation
         # прошлой эпохи оставил модель в eval, и dropout был выключен.
@@ -210,7 +441,15 @@ def train(
 
         stopped = False
 
+        # micro-batch'и эпохи, пройденные до этого места, включая
+        # пропущенные при resume.
+        done = 0
+
         for clients in micro_batches(source.clients(), config.token_budget):
+
+            if done < skip:
+                done += 1
+                continue
 
             # Предел считает шаги оптимизатора. Проверка стоит перед
             # новым micro-batch'ем: окно к этому моменту пустое,
@@ -226,6 +465,7 @@ def train(
                 out = model(pack(clients, device))
 
             window_batches += 1
+            done += 1
 
             if out.count > 0:
                 (out.loss * out.count).backward()
@@ -235,40 +475,66 @@ def train(
             if window_batches == config.grad_accum_steps:
                 close_window()
 
-        # Неполное окно в конце эпохи не выбрасывается: его
-        # градиенты нормируются по его настоящему числу целей.
-        if not stopped and window_batches:
-            close_window()
+        skip = 0
 
         # Эпоха, прерванная --max-steps, не пройдена целиком:
-        # validation считается только после полной эпохи.
-        if not stopped:
-
-            val_loss, val_targets = validate(model, val_source, device, config.token_budget)
-
-            shown = f"{val_loss:.4f}" if val_loss is not None else "n/a"
-
-            print(f"epoch={epoch} val_loss={shown} val_targets={val_targets}")
-
-        if max_steps is not None and step >= max_steps:
+        # validation нет, лучший чекпойнт не трогается, последний
+        # запоминает место внутри эпохи.
+        if stopped:
+            reason = "max_steps"
+            save_checkpoint(snapshot(False, done), latest_path)
             break
 
-    path = checkpoint_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+        # Неполное окно в конце эпохи не выбрасывается: его
+        # градиенты нормируются по его настоящему числу целей.
+        if window_batches:
+            close_window()
 
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "epoch": epoch,
-            "step": step,
-            "config": config.as_dict(),
-            "masking": masking.as_dict(),
-        },
-        path,
-    )
+        val_loss, val_targets = validate(model, val_source, device, config.token_budget)
 
-    return {"checkpoint": str(path), "epoch": epoch, "step": step, "device": str(device)}
+        # val без целей сигнала не даёт: ни улучшением, ни
+        # ухудшением это не считается.
+        improved = val_loss is not None and (
+            best is None or val_loss < best - config.early_stopping_min_delta
+        )
+
+        if improved:
+            best, stale = val_loss, 0
+        elif val_loss is not None:
+            stale += 1
+
+        shown = f"{val_loss:.4f}" if val_loss is not None else "n/a"
+        best_shown = f"{best:.4f}" if best is not None else "n/a"
+
+        print(
+            f"epoch={epoch} val_loss={shown} val_targets={val_targets} "
+            f"best_val_loss={best_shown} patience={stale}/{config.early_stopping_patience}"
+        )
+
+        current = snapshot(True, 0)
+
+        if improved:
+            save_checkpoint(current, best_path)
+
+        save_checkpoint(current, latest_path)
+
+        if stale >= config.early_stopping_patience:
+            reason = "early_stopping"
+            break
+
+        if max_steps is not None and step >= max_steps:
+            reason = "max_steps"
+            break
+
+    return {
+        "checkpoint": str(latest_path),
+        "epoch": epoch,
+        "step": step,
+        "best_val_loss": best,
+        "epochs_without_improvement": stale,
+        "device": str(device),
+        "reason": reason,
+    }
 
 
 def run_training(args) -> int:
@@ -276,6 +542,7 @@ def run_training(args) -> int:
     try:
         from .build import MlmError
         from .inputs import InputError
+        from .varlen import BackendError
 
     except ModuleNotFoundError as error:
         print(
@@ -284,22 +551,47 @@ def run_training(args) -> int:
         )
         return EXIT_BLOCKED
 
-    try:
-        config = MlmConfig.load(Path(args.config) if args.config else None)
-
-        masking = MaskingConfig.load(
-            Path(args.masking_config) if args.masking_config else None
+    if args.resume and (args.config or args.masking_config):
+        print(
+            "[train] --resume берёт конфиг и маскирование из чекпойнта: "
+            "--config и --masking-config с ним не задаются"
         )
+        return EXIT_BLOCKED
 
-        result = train(config, args.epochs, args.max_steps, masking)
+    try:
+        if args.resume:
+            # Настоящие значения придут из чекпойнта внутри train.
+            config, masking = MlmConfig(), MaskingConfig()
+        else:
+            config = MlmConfig.load(Path(args.config) if args.config else None)
 
-    except (ConfigError, MaskingConfigError, InputError, MlmError, FileNotFoundError) as error:
+            masking = MaskingConfig.load(
+                Path(args.masking_config) if args.masking_config else None
+            )
+
+        result = train(config, args.epochs, args.max_steps, masking, resume=args.resume)
+
+    except (
+        ConfigError, MaskingConfigError, InputError, MlmError, BackendError,
+        CheckpointError, FileNotFoundError,
+    ) as error:
         print(f"[train] {error}")
         return EXIT_BLOCKED
 
+    if result["reason"] == "nothing":
+        print(
+            f"[train] продолжать нечего: эпоха {result['epoch']}, шагов {result['step']}, "
+            f"patience {result['epochs_without_improvement']} — увеличьте --epochs или "
+            "--max-steps, если early stopping ещё не сработал"
+        )
+        return EXIT_OK
+
+    best = result["best_val_loss"]
+
     print(
-        f"[train] эпох {result['epoch']}, шагов {result['step']} на {result['device']} "
-        f"→ {result['checkpoint']}"
+        f"[train] эпох {result['epoch']}, шагов {result['step']} на {result['device']}, "
+        f"остановка: {result['reason']}, best_val_loss "
+        f"{f'{best:.4f}' if best is not None else 'n/a'} → {result['checkpoint']}"
     )
 
     return EXIT_OK
@@ -321,11 +613,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--epochs", type=_positive, default=1,
-        help="сколько раз пройти по всем батчам train",
+        help="сколько эпох всего, считая от начала обучения",
     )
     parser.add_argument(
         "--max-steps", type=_positive, default=None,
-        help="остановиться после стольких шагов оптимизатора",
+        help="остановиться, когда шагов оптимизатора от начала обучения станет столько",
     )
     parser.add_argument(
         "--config", type=Path, default=None,
@@ -334,6 +626,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--masking-config", type=Path, default=None,
         help="JSON конфига маскирования, тот же, что у python -m src.masking.run",
+    )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="продолжить с data/14_train/checkpoint.pt",
     )
 
     parser.set_defaults(handler=run_training)
@@ -352,7 +648,20 @@ def main(argv: list[str] | None = None) -> None:
     raise SystemExit(args.handler(args))
 
 
-__all__ = ["build_parser", "for_epoch", "main", "run_training", "train", "validate"]
+__all__ = [
+    "CHECKPOINT_KEYS",
+    "CheckpointError",
+    "build_parser",
+    "for_epoch",
+    "horizon",
+    "load_checkpoint",
+    "lr_factor",
+    "main",
+    "run_training",
+    "save_checkpoint",
+    "train",
+    "validate",
+]
 
 
 if __name__ == "__main__":

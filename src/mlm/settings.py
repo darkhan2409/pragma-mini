@@ -49,6 +49,11 @@ TRAIN_DIR = DATA_DIR / "14_train"
 
 CHECKPOINT_FILE = "checkpoint.pt"
 
+# Лучший по val_loss чекпойнт того же формата.
+#
+#   data/14_train/best_checkpoint.pt
+BEST_CHECKPOINT_FILE = "best_checkpoint.pt"
+
 
 class ConfigError(ValueError):
     """
@@ -92,6 +97,20 @@ class MlmConfig:
 
     attention_backend: str = "auto"
 
+    # Расписание LR: линейный разгон за warmup_steps шагов
+    # оптимизатора до learning_rate, затем cosine до
+    # min_learning_rate.
+    warmup_steps: int = 100
+    min_learning_rate: float = 1e-5
+
+    # Предел общей нормы градиента перед шагом.
+    max_grad_norm: float = 1.0
+
+    # Сколько эпох подряд val_loss может не улучшаться больше чем
+    # на min_delta, прежде чем обучение остановится.
+    early_stopping_patience: int = 3
+    early_stopping_min_delta: float = 0.0
+
     def validate(self) -> None:
 
         if not 0.0 <= self.label_smoothing < 1.0:
@@ -109,7 +128,32 @@ class MlmConfig:
                 f"weight_decay не может быть отрицательным, получено {self.weight_decay}"
             )
 
-        for name in ("top_k", "events_per_chunk", "token_budget", "grad_accum_steps"):
+        if not 0.0 <= self.min_learning_rate <= self.learning_rate:
+            raise ConfigError(
+                f"min_learning_rate обязан лежать в [0, learning_rate={self.learning_rate}], "
+                f"получено {self.min_learning_rate}"
+            )
+
+        if self.warmup_steps < 0:
+            raise ConfigError(
+                f"warmup_steps не может быть отрицательным, получено {self.warmup_steps}"
+            )
+
+        if self.max_grad_norm <= 0.0:
+            raise ConfigError(
+                f"max_grad_norm обязан быть положительным, получено {self.max_grad_norm}"
+            )
+
+        if self.early_stopping_min_delta < 0.0:
+            raise ConfigError(
+                "early_stopping_min_delta не может быть отрицательным, "
+                f"получено {self.early_stopping_min_delta}"
+            )
+
+        for name in (
+            "top_k", "events_per_chunk", "token_budget", "grad_accum_steps",
+            "early_stopping_patience",
+        ):
 
             value = getattr(self, name)
 
@@ -139,6 +183,11 @@ class MlmConfig:
             "token_budget": self.token_budget,
             "grad_accum_steps": self.grad_accum_steps,
             "attention_backend": self.attention_backend,
+            "warmup_steps": self.warmup_steps,
+            "min_learning_rate": self.min_learning_rate,
+            "max_grad_norm": self.max_grad_norm,
+            "early_stopping_patience": self.early_stopping_patience,
+            "early_stopping_min_delta": self.early_stopping_min_delta,
         }
 
     @staticmethod
@@ -163,6 +212,15 @@ class MlmConfig:
             token_budget=int(data.get("token_budget", base.token_budget)),
             grad_accum_steps=int(data.get("grad_accum_steps", base.grad_accum_steps)),
             attention_backend=str(data.get("attention_backend", base.attention_backend)),
+            warmup_steps=int(data.get("warmup_steps", base.warmup_steps)),
+            min_learning_rate=float(data.get("min_learning_rate", base.min_learning_rate)),
+            max_grad_norm=float(data.get("max_grad_norm", base.max_grad_norm)),
+            early_stopping_patience=int(
+                data.get("early_stopping_patience", base.early_stopping_patience)
+            ),
+            early_stopping_min_delta=float(
+                data.get("early_stopping_min_delta", base.early_stopping_min_delta)
+            ),
         )
 
         config.validate()
@@ -196,7 +254,16 @@ def checkpoint_path() -> Path:
     return TRAIN_DIR / CHECKPOINT_FILE
 
 
+def best_checkpoint_path() -> Path:
+    """
+    Чекпойнт с лучшим val_loss.
+    """
+
+    return TRAIN_DIR / BEST_CHECKPOINT_FILE
+
+
 __all__ = [
+    "BEST_CHECKPOINT_FILE",
     "CHECKPOINT_FILE",
     "ATTENTION_BACKENDS",
     "DEVICES",
@@ -207,6 +274,7 @@ __all__ = [
     "WEIGHTS_FILE",
     "ConfigError",
     "MlmConfig",
+    "best_checkpoint_path",
     "checkpoint_path",
     "mlm_dir",
 ]

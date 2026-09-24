@@ -190,9 +190,13 @@ def flash_available() -> bool:
     Есть ли библиотека flash-attn. Сама библиотека необязательна.
     """
 
+    # Ловится любая ошибка, а не только ImportError: CUDA-расширение
+    # несовместимой сборки падает при загрузке с OSError или
+    # RuntimeError. Сломанная библиотека — то же, что её нет: auto
+    # уходит на корзины SDPA, а явный flash получает BackendError.
     try:
         from flash_attn import flash_attn_varlen_func  # noqa: F401
-    except ImportError:
+    except Exception:
         return False
 
     return True

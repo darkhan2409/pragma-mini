@@ -15,11 +15,13 @@ History Encoder -> MLM и считает по нему кросс-энтропи
 
 Обучение — отдельная команда на train:
 
-    python -m src.mlm.train [--epochs N] [--max-steps N]
+    python -m src.mlm.train [--epochs N] [--max-steps N] [--resume]
 
-Тот же проход, но без no_grad: потери батча, backward и шаг
-AdamW по всем весам модели. Маска train разыгрывается заново на
-каждую эпоху маскером этапа 08. Чекпойнт — data/14_train/checkpoint.pt.
+Тот же проход, но без no_grad: потери батча, backward, клип и шаг
+AdamW с warmup + cosine по всем весам модели. Маска train
+разыгрывается заново на каждую эпоху маскером этапа 08.
+Чекпойнты — data/14_train/checkpoint.pt (последний) и
+best_checkpoint.pt (лучший val_loss).
 """
 
 from __future__ import annotations
