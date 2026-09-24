@@ -53,7 +53,10 @@ from .settings import ConfigError, MlmConfig, best_checkpoint_path, checkpoint_p
 # именно их.
 #
 # LR: линейный разгон за warmup_steps шагов, затем cosine до
-# min_learning_rate к концу горизонта (lr_factor).
+# min_learning_rate к концу горизонта (lr_factor). Горизонт — это
+# ПЛАН обучения: шаги всех --epochs, посчитанные до первого шага.
+# --max-steps в него не входит, он только останавливает прогон, а
+# --resume берёт горизонт из чекпойнта и продолжает ту же кривую.
 #
 # Промежуточные parquet этапов 09-12 сюда не читаются: через файл
 # градиент не течёт. Весь проход собран в model.Model, и здесь он
@@ -75,6 +78,8 @@ CHECKPOINT_KEYS = (
     "model_state_dict",
     "optimizer_state_dict",
     "scheduler_state_dict",
+    "scheduler_total",
+    "scheduler_epochs",
     "epoch",
     "epoch_complete",
     "micro_batches_done",
@@ -126,9 +131,15 @@ def lr_factor(done: int, warmup: int, total: int, floor: float) -> float:
     return floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * progress))
 
 
-def horizon(config: MlmConfig, masking: MaskingConfig, epochs: int, max_steps: int | None) -> int:
+def horizon(config: MlmConfig, masking: MaskingConfig, epochs: int) -> int:
     """
-    Сколько шагов оптимизатора займёт обучение — конец cosine.
+    Конец cosine — сколько шагов оптимизатора займёт ПОЛНЫЙ план
+    обучения по --epochs.
+
+    --max-steps сюда не входит намеренно. Он останавливает текущий
+    прогон, а не укорачивает план: иначе --epochs 10 --max-steps
+    100 проехал бы весь cosine за сто шагов, а продолжение тех же
+    десяти эпох поехало бы по другой кривой со скачком LR.
 
     Число micro-batch'ей эпохи считается по длинам клиентов, без
     масок и модели: разбиение от маски не зависит. Окно без целей
@@ -141,9 +152,38 @@ def horizon(config: MlmConfig, masking: MaskingConfig, epochs: int, max_steps: i
         1 for _ in micro_batches(Source("train", masking=masking).sizes(), config.token_budget)
     )
 
-    total = math.ceil(count / config.grad_accum_steps) * epochs
+    return math.ceil(count / config.grad_accum_steps) * epochs
 
-    return min(total, max_steps) if max_steps is not None else total
+
+def resumed_horizon(state: dict, path: Path) -> tuple[int, int]:
+    """
+    Горизонт cosine при продолжении — (шаги, эпохи плана).
+
+    Кривая LR принадлежит обучению, а не прогону, поэтому она
+    берётся из чекпойнта, а не считается заново: пересчёт сдвинул
+    бы уже пройденную часть расписания, и LR прыгнул бы на первом
+    же шаге продолжения. Заодно проверяется, что расписание стоит
+    ровно на сделанном шаге: LambdaLR и счётчик step идут вместе,
+    и разойтись они могут только у испорченного чекпойнта.
+    """
+
+    total = int(state["scheduler_total"])
+    epochs = int(state["scheduler_epochs"])
+
+    if total < 1 or epochs < 1:
+        raise CheckpointError(
+            f"{path}: горизонт расписания {total} шагов на {epochs} эпох — продолжать нечего"
+        )
+
+    position = int(state["scheduler_state_dict"].get("last_epoch", -1))
+
+    if position != int(state["step"]):
+        raise CheckpointError(
+            f"{path}: расписание стоит на шаге {position}, а шагов сделано "
+            f"{state['step']} — LR продолжился бы не с того места"
+        )
+
+    return total, epochs
 
 
 def load_checkpoint(path: Path) -> dict:
@@ -242,6 +282,10 @@ def train(
     epochs и max_steps — общие пределы от начала обучения, в том
     числе при resume. При resume config и masking берутся из
     чекпойнта.
+
+    epochs задаёт и горизонт cosine, max_steps — нет: он только
+    останавливает текущий прогон. Горизонт первого запуска лежит в
+    чекпойнте и при продолжении не пересчитывается.
     """
 
     # torch импортируется здесь, а не в шапке: без него команда
@@ -283,7 +327,14 @@ def train(
         weight_decay=config.weight_decay,
     )
 
-    total = horizon(config, masking, epochs, max_steps)
+    if state is None:
+        total, planned_epochs = horizon(config, masking, epochs), epochs
+
+    else:
+        # План замораживается при первом запуске: продолжение едет
+        # по той же кривой, а --epochs сверх плана добавляет эпохи
+        # уже на min_learning_rate.
+        total, planned_epochs = resumed_horizon(state, latest_path)
 
     floor = config.min_learning_rate / config.learning_rate
 
@@ -353,9 +404,20 @@ def train(
     # чтобы нехватка файлов стала видна до первого шага.
     val_source = Source("val")
 
+    if epochs > planned_epochs:
+        print(
+            f"[train] расписание рассчитано на {planned_epochs} эпох ({total} шагов) и "
+            f"остаётся прежним: эпохи {planned_epochs + 1}-{epochs} пройдут на "
+            "min_learning_rate, прошлая часть кривой не пересчитывается"
+        )
+
     if state is None:
-        # Новое обучение: лучший чекпойнт прошлого прогона к нему
-        # не относится. Последний и так перезаписывается.
+        # Новое обучение: чекпойнты прошлого прогона к нему не
+        # относятся, и продолжать их без --resume было бы нечем.
+        # Удаляются здесь, а не раньше: модель, оптимизатор,
+        # расписание и val уже собрались, и падение на сборке не
+        # стоило бы прошлого обучения.
+        latest_path.unlink(missing_ok=True)
         best_path.unlink(missing_ok=True)
 
     epoch = first_epoch
@@ -417,6 +479,8 @@ def train(
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
+            "scheduler_total": total,
+            "scheduler_epochs": planned_epochs,
             "epoch": epoch,
             "epoch_complete": complete,
             "micro_batches_done": done,
@@ -613,11 +677,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--epochs", type=_positive, default=1,
-        help="сколько эпох всего, считая от начала обучения",
+        help=(
+            "сколько эпох всего, считая от начала обучения; первый запуск ими же "
+            "задаёт горизонт cosine"
+        ),
     )
     parser.add_argument(
         "--max-steps", type=_positive, default=None,
-        help="остановиться, когда шагов оптимизатора от начала обучения станет столько",
+        help=(
+            "остановить прогон, когда шагов оптимизатора от начала обучения станет "
+            "столько; на горизонт cosine не влияет"
+        ),
     )
     parser.add_argument(
         "--config", type=Path, default=None,
@@ -657,6 +727,7 @@ __all__ = [
     "load_checkpoint",
     "lr_factor",
     "main",
+    "resumed_horizon",
     "run_training",
     "save_checkpoint",
     "train",
