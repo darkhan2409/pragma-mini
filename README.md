@@ -26,7 +26,7 @@ data/
 ├── 11_profiles/<group>/     вектор каждого клиента: profiles.parquet
 ├── 12_history/<group>/      он же после истории: history.parquet
 ├── 13_mlm/<group>/          цели и предсказания: targets.parquet
-└── 14_train/                чекпойнт обучения: checkpoint.pt
+└── 14_train/                чекпойнты обучения: checkpoint.pt, best_checkpoint.pt
 ```
 
 Этапы 09–13 это слои модели. Рядом с результатом каждый кладёт `weights.pt` —
@@ -728,6 +728,7 @@ predicted_id, correct, loss                        итог по этой цел
 python -m src.mlm.train                  # одна эпоха по всем клиентам train
 python -m src.mlm.train --epochs 3
 python -m src.mlm.train --max-steps 100
+python -m src.mlm.train --epochs 10 --resume   # продолжить до 10 эпох всего
 ```
 
 Учится только `train`. Вход: батчи и начальные веса этапов 09–12.
@@ -746,11 +747,10 @@ seed — он выводится из seed маскирования и номе�
 целям `val`:
 
 ```
-epoch=1 val_loss=7.0123 val_targets=15420
+epoch=1 val_loss=7.0123 val_targets=15420 best_val_loss=7.0123 patience=0/3
 ```
 
-Эпоха, прерванная `--max-steps`, validation не получает. Результат: `data/14_train/checkpoint.pt` с
-`model_state_dict`, `optimizer_state_dict`, `epoch`, `step` и конфигом.
+Эпоха, прерванная `--max-steps`, validation не получает.
 
 Группа строк `07_batches` здесь только хранение. Клиенты идут потоком и
 собираются в **micro-batch** по бюджету позиций `token_budget` (16384). Цена
@@ -770,14 +770,59 @@ epoch=1 val_loss=7.0123 val_targets=15420
 идёт по сумме потерь целей каждого micro-batch, а перед шагом градиенты делятся на
 число целей окна: это градиент среднего по всем целям окна. Окно без целей шага не
 делает; неполное окно в конце эпохи шаг делает. `step` и `--max-steps` считают
-шаги оптимизатора. В лог идёт строка на шаг:
+шаги оптимизатора. Порядок шага:
 
 ```
-epoch=1 step=42 loss=6.8124 targets=18432 micro_batches=4
+backward (по micro-batch'ам окна) -> grad /= цели окна -> clip_grad_norm_(max_grad_norm)
+  -> optimizer.step() -> scheduler.step() -> zero_grad
 ```
 
-`learning_rate` (3e-4), `weight_decay` (0.01), `token_budget` и `grad_accum_steps`
-задаются тем же JSON, что и конфиг головы: `--config`.
+В лог идёт строка на шаг, `lr` — с которым сделан этот шаг:
+
+```
+epoch=1 step=42 loss=6.8124 targets=18432 micro_batches=4 lr=1.26e-04
+```
+
+**LR.** `s` — число уже сделанных шагов, LR шага `s + 1`:
+
+- `s < warmup_steps`: `learning_rate * (s + 1) / warmup_steps`;
+- дальше cosine: `p = min(1, (s - warmup_steps) / (total - warmup_steps))`,
+  `lr = min_learning_rate + (learning_rate - min_learning_rate) * 0.5 * (1 + cos(pi * p))`.
+
+`total` — `ceil(micro-batch'ей эпохи / grad_accum_steps) * --epochs`, а с `--max-steps` —
+не больше него. Число micro-batch'ей считается до обучения по длинам клиентов, без
+модели. Окно без целей шага не делает, поэтому `total` — верхняя оценка.
+
+**Чекпойнты** — `data/14_train/`:
+
+- `checkpoint.pt` — последний: после каждой полной эпохи и при остановке `--max-steps`
+  посреди эпохи;
+- `best_checkpoint.pt` — после validation, если
+  `val_loss < best_val_loss - early_stopping_min_delta` (первая эпоха — всегда).
+
+Формат у обоих один и полный: `model_state_dict`, `optimizer_state_dict`,
+`scheduler_state_dict`, `epoch`, `epoch_complete`, `micro_batches_done`, `step`,
+`best_val_loss`, `epochs_without_improvement`, `config`, `masking`, состояние генераторов
+случайности. Запись идёт через временный файл. Новое обучение без `--resume` удаляет
+`best_checkpoint.pt` прошлого прогона.
+
+**Early stopping.** После каждой полной эпохи: улучшение больше
+`early_stopping_min_delta` обнуляет счётчик, иначе он растёт на 1. Счётчик
+`early_stopping_patience` — обучение останавливается. `val` без целей не считается ни
+тем, ни другим.
+
+**`--resume`** продолжает с `checkpoint.pt`: веса, AdamW, расписание, счётчики и
+генераторы. Конфиг и маскирование берутся из чекпойнта, поэтому `--config` и
+`--masking-config` с ним не задаются. Полная эпоха `e` — продолжение с `e + 1`;
+эпоха, прерванная `--max-steps`, — с того же места, уже пройденные micro-batch'и
+пропускаются без прохода модели. Маска эпохи — та же `for_epoch(masking, epoch)`.
+`--epochs` и `--max-steps` — общие пределы от начала обучения. Старый чекпойнт без
+новых полей продолжить нельзя — будет понятная ошибка.
+
+`learning_rate` (3e-4), `weight_decay` (0.01), `token_budget`, `grad_accum_steps`,
+`warmup_steps` (100), `min_learning_rate` (1e-5), `max_grad_norm` (1.0),
+`early_stopping_patience` (3) и `early_stopping_min_delta` (0.0) задаются тем же JSON,
+что и конфиг головы: `--config`.
 
 **Бэкенд внимания** — `attention_backend` в том же JSON:
 

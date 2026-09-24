@@ -26,6 +26,7 @@ from src.tokenization.specials import EVT, USR, load_special_tokens
 
 from .inputs import IGNORE, Client
 from .varlen import (
+    BackendError,
     VarlenLayout,
     assemble,
     encoder_layer_varlen,
@@ -400,7 +401,7 @@ class Model(nn.Module):
             return True
 
         if self.strict:
-            raise RuntimeError(
+            raise BackendError(
                 "attention_backend=flash: проход идёт не под autocast CUDA в bf16/fp16, "
                 "а flash-attn в fp32 не считает"
             )

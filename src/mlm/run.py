@@ -34,6 +34,7 @@ def run_group(args) -> int:
     try:
         from .build import MlmError, build_group
         from .inputs import InputError
+        from .varlen import BackendError
 
     except ModuleNotFoundError as error:
         print(
@@ -47,7 +48,7 @@ def run_group(args) -> int:
 
         report = build_group(group, config)
 
-    except (ConfigError, InputError, MlmError, FileNotFoundError) as error:
+    except (ConfigError, InputError, MlmError, BackendError, FileNotFoundError) as error:
         print(f"[mlm] группа {group}: {error}")
         return EXIT_BLOCKED
 

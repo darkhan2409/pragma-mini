@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, NamedTuple
 
 import numpy as np
 import pyarrow as pa
@@ -135,6 +135,19 @@ class Client:
         return int((self.labels != IGNORE).sum())
 
 
+class Size(NamedTuple):
+    """
+    Длины клиента без самих массивов.
+
+    Ровно те три числа, которые читает cost: micro_batches по
+    Size делит поток так же, как по настоящим клиентам.
+    """
+
+    n_tokens: int
+    profile_n_tokens: int
+    n_events: int
+
+
 class Source:
     """
     Пара файлов группы, открытая один раз.
@@ -218,6 +231,24 @@ class Source:
 
         for index in range(self.count):
             yield from self.batch(index)
+
+    def sizes(self) -> Iterator[Size]:
+        """
+        Длины клиентов группы в порядке файла.
+
+        Читаются только три целых колонки 07_batches, без масок:
+        маскирование значения заменяет, а длины не меняет. Так
+        число micro-batch'ей эпохи известно до обучения.
+        """
+
+        columns = ["n_tokens", "profile_n_tokens", "n_events"]
+
+        for index in range(self.count):
+
+            table = self._batches.read_row_group(index, columns=columns).to_pydict()
+
+            for tokens, profile, events in zip(*(table[name] for name in columns)):
+                yield Size(int(tokens), int(profile), int(events))
 
     def _mask(self, index: int, row: dict) -> dict:
         """
@@ -394,6 +425,7 @@ __all__ = [
     "MASKED_COLUMNS",
     "Client",
     "InputError",
+    "Size",
     "Source",
     "cost",
     "micro_batches",
