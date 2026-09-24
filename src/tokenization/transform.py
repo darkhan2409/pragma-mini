@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pyarrow as pa
 
-from src.preprocessing.artifacts import TableWriter
+from src.preprocessing.artifacts import TableWriter, write_json
 from src.preprocessing.keys import KeysError
+from src.preprocessing.profile_state import INCLUDED_FIELDS, UNPROVABLE_FIELDS
 from src.preprocessing.read import Group, ReadError
 from src.preprocessing.settings import PreprocessingConfig
 
@@ -34,7 +35,16 @@ from .specials import UNK
 #   data/04_tokenized/<group>/profile.parquet
 #
 # Профиль здесь уже закодирован: это представление анкеты
-# токенами, а не копия выгрузки.
+# токенами, а не копия выгрузки. Он описывает клиента НА НАЧАЛО
+# ПЕРИОДА ЦЕЛЕЙ группы, а не на конец её выгрузки: события
+# периода целей модель восстанавливает, и анкета не имеет права
+# их пересказывать.
+#
+# Отсюда третий файл — meta.json. В нём записаны оба среза и
+# версия формата: каталог, собранный прежним кодом, несёт анкету
+# на конец выгрузки, и смешивать его с новым нельзя. Читатель
+# (05_dataset) версию проверяет и на старом каталоге
+# останавливается.
 #
 # client_id и event_time сохраняются: по ним датасет группирует
 # и сортирует. Границы значений отдельными массивами не лежат:
@@ -48,6 +58,13 @@ from .specials import UNK
 
 EVENTS_FILE = "events.parquet"
 PROFILE_FILE = "profile.parquet"
+META_FILE = "meta.json"
+
+# 1 — анкета на конец выгрузки (прежний формат, читателю не
+#     годится);
+# 2 — анкета на начало периода целей, состав полей ограничен
+#     восстановимыми.
+TOKENIZED_FORMAT = 2
 
 # В файлах лежит только то, что нужно модели. Число токенов
 # и значений не хранится: это длины массивов. Названия
@@ -104,9 +121,9 @@ def _count_unknown(artifacts: FrozenArtifacts, record, counters: Counters) -> No
     counters.unknown += sum(1 for value_id in record.value_ids if value_id == unknown)
 
 
-def group_cutoff(group: str) -> datetime:
+def group_window(group: str):
     """
-    Конечный cutoff группы: дальше её истории не существует.
+    Окно группы: конец истории и начало периода целей.
     """
 
     window = PreprocessingConfig.load(None).windows.get(group)
@@ -114,7 +131,15 @@ def group_cutoff(group: str) -> datetime:
     if window is None:
         raise TransformError(f"для группы {group} не объявлено окно наблюдения")
 
-    return window.final_cutoff
+    return window
+
+
+def group_cutoff(group: str) -> datetime:
+    """
+    Конечный cutoff группы: дальше её истории не существует.
+    """
+
+    return group_window(group).final_cutoff
 
 
 def encode_group(
@@ -129,7 +154,12 @@ def encode_group(
 
     directory = Path(directory) if directory is not None else tokenized_dir(group)
 
-    cutoff = group_cutoff(group)
+    window = group_window(group)
+
+    # Два разных момента, и путать их нельзя: события доступны до
+    # конца окна, анкета описывает начало периода целей.
+    cutoff = window.final_cutoff
+    profile_moment = window.target_start
 
     try:
         source = Group(group)
@@ -147,7 +177,7 @@ def encode_group(
         for client_id in source.client_ids:
 
             try:
-                history = source.history(client_id, cutoff)
+                history = source.history(client_id, cutoff, profile_moment)
             except (ReadError, KeysError) as error:
                 raise TransformError(f"клиент {client_id}: {error}") from error
 
@@ -222,9 +252,25 @@ def encode_group(
         events_rows = events_writer.close()
         profile_rows = profile_writer.close()
 
+    meta = {
+        "format": TOKENIZED_FORMAT,
+        "group": group,
+        "events_cutoff": cutoff.isoformat(),
+        "profile_moment": profile_moment.isoformat(),
+        "profile_fields": list(INCLUDED_FIELDS),
+        "profile_fields_excluded": dict(UNPROVABLE_FIELDS),
+        "clients": counters.clients,
+        "clients_with_profile": counters.profiles,
+        "clients_with_empty_profile": counters.empty_profiles,
+    }
+
+    write_json(directory / META_FILE, meta)
+
     return {
         "group": group,
         "cutoff": cutoff.isoformat(),
+        "profile_moment": profile_moment.isoformat(),
+        "meta": meta,
         "rows": {"events": events_rows, "profile": profile_rows},
         "counts": {
             "clients": counters.clients,

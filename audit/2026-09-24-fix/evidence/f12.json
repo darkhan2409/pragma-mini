@@ -1,0 +1,40 @@
+{
+  "regression/train": {
+    "events": 412170,
+    "fraud_decision": 14,
+    "decisions_with_resolution": 0,
+    "fields_naming_the_answer": 0,
+    "examples": [],
+    "card_unblocked_reasons": {
+      "support_resolution": 3,
+      "block_expired": 1,
+      "client_request": 6,
+      "fraud_check_closed": 3
+    },
+    "verdict": "PASS"
+  },
+  "regression/val": {
+    "events": 201450,
+    "fraud_decision": 2,
+    "decisions_with_resolution": 0,
+    "fields_naming_the_answer": 0,
+    "examples": [],
+    "card_unblocked_reasons": {
+      "fraud_check_closed": 1,
+      "client_request": 4
+    },
+    "verdict": "PASS"
+  },
+  "regression/test": {
+    "events": 155543,
+    "fraud_decision": 6,
+    "decisions_with_resolution": 0,
+    "fields_naming_the_answer": 0,
+    "examples": [],
+    "card_unblocked_reasons": {
+      "client_request": 2
+    },
+    "verdict": "PASS"
+  },
+  "verdict": "PASS"
+}

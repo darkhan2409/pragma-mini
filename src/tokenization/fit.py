@@ -21,6 +21,10 @@ from .settings import METHOD_UNFITTED, TokenizerConfig
 #   data/02_preprocessed/train/events.parquet
 #   data/01_raw/train/profile.parquet
 #
+# Анкета читается НА НАЧАЛО ПЕРИОДА ЦЕЛЕЙ группы train, а не на
+# её конечный cutoff: словарь обязан видеть ровно те значения,
+# которые потом кодируются.
+#
 # Все три обучающих этапа (значения, границы, BPE) читают этот
 # корпус одинаково и через эту функцию. Второго способа
 # добраться до данных у токенизатора нет: иначе один этап учился
@@ -75,7 +79,11 @@ def read_train(config: TokenizerConfig, schema: SemanticSchema) -> TrainCorpus:
     _check_config(config, schema)
 
     statistics = scan(
-        source.histories(window.final_cutoff),
+        # Анкета берётся на начало периода целей — та же, что
+        # уйдёт в кодирование. Иначе словарь учил бы значения,
+        # которых в закодированном профиле не бывает, а те, что
+        # бывают, встречал бы как незнакомые.
+        source.histories(window.final_cutoff, window.target_start),
         schema,
         sample_k=config.quantile_sample_k,
         distinct_cap=config.distinct_cap,

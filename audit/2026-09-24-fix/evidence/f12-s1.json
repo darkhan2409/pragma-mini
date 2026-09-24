@@ -1,0 +1,15 @@
+{
+  "s1-observed": {
+    "events": 129621,
+    "fraud_decision": 69,
+    "decisions_with_resolution": 0,
+    "fields_naming_the_answer": 0,
+    "examples": [],
+    "card_unblocked_reasons": {
+      "support_resolution": 1,
+      "fraud_check_closed": 12
+    },
+    "verdict": "PASS"
+  },
+  "verdict": "PASS"
+}

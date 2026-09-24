@@ -1,0 +1,11 @@
+{
+  "left": "evidence/plan-2025-01-05.json",
+  "right": "evidence/plan-2026-01-01.json",
+  "clients": 48,
+  "same_client_set": true,
+  "clients_with_plan_differences": 0,
+  "examples": {},
+  "payout_boundary": "2025-01-05T00:00:00",
+  "clients_with_payout_differences": 0,
+  "verdict": "PASS"
+}

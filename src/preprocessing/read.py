@@ -4,22 +4,18 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 import pyarrow as pa
-import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from .calendar import calendar_features
 from .canonical.build import EVENTS_FILE
 from .keys import (
-    CATEGORICAL,
-    COUNT,
     DIRECT_KEYS,
     DYNAMIC_FIELDS,
-    NUMERIC,
     PROFILE_KEYS,
-    SemanticKey,
     key_for,
     profile_change_keys,
 )
+from .profile_state import INCLUDED_FIELDS, profile_at, typed_profile_value
 from .projection import EVENT_TYPE_FIELD, model_event
 from .settings import PreprocessingConfig, group_dir, raw_group_dir
 
@@ -41,6 +37,17 @@ from .settings import PreprocessingConfig, group_dir, raw_group_dir
 # История клиента это его строки, отобранные по client_id и
 # упорядоченные так, как их уложил препроцессинг. Срез — простой
 # отбор event_time < cutoff, а не отдельный этап.
+#
+# СРЕЗОВ ДВА, и они разные:
+#
+#   cutoff          до какого момента клиенту доступны события;
+#   profile_moment  на какой момент описывает его анкета.
+#
+# Одним параметром они быть не могут: события модель видит до
+# конца окна, а анкета обязана описывать начало периода целей,
+# иначе она пересказывает то, что модель должна восстановить.
+# Оба параметра обязательны: значения по умолчанию у такой пары
+# означали бы молчаливый выбор одного из двух моментов.
 #
 # Модель получает ФАКТИЧЕСКИЕ поля под смысловыми ключами:
 # производных признаков здесь нет ни одного. Ни интервалов, ни
@@ -101,6 +108,10 @@ class ClientHistory:
     events: list[ClientEvent]
     profile: dict[str, object]
 
+    # На какой момент описывает клиента profile. Не равен cutoff
+    # и равняться ему не должен.
+    profile_moment: datetime | None = None
+
     # Есть ли у клиента анкета вообще. Пустой словарь значений
     # ответом не является: у известной анкеты все поля могут
     # оказаться незаполненными.
@@ -116,6 +127,7 @@ class ClientHistory:
         return {
             "client_id": self.client_id,
             "cutoff": self.cutoff,
+            "profile_moment": self.profile_moment,
             "events": self.n_events,
             "keys_used": len({key for item in self.events for key in item.values}),
             "limitations": self.limitations,
@@ -229,12 +241,24 @@ class Group:
 
     # --- история ---
 
-    def history(self, client_id: str, cutoff: datetime | None = None) -> ClientHistory:
+    def history(
+        self,
+        client_id: str,
+        cutoff: datetime | None,
+        profile_moment: datetime | None,
+    ) -> ClientHistory:
         """
-        Клиент на срез: события строго раньше cutoff.
+        Клиент на два среза: события строго раньше cutoff, анкета
+        на profile_moment.
 
-        Без cutoff отдаётся вся лента клиента. Ничего, кроме
-        отбора по времени, срез не делает.
+        cutoff = None отдаёт всю ленту клиента. profile_moment =
+        None отдаёт конечный снимок анкеты как он лежит в
+        выгрузке — это состояние на границу выгрузки, и модели
+        оно не годится.
+
+        Оба аргумента обязательны именно потому, что моментов
+        два: пропущенный означал бы «пусть будет тот же», а он
+        не тот же.
         """
 
         if client_id not in self._profile_rows and client_id not in self._addresses():
@@ -242,12 +266,16 @@ class Group:
 
         table = self.events_table(client_id)
 
-        if cutoff is not None and table.num_rows:
-            # Срез и время события живут в одной шкале — UTC.
-            moment = pa.scalar(cutoff, type=pa.timestamp("us", tz="UTC"))
-            table = table.filter(pc.less(table.column("event_time"), moment))
+        # Лента клиента целиком нужна анкете: откат смотрит на
+        # то, что случилось ПОСЛЕ profile_moment, а срез событий
+        # это скрывает.
+        all_rows = table.to_pylist()
 
-        rows = table.to_pylist()
+        rows = (
+            [row for row in all_rows if row["event_time"] < cutoff]
+            if cutoff is not None
+            else all_rows
+        )
 
         # Календарь считается по местному времени банка: перевод
         # пояса живёт внутри calendar_features и наружу не
@@ -277,24 +305,39 @@ class Group:
                 )
             )
 
-        profile = self._profile_rows.get(client_id)
+        snapshot = self._profile_rows.get(client_id)
+
+        if profile_moment is None:
+            profile = snapshot
+            known = snapshot is not None
+        else:
+            state = profile_at(snapshot, all_rows, profile_moment)
+            profile = state.values
+            notes.extend(state.notes)
+            known = snapshot is not None
 
         return ClientHistory(
             client_id=client_id,
             cutoff=cutoff,
+            profile_moment=profile_moment,
             events=events,
             profile=profile_values(profile),
-            has_profile=profile is not None,
+            has_profile=known,
             limitations=sorted(set(notes)),
         )
 
-    def histories(self, cutoff: datetime | None = None, clients: list[str] | None = None):
+    def histories(
+        self,
+        cutoff: datetime | None,
+        profile_moment: datetime | None,
+        clients: list[str] | None = None,
+    ):
         """
         Клиенты по одному, в устойчивом порядке.
         """
 
         for client_id in (clients if clients is not None else self.client_ids):
-            yield self.history(client_id, cutoff)
+            yield self.history(client_id, cutoff, profile_moment)
 
 
 # ============================================================
@@ -358,7 +401,7 @@ def _profile_change_values(fields: dict) -> tuple[dict[str, object], list[str]]:
         if raw is None:
             continue
 
-        value, note = _typed_profile_value(key, raw, name)
+        value, note = typed_profile_value(key, raw, name)
 
         if note is not None:
             notes.append(note)
@@ -369,51 +412,22 @@ def _profile_change_values(fields: dict) -> tuple[dict[str, object], list[str]]:
     return out, notes
 
 
-def _typed_profile_value(key: SemanticKey, raw: object, field_name: str) -> tuple[object, str | None]:
-    """
-    Значение профиля в виде своего ключа. Неразобранное число не
-    подменяется текстом и признаком не становится.
-
-    Счётчик объявлен категорией, но числом быть не перестал.
-    Изменение профиля приходит строкой, и без привода «2» у
-    прежнего значения и 2 у самого поля стали бы разными записями
-    одного факта: словарь хранит запись значения вместе с его
-    типом. Дробный счётчик это ошибка, а не повод молча стать
-    числом с точкой.
-    """
-
-    counter = key.kind == CATEGORICAL and key.unit == COUNT
-
-    if key.kind != NUMERIC and not counter:
-        return raw, None
-
-    text = str(raw)
-
-    try:
-        return int(text), None
-    except ValueError:
-        pass
-
-    if counter:
-        return None, f"значение профиля {field_name} не разобрано как целый счётчик: {text!r}"
-
-    try:
-        return float(text), None
-    except ValueError:
-        return None, f"значение профиля {field_name} не разобрано как число: {text!r}"
-
-
 def profile_values(profile: dict | None) -> dict[str, object]:
     """
-    Итоговый профиль клиента под смысловыми ключами.
+    Профиль клиента под смысловыми ключами.
+
+    Состав полей задаёт INCLUDED_FIELDS и только он: поле, чьё
+    значение на нужный момент из данных не следует, в модельную
+    анкету не идёт ни у кого. Список одинаков для всех клиентов,
+    поэтому отсутствие поля ни о ком ничего не сообщает.
     """
 
     if profile is None:
         return {}
 
     return {
-        key.key: profile[name]
-        for name, key in PROFILE_KEYS.items()
+        PROFILE_KEYS[name].key: profile[name]
+        for name in INCLUDED_FIELDS
         if profile.get(name) is not None
     }
 

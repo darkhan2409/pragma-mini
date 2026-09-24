@@ -6,13 +6,15 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from src.preprocessing.artifacts import write_json
+from src.preprocessing.profile_state import INCLUDED_FIELDS
 from src.preprocessing.settings import PreprocessingConfig
 from src.tokenization.finalvocab import FrozenArtifacts
 from src.tokenization.settings import TokenizerConfig
 from src.tokenization.specials import UNK
 
 from .sample import Sample, SampleError, build_sample
-from .settings import SAMPLES_FILE, DatasetConfig, dataset_dir
+from .settings import DATASET_FORMAT, META_FILE, SAMPLES_FILE, DatasetConfig, dataset_dir
 from .tokenized import TokenizedError, TokenizedGroup
 
 
@@ -140,9 +142,13 @@ def build_group(
     except TokenizedError as error:
         raise BuildError(str(error)) from error
 
-    # Срез у группы один и объявлен её окном: второй записи
-    # того же значения рядом с данными не нужно.
+    # Срезов у группы два, и они не совпадают: события доступны
+    # до конца окна, анкета описывает начало периода целей.
+    # Момент анкеты приходит с закодированной группой, а не
+    # считается здесь заново: два вычисления одного значения
+    # разошлись бы молча.
     cutoff = window.final_cutoff
+    profile_moment = source.profile_moment
 
     _clear(directory)
 
@@ -209,9 +215,22 @@ def build_group(
         if writer is not None:
             writer.close()
 
+    meta = {
+        "format": DATASET_FORMAT,
+        "group": group,
+        "events_cutoff": cutoff.isoformat(),
+        "profile_moment": profile_moment,
+        "profile_fields": list(INCLUDED_FIELDS),
+        "samples": counters.samples,
+    }
+
+    write_json(directory / META_FILE, meta)
+
     return {
         "group": group,
         "cutoff": cutoff.isoformat(),
+        "profile_moment": profile_moment,
+        "meta": meta,
         "file": str(directory / SAMPLES_FILE),
         "counts": {
             "samples": counters.samples,

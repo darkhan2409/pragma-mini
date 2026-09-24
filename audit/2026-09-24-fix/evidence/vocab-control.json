@@ -1,0 +1,38 @@
+{
+  "source": "C:\\Develop\\mini_pragma_v2\\audit\\2026-09-24-fix\\runs\\regression",
+  "root": "C:\\Develop\\mini_pragma_v2\\audit\\2026-09-24-fix\\runs\\vocab-control-root",
+  "rows": {
+    "train": 412170,
+    "val": 201450,
+    "test": 155543
+  },
+  "vocab_files": 6,
+  "damage_val_test": {
+    "val": {
+      "payload_fields_changed": 112068,
+      "clients_left": 32,
+      "rows_left": 132255
+    },
+    "test": {
+      "payload_fields_changed": 77484,
+      "clients_left": 33,
+      "rows_left": 78389
+    }
+  },
+  "changed_after_holdout_damage": [],
+  "damage_train": {
+    "train": {
+      "payload_fields_changed": 268152,
+      "clients_left": 124,
+      "rows_left": 283296
+    }
+  },
+  "changed_after_train_damage": [
+    "bpe.json",
+    "buckets.json",
+    "final_vocab.json",
+    "value_vocab.json"
+  ],
+  "verdict": "PASS",
+  "note": "порча val и test словарь не изменила; порча train изменила — значит эксперимент достаёт до словаря, и совпадение в пункте 2 не следствие бездействия"
+}

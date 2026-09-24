@@ -1,0 +1,50 @@
+{
+  "runs": {
+    "regression/train": {
+      "clients": 187,
+      "impossible_rollbacks": 3,
+      "examples": [
+        {
+          "client_id": "c058269500664",
+          "snapshot_total": 7,
+          "snapshot_active": 5,
+          "opened_in_window": 6,
+          "closed_in_window": 3,
+          "rolled_total": 1,
+          "rolled_active": 2
+        },
+        {
+          "client_id": "c426496749278",
+          "snapshot_total": 3,
+          "snapshot_active": 3,
+          "opened_in_window": 2,
+          "closed_in_window": 1,
+          "rolled_total": 1,
+          "rolled_active": 2
+        },
+        {
+          "client_id": "c468737013844",
+          "snapshot_total": 8,
+          "snapshot_active": 3,
+          "opened_in_window": 6,
+          "closed_in_window": 6,
+          "rolled_total": 2,
+          "rolled_active": 3
+        }
+      ],
+      "conclusion": "снимок счётчиков не относится к концу выгрузки: откат даёт невозможное состояние"
+    },
+    "regression/val": {
+      "clients": 49,
+      "impossible_rollbacks": 0,
+      "examples": [],
+      "conclusion": "противоречий не найдено; это не доказывает, что снимок относится к концу выгрузки"
+    },
+    "regression/test": {
+      "clients": 50,
+      "impossible_rollbacks": 0,
+      "examples": [],
+      "conclusion": "противоречий не найдено; это не доказывает, что снимок относится к концу выгрузки"
+    }
+  }
+}

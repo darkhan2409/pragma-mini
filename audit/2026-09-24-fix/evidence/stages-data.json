@@ -1,0 +1,284 @@
+{
+  "root": "C:\\Develop\\mini_pragma_v2\\data",
+  "groups": {
+    "train": {
+      "dataset": {
+        "clients": 187,
+        "events": 412170,
+        "targets": 412170,
+        "rows_with_event_after_cutoff": 0,
+        "rows_out_of_order": 0,
+        "mask_disagreements": 0
+      },
+      "batches_and_masks": {
+        "clients_lost_in_batches": [],
+        "clients_invented_in_batches": [],
+        "rows_with_changed_content": 0,
+        "rows_with_wrong_padding": 0,
+        "masked_positions": 851645,
+        "masked_outside_targets": 0,
+        "label_mismatches": 0,
+        "unknown_substitutions": 94268,
+        "unexplained_substitutions": 0,
+        "source_mismatches": 0
+      },
+      "profile_leak": {
+        "samples_with_unprovable_key": 0,
+        "clients": 187,
+        "samples_carrying_profile": 187,
+        "profile_rows": 187,
+        "target_events_traced_by_profile": {
+          "account_opened": 170,
+          "product_opened": 331,
+          "product_closed": 110,
+          "profile_change": 110
+        },
+        "clients_with_such_target": 172,
+        "share_of_clients": 0.9198
+      }
+    },
+    "val": {
+      "dataset": {
+        "clients": 49,
+        "events": 201450,
+        "targets": 42828,
+        "rows_with_event_after_cutoff": 0,
+        "rows_out_of_order": 0,
+        "mask_disagreements": 0
+      },
+      "batches_and_masks": {
+        "clients_lost_in_batches": [],
+        "clients_invented_in_batches": [],
+        "rows_with_changed_content": 0,
+        "rows_with_wrong_padding": 0,
+        "masked_positions": 76849,
+        "masked_outside_targets": 0,
+        "label_mismatches": 0,
+        "unknown_substitutions": 8581,
+        "unexplained_substitutions": 0,
+        "source_mismatches": 0
+      },
+      "profile_leak": {
+        "samples_with_unprovable_key": 0,
+        "clients": 49,
+        "samples_carrying_profile": 49,
+        "profile_rows": 49,
+        "target_events_traced_by_profile": {
+          "profile_change": 7,
+          "account_opened": 8,
+          "product_opened": 14,
+          "product_closed": 2
+        },
+        "clients_with_such_target": 17,
+        "share_of_clients": 0.3469
+      }
+    },
+    "test": {
+      "dataset": {
+        "clients": 50,
+        "events": 155543,
+        "targets": 31273,
+        "rows_with_event_after_cutoff": 0,
+        "rows_out_of_order": 0,
+        "mask_disagreements": 0
+      },
+      "batches_and_masks": {
+        "clients_lost_in_batches": [],
+        "clients_invented_in_batches": [],
+        "rows_with_changed_content": 0,
+        "rows_with_wrong_padding": 0,
+        "masked_positions": 62632,
+        "masked_outside_targets": 0,
+        "label_mismatches": 0,
+        "unknown_substitutions": 6988,
+        "unexplained_substitutions": 0,
+        "source_mismatches": 0
+      },
+      "profile_leak": {
+        "samples_with_unprovable_key": 0,
+        "clients": 50,
+        "samples_carrying_profile": 50,
+        "profile_rows": 50,
+        "target_events_traced_by_profile": {
+          "profile_change": 4,
+          "account_opened": 8,
+          "product_opened": 16,
+          "product_closed": 7
+        },
+        "clients_with_such_target": 18,
+        "share_of_clients": 0.36
+      }
+    }
+  },
+  "results": [
+    {
+      "check": "ST-5A срез примера (train)",
+      "verdict": "PASS",
+      "detail": "событий 412170, клиентов 187",
+      "checked": 412170,
+      "violations": 0
+    },
+    {
+      "check": "ST-5B маска целей (train)",
+      "verdict": "PASS",
+      "detail": "целей 412170 из 412170 событий",
+      "checked": 412170,
+      "violations": 0
+    },
+    {
+      "check": "ST-7A батчи (train)",
+      "verdict": "PASS",
+      "detail": "состав, порядок и содержимое перенесены без изменений",
+      "checked": 187,
+      "violations": 0
+    },
+    {
+      "check": "ST-8A маскируется только разрешённое (train)",
+      "verdict": "PASS",
+      "detail": "маскированных мест 851645",
+      "checked": 851645,
+      "violations": 0
+    },
+    {
+      "check": "ST-8B метки равны исходным значениям (train)",
+      "verdict": "PASS",
+      "detail": "на каждом месте в loss метка равна значению до подстановки",
+      "checked": 851645,
+      "violations": 0
+    },
+    {
+      "check": "ST-8C подстановки вне loss (train)",
+      "verdict": "PASS",
+      "detail": "замен на [UNK] 94268, необъяснённых подстановок нет",
+      "checked": 94268,
+      "violations": 0
+    },
+    {
+      "check": "ST-PF невосстановимые поля в анкете (train)",
+      "verdict": "PASS",
+      "detail": "примеров с запрещённым ключом 0",
+      "checked": 187,
+      "violations": 0
+    },
+    {
+      "check": "RISK-1 целей, чей след анкета несла прежде (train)",
+      "verdict": "СПРАВКА",
+      "detail": "анкета есть у 187 примеров; целей, чей след виден в анкете: {'account_opened': 170, 'product_opened': 331, 'product_closed': 110, 'profile_change': 110}; клиентов 172 из 187",
+      "checked": 187,
+      "violations": 172
+    },
+    {
+      "check": "ST-5A срез примера (val)",
+      "verdict": "PASS",
+      "detail": "событий 201450, клиентов 49",
+      "checked": 201450,
+      "violations": 0
+    },
+    {
+      "check": "ST-5B маска целей (val)",
+      "verdict": "PASS",
+      "detail": "целей 42828 из 201450 событий",
+      "checked": 201450,
+      "violations": 0
+    },
+    {
+      "check": "ST-7A батчи (val)",
+      "verdict": "PASS",
+      "detail": "состав, порядок и содержимое перенесены без изменений",
+      "checked": 49,
+      "violations": 0
+    },
+    {
+      "check": "ST-8A маскируется только разрешённое (val)",
+      "verdict": "PASS",
+      "detail": "маскированных мест 76849",
+      "checked": 76849,
+      "violations": 0
+    },
+    {
+      "check": "ST-8B метки равны исходным значениям (val)",
+      "verdict": "PASS",
+      "detail": "на каждом месте в loss метка равна значению до подстановки",
+      "checked": 76849,
+      "violations": 0
+    },
+    {
+      "check": "ST-8C подстановки вне loss (val)",
+      "verdict": "PASS",
+      "detail": "замен на [UNK] 8581, необъяснённых подстановок нет",
+      "checked": 8581,
+      "violations": 0
+    },
+    {
+      "check": "ST-PF невосстановимые поля в анкете (val)",
+      "verdict": "PASS",
+      "detail": "примеров с запрещённым ключом 0",
+      "checked": 49,
+      "violations": 0
+    },
+    {
+      "check": "RISK-1 целей, чей след анкета несла прежде (val)",
+      "verdict": "СПРАВКА",
+      "detail": "анкета есть у 49 примеров; целей, чей след виден в анкете: {'profile_change': 7, 'account_opened': 8, 'product_opened': 14, 'product_closed': 2}; клиентов 17 из 49",
+      "checked": 49,
+      "violations": 17
+    },
+    {
+      "check": "ST-5A срез примера (test)",
+      "verdict": "PASS",
+      "detail": "событий 155543, клиентов 50",
+      "checked": 155543,
+      "violations": 0
+    },
+    {
+      "check": "ST-5B маска целей (test)",
+      "verdict": "PASS",
+      "detail": "целей 31273 из 155543 событий",
+      "checked": 155543,
+      "violations": 0
+    },
+    {
+      "check": "ST-7A батчи (test)",
+      "verdict": "PASS",
+      "detail": "состав, порядок и содержимое перенесены без изменений",
+      "checked": 50,
+      "violations": 0
+    },
+    {
+      "check": "ST-8A маскируется только разрешённое (test)",
+      "verdict": "PASS",
+      "detail": "маскированных мест 62632",
+      "checked": 62632,
+      "violations": 0
+    },
+    {
+      "check": "ST-8B метки равны исходным значениям (test)",
+      "verdict": "PASS",
+      "detail": "на каждом месте в loss метка равна значению до подстановки",
+      "checked": 62632,
+      "violations": 0
+    },
+    {
+      "check": "ST-8C подстановки вне loss (test)",
+      "verdict": "PASS",
+      "detail": "замен на [UNK] 6988, необъяснённых подстановок нет",
+      "checked": 6988,
+      "violations": 0
+    },
+    {
+      "check": "ST-PF невосстановимые поля в анкете (test)",
+      "verdict": "PASS",
+      "detail": "примеров с запрещённым ключом 0",
+      "checked": 50,
+      "violations": 0
+    },
+    {
+      "check": "RISK-1 целей, чей след анкета несла прежде (test)",
+      "verdict": "СПРАВКА",
+      "detail": "анкета есть у 50 примеров; целей, чей след виден в анкете: {'profile_change': 4, 'account_opened': 8, 'product_opened': 16, 'product_closed': 7}; клиентов 18 из 50",
+      "checked": 50,
+      "violations": 18
+    }
+  ],
+  "verdict": "FAIL"
+}

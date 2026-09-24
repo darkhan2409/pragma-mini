@@ -1,0 +1,35 @@
+{
+  "left": "regression/val",
+  "right": "det-w1/val",
+  "prefix": null,
+  "expect": "same",
+  "files_identical": {
+    "events.parquet": true,
+    "profile.parquet": true,
+    "manifest.json": true
+  },
+  "tables": [
+    {
+      "table": "events",
+      "schema": true,
+      "rows_left": 201450,
+      "rows_right": 201450,
+      "rows": true,
+      "order": true,
+      "text": true,
+      "payload": true,
+      "values": true
+    },
+    {
+      "table": "profile",
+      "schema": true,
+      "rows_left": 49,
+      "rows_right": 49,
+      "rows": true,
+      "order": true,
+      "values": true
+    }
+  ],
+  "data_identical": true,
+  "verdict": "PASS"
+}

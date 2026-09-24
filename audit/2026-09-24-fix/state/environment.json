@@ -1,0 +1,21 @@
+{
+  "code_state": "e1fd9a1b822a5055684a5495746858226693eeb62ecfd11ba290a6d77f020a78",
+  "commit": "791d8230bc2ffdf58914c2ad1ba12799bcb94cc7",
+  "branch": "main",
+  "dirty": true,
+  "python": "3.11.9 (tags/v3.11.9:de54cf5, Apr  2 2024, 10:12:12) [MSC v.1938 64 bit (AMD64)]",
+  "platform": "Windows-10-10.0.19045-SP0",
+  "machine": "AMD64",
+  "cpu_count": 12,
+  "start_methods": [
+    "spawn"
+  ],
+  "libraries": {
+    "numpy": "2.4.6",
+    "pandas": "3.0.5",
+    "pyarrow": "25.0.1",
+    "sklearn": "1.9.0",
+    "scipy": "1.17.1",
+    "tokenizers": "0.23.2"
+  }
+}

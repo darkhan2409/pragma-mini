@@ -1,0 +1,33 @@
+{
+  "checks": [
+    {
+      "check": "LIFE-9 решение не раньше алерта",
+      "verdict": "PASS",
+      "detail": "у каждого fraud_decision есть более ранний fraud_alert у того же клиента",
+      "checked": 69,
+      "violations": 0
+    },
+    {
+      "check": "FRAUD-1 resolution равен скрытому ответу клиента",
+      "verdict": "ОПРОВЕРГНУТА",
+      "detail": "совпало 15 из 61 пар эпизод/решение",
+      "checked": 61,
+      "violations": 46
+    },
+    {
+      "check": "FRAUD-2 распределение rule_code по скрытому виду",
+      "verdict": "СПРАВКА",
+      "detail": "{\"suspicious_transfer\": {\"R_TRANSFER_PATTERN\": 4, \"R_AMOUNT_ANOMALY\": 3, \"R_NEW_DEVICE\": 1}, \"social_engineering\": {\"R_TRANSFER_PATTERN\": 4, \"R_AMOUNT_ANOMALY\": 3, \"R_GEO_ANOMALY\": 1}, \"card_compromise\": {\"R_AMOUNT_ANOMALY\": 6, \"R_GEO_ANOMALY\": 4, \"R_CARD_VELOCITY\": 3}, \"unusual_purchase\": {\"R_AMOUNT_ANOMALY\": 4, \"R_TRANSFER_PATTERN\": 3, \"R_CARD_VELOCITY\": 3}, \"account_takeover\": {\"R_AMOUNT_ANOMALY\": 2, \"R_NEW_DEVICE\": 1}, \"false_positive\": {\"R_GEO_ANOMALY\": 5, \"R_TRANSFER_PATTERN\": 3, \"R_AMOUNT_ANOMALY\": 1}}",
+      "checked": 61,
+      "violations": 0
+    }
+  ],
+  "kind_vs_resolution": {
+    "suspicious_transfer|None": 10,
+    "social_engineering|None": 10,
+    "card_compromise|None": 17,
+    "unusual_purchase|None": 12,
+    "account_takeover|None": 3,
+    "false_positive|None": 9
+  }
+}

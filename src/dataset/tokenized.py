@@ -9,7 +9,13 @@ import pyarrow.parquet as pq
 
 from src.tokenization.finalvocab import FrozenArtifacts, VALUE_PREFIX
 from src.tokenization.settings import tokenized_dir
-from src.tokenization.transform import EVENTS_FILE, PROFILE_FILE
+from src.preprocessing.artifacts import read_json
+from src.tokenization.transform import (
+    EVENTS_FILE,
+    META_FILE,
+    PROFILE_FILE,
+    TOKENIZED_FORMAT,
+)
 
 
 # ============================================================
@@ -103,12 +109,29 @@ class TokenizedGroup:
         self.artifacts = artifacts
         self.directory = Path(directory) if directory is not None else tokenized_dir(group)
 
-        for name in (EVENTS_FILE, PROFILE_FILE):
+        for name in (EVENTS_FILE, PROFILE_FILE, META_FILE):
             if not (self.directory / name).exists():
                 raise TokenizedError(
                     f"нет {self.directory / name}: выполните "
                     f"python -m src.tokenization.run encode {group}"
                 )
+
+        # Версия формата, а не только наличие файлов. Каталог
+        # прежней сборки несёт анкету на КОНЕЦ выгрузки, и
+        # собранный из него набор молча вернул бы в примеры
+        # состояние из будущего.
+        self.meta = read_json(self.directory / META_FILE)
+
+        found = self.meta.get("format")
+
+        if found != TOKENIZED_FORMAT:
+            raise TokenizedError(
+                f"{self.directory / META_FILE}: формат {found!r}, а нужен {TOKENIZED_FORMAT}. "
+                f"Каталог собран прежним кодом и несёт анкету на конец выгрузки — "
+                f"выполните python -m src.tokenization.run encode {group} заново"
+            )
+
+        self.profile_moment = self.meta["profile_moment"]
 
         self._events = pq.ParquetFile(self.directory / EVENTS_FILE)
 

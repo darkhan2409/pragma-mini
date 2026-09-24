@@ -1,0 +1,46 @@
+{
+  "root": "C:\\Develop\\mini_pragma_v2\\audit\\2026-09-24-fix\\runs\\stages-root-v2",
+  "raw": "C:\\Develop\\mini_pragma_v2\\audit\\2026-09-24-fix\\runs\\regression",
+  "groups": {
+    "train": {
+      "target_start": "2023-12-31T19:00:00+00:00",
+      "samples": 187,
+      "compared": 187,
+      "values_compared": 1938,
+      "checked_as_bucket": 187,
+      "checked_as_unknown": 0,
+      "mismatched_values": 0,
+      "samples_with_future_trace": 0,
+      "unreadable_tokens": 0,
+      "examples": [],
+      "verdict": "PASS"
+    },
+    "val": {
+      "target_start": "2025-12-31T19:00:00+00:00",
+      "samples": 49,
+      "compared": 49,
+      "values_compared": 507,
+      "checked_as_bucket": 49,
+      "checked_as_unknown": 3,
+      "mismatched_values": 0,
+      "samples_with_future_trace": 0,
+      "unreadable_tokens": 0,
+      "examples": [],
+      "verdict": "PASS"
+    },
+    "test": {
+      "target_start": "2026-04-30T19:00:00+00:00",
+      "samples": 50,
+      "compared": 50,
+      "values_compared": 516,
+      "checked_as_bucket": 50,
+      "checked_as_unknown": 8,
+      "mismatched_values": 0,
+      "samples_with_future_trace": 0,
+      "unreadable_tokens": 0,
+      "examples": [],
+      "verdict": "PASS"
+    }
+  },
+  "verdict": "PASS"
+}
