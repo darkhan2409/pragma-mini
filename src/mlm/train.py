@@ -87,6 +87,7 @@ def validate(model, source, device, token_budget: int) -> tuple[float | None, in
 
     from .inputs import micro_batches
     from .model import pack
+    from .varlen import autocast
 
     model.eval()
 
@@ -97,7 +98,8 @@ def validate(model, source, device, token_budget: int) -> tuple[float | None, in
 
         for clients in micro_batches(source.clients(), token_budget):
 
-            out = model(pack(clients, device))
+            with autocast(device):
+                out = model(pack(clients, device))
 
             if out.count == 0:
                 continue
@@ -125,6 +127,7 @@ def train(
     from .build import _device
     from .inputs import Source, micro_batches
     from .model import load_model, pack
+    from .varlen import autocast
 
     device = _device(config.device)
 
@@ -134,6 +137,7 @@ def train(
         events_per_chunk=config.events_per_chunk,
         label_smoothing=config.label_smoothing,
         device=device,
+        attention_backend=config.attention_backend,
     )
 
     # Dropout энкодеров берёт случайность из глобального
@@ -215,8 +219,11 @@ def train(
                 stopped = True
                 break
 
-            # Один проход модели на весь micro-batch.
-            out = model(pack(clients, device))
+            # Один проход модели на весь micro-batch. На CUDA — под
+            # bf16 autocast; backward ниже идёт уже вне него, а веса и
+            # AdamW остаются fp32.
+            with autocast(device):
+                out = model(pack(clients, device))
 
             window_batches += 1
 
