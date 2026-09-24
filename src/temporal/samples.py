@@ -7,7 +7,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.dataset.build import SAMPLES_SCHEMA
-from src.dataset.settings import SAMPLES_FILE, dataset_dir
+from src.preprocessing.artifacts import read_json
+from src.dataset.settings import DATASET_FORMAT, META_FILE, SAMPLES_FILE, dataset_dir
 
 
 # ============================================================
@@ -54,6 +55,27 @@ class SamplesGroup:
         if not self._file.schema_arrow.equals(SAMPLES_SCHEMA, check_metadata=False):
             raise SamplesError(
                 f"{self.path} собран другой схемой примеров: выполните "
+                f"python -m src.dataset.run {group} заново"
+            )
+
+        # Схема не меняется от того, на какой момент снята
+        # анкета, поэтому одной её мало: набор прежней сборки
+        # несёт в примерах состояние на конец выгрузки.
+        meta_path = self.directory / META_FILE
+
+        if not meta_path.exists():
+            raise SamplesError(
+                f"нет {meta_path}: набор собран прежним кодом и несёт анкету на "
+                f"конец выгрузки — выполните python -m src.dataset.run {group} заново"
+            )
+
+        self.meta = read_json(meta_path)
+
+        found = self.meta.get("format")
+
+        if found != DATASET_FORMAT:
+            raise SamplesError(
+                f"{meta_path}: формат {found!r}, а нужен {DATASET_FORMAT}: выполните "
                 f"python -m src.dataset.run {group} заново"
             )
 

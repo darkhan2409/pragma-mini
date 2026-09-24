@@ -1,0 +1,45 @@
+{
+  "short": "C:\\Develop\\mini_pragma_v2\\audit\\2026-09-24-fix\\runs\\v3-s100-2024-07-01",
+  "long": "C:\\Develop\\mini_pragma_v2\\audit\\2026-09-24-fix\\runs\\v3-s100-2025-01-01",
+  "boundary": "2024-07-01T00:00:00+05:00",
+  "edge_days": 2,
+  "events": {
+    "short_rows": 12708,
+    "long_rows": 28429,
+    "long_prefix_rows": 12708,
+    "clients_short": 41,
+    "clients_long": 42,
+    "clients_lost": [],
+    "clients_appeared_in_prefix": [],
+    "first_difference_in_order": null,
+    "same_row_count": true,
+    "edge_from": "2024-06-29T00:00:00+05:00",
+    "rows_before_edge": 12426,
+    "differences_before_edge": 0,
+    "differences_inside_edge": 0,
+    "edge_changed_fields": {},
+    "edge_identity_preserved": true,
+    "rows_missing_in_long": 0,
+    "rows_extra_in_long_prefix": 0,
+    "missing_examples": [],
+    "extra_examples": [],
+    "amount_sum_short": 222359351,
+    "amount_sum_long_prefix": 222359351,
+    "amount_sum_equal": true,
+    "payload_semantic_differences": 0,
+    "verdict": "PASS",
+    "verdict_including_edge": "PASS"
+  },
+  "profile": {
+    "clients_short": 41,
+    "clients_long": 42,
+    "short_is_subset": true,
+    "clients_added": [
+      "c248404220627"
+    ],
+    "immutable_field_differences": 0,
+    "examples": [],
+    "verdict": "PASS"
+  },
+  "verdict": "PASS"
+}

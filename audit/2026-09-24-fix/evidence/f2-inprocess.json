@@ -1,0 +1,110 @@
+{
+  "baseline": {
+    "2025-01-01": {
+      "events": {
+        "rows": 28429,
+        "sha256": "c8e2d8aea5aa626efbfee404eeb72c5f52b3ba72ac062e31267d5249c357a837"
+      },
+      "profile": {
+        "rows": 42,
+        "sha256": "9afe52ceb07a6590ae3ce65ea6b4ebb6471598c4a37bf6580f5ddddfc93525f7"
+      },
+      "manifest": {
+        "chunk_clients": 256,
+        "community_size": 32,
+        "events_rows": 28429,
+        "events_sha256": "aa867d82fc67ed80b646e99184f5b2064ee2d30e12c28ad7b2e7aff11a84add7",
+        "generation_config_sha256": "226ad685607e067782f622dfb1fa3cf8db9aebffecf086c1006e17f6d721a96c",
+        "generator_version": "12.0",
+        "period_end": "2025-01-01T00:00:00+05:00",
+        "period_start": "2024-01-01T00:00:00+05:00",
+        "profile_rows": 42,
+        "profile_sha256": "5008827d9d95621405565358f7e6251e36e0db48ea56f432775828207b73fa5f",
+        "reference_sha256": {
+          "merchants": "595e0be2ab39c5466cb814038b0ccf548a8d7d4ace8bb38117d1c114cb24d40e",
+          "product_timeline": "fc5e34368562381cca14c9694dd7f848c7994ce744838eea4910dcd37ea4be9d"
+        },
+        "schema_version": 14,
+        "seed": 100,
+        "timezone": "Asia/Almaty",
+        "total_clients": 48,
+        "world_seed": 42
+      }
+    },
+    "2026-01-01": {
+      "events": {
+        "rows": 96394,
+        "sha256": "45e75006d0a7f1ecd8117a06e059972764a61421eca16973a46a742fb69fbcc5"
+      },
+      "profile": {
+        "rows": 46,
+        "sha256": "c2fa3c8669a5373702365c33a2fbb23ce150395ae79a54bfecfc2ed45f8c6a35"
+      },
+      "manifest": {
+        "chunk_clients": 256,
+        "community_size": 32,
+        "events_rows": 96394,
+        "events_sha256": "416577cf72c00e5b490f309b6e7d7e73aa72841fbc1bdfc9adf26a95cb96a9dc",
+        "generation_config_sha256": "226ad685607e067782f622dfb1fa3cf8db9aebffecf086c1006e17f6d721a96c",
+        "generator_version": "12.0",
+        "period_end": "2026-01-01T00:00:00+05:00",
+        "period_start": "2024-01-01T00:00:00+05:00",
+        "profile_rows": 46,
+        "profile_sha256": "4d3cc89a5bd27d6a5a23daf6292afc7e2a2d3af56bd289e0348f8deecb2d77b6",
+        "reference_sha256": {
+          "merchants": "595e0be2ab39c5466cb814038b0ccf548a8d7d4ace8bb38117d1c114cb24d40e",
+          "product_timeline": "fc5e34368562381cca14c9694dd7f848c7994ce744838eea4910dcd37ea4be9d"
+        },
+        "schema_version": 14,
+        "seed": 100,
+        "timezone": "Asia/Almaty",
+        "total_clients": 48,
+        "world_seed": 42
+      }
+    }
+  },
+  "orders": {
+    "короткое-длинное-короткое": {
+      "0:2025-01-01": {
+        "matches_fresh_process": true,
+        "rows": 28429,
+        "sha256": "c8e2d8aea5aa626e",
+        "expected_sha256": "c8e2d8aea5aa626e"
+      },
+      "1:2026-01-01": {
+        "matches_fresh_process": true,
+        "rows": 96394,
+        "sha256": "45e75006d0a7f1ec",
+        "expected_sha256": "45e75006d0a7f1ec"
+      },
+      "2:2025-01-01": {
+        "matches_fresh_process": true,
+        "rows": 28429,
+        "sha256": "c8e2d8aea5aa626e",
+        "expected_sha256": "c8e2d8aea5aa626e"
+      }
+    },
+    "длинное-короткое-длинное": {
+      "0:2026-01-01": {
+        "matches_fresh_process": true,
+        "rows": 96394,
+        "sha256": "45e75006d0a7f1ec",
+        "expected_sha256": "45e75006d0a7f1ec"
+      },
+      "1:2025-01-01": {
+        "matches_fresh_process": true,
+        "rows": 28429,
+        "sha256": "c8e2d8aea5aa626e",
+        "expected_sha256": "c8e2d8aea5aa626e"
+      },
+      "2:2026-01-01": {
+        "matches_fresh_process": true,
+        "rows": 96394,
+        "sha256": "45e75006d0a7f1ec",
+        "expected_sha256": "45e75006d0a7f1ec"
+      }
+    }
+  },
+  "failures": [],
+  "verdict": "PASS"
+}

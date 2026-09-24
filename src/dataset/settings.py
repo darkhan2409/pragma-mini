@@ -29,6 +29,11 @@ from src.generator.config import DATA_DIR
 DATASET_DIR = DATA_DIR / "05_dataset"
 
 SAMPLES_FILE = "samples.parquet"
+META_FILE = "meta.json"
+
+# 1 — анкета примера описывает конец выгрузки (прежний формат);
+# 2 — анкета описывает начало периода целей группы.
+DATASET_FORMAT = 2
 
 GROUPS: tuple[str, ...] = ("train", "val", "test")
 
@@ -257,6 +262,8 @@ __all__ = [
     "POLICIES",
     "POLICY_ALL",
     "POLICY_RECENT_PLUS_MILESTONES",
+    "DATASET_FORMAT",
+    "META_FILE",
     "SAMPLES_FILE",
     "ConfigError",
     "ContextPolicy",

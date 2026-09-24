@@ -23,12 +23,21 @@ from tests import world
 
 
 # (модуль, имя глобала, подкаталог)
+#
+# Перечислены ВСЕ этапы, а не только те, что нужны сегодняшним
+# тестам: пропущенный глобал означает, что этап пишет в
+# настоящий data/, и заметно это становится только по следам.
 PLACES = (
+    ("src.preprocessing.settings", "RAW_DIR", "01_raw"),
+    ("src.preprocessing.settings", "PREPROCESSED_DIR", "02_preprocessed"),
     ("src.tokenization.settings", "VOCAB_DIR", "03_vocab"),
     # Копия, снятая при импорте: FrozenArtifacts.load читает её, а
     # не settings, и без этой строки словарь искался бы в
     # настоящем data/.
     ("src.tokenization.finalvocab", "VOCAB_DIR", "03_vocab"),
+    ("src.tokenization.settings", "TOKENIZED_DIR", "04_tokenized"),
+    ("src.dataset.settings", "DATASET_DIR", "05_dataset"),
+    ("src.temporal.settings", "TEMPORAL_DIR", "06_temporal"),
     ("src.batching.settings", "BATCHES_DIR", "07_batches"),
     ("src.masking.settings", "MASKED_DIR", "08_masked"),
     ("src.embedding.settings", "EMBEDDINGS_DIR", "09_embeddings"),

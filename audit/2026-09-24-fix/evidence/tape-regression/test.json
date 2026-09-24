@@ -1,0 +1,72 @@
+[
+  {
+    "check": "RAW-1 конверт",
+    "verdict": "PASS",
+    "detail": "колонки ['client_id', 'event_time', 'source', 'payload'], типы {'string'}",
+    "checked": 155543,
+    "violations": 0
+  },
+  {
+    "check": "RAW-3 смещение времени",
+    "verdict": "PASS",
+    "detail": "каждая строка разобрана и несёт смещение",
+    "checked": 155543,
+    "violations": 0
+  },
+  {
+    "check": "TIME-1 окно [start, end)",
+    "verdict": "PASS",
+    "detail": "границы 2024-01-01 .. 2026-09-01",
+    "checked": 155543,
+    "violations": 0
+  },
+  {
+    "check": "OBS-2 отсутствие null",
+    "verdict": "PASS",
+    "detail": "пропуск выражается отсутствием ключа, а не null",
+    "checked": 155543,
+    "violations": 0
+  },
+  {
+    "check": "OBS-3 обязательные поля",
+    "verdict": "PASS",
+    "detail": "все обязательные поля на месте",
+    "checked": 155543,
+    "violations": 0
+  },
+  {
+    "check": "TIME-3 запуск источника",
+    "verdict": "PASS",
+    "detail": "событий раньше запуска источника нет",
+    "checked": 155543,
+    "violations": 0
+  },
+  {
+    "check": "P2P симметрия в ленте",
+    "verdict": "СПРАВКА",
+    "detail": "p2p_out 834 (одобренных 733), p2p_in 733; разность 0",
+    "checked": 1567,
+    "violations": 0
+  },
+  {
+    "check": "ANKETA contracts_count = число product_opened",
+    "verdict": "СПРАВКА",
+    "detail": "совпало у 12 из 50 клиентов (24.0%)",
+    "checked": 50,
+    "violations": 38
+  },
+  {
+    "check": "ANKETA active_contracts = открытые минус закрытые",
+    "verdict": "СПРАВКА",
+    "detail": "совпало у 15 из 50 (30.0%)",
+    "checked": 50,
+    "violations": 35
+  },
+  {
+    "check": "ANKETA holds_deposit = есть признаки вклада в ленте",
+    "verdict": "СПРАВКА",
+    "detail": "совпало у 46 из 50 (92.0%)",
+    "checked": 50,
+    "violations": 4
+  }
+]

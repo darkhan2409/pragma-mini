@@ -1,0 +1,50 @@
+{
+  "run": "m2-observed-val",
+  "code_state": "c8121793719a2f9c6fa7b5e7d8b11fe28a99a30ab8ccd719030c317848c0c976",
+  "counts": {
+    "events": 201450,
+    "profile": 49
+  },
+  "observation_control": {
+    "events.parquet": true,
+    "profile.parquet": true,
+    "verdict": "PASS"
+  },
+  "ledger": {
+    "clients": 50,
+    "accounts": 200,
+    "postings": 65511,
+    "crossing_postings": 2334,
+    "crossing_mirrored": 2334,
+    "mirror_time_deltas_seconds": {
+      "-1": 1167,
+      "1": 1167
+    },
+    "trial_balance": 0,
+    "trial_sides": 1388,
+    "unknown_sides": {},
+    "problems": {},
+    "problem_counts": {},
+    "verdict": "PASS"
+  },
+  "tape": {
+    "run": "m2-observed-val",
+    "steps_checked": 57380,
+    "declined_events": 0,
+    "declined_moving_balance": 0,
+    "breaks": [],
+    "break_count": 0,
+    "verdict": "PASS"
+  },
+  "solvency": {
+    "debits_checked": 58142,
+    "short_at_moment": 1,
+    "share": 1.7e-05,
+    "worst_shortfall": 571,
+    "worst_lookahead_seconds": 23880.0,
+    "within_recent_window": true,
+    "examples": [
+      "c456029633400 cash:c456029633400 2024-10-16T11:49:00: остаток 28849, лимит 0, списание 29420, покрытие через 6:38:00"
+    ]
+  }
+}

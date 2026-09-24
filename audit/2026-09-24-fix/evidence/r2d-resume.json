@@ -1,0 +1,91 @@
+{
+  "resume_equals_continuous": {
+    "parts_after_stop": 6,
+    "markers_after_stop": 3,
+    "files": {
+      "events.parquet": {
+        "continuous": "9f35ceb6e8d6e390",
+        "resumed": "9f35ceb6e8d6e390"
+      },
+      "profile.parquet": {
+        "continuous": "8ba211210fb613ce",
+        "resumed": "8ba211210fb613ce"
+      }
+    },
+    "manifest_equal": {},
+    "verdict": "PASS"
+  },
+  "swapped_part": {
+    "part": "events-00000.parquet",
+    "rows_before": 1218,
+    "rows_after": 1218,
+    "same_row_count": true,
+    "error": "пачка 0: содержимое events-00000.parquet не совпадает с подписью маркера — черновик повреждён, прогон нужно начать заново",
+    "manifest_written": false,
+    "verdict": "PASS"
+  },
+  "broken_marker": {
+    "нечитаемый": {
+      "marker": "batch-00000.json",
+      "error": "маркер пачки batch-00000.json нечитаем: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+      "names_the_file": true,
+      "manifest_written": false,
+      "verdict": "PASS"
+    },
+    "без подписей": {
+      "marker": "batch-00000.json",
+      "error": "маркер пачки 0 без подписей частей: черновик собран прежней версией генератора, продолжить его нельзя",
+      "names_the_file": false,
+      "manifest_written": false,
+      "verdict": "PASS"
+    }
+  },
+  "manifest": {
+    "keys": [
+      "chunk_clients",
+      "community_size",
+      "events_rows",
+      "events_sha256",
+      "generation_config_sha256",
+      "generator_version",
+      "period_end",
+      "period_start",
+      "profile_rows",
+      "profile_sha256",
+      "reference_sha256",
+      "schema_version",
+      "seed",
+      "timezone",
+      "total_clients",
+      "world_seed"
+    ],
+    "missing": [],
+    "read_by_preprocessing": {
+      "schema_version": 14,
+      "events_rows": 12516,
+      "provenance_keys": [
+        "chunk_clients",
+        "community_size",
+        "generation_config_sha256",
+        "generator_version",
+        "reference_sha256",
+        "seed",
+        "total_clients",
+        "world_seed"
+      ]
+    },
+    "error": null,
+    "refusals": {
+      "прежняя версия схемы": {
+        "error": "RawContractError: schema_version манифеста 13, поддерживается 14",
+        "verdict": "PASS"
+      },
+      "без происхождения": {
+        "error": "RawContractError: в manifest.json нет ключей: ['generator_version', 'seed', 'world_seed', 'generation_config_sha256', 'reference_sha256']",
+        "verdict": "PASS"
+      }
+    },
+    "verdict": "PASS"
+  },
+  "verdict": "PASS"
+}

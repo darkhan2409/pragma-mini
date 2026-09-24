@@ -1,0 +1,233 @@
+{
+  "groups": [
+    "regression/train",
+    "regression/val",
+    "regression/test"
+  ],
+  "clients": {
+    "regression/train": 187,
+    "regression/val": 49,
+    "regression/test": 50
+  },
+  "split1_overlaps": {
+    "regression/train|regression/val": 0,
+    "regression/test|regression/train": 0,
+    "regression/test|regression/val": 0
+  },
+  "split1": "PASS",
+  "split4_world": {
+    "regression/train|regression/val": {
+      "shared_merchants": 668,
+      "left_only": 619,
+      "right_only": 121
+    },
+    "regression/test|regression/train": {
+      "shared_merchants": 590,
+      "left_only": 86,
+      "right_only": 697
+    },
+    "regression/test|regression/val": {
+      "shared_merchants": 404,
+      "left_only": 272,
+      "right_only": 385
+    }
+  },
+  "split5_snapshot": {
+    "train": {
+      "target_start": "2023-12-31T19:00:00+00:00",
+      "final_cutoff": "2025-12-31T19:00:00+00:00",
+      "clients": 187,
+      "events_in_target_window": 412170,
+      "profile_change_in_window": {
+        "children": {
+          "events": 6,
+          "clients": 5
+        },
+        "city": {
+          "events": 5,
+          "clients": 5
+        },
+        "consent_marketing": {
+          "events": 16,
+          "clients": 16
+        },
+        "declared_income": {
+          "events": 40,
+          "clients": 35
+        },
+        "family_status": {
+          "events": 6,
+          "clients": 6
+        },
+        "income_day": {
+          "events": 19,
+          "clients": 18
+        },
+        "industry": {
+          "events": 12,
+          "clients": 11
+        },
+        "region": {
+          "events": 6,
+          "clients": 6
+        }
+      },
+      "activity_fields_in_window": {
+        "active_contracts": {
+          "events": 611,
+          "clients": 159
+        },
+        "contracts_count": {
+          "events": 501,
+          "clients": 154
+        },
+        "credit_limit": {
+          "events": 441,
+          "clients": 159
+        },
+        "credit_utilization": {
+          "events": 106604,
+          "clients": 187
+        },
+        "holds_credit_card": {
+          "events": 441,
+          "clients": 159
+        },
+        "holds_debit_card": {
+          "events": 441,
+          "clients": 159
+        },
+        "holds_deposit": {
+          "events": 441,
+          "clients": 159
+        }
+      },
+      "clients_with_stale_snapshot": 187,
+      "share_of_clients": 1.0,
+      "clients_with_stale_snapshot_strict": 172,
+      "share_of_clients_strict": 0.9198,
+      "fields_provably_unchanged": [],
+      "clock_fields": [
+        "age",
+        "relationship_months"
+      ],
+      "verdict": "СНИМОК ОПИСЫВАЕТ БУДУЩЕЕ"
+    },
+    "val": {
+      "target_start": "2025-12-31T19:00:00+00:00",
+      "final_cutoff": "2026-04-30T19:00:00+00:00",
+      "clients": 49,
+      "events_in_target_window": 42828,
+      "profile_change_in_window": {
+        "city": {
+          "events": 2,
+          "clients": 2
+        },
+        "declared_income": {
+          "events": 4,
+          "clients": 4
+        },
+        "income_day": {
+          "events": 1,
+          "clients": 1
+        }
+      },
+      "activity_fields_in_window": {
+        "active_contracts": {
+          "events": 24,
+          "clients": 13
+        },
+        "contracts_count": {
+          "events": 22,
+          "clients": 12
+        },
+        "credit_limit": {
+          "events": 16,
+          "clients": 13
+        },
+        "credit_utilization": {
+          "events": 6244,
+          "clients": 45
+        },
+        "holds_credit_card": {
+          "events": 16,
+          "clients": 13
+        },
+        "holds_debit_card": {
+          "events": 16,
+          "clients": 13
+        },
+        "holds_deposit": {
+          "events": 16,
+          "clients": 13
+        }
+      },
+      "clients_with_stale_snapshot": 46,
+      "share_of_clients": 0.9388,
+      "clients_with_stale_snapshot_strict": 17,
+      "share_of_clients_strict": 0.3469,
+      "fields_provably_unchanged": [],
+      "clock_fields": [
+        "age",
+        "relationship_months"
+      ],
+      "verdict": "СНИМОК ОПИСЫВАЕТ БУДУЩЕЕ"
+    },
+    "test": {
+      "target_start": "2026-04-30T19:00:00+00:00",
+      "final_cutoff": "2026-08-31T19:00:00+00:00",
+      "clients": 50,
+      "events_in_target_window": 31273,
+      "profile_change_in_window": {
+        "children": {
+          "events": 1,
+          "clients": 1
+        },
+        "consent_marketing": {
+          "events": 3,
+          "clients": 3
+        }
+      },
+      "activity_fields_in_window": {
+        "active_contracts": {
+          "events": 31,
+          "clients": 16
+        },
+        "contracts_count": {
+          "events": 24,
+          "clients": 13
+        },
+        "credit_limit": {
+          "events": 23,
+          "clients": 16
+        },
+        "credit_utilization": {
+          "events": 6418,
+          "clients": 45
+        },
+        "holds_credit_card": {
+          "events": 23,
+          "clients": 16
+        },
+        "holds_debit_card": {
+          "events": 23,
+          "clients": 16
+        },
+        "holds_deposit": {
+          "events": 23,
+          "clients": 16
+        }
+      },
+      "clients_with_stale_snapshot": 45,
+      "share_of_clients": 0.9,
+      "clients_with_stale_snapshot_strict": 18,
+      "share_of_clients_strict": 0.36,
+      "fields_provably_unchanged": [],
+      "clock_fields": [
+        "age",
+        "relationship_months"
+      ],
+      "verdict": "СНИМОК ОПИСЫВАЕТ БУДУЩЕЕ"
+    }
+  }
+}
