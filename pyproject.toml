@@ -15,6 +15,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=9,<10"]
 torch = ["torch==2.13.0"]
+# Varlen FlashAttention на CUDA. Необязательна: без неё обучение
+# идёт корзинами SDPA.
+flash = ["flash-attn>=2.6"]
 
 [project.scripts]
 mini-pragma-emit = "src.generator.emit:main"

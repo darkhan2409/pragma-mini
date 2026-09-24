@@ -25,7 +25,13 @@ from src.profile.settings import ProfileConfig, profiles_dir
 from src.tokenization.specials import EVT, USR, load_special_tokens
 
 from .inputs import IGNORE, Client
-from .varlen import VarlenLayout, assemble
+from .varlen import (
+    VarlenLayout,
+    assemble,
+    encoder_layer_varlen,
+    history_block_varlen,
+    resolve_backend,
+)
 
 
 # ============================================================
@@ -49,10 +55,15 @@ from .varlen import VarlenLayout, assemble
 #   истории    — сегмент = [анкета, события клиента], энкодер
 #                истории: слот анкеты первым, как [USR].
 #
-# Прямоугольник с заполнителем есть только внутри корзины и
-# только до её наибольшей длины: длинный клиент не растягивает
-# остальных. Это плоское представление с запасным путём через
-# корзины, а не внимание без заполнителя.
+# Два пути внимания, один и тот же результат:
+#
+#   flash — CUDA, bf16/fp16 под autocast и библиотека flash-attn:
+#           плоские Q/K/V по cu_seqlens, ни одной позиции
+#           заполнителя (varlen.attend);
+#   sdpa  — всё остальное: сегменты по корзинам близкой длины,
+#           прямоугольник с заполнителем только внутри корзины.
+#
+# Путь выбирается внутри forward: код обучения о нём не знает.
 #
 # Голова получает на каждую размеченную позицию три вектора:
 #
@@ -314,6 +325,8 @@ class Model(nn.Module):
         head: Mlm,
         events_per_chunk: int = 512,
         label_smoothing: float = 0.1,
+        attention: str = "sdpa",
+        strict: bool = False,
     ):
 
         super().__init__()
@@ -327,16 +340,24 @@ class Model(nn.Module):
         self.events_per_chunk = int(events_per_chunk)
         self.label_smoothing = float(label_smoothing)
 
+        # attention — решённый бэкенд ("flash" или "sdpa"); strict
+        # — flash выбран явно, и откат на корзины запрещён.
+        self.attention = attention
+        self.strict = bool(strict)
+
     def forward(self, data: PackedBatch) -> Predicted:
         """
         Micro-batch от токенов до потерь, одним проходом.
         """
 
-        dated, token_vectors = self._events(data)
-
-        profile = self._profiles(data)
-
-        client_vectors, event_vectors = self._history(data, profile, dated)
+        if self._flash():
+            dated, token_vectors = self._events_flash(data)
+            profile = self._profiles_flash(data)
+            client_vectors, event_vectors = self._history_flash(data, profile, dated)
+        else:
+            dated, token_vectors = self._events(data)
+            profile = self._profiles(data)
+            client_vectors, event_vectors = self._history(data, profile, dated)
 
         if token_vectors is None:
             # Целей нет. Контекст пуст, но граф обязан остаться
@@ -360,6 +381,109 @@ class Model(nn.Module):
             event=data.target_local,
             client=data.target_client,
         )
+
+    def _flash(self) -> bool:
+        """
+        Идти ли этим проходом через varlen-ядро.
+
+        Ядро flash-attn считает только в bf16 и fp16, поэтому кроме
+        выбранного бэкенда нужен ещё autocast CUDA в одном из них.
+        Без него auto уходит на корзины, а явный flash — ошибка.
+        """
+
+        if self.attention != "flash":
+            return False
+
+        if torch.is_autocast_enabled("cuda") and torch.get_autocast_dtype("cuda") in (
+            torch.bfloat16, torch.float16
+        ):
+            return True
+
+        if self.strict:
+            raise RuntimeError(
+                "attention_backend=flash: проход идёт не под autocast CUDA в bf16/fp16, "
+                "а flash-attn в fp32 не считает"
+            )
+
+        return False
+
+    def _events_flash(self, data: PackedBatch) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """
+        Энкодер события на плоских токенах, без заполнителя.
+
+        Все токены micro-batch — одна ось [T, d]; внимание не выходит
+        за границы события (cu_seqlens_event). Контекст всех токенов
+        живёт до конца прохода энкодера — он ограничен token_budget;
+        наружу идут только векторы целевых токенов.
+        """
+
+        encoder = self.event
+
+        x = self.embedding.embed(
+            data.key_ids, data.value_ids, data.positions,
+            torch.ones_like(data.key_ids, dtype=torch.bool),
+        )
+
+        for layer in encoder.layers:
+            x = encoder_layer_varlen(layer, x, data.events)
+
+        x = encoder.norm(x)
+
+        # Маркер [EVT] — первый токен события: его вектор и есть
+        # вектор события, к нему прибавляется календарь.
+        dated = x[data.events.cu_seqlens[:-1]] + encoder.calendar(data.calendar)
+
+        if data.target_token.numel() == 0:
+            return dated, None
+
+        return dated, x[data.target_token]
+
+    def _profiles_flash(self, data: PackedBatch) -> torch.Tensor:
+        """
+        Энкодер анкеты на плоских токенах: [B, d] из позиции [USR].
+        """
+
+        encoder = self.profile
+
+        x = self.embedding.embed(
+            data.profile_key_ids, data.profile_value_ids, data.profile_positions,
+            torch.ones_like(data.profile_key_ids, dtype=torch.bool),
+        )
+
+        for layer in encoder.layers:
+            x = encoder_layer_varlen(layer, x, data.profiles)
+
+        return encoder.norm(x)[data.profiles.cu_seqlens[:-1]]
+
+    def _history_flash(
+        self,
+        data: PackedBatch,
+        profile: torch.Tensor,
+        dated: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Энкодер истории на плоской истории [B + E, d], без заполнителя.
+
+        Углы TimeRoPE считаются в fp32 один раз по плоским позициям
+        и служат всем блокам.
+        """
+
+        encoder = self.history
+
+        x = (
+            profile.new_zeros(data.clients + data.events.segments, profile.shape[-1])
+            .index_copy(0, data.history_profile_slot, profile)
+            .index_copy(0, data.history_event_slot, dated)
+        )
+
+        cos, sin = encoder.rope.angles(data.history_positions)
+
+        for block in encoder.layers:
+            x = history_block_varlen(block, encoder.rope, x, cos, sin, data.history)
+
+        x = encoder.norm(x)
+
+        return x[data.history_profile_slot], x[data.history_event_slot]
 
     def _events(self, data: PackedBatch) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
@@ -510,6 +634,7 @@ def load_model(
     events_per_chunk: int,
     label_smoothing: float,
     device: torch.device,
+    attention_backend: str = "auto",
 ) -> Model:
     """
     Четыре энкодера из весов этапов 09-12 плюс свежая голова.
@@ -560,6 +685,9 @@ def load_model(
         head=Mlm(dim, seed),
         events_per_chunk=events_per_chunk,
         label_smoothing=label_smoothing,
+        # Недоступный явный flash — ошибка сразу, до первого шага.
+        attention=resolve_backend(attention_backend, device),
+        strict=attention_backend == "flash",
     )
 
     # Веса разыграны и загружены на CPU и только теперь переезжают.

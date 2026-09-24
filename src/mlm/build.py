@@ -14,6 +14,7 @@ from src.tokenization.specials import UNK, load_special_tokens
 
 from .inputs import IGNORE, Client, Source
 from .model import Model, Predicted, load_model, pack
+from .varlen import autocast
 from .report import Piece, Shot, render
 from .settings import (
     PREVIEW_FILE,
@@ -105,6 +106,7 @@ def build_group(
         events_per_chunk=config.events_per_chunk,
         label_smoothing=config.label_smoothing,
         device=device,
+        attention_backend=config.attention_backend,
     )
 
     model.eval()
@@ -138,7 +140,7 @@ def build_group(
                 # no_grad стоит ЗДЕСЬ: это отчёт. Отчёт поклиентный,
                 # поэтому micro-batch здесь из одного клиента —
                 # через то же ядро, что и обучение.
-                with torch.no_grad():
+                with torch.no_grad(), autocast(device):
                     out = model(pack([client], device))
 
                 rows, shot = _rows(client, out, names, config, unknown_id, shot)
@@ -241,12 +243,16 @@ def _rows(
     if out.count == 0:
         return [], shot
 
+    # Под bf16 autocast логиты приходят в bf16: отчёт считает
+    # вероятности и потери в fp32.
+    logits = out.logits.float()
+
     losses = F.cross_entropy(
-        out.logits, out.targets, reduction="none",
+        logits, out.targets, reduction="none",
         label_smoothing=config.label_smoothing,
     )
 
-    probabilities = out.logits.softmax(dim=-1)
+    probabilities = logits.softmax(dim=-1)
 
     top = probabilities.topk(min(config.top_k, probabilities.shape[-1]), dim=-1)
 

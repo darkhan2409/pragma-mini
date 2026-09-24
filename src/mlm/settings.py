@@ -37,6 +37,10 @@ WEIGHTS_FILE = "weights.pt"
 
 DEVICES = ("auto", "cpu", "cuda")
 
+# Бэкенд внимания. auto — flash-attn, когда есть CUDA и библиотека,
+# иначе корзины SDPA. Совпадает с varlen.BACKENDS: здесь без torch.
+ATTENTION_BACKENDS = ("auto", "flash", "sdpa")
+
 # Чекпойнт обучения лежит отдельно от 13_mlm: отчёт очищает свой
 # каталог целиком и стёр бы его.
 #
@@ -86,6 +90,8 @@ class MlmConfig:
     # оптимизатора.
     grad_accum_steps: int = 1
 
+    attention_backend: str = "auto"
+
     def validate(self) -> None:
 
         if not 0.0 <= self.label_smoothing < 1.0:
@@ -110,6 +116,12 @@ class MlmConfig:
             if value < 1:
                 raise ConfigError(f"{name} обязан быть положительным, получено {value}")
 
+        if self.attention_backend not in ATTENTION_BACKENDS:
+            raise ConfigError(
+                f"attention_backend обязан быть одним из {list(ATTENTION_BACKENDS)}, "
+                f"получено {self.attention_backend!r}"
+            )
+
         if self.device not in DEVICES:
             raise ConfigError(
                 f"device обязан быть одним из {list(DEVICES)}, получено {self.device!r}"
@@ -126,6 +138,7 @@ class MlmConfig:
             "weight_decay": self.weight_decay,
             "token_budget": self.token_budget,
             "grad_accum_steps": self.grad_accum_steps,
+            "attention_backend": self.attention_backend,
         }
 
     @staticmethod
@@ -149,6 +162,7 @@ class MlmConfig:
             weight_decay=float(data.get("weight_decay", base.weight_decay)),
             token_budget=int(data.get("token_budget", base.token_budget)),
             grad_accum_steps=int(data.get("grad_accum_steps", base.grad_accum_steps)),
+            attention_backend=str(data.get("attention_backend", base.attention_backend)),
         )
 
         config.validate()
@@ -184,6 +198,7 @@ def checkpoint_path() -> Path:
 
 __all__ = [
     "CHECKPOINT_FILE",
+    "ATTENTION_BACKENDS",
     "DEVICES",
     "MLM_DIR",
     "PREVIEW_FILE",
