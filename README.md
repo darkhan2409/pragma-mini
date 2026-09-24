@@ -789,9 +789,12 @@ epoch=1 step=42 loss=6.8124 targets=18432 micro_batches=4 lr=1.26e-04
 - дальше cosine: `p = min(1, (s - warmup_steps) / (total - warmup_steps))`,
   `lr = min_learning_rate + (learning_rate - min_learning_rate) * 0.5 * (1 + cos(pi * p))`.
 
-`total` — `ceil(micro-batch'ей эпохи / grad_accum_steps) * --epochs`, а с `--max-steps` —
-не больше него. Число micro-batch'ей считается до обучения по длинам клиентов, без
-модели. Окно без целей шага не делает, поэтому `total` — верхняя оценка.
+`total` — горизонт расписания, `ceil(micro-batch'ей эпохи / grad_accum_steps) * --epochs`.
+Он зависит только от `--epochs`: `--max-steps` в него не входит и кривую не укорачивает —
+он останавливает прогон. Поэтому `--epochs 10 --max-steps 100` — это cosine на все десять
+эпох, остановленный на сотом шаге, а `--epochs 10 --resume` продолжает ту же кривую без
+скачка. Число micro-batch'ей считается до обучения по длинам клиентов, без модели. Окно
+без целей шага не делает, поэтому `total` — верхняя оценка.
 
 **Чекпойнты** — `data/14_train/`:
 
@@ -801,10 +804,11 @@ epoch=1 step=42 loss=6.8124 targets=18432 micro_batches=4 lr=1.26e-04
   `val_loss < best_val_loss - early_stopping_min_delta` (первая эпоха — всегда).
 
 Формат у обоих один и полный: `model_state_dict`, `optimizer_state_dict`,
-`scheduler_state_dict`, `epoch`, `epoch_complete`, `micro_batches_done`, `step`,
+`scheduler_state_dict`, `scheduler_total`, `scheduler_epochs`, `epoch`, `epoch_complete`, `micro_batches_done`, `step`,
 `best_val_loss`, `epochs_without_improvement`, `config`, `masking`, состояние генераторов
 случайности. Запись идёт через временный файл. Новое обучение без `--resume` удаляет
-`best_checkpoint.pt` прошлого прогона.
+`checkpoint.pt` и `best_checkpoint.pt` прошлого прогона — после того, как модель,
+оптимизатор, расписание и `val` собрались: падение на сборке прошлого обучения не стоит.
 
 **Early stopping.** После каждой полной эпохи: улучшение больше
 `early_stopping_min_delta` обнуляет счётчик, иначе он растёт на 1. Счётчик
@@ -816,8 +820,13 @@ epoch=1 step=42 loss=6.8124 targets=18432 micro_batches=4 lr=1.26e-04
 `--masking-config` с ним не задаются. Полная эпоха `e` — продолжение с `e + 1`;
 эпоха, прерванная `--max-steps`, — с того же места, уже пройденные micro-batch'и
 пропускаются без прохода модели. Маска эпохи — та же `for_epoch(masking, epoch)`.
-`--epochs` и `--max-steps` — общие пределы от начала обучения. Старый чекпойнт без
-новых полей продолжить нельзя — будет понятная ошибка.
+`--epochs` и `--max-steps` — общие пределы от начала обучения. Горизонт расписания при
+`--resume` не пересчитывается: берутся `scheduler_total` и `scheduler_epochs` из
+чекпойнта, и продолжение проверяет, что расписание стоит ровно на сделанном шаге. План
+замораживается первым запуском, поэтому увеличенный на `--resume` `--epochs` добавляет
+эпохи уже на `min_learning_rate`, а не пересчитывает пройденную часть кривой; команда
+говорит об этом строкой в логе. Старый чекпойнт без новых полей продолжить нельзя —
+будет понятная ошибка.
 
 `learning_rate` (3e-4), `weight_decay` (0.01), `token_budget`, `grad_accum_steps`,
 `warmup_steps` (100), `min_learning_rate` (1e-5), `max_grad_norm` (1.0),
