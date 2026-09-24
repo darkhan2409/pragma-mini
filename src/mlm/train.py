@@ -34,7 +34,8 @@ from .settings import ConfigError, MlmConfig, checkpoint_path
 #
 # Клиенты идут потоком и собираются в micro-batch по бюджету
 # позиций (inputs.micro_batches, token_budget). Группа строк
-# 07_batches — только хранение, а не батч модели.
+# 07_batches — только хранение, а не батч модели. micro-batch
+# собирается model.pack в плоские массивы без заполнителя.
 #
 #   micro-batch -> ОДИН проход: InputEmbedding -> Event -> Profile
 #               -> History -> MLM -> потери -> backward
@@ -85,7 +86,7 @@ def validate(model, source, device, token_budget: int) -> tuple[float | None, in
     import torch
 
     from .inputs import micro_batches
-    from .model import collate
+    from .model import pack
 
     model.eval()
 
@@ -96,7 +97,7 @@ def validate(model, source, device, token_budget: int) -> tuple[float | None, in
 
         for clients in micro_batches(source.clients(), token_budget):
 
-            out = model(collate(clients, source.pad_id, device))
+            out = model(pack(clients, device))
 
             if out.count == 0:
                 continue
@@ -123,7 +124,7 @@ def train(
 
     from .build import _device
     from .inputs import Source, micro_batches
-    from .model import collate, load_model
+    from .model import load_model, pack
 
     device = _device(config.device)
 
@@ -215,7 +216,7 @@ def train(
                 break
 
             # Один проход модели на весь micro-batch.
-            out = model(collate(clients, source.pad_id, device))
+            out = model(pack(clients, device))
 
             window_batches += 1
 

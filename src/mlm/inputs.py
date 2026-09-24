@@ -15,7 +15,7 @@ from src.masking.apply import apply
 from src.masking.build import MASKED_SCHEMA
 from src.masking.choose import choose
 from src.masking.settings import MASKED_FILE, MaskingConfig, masked_dir
-from src.tokenization.specials import MASK, PAD, UNK, load_special_tokens
+from src.tokenization.specials import MASK, UNK, load_special_tokens
 
 
 # ============================================================
@@ -36,9 +36,9 @@ from src.tokenization.specials import MASK, PAD, UNK, load_special_tokens
 # в labels, и второй его копии не нужно.
 #
 # Заполнитель наружу не выходит: каждый массив клиента обрезан по
-# его настоящей длине. [PAD] появляется только при сборке прохода
-# из нескольких клиентов (model.collate), всегда вместе с маской и
-# меткой -100, поэтому в потери он не попадает.
+# его настоящей длине. Проход из нескольких клиентов (model.pack)
+# тоже плоский, без [PAD]: клиенты лежат подряд, границы — в
+# cu_seqlens.
 #
 # labels и reason в модель НЕ подаются. Первое уходит в потери,
 # второе в отчёт.
@@ -160,7 +160,6 @@ class Source:
 
         self.mask_id = specials[MASK]
         self.unknown_id = specials[UNK]
-        self.pad_id = specials[PAD]
 
         if masking is not None:
             return

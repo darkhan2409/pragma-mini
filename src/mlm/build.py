@@ -13,7 +13,7 @@ from src.tokenization.finalvocab import FrozenArtifacts
 from src.tokenization.specials import UNK, load_special_tokens
 
 from .inputs import IGNORE, Client, Source
-from .model import Model, Predicted, collate, load_model
+from .model import Model, Predicted, load_model, pack
 from .report import Piece, Shot, render
 from .settings import (
     PREVIEW_FILE,
@@ -139,7 +139,7 @@ def build_group(
                 # поэтому micro-batch здесь из одного клиента —
                 # через то же ядро, что и обучение.
                 with torch.no_grad():
-                    out = model(collate([client], source.pad_id, device))
+                    out = model(pack([client], device))
 
                 rows, shot = _rows(client, out, names, config, unknown_id, shot)
 
