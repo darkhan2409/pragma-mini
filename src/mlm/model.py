@@ -25,6 +25,7 @@ from src.profile.settings import ProfileConfig, profiles_dir
 from src.tokenization.specials import EVT, USR, load_special_tokens
 
 from .inputs import IGNORE, Client
+from .varlen import VarlenLayout, assemble
 
 
 # ============================================================
@@ -38,16 +39,20 @@ from .inputs import IGNORE, Client
 #   History Encoder -> MLM
 #
 # Единица прохода — micro-batch: несколько клиентов, собранных
-# collate в один набор тензоров с заполнителем. Модель
-# вызывается ОДИН раз на весь micro-batch:
+# pack в ПЛОСКИЕ массивы без заполнителя, с границами в
+# cu_seqlens (varlen.py). Модель вызывается ОДИН раз на весь
+# micro-batch. Внутри три уровня сегментов, и каждый считается
+# по корзинам близкой длины:
 #
-#   события    — настоящие события всех клиентов расплющены в
-#                одну ось и идут в энкодер события порциями;
-#                заполнительные события туда не попадают;
-#   анкета     — [B, P] одним вызовом энкодера анкеты;
-#   история    — [B, 1 + E]: у каждого клиента своя строка,
-#                заполнитель исключён маской внимания;
-#   голова     — по всем целям всех клиентов сразу.
+#   события    — сегмент = токены одного события, энкодер события;
+#   анкеты     — сегмент = токены анкеты клиента, энкодер анкеты;
+#   истории    — сегмент = [анкета, события клиента], энкодер
+#                истории: слот анкеты первым, как [USR].
+#
+# Прямоугольник с заполнителем есть только внутри корзины и
+# только до её наибольшей длины: длинный клиент не растягивает
+# остальных. Это плоское представление с запасным путём через
+# корзины, а не внимание без заполнителя.
 #
 # Голова получает на каждую размеченную позицию три вектора:
 #
@@ -64,41 +69,60 @@ from .inputs import IGNORE, Client
 # весит столько же, сколько цель другого.
 #
 # Внутри forward нет ни detach, ни NumPy, ни no_grad. Перевод
-# данных клиентов в тензоры сделан отдельным шагом, до входа в
-# граф.
+# клиентов в тензоры и раскладка по корзинам сделаны в pack, до
+# входа в граф.
 # ============================================================
 
 
 @dataclass(frozen=True)
-class BatchTensors:
+class PackedBatch:
     """
-    Micro-batch из B клиентов в тензорах. Всё, что видит модель.
+    Micro-batch из B клиентов плоскими массивами. Всё, что видит
+    модель.
 
-    T, E и P — наибольшие у клиентов batch число токенов событий,
-    событий и токенов анкеты. Хвост короче — заполнитель: [PAD] в
-    идентификаторах, ноль в числах, False в масках, -100 в labels.
+    Заполнителя здесь нет вовсе: T — сумма токенов событий всех
+    клиентов, E — сумма их событий, P — сумма токенов их анкет.
 
     labels лежат рядом, но в саму модель не подаются: они нужны
     только чтобы выбрать позиции и посчитать потери.
     """
 
-    key_ids: torch.Tensor             # [B, T]
-    value_ids: torch.Tensor           # [B, T]
-    positions: torch.Tensor           # [B, T]
-    labels: torch.Tensor              # [B, T]
-    token_mask: torch.Tensor          # [B, T]
+    clients: int
 
-    # Начала событий отсчитываются внутри строки своего клиента.
-    event_starts: torch.Tensor        # [B, E]
-    event_lengths: torch.Tensor       # [B, E], 0 у заполнителя
-    event_time_log: torch.Tensor      # [B, E]
-    calendar: torch.Tensor            # [B, E, 6]
-    event_mask: torch.Tensor          # [B, E]
+    # --- токены событий, [T]; сегменты — события ---
+    key_ids: torch.Tensor
+    value_ids: torch.Tensor
+    positions: torch.Tensor
+    labels: torch.Tensor
+    events: VarlenLayout          # cu_seqlens_event [E + 1]
+    event_of_token: torch.Tensor  # [T]
 
-    profile_key_ids: torch.Tensor     # [B, P]
-    profile_value_ids: torch.Tensor   # [B, P]
-    profile_positions: torch.Tensor   # [B, P]
-    profile_token_mask: torch.Tensor  # [B, P]
+    # --- события, [E]; сегменты — истории клиентов ---
+    event_time_log: torch.Tensor
+    calendar: torch.Tensor        # [E, 6]
+    user_of_event: torch.Tensor   # [E]
+
+    # --- анкета, [P]; сегменты — анкеты клиентов ---
+    profile_key_ids: torch.Tensor
+    profile_value_ids: torch.Tensor
+    profile_positions: torch.Tensor
+    profiles: VarlenLayout        # cu_seqlens_profile [B + 1]
+
+    # --- истории, [B + E]: у клиента слот анкеты и его события ---
+    history: VarlenLayout         # сегмент клиента длиной n_events + 1
+    history_profile_slot: torch.Tensor  # [B]
+    history_event_slot: torch.Tensor    # [E]
+    history_positions: torch.Tensor     # [B + E]: 0 у анкеты, event_time_log у события
+
+    # --- цели, [M], по возрастанию плоского номера токена ---
+    target_token: torch.Tensor    # плоский номер токена
+    target_event: torch.Tensor    # глобальный номер события
+    target_client: torch.Tensor   # номер клиента в micro-batch
+    target_place: torch.Tensor    # номер токена внутри клиента
+    target_local: torch.Tensor    # номер события внутри клиента
+    target_inside: torch.Tensor   # позиция внутри события
+    target_bucket: torch.Tensor   # корзина его события
+    target_row: torch.Tensor      # строка его события в корзине
 
 
 @dataclass(frozen=True)
@@ -107,7 +131,7 @@ class Predicted:
     Что вернул проход по micro-batch.
 
     place, event и client называют каждую цель: позицию токена и
-    событие внутри клиента и номер клиента в batch.
+    событие внутри клиента и номер клиента в micro-batch.
     """
 
     logits: torch.Tensor    # [M, словарь]
@@ -115,85 +139,110 @@ class Predicted:
     loss: torch.Tensor      # скаляр, связанный с графом: среднее по M целям
     place: torch.Tensor     # [M] номер токена у клиента
     event: torch.Tensor     # [M] номер его события у клиента
-    client: torch.Tensor    # [M] номер клиента в batch
+    client: torch.Tensor    # [M] номер клиента в micro-batch
 
     @property
     def count(self) -> int:
         return int(self.targets.numel())
 
 
-def collate(clients: list[Client], pad_id: int, device: torch.device) -> BatchTensors:
+def pack(clients: list[Client], device: torch.device) -> PackedBatch:
     """
-    Клиенты в один micro-batch. Делается ДО графа значений.
+    Клиенты в один плоский micro-batch. Делается ДО графа значений.
 
-    Массивы клиента копируются в начало своей строки; хвост
-    строки — заполнитель. Одна копия на поле: сначала NumPy, затем
-    один тензор.
+    Массивы клиентов идут подряд, без заполнителя. События клиента
+    обязаны лежать подряд и покрывать все его токены: только тогда
+    конкатенация токенов клиентов совпадает с конкатенацией их
+    событий, и границы событий однозначны.
     """
+
+    for client in clients:
+
+        expected = np.concatenate(
+            [[0], np.cumsum(client.event_lengths)[:-1]]
+        ) if client.n_events else client.event_starts
+
+        if (
+            not np.array_equal(client.event_starts, expected)
+            or int(client.event_lengths.sum()) != client.n_tokens
+        ):
+            raise ValueError(
+                f"{client.client_id}: события не лежат подряд или не покрывают "
+                "все токены клиента"
+            )
+
+    def join(name: str, dtype) -> np.ndarray:
+        return np.concatenate([getattr(client, name) for client in clients]).astype(dtype)
+
+    tokens_per_client = np.array([client.n_tokens for client in clients], dtype=np.int64)
+    events_per_client = np.array([client.n_events for client in clients], dtype=np.int64)
+    profile_per_client = np.array([client.profile_n_tokens for client in clients], dtype=np.int64)
 
     size = len(clients)
+    total_events = int(events_per_client.sum())
 
-    tokens = max(client.n_tokens for client in clients)
-    events = max(client.n_events for client in clients)
-    profile = max(client.profile_n_tokens for client in clients)
+    event_lengths = join("event_lengths", np.int64)
+    labels = join("labels", np.int64)
+    event_time_log = join("event_time_log", np.float32)
 
-    def ids(width: int) -> np.ndarray:
-        return np.full((size, width), pad_id, dtype=np.int64)
+    event_of_token = np.repeat(np.arange(total_events, dtype=np.int64), event_lengths)
+    user_of_event = np.repeat(np.arange(size, dtype=np.int64), events_per_client)
 
-    key_ids, value_ids = ids(tokens), ids(tokens)
-    positions = np.zeros((size, tokens), dtype=np.int64)
-    labels = np.full((size, tokens), IGNORE, dtype=np.int64)
-    token_mask = np.zeros((size, tokens), dtype=bool)
+    events = VarlenLayout.build(event_lengths, device, "события")
+    profiles = VarlenLayout.build(profile_per_client, device, "анкеты")
+    history = VarlenLayout.build(events_per_client + 1, device, "истории")
 
-    event_starts = np.zeros((size, events), dtype=np.int64)
-    event_lengths = np.zeros((size, events), dtype=np.int64)
-    event_time_log = np.zeros((size, events), dtype=np.float32)
-    calendar = np.zeros((size, events, CALENDAR_PER_EVENT), dtype=np.float32)
-    event_mask = np.zeros((size, events), dtype=bool)
+    # Слоты истории: у клиента c сначала анкета, затем его события.
+    # До слотов клиента c лежат c анкет и все события прежних
+    # клиентов.
+    first_event = np.concatenate([[0], np.cumsum(events_per_client)[:-1]]).astype(np.int64)
+    history_profile_slot = first_event + np.arange(size, dtype=np.int64)
+    history_event_slot = np.arange(total_events, dtype=np.int64) + user_of_event + 1
 
-    profile_key_ids, profile_value_ids = ids(profile), ids(profile)
-    profile_positions = np.zeros((size, profile), dtype=np.int64)
-    profile_token_mask = np.zeros((size, profile), dtype=bool)
+    history_positions = np.zeros(size + total_events, dtype=np.float32)
+    history_positions[history_event_slot] = event_time_log
 
-    for row, client in enumerate(clients):
+    # Цели и их владельцы: токен -> событие -> клиент.
+    first_token = np.concatenate([[0], np.cumsum(tokens_per_client)[:-1]]).astype(np.int64)
+    event_start = np.concatenate([[0], np.cumsum(event_lengths)[:-1]]).astype(np.int64)
 
-        n, e, p = client.n_tokens, client.n_events, client.profile_n_tokens
-
-        key_ids[row, :n] = client.key_ids
-        value_ids[row, :n] = client.value_ids
-        positions[row, :n] = client.positions
-        labels[row, :n] = client.labels
-        token_mask[row, :n] = True
-
-        event_starts[row, :e] = client.event_starts
-        event_lengths[row, :e] = client.event_lengths
-        event_time_log[row, :e] = client.event_time_log
-        calendar[row, :e] = client.calendar
-        event_mask[row, :e] = True
-
-        profile_key_ids[row, :p] = client.profile_key_ids
-        profile_value_ids[row, :p] = client.profile_value_ids
-        profile_positions[row, :p] = client.profile_positions
-        profile_token_mask[row, :p] = True
+    target_token = np.nonzero(labels != IGNORE)[0]
+    target_event = event_of_token[target_token]
+    target_client = user_of_event[target_event]
 
     def tensor(values: np.ndarray) -> torch.Tensor:
         return torch.as_tensor(values, device=device)
 
-    return BatchTensors(
-        key_ids=tensor(key_ids),
-        value_ids=tensor(value_ids),
-        positions=tensor(positions),
+    return PackedBatch(
+        clients=size,
+        key_ids=tensor(join("key_ids", np.int64)),
+        value_ids=tensor(join("value_ids", np.int64)),
+        positions=tensor(join("positions", np.int64)),
         labels=tensor(labels),
-        token_mask=tensor(token_mask),
-        event_starts=tensor(event_starts),
-        event_lengths=tensor(event_lengths),
+        events=events,
+        event_of_token=tensor(event_of_token),
         event_time_log=tensor(event_time_log),
-        calendar=tensor(calendar),
-        event_mask=tensor(event_mask),
-        profile_key_ids=tensor(profile_key_ids),
-        profile_value_ids=tensor(profile_value_ids),
-        profile_positions=tensor(profile_positions),
-        profile_token_mask=tensor(profile_token_mask),
+        calendar=tensor(
+            np.concatenate([client.calendar for client in clients]).astype(np.float32)
+            .reshape(-1, CALENDAR_PER_EVENT)
+        ),
+        user_of_event=tensor(user_of_event),
+        profile_key_ids=tensor(join("profile_key_ids", np.int64)),
+        profile_value_ids=tensor(join("profile_value_ids", np.int64)),
+        profile_positions=tensor(join("profile_positions", np.int64)),
+        profiles=profiles,
+        history=history,
+        history_profile_slot=tensor(history_profile_slot),
+        history_event_slot=tensor(history_event_slot),
+        history_positions=tensor(history_positions),
+        target_token=tensor(target_token),
+        target_event=tensor(target_event),
+        target_client=tensor(target_client),
+        target_place=tensor(target_token - first_token[target_client]),
+        target_local=tensor(target_event - first_event[target_client]),
+        target_inside=tensor(target_token - event_start[target_event]),
+        target_bucket=tensor(events.bucket_of[target_event]),
+        target_row=tensor(events.row_of[target_event]),
     )
 
 
@@ -278,173 +327,181 @@ class Model(nn.Module):
         self.events_per_chunk = int(events_per_chunk)
         self.label_smoothing = float(label_smoothing)
 
-    def forward(self, data: BatchTensors) -> Predicted:
+    def forward(self, data: PackedBatch) -> Predicted:
         """
         Micro-batch от токенов до потерь, одним проходом.
         """
 
-        tokens = data.key_ids.shape[1]
+        dated, token_vectors = self._events(data)
 
-        # Настоящие события всех клиентов одной осью: номер клиента
-        # и номер события у него. nonzero идёт по строкам, поэтому
-        # события лежат клиент за клиентом, внутри — по порядку.
-        client_of, local_of = torch.nonzero(data.event_mask, as_tuple=True)
+        profile = self._profiles(data)
 
-        starts = data.event_starts[client_of, local_of]
-        lengths = data.event_lengths[client_of, local_of]
+        client_vectors, event_vectors = self._history(data, profile, dated)
 
-        n_events = int(starts.numel())
-
-        # Цели micro-batch: клиент и позиция токена у него.
-        target_client, target_place = torch.nonzero(data.labels != IGNORE, as_tuple=True)
-
-        # Владелец цели ищется по сквозной координате client*T +
-        # позиция: у событий она строго растёт, потому что события
-        # клиента лежат подряд и покрывают всю его строку.
-        owner = torch.searchsorted(
-            client_of * tokens + starts, target_client * tokens + target_place, right=True
-        ) - 1
-
-        inside = target_place - starts[owner]
-        target_event = local_of[owner]
-
-        column, pad = self._windows(starts, lengths)
-
-        token_chunks: list[torch.Tensor] = []
-        dated_chunks: list[torch.Tensor] = []
-
-        for first in range(0, n_events, self.events_per_chunk):
-
-            last = min(first + self.events_per_chunk, n_events)
-
-            rows = client_of[first:last, None]
-            cols = column[first:last]
-
-            piece = self.event(
-                self.embedding.embed(
-                    data.key_ids[rows, cols],
-                    data.value_ids[rows, cols],
-                    data.positions[rows, cols],
-                    ~pad[first:last],
-                ),
-                pad[first:last],
-                data.calendar[client_of[first:last], local_of[first:last]],
-            )
-
-            dated_chunks.append(piece.dated)
-
-            # Из порции сразу берутся только размеченные токены:
-            # держать [события, длина, d] целиком незачем, у
-            # длинного клиента это сотни мегабайт. Цели и владельцы
-            # идут в одном порядке, поэтому склейка порций его
-            # сохраняет.
-            here = (owner >= first) & (owner < last)
-
-            if bool(here.any()):
-                token_chunks.append(piece.tokens[owner[here] - first, inside[here]])
-
-        dated = (
-            torch.cat(dated_chunks, dim=0)
-            if dated_chunks
-            else self.embedding.weight[:0]
-        )
-
-        client_vectors, event_vectors = self._history(data, dated, client_of, local_of)
-
-        if token_chunks:
-            token_vectors = torch.cat(token_chunks, dim=0)
-        else:
+        if token_vectors is None:
             # Целей нет. Контекст пуст, но граф обязан остаться
             # связным, иначе backward на таком batch оборвётся.
             token_vectors = client_vectors[:0]
 
         logits = self.head(
             token_vectors,
-            event_vectors[target_client, target_event],
-            client_vectors[target_client],
+            event_vectors[data.target_event],
+            client_vectors[data.target_client],
             self.embedding.weight,
         )
 
-        targets = data.labels[target_client, target_place]
+        targets = data.labels[data.target_token]
 
         return Predicted(
             logits=logits,
             targets=targets,
             loss=mlm_loss(logits, targets, self.label_smoothing),
-            place=target_place,
-            event=target_event,
-            client=target_client,
+            place=data.target_place,
+            event=data.target_local,
+            client=data.target_client,
         )
 
-    @staticmethod
-    def _windows(
-        starts: torch.Tensor, lengths: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def _events(self, data: PackedBatch) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
-        Окна событий: номера токенов в строке клиента и маска хвоста.
+        Энкодер события по корзинам длины.
+
+        Каждое событие — свой сегмент: внимание не выходит за его
+        границы. Внутри корзины строки идут порциями по
+        events_per_chunk, чтобы память ограничивалась порцией.
+
+        Из порции сразу берутся векторы только целевых токенов:
+        держать контекст всех токенов незачем. Возвращаются
+        векторы событий [E, d] в исходном порядке и векторы целей
+        [M, d] в порядке целей (None, если целей нет).
         """
 
-        width = int(lengths.max()) if lengths.numel() else 0
+        dated_parts: list[torch.Tensor] = []
+        dated_index: list[torch.Tensor] = []
 
-        numbers = torch.arange(width, device=starts.device)[None, :]
+        token_parts: list[torch.Tensor] = []
+        token_index: list[torch.Tensor] = []
 
-        pad = numbers >= lengths[:, None]
+        for number, bucket in enumerate(data.events.buckets):
 
-        return torch.where(pad, starts[:, None], starts[:, None] + numbers), pad
+            for first in range(0, bucket.size, self.events_per_chunk):
+
+                last = min(first + self.events_per_chunk, bucket.size)
+
+                index = bucket.index[first:last]
+                mask = bucket.mask[first:last]
+                segments = bucket.segments[first:last]
+
+                piece = self.event(
+                    self.embedding.embed(
+                        data.key_ids[index],
+                        data.value_ids[index],
+                        data.positions[index],
+                        mask,
+                    ),
+                    ~mask,
+                    data.calendar[segments],
+                )
+
+                dated_parts.append(piece.dated)
+                dated_index.append(segments)
+
+                chosen = (
+                    (data.target_bucket == number)
+                    & (data.target_row >= first)
+                    & (data.target_row < last)
+                )
+
+                if bool(chosen.any()):
+
+                    ids = torch.nonzero(chosen, as_tuple=True)[0]
+
+                    token_parts.append(
+                        piece.tokens[data.target_row[ids] - first, data.target_inside[ids]]
+                    )
+                    token_index.append(ids)
+
+        dated = assemble(
+            dated_parts, dated_index, data.events.segments, self.embedding.weight[:0]
+        )
+
+        if not token_parts:
+            return dated, None
+
+        return dated, assemble(
+            token_parts, token_index, int(data.target_token.numel()), self.embedding.weight[:0]
+        )
+
+    def _profiles(self, data: PackedBatch) -> torch.Tensor:
+        """
+        Энкодер анкеты по корзинам длины: [B, d] в порядке клиентов.
+        """
+
+        parts: list[torch.Tensor] = []
+        indices: list[torch.Tensor] = []
+
+        for bucket in data.profiles.buckets:
+
+            parts.append(
+                self.profile(
+                    self.embedding.embed(
+                        data.profile_key_ids[bucket.index],
+                        data.profile_value_ids[bucket.index],
+                        data.profile_positions[bucket.index],
+                        bucket.mask,
+                    ),
+                    ~bucket.mask,
+                )
+            )
+            indices.append(bucket.segments)
+
+        return assemble(parts, indices, data.clients, self.embedding.weight[:0])
 
     def _history(
         self,
-        data: BatchTensors,
+        data: PackedBatch,
+        profile: torch.Tensor,
         dated: torch.Tensor,
-        client_of: torch.Tensor,
-        local_of: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Анкета и события одной последовательностью на клиента.
+        Энкодер истории по корзинам длины.
 
-        [B, 1 + E, d]: слот 0 — вектор анкеты, дальше события
-        клиента на своих местах, хвост — заполнитель под маской.
+        Плоская история [B + E, d]: у каждого клиента первым идёт
+        слот анкеты, затем его события. Сегмент клиента — только
+        его строки, поэтому внимание одного клиента не видит
+        другого. Позиция анкеты — ноль, события — event_time_log.
+
+        Возвращает векторы клиентов [B, d] и событий [E, d].
         """
 
-        size, events = data.event_mask.shape
+        width = data.clients + data.events.segments
 
-        profile = self.profile(
-            self.embedding.embed(
-                data.profile_key_ids,
-                data.profile_value_ids,
-                data.profile_positions,
-                data.profile_token_mask,
-            ),
-            ~data.profile_token_mask,
+        # Вне графа только нулевой холст: index_copy возвращает
+        # новый тензор, и градиент идёт к анкетам и событиям.
+        flat = (
+            profile.new_zeros(width, profile.shape[-1])
+            .index_copy(0, data.history_profile_slot, profile)
+            .index_copy(0, data.history_event_slot, dated)
         )
 
-        # Вне графа только нулевой холст: index_put возвращает новый
-        # тензор, и градиент идёт к векторам событий.
-        placed = dated.new_zeros(size, events, dated.shape[-1]).index_put(
-            (client_of, local_of), dated
-        )
+        parts: list[torch.Tensor] = []
+        indices: list[torch.Tensor] = []
 
-        sequence = torch.cat([profile[:, None], placed], dim=1)
+        for bucket in data.history.buckets:
 
-        positions = torch.cat(
-            [
-                torch.zeros(size, 1, dtype=torch.float32, device=dated.device),
-                data.event_time_log,
-            ],
-            dim=1,
-        )
+            # Позиция хвоста — ноль: маска и так закрывает его, а
+            # настоящие позиции остаются ровно своими.
+            positions = torch.where(
+                bucket.mask, data.history_positions[bucket.index], 0.0
+            )
 
-        mask = torch.cat(
-            [
-                torch.ones(size, 1, dtype=torch.bool, device=dated.device),
-                data.event_mask,
-            ],
-            dim=1,
-        )
+            out = self.history(flat[bucket.index], positions, bucket.mask)
 
-        out = self.history(sequence, positions, mask)
+            parts.append(out[bucket.mask])
+            indices.append(bucket.index[bucket.mask])
 
-        return out[:, 0], out[:, 1:]
+        out = assemble(parts, indices, width, flat[:0])
+
+        return out[data.history_profile_slot], out[data.history_event_slot]
 
 
 def load_model(
@@ -533,11 +590,11 @@ def _seeded(seed: int):
 
 
 __all__ = [
-    "BatchTensors",
     "Mlm",
     "Model",
+    "PackedBatch",
     "Predicted",
-    "collate",
     "load_model",
     "mlm_loss",
+    "pack",
 ]
