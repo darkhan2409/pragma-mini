@@ -1,0 +1,35 @@
+{
+  "left": "p0-pilot-c",
+  "right": "d2-hash0",
+  "prefix": null,
+  "expect": "same",
+  "files_identical": {
+    "events.parquet": true,
+    "profile.parquet": true,
+    "manifest.json": true
+  },
+  "tables": [
+    {
+      "table": "events",
+      "schema": true,
+      "rows_left": 134658,
+      "rows_right": 134658,
+      "rows": true,
+      "order": true,
+      "text": true,
+      "payload": true,
+      "values": true
+    },
+    {
+      "table": "profile",
+      "schema": true,
+      "rows_left": 64,
+      "rows_right": 64,
+      "rows": true,
+      "order": true,
+      "values": true
+    }
+  ],
+  "data_identical": true,
+  "verdict": "PASS"
+}

@@ -1,0 +1,55 @@
+{
+  "groups": [
+    "m-train",
+    "m-val",
+    "m-test"
+  ],
+  "clients": {
+    "m-train": 200,
+    "m-val": 50,
+    "m-test": 50
+  },
+  "split1_overlaps": {
+    "m-train|m-val": 0,
+    "m-test|m-train": 0,
+    "m-test|m-val": 0
+  },
+  "split1": "PASS",
+  "split4_world": {
+    "m-train|m-val": {
+      "shared_merchants": 656,
+      "left_only": 626,
+      "right_only": 104
+    },
+    "m-test|m-train": {
+      "shared_merchants": 583,
+      "left_only": 90,
+      "right_only": 699
+    },
+    "m-test|m-val": {
+      "shared_merchants": 400,
+      "left_only": 273,
+      "right_only": 360
+    }
+  },
+  "split5_snapshot": {
+    "m-train": {
+      "target_end": "2026-01-01",
+      "events_after_target_end": 0,
+      "clients_with_products_after_target_end": 0,
+      "note": "снимок анкеты относится к границе выгрузки; если событий после конца периода целей нет, снимок и история описывают один момент"
+    },
+    "m-val": {
+      "target_end": "2026-05-01",
+      "events_after_target_end": 0,
+      "clients_with_products_after_target_end": 0,
+      "note": "снимок анкеты относится к границе выгрузки; если событий после конца периода целей нет, снимок и история описывают один момент"
+    },
+    "m-test": {
+      "target_end": "2026-09-01",
+      "events_after_target_end": 0,
+      "clients_with_products_after_target_end": 0,
+      "note": "снимок анкеты относится к границе выгрузки; если событий после конца периода целей нет, снимок и история описывают один момент"
+    }
+  }
+}

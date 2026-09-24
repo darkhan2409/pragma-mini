@@ -1,0 +1,40 @@
+{
+  "report": "CanonicalResult(outputs=[WindowsPath('C:/Develop/mini_pragma_v2/audit/2026-09-24-gen/runs/pipeline-m-train/02_preprocessed/train/events.parquet')], events_rows=432610, clients=200)",
+  "checks": [
+    {
+      "check": "PREP-1 число строк",
+      "verdict": "PASS",
+      "detail": "RAW 432610 -> canonical 432610",
+      "checked": 432610,
+      "violations": 0
+    },
+    {
+      "check": "PREP-2 время в UTC",
+      "verdict": "PASS",
+      "detail": "тип timestamp[us, tz=UTC]; совпало моментов 432610 из 432610",
+      "checked": 432610,
+      "violations": 0
+    },
+    {
+      "check": "PREP-3 служебные поля",
+      "verdict": "PASS",
+      "detail": "объявлено внутренними 13, прошло в слой: ничего",
+      "checked": 13,
+      "violations": 0
+    },
+    {
+      "check": "PREP-4 порядок внутри клиента",
+      "verdict": "PASS",
+      "detail": "строки клиента идут подряд и по неубыванию времени",
+      "checked": 432610,
+      "violations": 0
+    },
+    {
+      "check": "PREP-5 битая выгрузка",
+      "verdict": "PASS",
+      "detail": "доменная ошибка: events.parquet: строк 432610, а manifest.json обещает 432611",
+      "checked": 1,
+      "violations": 0
+    }
+  ]
+}

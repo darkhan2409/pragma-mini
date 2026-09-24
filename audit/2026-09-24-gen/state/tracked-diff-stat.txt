@@ -1,0 +1,6 @@
+ CLAUDE.md               | 10 ++++++----
+ pyproject.toml          |  1 +
+ src/generator/config.py | 12 ++++++------
+ src/history/run.py      |  5 ++++-
+ src/profile/run.py      |  5 ++++-
+ 5 files changed, 21 insertions(+), 12 deletions(-)

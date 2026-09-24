@@ -1,0 +1,1284 @@
+{
+  "run": "s-101",
+  "code_state": "b2842186797d6e4d66d33b6389822150920ff91f2c7ff4b397214867d57086b1",
+  "manifest": {
+    "schema_version": 13,
+    "timezone": "Asia/Almaty",
+    "period_start": "2024-01-01T00:00:00+05:00",
+    "period_end": "2026-01-01T00:00:00+05:00",
+    "events_rows": 308593,
+    "profile_rows": 128,
+    "events_sha256": "819d9b2ddc67fa5159bd87384159bb8c3510183c08d80aefd8d279715ac5569d",
+    "profile_sha256": "104b891ca0e8be589fc6035e3faa11ed6de85f01dcdce04b5422d1f8fb450e80"
+  },
+  "integrity": {
+    "events_sha256_ok": true,
+    "profile_sha256_ok": true,
+    "events_rows_ok": true,
+    "profile_rows_ok": true,
+    "envelope_columns": [
+      "client_id",
+      "event_time",
+      "source",
+      "payload"
+    ],
+    "definition": "sha256 и число строк посчитаны здесь и сверены с manifest.json"
+  },
+  "clients": {
+    "definition": "profile_rows — строки profile.parquet; with_events — различных client_id в events.parquet; длины — событий на client_id",
+    "profile_rows": 128,
+    "with_events": 128,
+    "history_min": 15,
+    "history_p25": 341,
+    "history_median": 1191,
+    "history_p75": 3333,
+    "history_max": 21816,
+    "history_total": 308593
+  },
+  "time": {
+    "definition": "разбор строки event_time; смещение — последние 6 символов; миллисекунды — наличие точки в строке",
+    "earliest": "2024-01-01T00:58:54+05:00",
+    "latest": "2025-12-31T23:55:00+05:00",
+    "offsets": {
+      "+05:00": 308593
+    },
+    "with_milliseconds": 0
+  },
+  "sources": {
+    "definition": "строк events.parquet с этим значением колонки source",
+    "counts": {
+      "app_screens": 117289,
+      "transactions": 95904,
+      "app_operations": 63435,
+      "banners": 22387,
+      "communications": 5351,
+      "loans": 2034,
+      "support": 794,
+      "product_events": 701,
+      "applications": 608,
+      "profile": 84,
+      "antifraud": 6
+    }
+  },
+  "types": {
+    "definition": "events — строк с этим payload.type; clients — различных client_id среди них",
+    "counts": {
+      "app_screen": {
+        "events": 117289,
+        "clients": 115
+      },
+      "purchase": {
+        "events": 66416,
+        "clients": 124
+      },
+      "app_operation": {
+        "events": 63435,
+        "clients": 116
+      },
+      "banner_shown": {
+        "events": 21791,
+        "clients": 113
+      },
+      "transfer_out": {
+        "events": 6177,
+        "clients": 114
+      },
+      "transfer_in": {
+        "events": 5950,
+        "clients": 106
+      },
+      "communication_sent": {
+        "events": 5351,
+        "clients": 114
+      },
+      "balance_snapshot": {
+        "events": 3131,
+        "clients": 114
+      },
+      "bill_payment": {
+        "events": 2839,
+        "clients": 120
+      },
+      "cashback_credit": {
+        "events": 1839,
+        "clients": 105
+      },
+      "cash_withdrawal": {
+        "events": 1813,
+        "clients": 116
+      },
+      "p2p_out": {
+        "events": 1473,
+        "clients": 72
+      },
+      "p2p_in": {
+        "events": 1294,
+        "clients": 77
+      },
+      "loan_payment": {
+        "events": 919,
+        "clients": 52
+      },
+      "salary_credit": {
+        "events": 900,
+        "clients": 34
+      },
+      "installment_due": {
+        "events": 865,
+        "clients": 59
+      },
+      "cash_deposit": {
+        "events": 776,
+        "clients": 85
+      },
+      "refund": {
+        "events": 772,
+        "clients": 83
+      },
+      "installment_paid": {
+        "events": 751,
+        "clients": 52
+      },
+      "other_income_credit": {
+        "events": 645,
+        "clients": 18
+      },
+      "banner_clicked": {
+        "events": 596,
+        "clients": 69
+      },
+      "case_resolved": {
+        "events": 317,
+        "clients": 67
+      },
+      "case_opened": {
+        "events": 316,
+        "clients": 67
+      },
+      "interest_credit": {
+        "events": 313,
+        "clients": 23
+      },
+      "application_submitted": {
+        "events": 304,
+        "clients": 102
+      },
+      "application_decision": {
+        "events": 304,
+        "clients": 102
+      },
+      "product_opened": {
+        "events": 250,
+        "clients": 103
+      },
+      "reversal": {
+        "events": 232,
+        "clients": 68
+      },
+      "installment_missed": {
+        "events": 226,
+        "clients": 34
+      },
+      "pension_credit": {
+        "events": 184,
+        "clients": 9
+      },
+      "fee_charge": {
+        "events": 169,
+        "clients": 22
+      },
+      "case_updated": {
+        "events": 161,
+        "clients": 56
+      },
+      "account_opened": {
+        "events": 122,
+        "clients": 74
+      },
+      "delinquency_registered": {
+        "events": 96,
+        "clients": 34
+      },
+      "contract_terms_changed": {
+        "events": 95,
+        "clients": 83
+      },
+      "product_closed": {
+        "events": 92,
+        "clients": 56
+      },
+      "profile_change": {
+        "events": 84,
+        "clients": 43
+      },
+      "card_activated": {
+        "events": 69,
+        "clients": 58
+      },
+      "schedule_created": {
+        "events": 52,
+        "clients": 42
+      },
+      "card_reissued": {
+        "events": 39,
+        "clients": 38
+      },
+      "loan_closed": {
+        "events": 30,
+        "clients": 28
+      },
+      "deposit_withdrawal": {
+        "events": 28,
+        "clients": 14
+      },
+      "product_renewed": {
+        "events": 20,
+        "clients": 12
+      },
+      "deposit_topup": {
+        "events": 18,
+        "clients": 7
+      },
+      "loan_disbursement": {
+        "events": 15,
+        "clients": 13
+      },
+      "card_blocked": {
+        "events": 7,
+        "clients": 7
+      },
+      "arrears_cleared": {
+        "events": 7,
+        "clients": 4
+      },
+      "product_repriced": {
+        "events": 4,
+        "clients": 4
+      },
+      "early_repayment": {
+        "events": 4,
+        "clients": 4
+      },
+      "card_unblocked": {
+        "events": 3,
+        "clients": 3
+      },
+      "loan_restructured": {
+        "events": 3,
+        "clients": 3
+      },
+      "fraud_alert": {
+        "events": 3,
+        "clients": 3
+      },
+      "fraud_decision": {
+        "events": 3,
+        "clients": 3
+      },
+      "chargeback": {
+        "events": 1,
+        "clients": 1
+      }
+    }
+  },
+  "products": {
+    "definition": "событий с этим payload.product_id и различных клиентов среди них",
+    "counts": {
+      "prd_cash_loan_online": {
+        "events": 684,
+        "clients": 102
+      },
+      "prd_cert_flex": {
+        "events": 567,
+        "clients": 98
+      },
+      "prd_pos_installment": {
+        "events": 558,
+        "clients": 104
+      },
+      "prd_usd_bonds": {
+        "events": 546,
+        "clients": 100
+      },
+      "prd_ins_family": {
+        "events": 528,
+        "clients": 113
+      },
+      "prd_ozen": {
+        "events": 510,
+        "clients": 90
+      },
+      "prd_home_card": {
+        "events": 475,
+        "clients": 104
+      },
+      "prd_deposit_akcionny": {
+        "events": 352,
+        "clients": 95
+      },
+      "prd_deposit_hoom": {
+        "events": 332,
+        "clients": 94
+      },
+      "prd_arna": {
+        "events": 171,
+        "clients": 83
+      },
+      "prd_aspan": {
+        "events": 140,
+        "clients": 52
+      },
+      "prd_home_card_lite": {
+        "events": 111,
+        "clients": 58
+      },
+      "prd_tour_installment": {
+        "events": 88,
+        "clients": 30
+      },
+      "prd_ins_family_universal": {
+        "events": 66,
+        "clients": 20
+      },
+      "prd_ins_shanyrak": {
+        "events": 52,
+        "clients": 17
+      },
+      "prd_deposit_pochtovy": {
+        "events": 36,
+        "clients": 14
+      },
+      "prd_ins_sick_leave": {
+        "events": 35,
+        "clients": 9
+      },
+      "prd_deposit_prostoy": {
+        "events": 31,
+        "clients": 7
+      },
+      "prd_alem": {
+        "events": 26,
+        "clients": 8
+      },
+      "prd_refinance": {
+        "events": 25,
+        "clients": 7
+      },
+      "prd_deposit_hoom_plus": {
+        "events": 18,
+        "clients": 5
+      },
+      "prd_tan": {
+        "events": 17,
+        "clients": 5
+      },
+      "prd_synth_loan_green": {
+        "events": 14,
+        "clients": 9
+      },
+      "prd_deposit_prostoy_plus": {
+        "events": 10,
+        "clients": 2
+      },
+      "prd_cert_standard": {
+        "events": 9,
+        "clients": 1
+      },
+      "prd_ins_traveler": {
+        "events": 6,
+        "clients": 2
+      },
+      "prd_dos_pro": {
+        "events": 3,
+        "clients": 2
+      },
+      "prd_tau": {
+        "events": 3,
+        "clients": 1
+      },
+      "prd_dos": {
+        "events": 2,
+        "clients": 2
+      }
+    }
+  },
+  "channels": {
+    "definition": "событий с этим payload.channel",
+    "counts": {
+      "pos": 36474,
+      "ecom": 29884,
+      "system": 15203,
+      "qr": 5672,
+      "push": 2921,
+      "app": 2601,
+      "atm": 2589,
+      "sms": 1303,
+      "branch": 728,
+      "call": 689,
+      "email": 483,
+      "chat": 444,
+      "call_center": 251,
+      "web": 174,
+      "partner_pos": 84,
+      "qazpost": 16,
+      "terminal": 10
+    }
+  },
+  "statuses": {
+    "definition": "событий с этим payload.status",
+    "counts": {
+      "approved": 89158,
+      "success": 52518,
+      "cancelled": 5924,
+      "failed": 4747,
+      "declined": 3615,
+      "resolved": 317,
+      "open": 316,
+      "in_progress": 161
+    }
+  },
+  "transfers": {
+    "definition": "группировка событий по payload.transfer_id; пара — id, встретившийся ровно дважды (две ноги одного перевода)",
+    "distinct_ids": 6982,
+    "legs_per_id": {
+      "1": 5507,
+      "2": 1475
+    },
+    "pairs": 1475
+  },
+  "decline_reasons": {
+    "definition": "событий с этим payload.decline_reason",
+    "counts": {
+      "insufficient_funds": 3613,
+      "card_blocked": 2
+    }
+  },
+  "scenarios": {
+    "просрочка зарегистрирована": {
+      "definition": "события type=delinquency_registered",
+      "events": 96,
+      "clients": 34
+    },
+    "просрочка погашена": {
+      "definition": "события type=arrears_cleared",
+      "events": 7,
+      "clients": 4
+    },
+    "платёж пропущен": {
+      "definition": "события type=installment_missed",
+      "events": 226,
+      "clients": 34
+    },
+    "частичная оплата": {
+      "definition": "type=installment_paid и 0 < amount_paid < amount_due",
+      "events": 52,
+      "clients": 15
+    },
+    "досрочное погашение": {
+      "definition": "события type=early_repayment",
+      "events": 4,
+      "clients": 4
+    },
+    "реструктуризация": {
+      "definition": "события type=loan_restructured",
+      "events": 3,
+      "clients": 3
+    },
+    "кредит закрыт": {
+      "definition": "события type=loan_closed",
+      "events": 30,
+      "clients": 28
+    },
+    "график без выдачи": {
+      "definition": "type=schedule_created; сравнивается с числом loan_disbursement",
+      "events": 52,
+      "clients": 42
+    },
+    "возврат": {
+      "definition": "события type=refund",
+      "events": 772,
+      "clients": 83
+    },
+    "отмена операции": {
+      "definition": "события type=reversal",
+      "events": 232,
+      "clients": 68
+    },
+    "chargeback": {
+      "definition": "события type=chargeback",
+      "events": 1,
+      "clients": 1
+    },
+    "карта заблокирована": {
+      "definition": "события type=card_blocked",
+      "events": 7,
+      "clients": 7
+    },
+    "карта разблокирована": {
+      "definition": "события type=card_unblocked",
+      "events": 3,
+      "clients": 3
+    },
+    "карта перевыпущена": {
+      "definition": "события type=card_reissued",
+      "events": 39,
+      "clients": 38
+    },
+    "продукт закрыт": {
+      "definition": "события type=product_closed",
+      "events": 92,
+      "clients": 56
+    },
+    "продукт мигрировал": {
+      "definition": "события type=product_migrated",
+      "events": 0,
+      "clients": 0
+    },
+    "условия изменены": {
+      "definition": "события type=contract_terms_changed",
+      "events": 95,
+      "clients": 83
+    },
+    "тариф пересмотрен": {
+      "definition": "события type=product_repriced",
+      "events": 4,
+      "clients": 4
+    },
+    "вклад продлён": {
+      "definition": "события type=product_renewed",
+      "events": 20,
+      "clients": 12
+    },
+    "проценты вклада": {
+      "definition": "события type=interest_credit",
+      "events": 313,
+      "clients": 23
+    },
+    "пополнение вклада": {
+      "definition": "события type=deposit_topup",
+      "events": 18,
+      "clients": 7
+    },
+    "снятие со вклада": {
+      "definition": "события type=deposit_withdrawal",
+      "events": 28,
+      "clients": 14
+    },
+    "отказ по заявке": {
+      "definition": "type=application_decision и decision=rejected",
+      "events": 72,
+      "clients": 48
+    },
+    "одобрение по заявке": {
+      "definition": "type=application_decision и decision=approved",
+      "events": 232,
+      "clients": 93
+    },
+    "операция отклонена": {
+      "definition": "любое событие со status=declined",
+      "events": 3615,
+      "clients": 95
+    },
+    "нехватка средств": {
+      "definition": "любое событие с decline_reason=insufficient_funds",
+      "events": 3613,
+      "clients": 94
+    },
+    "мошенничество: алерт": {
+      "definition": "события type=fraud_alert",
+      "events": 3,
+      "clients": 3
+    },
+    "мошенничество: решение": {
+      "definition": "события type=fraud_decision",
+      "events": 3,
+      "clients": 3
+    },
+    "обращение в поддержку": {
+      "definition": "события type=case_opened",
+      "events": 316,
+      "clients": 67
+    },
+    "смена анкеты": {
+      "definition": "события type=profile_change",
+      "events": 84,
+      "clients": 43
+    },
+    "кешбэк": {
+      "definition": "события type=cashback_credit",
+      "events": 1839,
+      "clients": 105
+    },
+    "комиссия": {
+      "definition": "события type=fee_charge",
+      "events": 169,
+      "clients": 22
+    },
+    "зарплата": {
+      "definition": "события type=salary_credit",
+      "events": 900,
+      "clients": 34
+    },
+    "безымянная точка": {
+      "definition": "type=purchase, merchant_category есть, merchant_name пуст или отсутствует",
+      "events": 48177,
+      "clients": 123
+    }
+  },
+  "field_presence": {
+    "definition": "доля событий этого типа, у которых ключ присутствует в payload; знаменатель — все события типа; поля собраны первым проходом",
+    "counts": {
+      "account_opened": {
+        "account_id": 1.0,
+        "amount_or_limit": 0.541,
+        "application_id": 0.8525,
+        "card_id": 0.5656,
+        "contract_id": 1.0,
+        "offer_id": 0.3852,
+        "product_id": 1.0,
+        "rate": 0.418,
+        "reason": 1.0,
+        "term": 0.541,
+        "type": 1.0
+      },
+      "app_operation": {
+        "amount": 0.1446,
+        "device_new": 0.5647,
+        "domain": 1.0,
+        "error_code": 0.075,
+        "operation": 1.0,
+        "session_id": 1.0,
+        "status": 0.9961,
+        "type": 1.0
+      },
+      "app_screen": {
+        "application_id": 0.0022,
+        "domain": 0.9978,
+        "firebase_screen": 1.0,
+        "funnel_stage": 0.0022,
+        "product_id": 0.0014,
+        "reject_reason": 0.0001,
+        "session_id": 1.0,
+        "type": 1.0
+      },
+      "application_decision": {
+        "application_id": 1.0,
+        "approved_amount": 0.6382,
+        "approved_term": 0.6382,
+        "channel": 1.0,
+        "decision": 1.0,
+        "offer_id": 0.3947,
+        "product_id": 1.0,
+        "reject_reason": 0.2368,
+        "requested_amount": 0.8684,
+        "requested_term": 0.8684,
+        "type": 1.0
+      },
+      "application_submitted": {
+        "application_id": 1.0,
+        "channel": 1.0,
+        "offer_id": 0.3947,
+        "product_id": 1.0,
+        "requested_amount": 0.8684,
+        "requested_term": 0.8684,
+        "type": 1.0
+      },
+      "arrears_cleared": {
+        "contract_id": 1.0,
+        "days_past_due": 1.0,
+        "principal_outstanding": 1.0,
+        "reason": 1.0,
+        "type": 1.0
+      },
+      "balance_snapshot": {
+        "account_id": 1.0,
+        "accrual_period": 1.0,
+        "balance_after": 1.0,
+        "currency": 1.0,
+        "type": 1.0
+      },
+      "banner_clicked": {
+        "campaign_code": 0.5235,
+        "offer": 1.0,
+        "offer_id": 0.7164,
+        "session_id": 1.0,
+        "slot": 1.0,
+        "type": 1.0
+      },
+      "banner_shown": {
+        "campaign_code": 0.5363,
+        "offer": 1.0,
+        "offer_id": 0.7246,
+        "session_id": 1.0,
+        "slot": 1.0,
+        "type": 1.0
+      },
+      "bill_payment": {
+        "account_id": 0.8394,
+        "amount": 1.0,
+        "balance_after": 0.8394,
+        "card_id": 0.6552,
+        "channel": 1.0,
+        "currency": 1.0,
+        "decline_reason": 0.1606,
+        "direction": 1.0,
+        "is_online": 1.0,
+        "is_subscription": 1.0,
+        "mcc": 0.9986,
+        "merchant_category": 1.0,
+        "merchant_city": 0.8228,
+        "merchant_country": 1.0,
+        "reason": 1.0,
+        "session_id": 0.0303,
+        "status": 1.0,
+        "type": 1.0
+      },
+      "card_activated": {
+        "account_id": 1.0,
+        "application_id": 0.7391,
+        "card_id": 1.0,
+        "contract_id": 1.0,
+        "offer_id": 0.2319,
+        "product_id": 1.0,
+        "reason": 1.0,
+        "type": 1.0
+      },
+      "card_blocked": {
+        "account_id": 1.0,
+        "card_id": 1.0,
+        "contract_id": 1.0,
+        "product_id": 1.0,
+        "reason": 1.0,
+        "type": 1.0
+      },
+      "card_reissued": {
+        "account_id": 1.0,
+        "card_id": 1.0,
+        "contract_id": 1.0,
+        "product_id": 1.0,
+        "reason": 1.0,
+        "type": 1.0
+      },
+      "card_unblocked": {
+        "account_id": 1.0,
+        "card_id": 1.0,
+        "contract_id": 1.0,
+        "product_id": 1.0,
+        "reason": 1.0,
+        "type": 1.0
+      },
+      "case_opened": {
+        "case_id": 1.0,
+        "channel": 1.0,
+        "status": 1.0,
+        "topic": 1.0,
+        "type": 1.0
+      },
+      "case_resolved": {
+        "case_id": 1.0,
+        "channel": 1.0,
+        "resolution": 1.0,
+        "status": 1.0,
+        "topic": 1.0,
+        "type": 1.0
+      },
+      "case_updated": {
+        "case_id": 1.0,
+        "channel": 1.0,
+        "status": 1.0,
+        "topic": 1.0,
+        "type": 1.0
+      },
+      "cash_deposit": {
+        "account_id": 1.0,
+        "amount": 1.0,
+        "balance_after": 1.0,
+        "card_id": 0.8466,
+        "channel": 1.0,
+        "counterparty": 0.1534,
+        "currency": 1.0,
+        "direction": 1.0,
+        "is_online": 0.8466,
+        "mcc": 0.9974,
+        "merchant_country": 1.0,
+        "reason": 1.0,
+        "status": 1.0,
+        "type": 1.0
+      },
+      "cash_withdrawal": {
+        "account_id": 0.8919,
+        "amount": 1.0,
+        "balance_after": 0.8919,
+        "card_id": 0.8891,
+        "channel": 1.0,
+        "currency": 1.0,
+        "decline_reason": 0.1081,
+        "direction": 1.0,
+        "is_online": 1.0,
+        "mcc": 0.9961,
+        "merchant_country": 1.0,
+        "reason": 1.0,
+        "status": 1.0,
+        "type": 1.0
+      },
+      "cashback_credit": {
+        "account_id": 1.0,
+        "accrual_period": 1.0,
+        "amount": 1.0,
+        "balance_after": 1.0,
+        "channel": 1.0,
+        "contract_id": 1.0,
+        "currency": 1.0,
+        "direction": 1.0,
+        "merchant_country": 1.0,
+        "reason": 1.0,
+        "status": 1.0,
+        "type": 1.0
+      },
+      "chargeback": {
+        "account_id": 1.0,
+        "amount": 1.0,
+        "balance_after": 1.0,
+        "card_id": 1.0,
+        "channel": 1.0,
+        "currency": 1.0,
+        "direction": 1.0,
+        "mcc": 1.0,
+        "merchant_category": 1.0,
+        "merchant_country": 1.0,
+        "original_amount": 1.0,
+        "original_currency": 1.0,
+        "reason": 1.0,
+        "status": 1.0,
+        "type": 1.0
+      },
+      "communication_sent": {
+        "campaign_code": 1.0,
+        "channel": 1.0,
+        "delivered": 0.9964,
+        "offer_id": 0.7548,
+        "product_id": 0.7374,
+        "purpose": 1.0,
+        "template": 1.0,
+        "type": 1.0
+      },
+      "contract_terms_changed": {
+        "account_id": 1.0,
+        "card_id": 1.0,
+        "contract_id": 1.0,
+        "product_id": 1.0,
+        "reason": 1.0,
+        "type": 1.0
+      },
+      "delinquency_registered": {
+        "amount_due": 1.0,
+        "contract_id": 1.0,
+        "days_past_due": 1.0,
+        "principal_outstanding": 1.0,
+        "reason": 1.0,
+        "type": 1.0
+      },
+      "deposit_topup": {
+        "account_id": 1.0,
+        "amount": 1.0,
+        "balance_after": 1.0,
+        "channel": 1.0,
+        "contract_id": 1.0,
+        "counterparty": 1.0,
+        "currency": 1.0,
+        "direction": 1.0,
+        "merchant_country": 1.0,
+        "reason": 1.0,
+        "session_id": 0.3333,
+        "status": 1.0,
+        "type": 1.0
+      },
+      "deposit_withdrawal": {
+        "account_id": 1.0,
+        "amount": 1.0,
+        "balance_after": 1.0,
+        "channel": 1.0,
+        "contract_id": 1.0,
+        "counterparty": 1.0,
+        "currency": 1.0,
+        "direction": 1.0,
+        "merchant_country": 1.0,
+        "reason": 1.0,
+        "status": 1.0,
+        "type": 1.0
+      },
+      "early_repayment": {
+        "amount_due": 1.0,
+        "amount_paid": 1.0,
+        "contract_id": 1.0,
+        "days_past_due": 1.0,
+        "principal_outstanding": 1.0,
+        "reason": 1.0,
+        "type": 1.0
+      },
+      "fee_charge": {
+        "account_id": 1.0,
+        "accrual_period": 0.9763,
+        "amount": 1.0,
+        "balance_after": 0.4142,
+        "channel": 1.0,
+        "contract_id": 1.0,
+        "currency": 1.0,
+        "decline_reason": 0.5858,
+        "direction": 1.0,
+        "merchant_country": 1.0,
+        "reason": 1.0,
+        "status": 1.0,
+        "type": 1.0
+      },
+      "fraud_alert": {
+        "account_id": 1.0,
+        "card_id": 1.0,
+        "rule_code": 1.0,
+        "score_band": 1.0,
+        "subject": 1.0,
+        "type": 1.0
+      },
+      "fraud_decision": {
+        "account_id": 1.0,
+        "card_id": 1.0,
+        "decision": 1.0,
+        "resolution": 0.6667,
+        "subject": 1.0,
+        "type": 1.0
+      },
+      "installment_due": {
+        "amount_due": 1.0,
+        "contract_id": 1.0,
+        "days_past_due": 1.0,
+        "due_date": 1.0,
+        "installment_no": 0.8347,
+        "principal_outstanding": 1.0,
+        "reason": 1.0,
+        "type": 1.0
+      },
+      "installment_missed": {
+        "amount_due": 1.0,
+        "amount_paid": 0.1195,
+        "contract_id": 1.0,
+        "days_past_due": 1.0,
+        "due_date": 1.0,
+        "installment_no": 0.6504,
+        "principal_outstanding": 1.0,
+        "reason": 1.0,
+        "type": 1.0
+      },
+      "installment_paid": {
+        "amount_due": 1.0,
+        "amount_paid": 1.0,
+        "contract_id": 1.0,
+        "days_past_due": 1.0,
+        "due_date": 1.0,
+        "installment_no": 0.9148,
+        "principal_outstanding": 1.0,
+        "reason": 1.0,
+        "type": 1.0
+      },
+      "interest_credit": {
+        "account_id": 1.0,
+        "accrual_period": 1.0,
+        "amount": 1.0,
+        "balance_after": 1.0,
+        "channel": 1.0,
+        "contract_id": 1.0,
+        "currency": 1.0,
+        "direction": 1.0,
+        "merchant_country": 1.0,
+        "reason": 1.0,
+        "status": 1.0,
+        "type": 1.0
+      },
+      "loan_closed": {
+        "contract_id": 1.0,
+        "days_past_due": 1.0,
+        "principal_outstanding": 1.0,
+        "reason": 1.0,
+        "type": 1.0
+      },
+      "loan_disbursement": {
+        "account_id": 1.0,
+        "amount": 1.0,
+        "balance_after": 1.0,
+        "channel": 1.0,
+        "contract_id": 1.0,
+        "currency": 1.0,
+        "direction": 1.0,
+        "merchant_country": 1.0,
+        "reason": 1.0,
+        "status": 1.0,
+        "type": 1.0
+      },
+      "loan_payment": {
+        "account_id": 0.8009,
+        "amount": 1.0,
+        "balance_after": 0.8009,
+        "channel": 1.0,
+        "contract_id": 1.0,
+        "counterparty": 0.0696,
+        "currency": 1.0,
+        "decline_reason": 0.1991,
+        "direction": 1.0,
+        "mcc": 0.9956,
+        "merchant_country": 1.0,
+        "reason": 1.0,
+        "session_id": 0.049,
+        "status": 1.0,
+        "type": 1.0
+      },
+      "loan_restructured": {
+        "contract_id": 1.0,
+        "days_past_due": 1.0,
+        "principal_outstanding": 1.0,
+        "reason": 1.0,
+        "type": 1.0
+      },
+      "other_income_credit": {
+        "account_id": 1.0,
+        "amount": 1.0,
+        "balance_after": 1.0,
+        "channel": 1.0,
+        "counterparty": 1.0,
+        "currency": 1.0,
+        "direction": 1.0,
+        "mcc": 1.0,
+        "merchant_country": 1.0,
+        "reason": 1.0,
+        "status": 1.0,
+        "type": 1.0
+      },
+      "p2p_in": {
+        "account_id": 1.0,
+        "amount": 1.0,
+        "balance_after": 1.0,
+        "channel": 1.0,
+        "counterparty": 1.0,
+        "currency": 1.0,
+        "direction": 1.0,
+        "mcc": 0.9992,
+        "merchant_country": 1.0,
+        "reason": 1.0,
+        "status": 1.0,
+        "transfer_id": 1.0,
+        "type": 1.0
+      },
+      "p2p_out": {
+        "account_id": 0.8785,
+        "amount": 1.0,
+        "balance_after": 0.8785,
+        "card_id": 0.6083,
+        "channel": 1.0,
+        "counterparty": 1.0,
+        "currency": 1.0,
+        "decline_reason": 0.1215,
+        "direction": 1.0,
+        "mcc": 0.9993,
+        "merchant_country": 1.0,
+        "reason": 1.0,
+        "session_id": 0.2695,
+        "status": 1.0,
+        "transfer_id": 0.8785,
+        "type": 1.0
+      },
+      "pension_credit": {
+        "account_id": 1.0,
+        "amount": 1.0,
+        "balance_after": 1.0,
+        "channel": 1.0,
+        "counterparty": 1.0,
+        "currency": 1.0,
+        "direction": 1.0,
+        "mcc": 0.9946,
+        "merchant_country": 1.0,
+        "reason": 1.0,
+        "status": 1.0,
+        "type": 1.0
+      },
+      "product_closed": {
+        "account_id": 0.6739,
+        "contract_id": 1.0,
+        "product_id": 1.0,
+        "reason": 1.0,
+        "type": 1.0
+      },
+      "product_opened": {
+        "account_id": 0.488,
+        "amount_or_limit": 0.776,
+        "application_id": 0.928,
+        "card_id": 0.276,
+        "contract_id": 1.0,
+        "offer_id": 0.336,
+        "product_id": 1.0,
+        "rate": 0.232,
+        "reason": 1.0,
+        "term": 0.776,
+        "type": 1.0
+      },
+      "product_renewed": {
+        "account_id": 1.0,
+        "amount_or_limit": 1.0,
+        "contract_id": 1.0,
+        "product_id": 1.0,
+        "rate": 1.0,
+        "reason": 1.0,
+        "term": 1.0,
+        "type": 1.0
+      },
+      "product_repriced": {
+        "account_id": 1.0,
+        "card_id": 1.0,
+        "contract_id": 1.0,
+        "product_id": 1.0,
+        "reason": 1.0,
+        "type": 1.0
+      },
+      "profile_change": {
+        "change_source": 1.0,
+        "confirmed": 1.0,
+        "field_name": 1.0,
+        "new_value": 0.9881,
+        "old_value": 1.0,
+        "type": 1.0
+      },
+      "purchase": {
+        "account_id": 0.9697,
+        "amount": 1.0,
+        "balance_after": 0.9696,
+        "card_id": 0.9667,
+        "channel": 1.0,
+        "contract_id": 0.0003,
+        "currency": 1.0,
+        "decline_reason": 0.0304,
+        "direction": 1.0,
+        "is_online": 1.0,
+        "is_subscription": 1.0,
+        "mcc": 0.9979,
+        "merchant_category": 0.9982,
+        "merchant_city": 0.7267,
+        "merchant_country": 0.9985,
+        "merchant_id": 0.2739,
+        "merchant_name": 0.2728,
+        "original_amount": 0.0071,
+        "original_currency": 0.0071,
+        "reason": 1.0,
+        "status": 1.0,
+        "type": 1.0
+      },
+      "refund": {
+        "account_id": 1.0,
+        "amount": 1.0,
+        "balance_after": 1.0,
+        "card_id": 0.9974,
+        "channel": 1.0,
+        "currency": 1.0,
+        "direction": 1.0,
+        "is_online": 1.0,
+        "is_subscription": 1.0,
+        "mcc": 1.0,
+        "merchant_category": 0.9987,
+        "merchant_city": 0.7215,
+        "merchant_country": 0.9987,
+        "merchant_id": 0.2966,
+        "merchant_name": 0.294,
+        "original_amount": 0.0117,
+        "original_currency": 0.0117,
+        "reason": 1.0,
+        "status": 1.0,
+        "type": 1.0
+      },
+      "reversal": {
+        "account_id": 1.0,
+        "amount": 1.0,
+        "balance_after": 1.0,
+        "card_id": 0.9957,
+        "channel": 1.0,
+        "currency": 1.0,
+        "direction": 1.0,
+        "is_online": 1.0,
+        "is_subscription": 1.0,
+        "mcc": 1.0,
+        "merchant_category": 0.9957,
+        "merchant_city": 0.7155,
+        "merchant_country": 0.9957,
+        "merchant_id": 0.2716,
+        "merchant_name": 0.2672,
+        "original_amount": 0.0086,
+        "original_currency": 0.0086,
+        "reason": 1.0,
+        "status": 1.0,
+        "type": 1.0
+      },
+      "salary_credit": {
+        "account_id": 1.0,
+        "amount": 1.0,
+        "balance_after": 1.0,
+        "channel": 1.0,
+        "counterparty": 1.0,
+        "currency": 1.0,
+        "direction": 1.0,
+        "mcc": 0.9989,
+        "merchant_country": 1.0,
+        "reason": 1.0,
+        "status": 1.0,
+        "type": 1.0
+      },
+      "schedule_created": {
+        "amount_due": 1.0,
+        "contract_id": 1.0,
+        "days_past_due": 1.0,
+        "due_date": 1.0,
+        "installment_no": 1.0,
+        "principal_outstanding": 1.0,
+        "reason": 1.0,
+        "type": 1.0
+      },
+      "transfer_in": {
+        "account_id": 1.0,
+        "amount": 1.0,
+        "balance_after": 1.0,
+        "channel": 1.0,
+        "contract_id": 0.0412,
+        "counterparty": 1.0,
+        "currency": 1.0,
+        "direction": 1.0,
+        "mcc": 0.9666,
+        "merchant_country": 1.0,
+        "reason": 1.0,
+        "session_id": 0.0304,
+        "status": 1.0,
+        "transfer_id": 0.0304,
+        "type": 1.0
+      },
+      "transfer_out": {
+        "account_id": 0.9216,
+        "amount": 1.0,
+        "balance_after": 0.9213,
+        "card_id": 0.6131,
+        "channel": 1.0,
+        "contract_id": 0.0293,
+        "counterparty": 1.0,
+        "currency": 1.0,
+        "decline_reason": 0.0787,
+        "direction": 1.0,
+        "mcc": 0.9689,
+        "merchant_country": 1.0,
+        "reason": 1.0,
+        "session_id": 0.3076,
+        "status": 1.0,
+        "transfer_id": 0.9208,
+        "type": 1.0
+      }
+    }
+  },
+  "not_in_raw": {
+    "версия продукта": "в каталоге полей payload нет ни product_version, ни tariff_version (src/generator/config.py:377-397); события contract_terms_changed и product_repriced отмечают факт смены, но не называют версию",
+    "семейство продукта": "RAW несёт только product_id; семейство живёт в каталоге (src/generator/world/products.py) и из выгрузки не выводится",
+    "жизненное состояние клиента": "состояние (active, dormant, churned и прочие) наружу не выгружается вовсе: оно только модулирует интенсивности (src/generator/life/lifecycle.py)",
+    "причина пропуска поля": "причина объявлена в параметрах (source_unavailable, not_collected, unknown), но разбирается и выбрасывается (src/generator/observe/defects.py:91)",
+    "источник пропуска поля": "по RAW нельзя отличить поле, снятое слоем наблюдения, от поля, которое симуляция не заполняла: и то и другое выглядит как отсутствие ключа"
+  }
+}

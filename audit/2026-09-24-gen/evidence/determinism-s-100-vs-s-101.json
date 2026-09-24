@@ -1,0 +1,35 @@
+{
+  "left": "s-100",
+  "right": "s-101",
+  "prefix": null,
+  "expect": "differ",
+  "files_identical": {
+    "events.parquet": false,
+    "profile.parquet": false,
+    "manifest.json": false
+  },
+  "tables": [
+    {
+      "table": "events",
+      "schema": true,
+      "rows_left": 237768,
+      "rows_right": 308593,
+      "rows": false,
+      "order": false,
+      "text": false,
+      "payload": false,
+      "values": false
+    },
+    {
+      "table": "profile",
+      "schema": true,
+      "rows_left": 128,
+      "rows_right": 128,
+      "rows": true,
+      "order": false,
+      "values": false
+    }
+  ],
+  "data_identical": false,
+  "verdict": "PASS"
+}

@@ -1,0 +1,92 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 503454d..a15568c 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -36,8 +36,10 @@
+ 
+ ## Тесты
+ 
+-- До отдельной прямой команды пользователя не запускать никакие тесты, `pytest`, проверки, сквозные пайплайны или тестовые генерации.
+-- Не добавлять, не обновлять и не восстанавливать тесты во время текущей переработки проекта.
+-- Каталог `tests/` должен быть удалён и не должен создаваться заново до команды пользователя начать финальное тестирование.
++- Набор лежит в `tests/` и запускается командой `pytest`. CPU-часть обязана оставаться быстрой.
++- Тесты не читают и не пишут `data/`: синтетический мир строится во временном каталоге, а каталоги всех этапов на время сессии переставлены туда же.
+ - Не создавать `probe`, временные тестовые датасеты и другие проверочные артефакты в `data/`.
+-- Финальное тестирование проводить только по явной команде пользователя.
++- Тесты, которым нужны CUDA или flash-attn, помечены `@pytest.mark.cuda` и пропускаются, когда среды нет. Пропуск не считать пройденной проверкой и называть его отдельно.
++- Проверять инварианты, а не факт запуска: математическую эквивалентность, изоляцию последовательностей, правильность отображений, семантику оптимизатора, воспроизводимость и resume.
++- Найденную тестом ошибку чинить в коде. Допуск не ослаблять и тест под полученный результат не переписывать.
++- Полные генерации, длительное обучение и сквозные прогоны конвейера запускать только по прямой команде пользователя.
+diff --git a/pyproject.toml b/pyproject.toml
+index 6464f93..4ed62ad 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -68,3 +68,4 @@ packages = [
+ testpaths = ["tests"]
+ pythonpath = ["."]
+ addopts = "-q"
++markers = ["cuda: нужна CUDA, bf16 или flash-attn"]
+diff --git a/src/generator/config.py b/src/generator/config.py
+index 518320c..f804039 100644
+--- a/src/generator/config.py
++++ b/src/generator/config.py
+@@ -769,21 +769,21 @@ class DatasetGroup:
+ 
+ DATASETS: dict[str, DatasetGroup] = {
+     "train": DatasetGroup(
+-        clients=1,
++        clients=200,
+         history_start=datetime(2024, 1, 1),
+         history_end=datetime(2026, 1, 1),
+-        seed=494,
++        seed=100,
+     ),
+     "val": DatasetGroup(
+-        clients=10,
++        clients=50,
+         history_start=datetime(2024, 1, 1),
+         history_end=datetime(2026, 5, 1),
+-        seed=501,
++        seed=200,
+     ),
+     "test": DatasetGroup(
+-        clients=10,
++        clients=50,
+         history_start=datetime(2024, 1, 1),
+         history_end=datetime(2026, 9, 1),
+-        seed=502,
++        seed=300,
+     ),
+ }
+diff --git a/src/history/run.py b/src/history/run.py
+index 1ee1567..d3e01c3 100644
+--- a/src/history/run.py
++++ b/src/history/run.py
+@@ -49,7 +49,10 @@ def run_group(args) -> int:
+         report = build_group(group, config)
+ 
+     except (ConfigError, HistoryError, InputError) as error:
+-        print(f"[history] группа {group} → {report['table']}")
++        print(f"[history] группа {group}: {error}")
++        return EXIT_BLOCKED
++
++    print(f"[history] группа {group} → {report['table']}")
+     print(f"    веса {report['weights']}")
+     print(
+         f"    клиентов {report['clients']}, событий {report['events']}, "
+diff --git a/src/profile/run.py b/src/profile/run.py
+index 50a4e48..74dea3e 100644
+--- a/src/profile/run.py
++++ b/src/profile/run.py
+@@ -53,7 +53,10 @@ def run_group(args) -> int:
+         report = build_group(group, config)
+ 
+     except (ConfigError, InputError, ProfileError, SpecialsError) as error:
+-        print(f"[profile] группа {group} → {report['table']}")
++        print(f"[profile] группа {group}: {error}")
++        return EXIT_BLOCKED
++
++    print(f"[profile] группа {group} → {report['table']}")
+     print(f"    веса {report['weights']}")
+     print(
+         f"    клиентов {report['clients']}, токенов анкет {report['tokens']}; "
