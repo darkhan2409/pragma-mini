@@ -49,7 +49,10 @@ def run_group(args) -> int:
         report = build_group(group, config)
 
     except (ConfigError, HistoryError, InputError) as error:
-        print(f"[history] группа {group} → {report['table']}")
+        print(f"[history] группа {group}: {error}")
+        return EXIT_BLOCKED
+
+    print(f"[history] группа {group} → {report['table']}")
     print(f"    веса {report['weights']}")
     print(
         f"    клиентов {report['clients']}, событий {report['events']}, "

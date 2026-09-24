@@ -68,3 +68,4 @@ packages = [
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-q"
+markers = ["cuda: нужна CUDA, bf16 или flash-attn"]

@@ -53,7 +53,10 @@ def run_group(args) -> int:
         report = build_group(group, config)
 
     except (ConfigError, InputError, ProfileError, SpecialsError) as error:
-        print(f"[profile] группа {group} → {report['table']}")
+        print(f"[profile] группа {group}: {error}")
+        return EXIT_BLOCKED
+
+    print(f"[profile] группа {group} → {report['table']}")
     print(f"    веса {report['weights']}")
     print(
         f"    клиентов {report['clients']}, токенов анкет {report['tokens']}; "
