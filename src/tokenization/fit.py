@@ -79,11 +79,11 @@ def read_train(config: TokenizerConfig, schema: SemanticSchema) -> TrainCorpus:
     _check_config(config, schema)
 
     statistics = scan(
-        # Анкета берётся на начало периода целей — та же, что
-        # уйдёт в кодирование. Иначе словарь учил бы значения,
-        # которых в закодированном профиле не бывает, а те, что
-        # бывают, встречал бы как незнакомые.
-        source.histories(window.final_cutoff, window.target_start),
+        # События и анкета на тот же cutoff, что и в кодировании.
+        # Иначе словарь учил бы значения, которых в закодированном
+        # профиле не бывает, а те, что бывают, встречал бы как
+        # незнакомые.
+        source.histories(window.final_cutoff),
         schema,
         sample_k=config.quantile_sample_k,
         distinct_cap=config.distinct_cap,

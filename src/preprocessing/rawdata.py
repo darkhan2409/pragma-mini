@@ -50,7 +50,7 @@ from .artifacts import sha256_file
 
 MANIFEST_NAME = "manifest.json"
 
-EXPECTED_SCHEMA_VERSION = 14
+EXPECTED_SCHEMA_VERSION = 15
 
 # Файлы, без которых группа не обрабатывается. Справочников
 # рядом с выгрузкой нет: они остались входом генератора.

@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 
+from src.dataset.lineage import write_lineage
 from src.batching.build import BATCHES_SCHEMA
 from src.embedding.layer import InputEmbedding
 from src.embedding.settings import EmbeddingConfig
@@ -278,6 +279,10 @@ def write_batches(path: Path, batches: list[list[Made]]) -> None:
     finally:
         writer.close()
 
+    # Отметка происхождения, как у настоящего этапа: без неё
+    # читатель каталог отвергнет.
+    write_lineage(path.parent)
+
 
 def write_masked(path: Path, batches: list[list[Made]]) -> None:
     """
@@ -291,6 +296,10 @@ def write_masked(path: Path, batches: list[list[Made]]) -> None:
             writer.write(_masked_table(index, batch))
     finally:
         writer.close()
+
+    # Отметка происхождения, как у настоящего этапа: без неё
+    # читатель каталог отвергнет.
+    write_lineage(path.parent)
 
 
 def _batch_table(index: int, batch: list[Made]) -> pa.Table:

@@ -962,7 +962,7 @@ def finish(sim) -> CommunityResult:
         # она стала к границе выгрузки. Клиент, о котором банк
         # ещё ничего не посчитал, строки не получает вовсе.
         if state.profile_known:
-            row = {"client_id": state.client_id}
+            row = {"client_id": state.client_id, "birth_date": state.persona.birth_date.date()}
             row.update({name: state.profile_values.get(name) for name in PROFILE_FIELDS})
             profile_rows.append(row)
 

@@ -38,16 +38,11 @@ from .settings import PreprocessingConfig, group_dir, raw_group_dir
 # упорядоченные так, как их уложил препроцессинг. Срез — простой
 # отбор event_time < cutoff, а не отдельный этап.
 #
-# СРЕЗОВ ДВА, и они разные:
-#
-#   cutoff          до какого момента клиенту доступны события;
-#   profile_moment  на какой момент описывает его анкета.
-#
-# Одним параметром они быть не могут: события модель видит до
-# конца окна, а анкета обязана описывать начало периода целей,
-# иначе она пересказывает то, что модель должна восстановить.
-# Оба параметра обязательны: значения по умолчанию у такой пары
-# означали бы молчаливый выбор одного из двух моментов.
+# Срез ОДИН — cutoff T: события строго раньше T, анкета —
+# состояние клиента на тот же T (profile_state.PROFILE_SEMANTICS).
+# Данных позже T в историю не попадает ничего. Лента после T
+# читается только откатом анкеты: он снимает изменения, которых
+# на T ещё не было.
 #
 # Модель получает ФАКТИЧЕСКИЕ поля под смысловыми ключами:
 # производных признаков здесь нет ни одного. Ни интервалов, ни
@@ -104,13 +99,9 @@ class ClientHistory:
     """
 
     client_id: str
-    cutoff: datetime | None
+    cutoff: datetime
     events: list[ClientEvent]
     profile: dict[str, object]
-
-    # На какой момент описывает клиента profile. Не равен cutoff
-    # и равняться ему не должен.
-    profile_moment: datetime | None = None
 
     # Есть ли у клиента анкета вообще. Пустой словарь значений
     # ответом не является: у известной анкеты все поля могут
@@ -127,7 +118,6 @@ class ClientHistory:
         return {
             "client_id": self.client_id,
             "cutoff": self.cutoff,
-            "profile_moment": self.profile_moment,
             "events": self.n_events,
             "keys_used": len({key for item in self.events for key in item.values}),
             "limitations": self.limitations,
@@ -244,21 +234,11 @@ class Group:
     def history(
         self,
         client_id: str,
-        cutoff: datetime | None,
-        profile_moment: datetime | None,
+        cutoff: datetime,
     ) -> ClientHistory:
         """
-        Клиент на два среза: события строго раньше cutoff, анкета
-        на profile_moment.
-
-        cutoff = None отдаёт всю ленту клиента. profile_moment =
-        None отдаёт конечный снимок анкеты как он лежит в
-        выгрузке — это состояние на границу выгрузки, и модели
-        оно не годится.
-
-        Оба аргумента обязательны именно потому, что моментов
-        два: пропущенный означал бы «пусть будет тот же», а он
-        не тот же.
+        Клиент на cutoff: события строго раньше cutoff и анкета —
+        состояние клиента на тот же cutoff.
         """
 
         if client_id not in self._profile_rows and client_id not in self._addresses():
@@ -266,16 +246,12 @@ class Group:
 
         table = self.events_table(client_id)
 
-        # Лента клиента целиком нужна анкете: откат смотрит на
-        # то, что случилось ПОСЛЕ profile_moment, а срез событий
-        # это скрывает.
+        # Лента клиента целиком нужна только откату анкеты: он
+        # снимает изменения с временем >= cutoff. В события
+        # примера из неё не попадает ничего позже cutoff.
         all_rows = table.to_pylist()
 
-        rows = (
-            [row for row in all_rows if row["event_time"] < cutoff]
-            if cutoff is not None
-            else all_rows
-        )
+        rows = [row for row in all_rows if row["event_time"] < cutoff]
 
         # Календарь считается по местному времени банка: перевод
         # пояса живёт внутри calendar_features и наружу не
@@ -307,29 +283,22 @@ class Group:
 
         snapshot = self._profile_rows.get(client_id)
 
-        if profile_moment is None:
-            profile = snapshot
-            known = snapshot is not None
-        else:
-            state = profile_at(snapshot, all_rows, profile_moment)
-            profile = state.values
-            notes.extend(state.notes)
-            known = snapshot is not None
+        state = profile_at(snapshot, all_rows, cutoff, self.timezone)
+
+        notes.extend(state.notes)
 
         return ClientHistory(
             client_id=client_id,
             cutoff=cutoff,
-            profile_moment=profile_moment,
             events=events,
-            profile=profile_values(profile),
-            has_profile=known,
+            profile=profile_values(state.values),
+            has_profile=snapshot is not None,
             limitations=sorted(set(notes)),
         )
 
     def histories(
         self,
-        cutoff: datetime | None,
-        profile_moment: datetime | None,
+        cutoff: datetime,
         clients: list[str] | None = None,
     ):
         """
@@ -337,7 +306,7 @@ class Group:
         """
 
         for client_id in (clients if clients is not None else self.client_ids):
-            yield self.history(client_id, cutoff, profile_moment)
+            yield self.history(client_id, cutoff)
 
 
 # ============================================================

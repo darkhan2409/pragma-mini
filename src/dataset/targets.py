@@ -21,7 +21,17 @@ from src.preprocessing.settings import GroupWindow
 # правило одно: [target_start, target_end). Вторая реализация
 # «того же самого» рано или поздно разошлась бы с первой на
 # границе.
+#
+# Изменение анкеты (profile_change) целью не бывает, хотя в ленте
+# остаётся: анкета примера описывает клиента на cutoff событий, то
+# есть уже после изменения, и закрытое новое значение она бы
+# просто подсказала.
 # ============================================================
+
+
+# Типы событий, которые остаются видимым контекстом, но целями
+# MLM не становятся.
+NOT_TARGET_TYPES: tuple[str, ...] = ("profile_change",)
 
 
 def eligible(event_time: datetime, window: GroupWindow) -> bool:
@@ -36,6 +46,16 @@ def eligible(event_time: datetime, window: GroupWindow) -> bool:
     return window.target_start <= event_time < window.target_end
 
 
+def can_be_target(event_type: str | None) -> bool:
+    """
+    Может ли событие этого типа стать целью MLM.
+    """
+
+    return event_type not in NOT_TARGET_TYPES
+
+
 __all__ = [
+    "NOT_TARGET_TYPES",
+    "can_be_target",
     "eligible",
 ]

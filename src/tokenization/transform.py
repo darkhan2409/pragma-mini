@@ -8,7 +8,7 @@ import pyarrow as pa
 
 from src.preprocessing.artifacts import TableWriter, write_json
 from src.preprocessing.keys import KeysError
-from src.preprocessing.profile_state import INCLUDED_FIELDS, UNPROVABLE_FIELDS
+from src.preprocessing.profile_state import EXCLUDED_FIELDS, INCLUDED_FIELDS, PROFILE_SEMANTICS
 from src.preprocessing.read import Group, ReadError
 from src.preprocessing.settings import PreprocessingConfig
 
@@ -62,9 +62,10 @@ META_FILE = "meta.json"
 
 # 1 — анкета на конец выгрузки (прежний формат, читателю не
 #     годится);
-# 2 — анкета на начало периода целей, состав полей ограничен
-#     восстановимыми.
-TOKENIZED_FORMAT = 2
+# 2 — анкета на начало периода целей;
+# 3 — анкета на cutoff событий (PROFILE_SEMANTICS), возраст и
+#     признак пенсионера посчитаны от даты рождения.
+TOKENIZED_FORMAT = 3
 
 # В файлах лежит только то, что нужно модели. Число токенов
 # и значений не хранится: это длины массивов. Названия
@@ -156,10 +157,9 @@ def encode_group(
 
     window = group_window(group)
 
-    # Два разных момента, и путать их нельзя: события доступны до
-    # конца окна, анкета описывает начало периода целей.
+    # Один момент на всё: события строго раньше cutoff, анкета —
+    # состояние клиента на тот же cutoff.
     cutoff = window.final_cutoff
-    profile_moment = window.target_start
 
     try:
         source = Group(group)
@@ -177,7 +177,7 @@ def encode_group(
         for client_id in source.client_ids:
 
             try:
-                history = source.history(client_id, cutoff, profile_moment)
+                history = source.history(client_id, cutoff)
             except (ReadError, KeysError) as error:
                 raise TransformError(f"клиент {client_id}: {error}") from error
 
@@ -256,9 +256,9 @@ def encode_group(
         "format": TOKENIZED_FORMAT,
         "group": group,
         "events_cutoff": cutoff.isoformat(),
-        "profile_moment": profile_moment.isoformat(),
+        "profile_semantics": PROFILE_SEMANTICS,
         "profile_fields": list(INCLUDED_FIELDS),
-        "profile_fields_excluded": dict(UNPROVABLE_FIELDS),
+        "profile_fields_excluded": dict(EXCLUDED_FIELDS),
         "clients": counters.clients,
         "clients_with_profile": counters.profiles,
         "clients_with_empty_profile": counters.empty_profiles,
@@ -269,7 +269,6 @@ def encode_group(
     return {
         "group": group,
         "cutoff": cutoff.isoformat(),
-        "profile_moment": profile_moment.isoformat(),
         "meta": meta,
         "rows": {"events": events_rows, "profile": profile_rows},
         "counts": {

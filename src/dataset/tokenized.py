@@ -16,6 +16,7 @@ from src.tokenization.transform import (
     PROFILE_FILE,
     TOKENIZED_FORMAT,
 )
+from src.preprocessing.profile_state import PROFILE_SEMANTICS
 
 
 # ============================================================
@@ -117,21 +118,19 @@ class TokenizedGroup:
                 )
 
         # Версия формата, а не только наличие файлов. Каталог
-        # прежней сборки несёт анкету на КОНЕЦ выгрузки, и
-        # собранный из него набор молча вернул бы в примеры
-        # состояние из будущего.
+        # прежней сборки несёт анкету другого смысла: формат 1 —
+        # на конец выгрузки, формат 2 — на начало периода целей.
         self.meta = read_json(self.directory / META_FILE)
 
         found = self.meta.get("format")
 
-        if found != TOKENIZED_FORMAT:
+        if found != TOKENIZED_FORMAT or self.meta.get("profile_semantics") != PROFILE_SEMANTICS:
             raise TokenizedError(
-                f"{self.directory / META_FILE}: формат {found!r}, а нужен {TOKENIZED_FORMAT}. "
-                f"Каталог собран прежним кодом и несёт анкету на конец выгрузки — "
-                f"выполните python -m src.tokenization.run encode {group} заново"
+                f"{self.directory / META_FILE}: формат {found!r}, смысл анкеты "
+                f"{self.meta.get('profile_semantics')!r}, а нужны {TOKENIZED_FORMAT} и "
+                f"{PROFILE_SEMANTICS!r}. Каталог собран прежним кодом — выполните "
+                f"python -m src.tokenization.run encode {group} заново"
             )
-
-        self.profile_moment = self.meta["profile_moment"]
 
         self._events = pq.ParquetFile(self.directory / EVENTS_FILE)
 

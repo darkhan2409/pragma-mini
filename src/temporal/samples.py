@@ -60,13 +60,13 @@ class SamplesGroup:
 
         # Схема не меняется от того, на какой момент снята
         # анкета, поэтому одной её мало: набор прежней сборки
-        # несёт в примерах состояние на конец выгрузки.
+        # несёт в примерах анкету другого смысла.
         meta_path = self.directory / META_FILE
 
         if not meta_path.exists():
             raise SamplesError(
-                f"нет {meta_path}: набор собран прежним кодом и несёт анкету на "
-                f"конец выгрузки — выполните python -m src.dataset.run {group} заново"
+                f"нет {meta_path}: набор собран прежним кодом — выполните "
+                f"python -m src.dataset.run {group} заново"
             )
 
         self.meta = read_json(meta_path)

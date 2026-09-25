@@ -32,8 +32,10 @@ SAMPLES_FILE = "samples.parquet"
 META_FILE = "meta.json"
 
 # 1 — анкета примера описывает конец выгрузки (прежний формат);
-# 2 — анкета описывает начало периода целей группы.
-DATASET_FORMAT = 2
+# 2 — анкета описывает начало периода целей группы;
+# 3 — анкета на cutoff событий (state_at_event_cutoff), возраст и
+#     признак пенсионера посчитаны от даты рождения.
+DATASET_FORMAT = 3
 
 GROUPS: tuple[str, ...] = ("train", "val", "test")
 
