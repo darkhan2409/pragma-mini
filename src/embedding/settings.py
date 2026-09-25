@@ -22,13 +22,11 @@ from src.generator.config import DATA_DIR
 # ============================================================
 
 
-# Один каталог на группу и два файла в нём: векторы и веса.
+# Один каталог на группу: веса слоя и отметка происхождения.
 #
-#   data/09_embeddings/<group>/embeddings.parquet
 #   data/09_embeddings/<group>/weights.pt
+#   data/09_embeddings/<group>/lineage.json
 EMBEDDINGS_DIR = DATA_DIR / "09_embeddings"
-
-EMBEDDINGS_FILE = "embeddings.parquet"
 
 WEIGHTS_FILE = "weights.pt"
 
@@ -111,7 +109,6 @@ def embeddings_dir(group: str) -> Path:
 
 __all__ = [
     "EMBEDDINGS_DIR",
-    "EMBEDDINGS_FILE",
     "WEIGHTS_FILE",
     "ConfigError",
     "EmbeddingConfig",

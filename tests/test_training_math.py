@@ -613,3 +613,35 @@ def test_extremely_short_and_long_values_stay_finite(stage, pieces: int):
 
     for name, value in weights_of(checkpoint_path()).items():
         assert bool(torch.isfinite(value).all()), name
+
+
+def test_training_starts_from_stage_09_weights_and_moves_the_table(stage):
+    """
+    Снимка векторов у этапа 09 нет: модель считает вход по номерам
+    токенов и его weights.pt. Обучение начинает ровно с этой
+    таблицы и двигает её градиентом, а сам файл этапа не трогает.
+    """
+
+    from src.embedding.settings import WEIGHTS_FILE, embeddings_dir
+
+    settle(stage, train_people=world.population())
+
+    path = embeddings_dir("train") / WEIGHTS_FILE
+
+    table = torch.load(path, map_location="cpu", weights_only=True)["state_dict"]["table.weight"]
+
+    config = tiny()
+
+    assert torch.equal(fresh(stage, config).embedding.weight.detach(), table)
+
+    result = train(config, epochs=1, max_steps=1, masking=every_value())
+
+    assert result["step"] == 1
+
+    trained = weights_of(checkpoint_path())["embedding.table.weight"]
+
+    assert not torch.equal(trained, table)
+
+    on_disk = torch.load(path, map_location="cpu", weights_only=True)["state_dict"]["table.weight"]
+
+    assert torch.equal(on_disk, table)
