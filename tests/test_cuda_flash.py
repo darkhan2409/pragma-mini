@@ -296,3 +296,73 @@ def test_flash_sends_gradients_to_the_same_weights(clients):
         assert torch.allclose(
             parameter.grad.float(), other[name].grad, atol=scale * 0.1, rtol=0.1
         ), name
+
+
+@flash_only
+def test_flash_survives_a_batch_without_targets(clients):
+    """
+    Окно без целей на настоящем ядре: ни падения, ни NaN.
+
+    Проверяется то же, что на CPU эталоном, но на flash-attn: у
+    ядра свои требования к формам, и пустой набор целей — как раз
+    тот случай, где расходятся длины.
+    """
+
+    quiet = [client for client in clients if client.n_targets == 0]
+
+    assert quiet, "в наборе должен быть клиент без целей"
+
+    built = world.model(attention="flash").to(device())
+
+    data = pack(quiet, device())
+
+    assert int(data.target_token.numel()) == 0
+
+    with autocast(device()):
+        out = built(data)
+
+    assert out.logits.shape == (0, world.VOCAB)
+    assert float(out.loss.detach()) == 0.0
+    assert bool(torch.isfinite(out.loss))
+
+    out.loss.backward()
+
+    for name, parameter in built.named_parameters():
+        assert parameter.grad is not None, name
+        assert bool(torch.isfinite(parameter.grad).all()), name
+
+
+@flash_only
+def test_flash_step_changes_the_weights(clients):
+    """
+    Настоящий шаг обучения на ядре: backward, обрезка, шаг AdamW.
+
+    Без GradScaler: bf16 в нём не нуждается, а веса и состояние
+    оптимизатора остаются fp32.
+    """
+
+    built = world.model(attention="flash", dropout=0.1).to(device())
+    built.train()
+
+    before = {name: value.detach().clone()
+              for name, value in built.named_parameters()}
+
+    optimizer = torch.optim.AdamW(built.parameters(), lr=1e-3)
+
+    with autocast(device()):
+        out = built(pack(clients, device()))
+
+    assert out.logits.dtype is torch.bfloat16
+    assert bool(torch.isfinite(out.loss))
+
+    out.loss.backward()
+
+    norm = torch.nn.utils.clip_grad_norm_(built.parameters(), 1.0)
+
+    assert bool(torch.isfinite(norm))
+
+    optimizer.step()
+
+    for name, value in built.named_parameters():
+        assert value.dtype is torch.float32, name
+        assert not torch.equal(value.detach(), before[name]), name
