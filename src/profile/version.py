@@ -6,8 +6,10 @@ from __future__ import annotations
 # ============================================================
 #
 # FORMAT_VERSION — контракт энкодера анкеты: внимание по всей
-# анкете клиента, один вектор из позиции [USR], временного канала
-# нет. Его читает будущий History Encoder.
+# анкете клиента, один вектор из позиции [USR], время токенов
+# через TimeRoPE — давность вех Lifelong до cutoff, ноль у [USR]
+# и Attributes. Версия 2 — появился временной канал: веса версии
+# 1 к энкодеру не подходят.
 #
 # IMPLEMENTATION_VERSION — версия кода пакета.
 #
@@ -15,9 +17,9 @@ from __future__ import annotations
 # ============================================================
 
 
-FORMAT_VERSION = "1.0.0"
+FORMAT_VERSION = "2.0.0"
 
-IMPLEMENTATION_VERSION = "1.1.0"
+IMPLEMENTATION_VERSION = "2.0.0"
 
 SCHEMA_VERSION = 1
 

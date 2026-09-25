@@ -70,6 +70,8 @@ BATCHES_SCHEMA = pa.schema(
         ("profile_key_ids", pa.list_(pa.int32())),
         ("profile_value_ids", pa.list_(pa.int32())),
         ("profile_positions", pa.list_(pa.int32())),
+        # Давность вехи до cutoff, ноль у [USR] и Attributes.
+        ("profile_time_log", pa.list_(pa.float32())),
         ("profile_token_mask", pa.list_(pa.bool_())),
     ]
 )

@@ -25,8 +25,9 @@ from src.preprocessing.profile_state import (
 # ============================================================
 #
 # Пример модели это события строго раньше cutoff T и анкета —
-# состояние клиента на тот же T. Снимок анкеты в выгрузке лежит
-# на её границу, возможно позже T, и откатывается по ленте.
+# Attributes на тот же T. Снимок анкеты в выгрузке лежит на её
+# границу as_of, возможно позже T, и откатывается по ленте. Вехи
+# Lifelong проверяются отдельно, в test_lifelong.py.
 #
 # Здесь проверяется не то, что функция согласна сама с собой, а
 # независимые утверждения:
@@ -529,6 +530,10 @@ def test_unknown_initial_income_type_leaves_pensioner_out_only_for_the_young():
 
 RAW_CLIENT = "c000000000001"
 
+# Граница выгрузки write_raw: 1 июля 2026 у банка. Снимок анкеты
+# описывает клиента перед ней.
+AS_OF = datetime(2026, 7, 1, tzinfo=BANK).astimezone(UTC)
+
 
 def raw_event(client: str, moment: str, payload: dict) -> dict:
     return {
@@ -556,6 +561,8 @@ def write_raw(directory, events: list[dict], snapshot: dict) -> None:
     pq.write_table(table, directory / "events.parquet", compression="zstd")
 
     row = {name: None for name in PROFILE_SCHEMA.names}
+    row["as_of"] = AS_OF
+    row["lifelong"] = []
     row.update(snapshot)
     row["client_id"] = RAW_CLIENT
 
@@ -711,13 +718,19 @@ def test_profile_change_stays_an_event_of_the_history(stage):
     ]
 
 
-def write_profile_vocab(root) -> None:
+LIFELONG_VALUES = ("relationship_started", "kyc_passed", "app_adopted")
+
+
+def write_profile_vocab(root, lifelong: tuple[str, ...] | None = LIFELONG_VALUES) -> None:
     """
     Крошечный словарь, знающий ключи анкеты.
 
     Общий словарь тестов знает только key_a/b/c, и на нём любое
     значение профиля стало бы [UNK]: проверка совпадения токенов
     выполнялась бы сама собой.
+
+    lifelong — известные словарю типы вех; None — словарь прежнего
+    кода, без ключа вех вовсе.
     """
 
     import json as _json
@@ -741,15 +754,16 @@ def write_profile_vocab(root) -> None:
 
     specials = build_special_tokens()
 
-    names = ("profile_gender", "profile_city", "profile_children")
-
-    keys = {name: len(specials) + number for number, name in enumerate(names)}
-
     catalogue = {
         "profile_gender": ("F", "M"),
         "profile_city": ("Almaty", "Astana", "Shymkent"),
         "profile_children": ("0", "1", "2"),
     }
+
+    if lifelong is not None:
+        catalogue["profile_lifelong"] = lifelong
+
+    keys = {name: len(specials) + number for number, name in enumerate(catalogue)}
 
     number = len(specials) + len(keys)
 
@@ -818,6 +832,7 @@ def test_profile_change_is_context_not_a_target(stage):
             event("2026-02-02T10:00:00", "purchase"),
         ],
         profile_key_ids=[usr], profile_value_ids=[usr], profile_positions=[0],
+        profile_time=[None],
     )
 
     sample = build_sample(artifacts, client, window, ContextPolicy())
@@ -838,12 +853,15 @@ def test_pipeline_profile_tokens_are_identical(stage):
 
     artifacts = FrozenArtifacts.load()
 
-    quiet = encode_profile(artifacts, prepare(stage, EARLY, QUIET_SNAPSHOT), 4)
-    busy = encode_profile(artifacts, prepare(stage, EARLY + AFTER, BUSY_SNAPSHOT), 4)
+    quiet, quiet_times = encode_profile(artifacts, prepare(stage, EARLY, QUIET_SNAPSHOT), 4)
+    busy, busy_times = encode_profile(
+        artifacts, prepare(stage, EARLY + AFTER, BUSY_SNAPSHOT), 4
+    )
 
     assert list(quiet.key_ids) == list(busy.key_ids)
     assert list(quiet.value_ids) == list(busy.value_ids)
     assert list(quiet.positions) == list(busy.positions)
+    assert quiet_times == busy_times
 
     # Проверка не вырождена: значения словарю известны, и
     # неизвестных ключей среди них нет.
@@ -994,11 +1012,12 @@ def test_samples_without_meta_are_refused(stage):
 
 def test_encoded_group_records_the_profile_semantics(stage):
     """
-    meta.json называет cutoff событий и смысл анкеты: состояние на
-    тот же cutoff.
+    meta.json называет cutoff событий и смысл анкеты: Attributes на
+    тот же cutoff и вехи Lifelong раньше него, с их набором и
+    шкалой времени.
     """
 
-    from src.preprocessing.profile_state import PROFILE_SEMANTICS
+    from src.preprocessing.profile_state import LIFELONG_TYPES, PROFILE_SEMANTICS
     from src.tokenization.finalvocab import FrozenArtifacts
     from src.tokenization.settings import TokenizerConfig, tokenized_dir
     from src.tokenization.transform import TOKENIZED_FORMAT, encode_group
@@ -1013,9 +1032,13 @@ def test_encoded_group_records_the_profile_semantics(stage):
 
     assert meta["format"] == TOKENIZED_FORMAT
     assert meta["events_cutoff"] == val_cutoff().isoformat()
-    assert meta["profile_semantics"] == PROFILE_SEMANTICS == "state_at_event_cutoff"
+    assert meta["profile_semantics"] == PROFILE_SEMANTICS == "attributes_and_lifelong_at_event_cutoff"
     assert "profile_moment" not in meta
     assert meta["profile_fields"] == list(INCLUDED_FIELDS)
+    assert meta["profile_lifelong_types"] == list(LIFELONG_TYPES) == [
+        "relationship_started", "kyc_passed", "app_adopted",
+    ]
+    assert meta["profile_lifelong_time"] == {"anchor": "cutoff", "transform": "8*log1p(seconds/8)"}
 
     # Исключённые поля названы вместе с причиной.
     assert set(meta["profile_fields_excluded"]) == set(EXCLUDED_FIELDS)
@@ -1024,8 +1047,11 @@ def test_encoded_group_records_the_profile_semantics(stage):
 def test_tokenized_of_the_previous_semantics_is_refused(stage):
     """
     Каталог формата 2 — анкета на начало периода целей — читать
-    нельзя, как и текущий формат без смысла анкеты.
+    нельзя, как и формата 3 — анкета без вех, — и текущий формат
+    без смысла анкеты или с другим набором вех.
     """
+
+    from src.preprocessing.profile_state import LIFELONG_TYPES, PROFILE_SEMANTICS
 
     from src.dataset.tokenized import TokenizedError, TokenizedGroup
     from src.tokenization.finalvocab import FrozenArtifacts
@@ -1042,7 +1068,10 @@ def test_tokenized_of_the_previous_semantics_is_refused(stage):
 
     for meta in (
         {"format": 2, "profile_moment": "2026-01-01T00:00:00+00:00"},
+        {"format": 3, "profile_semantics": "state_at_event_cutoff"},
         {"format": TOKENIZED_FORMAT, "profile_moment": "2026-01-01T00:00:00+00:00"},
+        {"format": TOKENIZED_FORMAT, "profile_semantics": PROFILE_SEMANTICS,
+         "profile_lifelong_types": list(LIFELONG_TYPES)[:2]},
     ):
         (directory / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
 

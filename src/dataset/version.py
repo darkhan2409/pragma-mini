@@ -22,11 +22,11 @@ from __future__ import annotations
 # ============================================================
 
 
-FORMAT_VERSION = "6.0.0"
+FORMAT_VERSION = "7.0.0"
 
-IMPLEMENTATION_VERSION = "6.1.0"
+IMPLEMENTATION_VERSION = "7.0.0"
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 __all__ = ["FORMAT_VERSION", "IMPLEMENTATION_VERSION", "SCHEMA_VERSION"]

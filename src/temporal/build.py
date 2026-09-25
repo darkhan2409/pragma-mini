@@ -9,7 +9,7 @@ from src.dataset.lineage import write_lineage
 from src.dataset.build import SAMPLES_SCHEMA
 from src.preprocessing.artifacts import TableWriter
 
-from .position import check, time_log
+from .position import check, check_profile, profile_time_log, time_log
 from .samples import SamplesGroup
 from .settings import TEMPORAL_FILE, temporal_dir
 
@@ -18,32 +18,44 @@ from .settings import TEMPORAL_FILE, temporal_dir
 # ИДЕЯ
 # ============================================================
 #
-# Этап читает готовые примеры и добавляет к каждому один канал:
+# Этап читает готовые примеры и добавляет к каждому два канала:
 #
 #   data/06_temporal/<group>/temporal.parquet
 #
+#   event_time_log    давность события до последнего события;
+#   profile_time_log  давность вехи анкеты до cutoff примера, ноль
+#                     у [USR] и Attributes.
+#
 # Строка остаётся полным примером клиента, поэтому открыв её
-# глазами, видно event_time[i] и event_time_log[i] рядом. Ни
-# агрегатов, ни скрытых значений внутри кода: позиция лежит в
-# файле там же, где время, из которого она посчитана.
+# глазами, видно event_time[i] и event_time_log[i] рядом, а
+# profile_time[j] и profile_time_log[j] — тоже. Ни агрегатов, ни
+# скрытых значений внутри кода: позиция лежит в файле там же,
+# где время, из которого она посчитана.
 #
 # Ничего не отбирается, не переставляется и не кодируется.
 # ============================================================
 
 
-# Схема это схема примера плюс одна колонка. Она выводится из
+# Схема это схема примера плюс две колонки, каждая следом за
+# временем, из которого посчитана. Она выводится из
 # SAMPLES_SCHEMA, а не переписывается рядом: иначе новое поле
 # примера молча потерялось бы на этом этапе.
 TIME_LOG = pa.field("event_time_log", pa.list_(pa.float32()))
+
+PROFILE_TIME_LOG = pa.field("profile_time_log", pa.list_(pa.float32()))
 
 
 def _schema() -> pa.Schema:
 
     fields = list(SAMPLES_SCHEMA)
 
-    after = SAMPLES_SCHEMA.get_field_index("event_time")
+    for column, after in ((TIME_LOG, "event_time"), (PROFILE_TIME_LOG, "profile_time")):
 
-    return pa.schema(fields[: after + 1] + [TIME_LOG] + fields[after + 1 :])
+        index = [field.name for field in fields].index(after)
+
+        fields.insert(index + 1, column)
+
+    return pa.schema(fields)
 
 
 TEMPORAL_SCHEMA = _schema()
@@ -87,6 +99,12 @@ def build_group(group: str, directory: Path | None = None) -> dict:
                 check(row["client_id"], positions, len(row["event_time"]))
 
                 row["event_time_log"] = positions
+
+                ages = profile_time_log(row["client_id"], row["profile_time"], source.cutoff)
+
+                check_profile(row["client_id"], ages, row["profile_time"])
+
+                row["profile_time_log"] = ages
 
                 _count(counters, row)
 

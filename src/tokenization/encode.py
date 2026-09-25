@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from src.preprocessing.canonical.events import normalize_text
+from src.preprocessing.keys import PROFILE_LIFELONG_KEY
 from src.preprocessing.read import ClientEvent, ClientHistory
 
 from .finalvocab import FrozenArtifacts
@@ -31,7 +33,8 @@ from .specials import EVT, UNK, USR
 # начинает свой ноль, и на key_id правило не смотрит.
 #
 # Порядок полей смысла не несёт: событие это набор пар, а его
-# границы задаются отдельно.
+# границы задаются отдельно. Пары записи идут по возрастанию
+# key_id; у анкеты за ними следуют вехи — по времени.
 #
 # Пары существуют только у того, что есть. Отсутствующее поле в
 # последовательность не попадает вовсе, и пустой после
@@ -277,15 +280,52 @@ def encode_event(artifacts: FrozenArtifacts, event: ClientEvent, limit: int) -> 
     return encode_values(artifacts, event.model_values(), EVT, limit)
 
 
-def encode_profile(artifacts: FrozenArtifacts, history: ClientHistory, limit: int) -> EncodedRecord:
+def encode_profile(
+    artifacts: FrozenArtifacts, history: ClientHistory, limit: int
+) -> tuple[EncodedRecord, list[datetime | None]]:
     """
-    Представление профиля: ведущий [USR] и пары его значений.
+    Представление анкеты: ведущий [USR], пары Attributes, затем
+    по паре на каждую веху Lifelong, и время каждого токена.
+
+    Время есть только у вех: у [USR] и Attributes оно None — это
+    состояние на cutoff, а не событие. У всех кусков одного
+    значения время одно.
+
+    Вехи идут под одним ключом, значение — тип вехи. Ключ
+    повторяется, и каждое значение начинает свой ноль в positions.
 
     У клиента без анкеты остаётся только маркер: банк о нём ещё
     ничего не знает, и выдумывать пустые поля незачем.
     """
 
-    return encode_values(artifacts, history.profile or {}, USR, limit)
+    record = encode_values(artifacts, history.profile or {}, USR, limit)
+
+    times: list[datetime | None] = [None] * record.n_tokens
+
+    if history.lifelong:
+
+        key = PROFILE_LIFELONG_KEY.key
+
+        key_id = artifacts.key_id(key)
+
+        # Словарь без ключа вех собран прежним кодом: молча
+        # потерять вехи хуже, чем остановиться.
+        if key_id is None:
+            raise EncodeError(f"в словаре нет ключа {key}: словарь собран прежним кодом")
+
+        for kind, moment in history.lifelong:
+
+            ids = _value_ids(artifacts, key, kind, limit)
+
+            if ids is None:
+                continue
+
+            record.add(key_id, ids)
+            times.extend([moment] * len(ids))
+
+    record.check()
+
+    return record, times
 
 
 __all__ = [

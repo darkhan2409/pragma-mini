@@ -6,6 +6,7 @@ import numpy as np
 import pyarrow as pa
 import torch
 
+from src.dataset.lineage import lineage_problem
 from src.embedding.inputs import Loaded, Source
 from src.embedding.layer import InputEmbedding
 from src.embedding.settings import WEIGHTS_FILE as EMBEDDING_WEIGHTS
@@ -238,6 +239,11 @@ def _embedding(group: str, specials: dict) -> InputEmbedding:
 
     if not path.exists():
         raise EventError(f"нет {path}: выполните python -m src.embedding.run {group}")
+
+    problem = lineage_problem(path.parent, f"python -m src.embedding.run {group}")
+
+    if problem:
+        raise EventError(problem)
 
     saved = torch.load(path, map_location="cpu", weights_only=True)
 

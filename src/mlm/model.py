@@ -24,7 +24,9 @@ from src.profile.settings import WEIGHTS_FILE as PROFILE_WEIGHTS
 from src.profile.settings import ProfileConfig, profiles_dir
 from src.tokenization.specials import EVT, USR, load_special_tokens
 
-from .inputs import IGNORE, Client
+from src.dataset.lineage import lineage_problem
+
+from .inputs import IGNORE, Client, InputError
 from .varlen import (
     BackendError,
     VarlenLayout,
@@ -52,7 +54,9 @@ from .varlen import (
 # по корзинам близкой длины:
 #
 #   события    — сегмент = токены одного события, энкодер события;
-#   анкеты     — сегмент = токены анкеты клиента, энкодер анкеты;
+#   анкеты     — сегмент = токены анкеты клиента, энкодер анкеты:
+#                Attributes на cutoff и вехи Lifelong со своим
+#                временем (profile_time_log) внутри TimeRoPE;
 #   истории    — сегмент = [анкета, события клиента], энкодер
 #                истории: слот анкеты первым, как [USR].
 #
@@ -118,6 +122,7 @@ class PackedBatch:
     profile_key_ids: torch.Tensor
     profile_value_ids: torch.Tensor
     profile_positions: torch.Tensor
+    profile_time_log: torch.Tensor  # давность вехи до cutoff, ноль у [USR] и Attributes
     profiles: VarlenLayout        # cu_seqlens_profile [B + 1]
 
     # --- истории, [B + E]: у клиента слот анкеты и его события ---
@@ -183,6 +188,14 @@ def pack(clients: list[Client], device: torch.device) -> PackedBatch:
                 "все токены клиента"
             )
 
+        # Время анкеты плоским массивом рядом с её токенами:
+        # несовпадение длин сдвинуло бы время на токены соседа.
+        if client.profile_time_log.size != client.profile_n_tokens:
+            raise ValueError(
+                f"{client.client_id}: время анкеты на {client.profile_time_log.size} "
+                f"токенов при {client.profile_n_tokens} токенах анкеты"
+            )
+
     def join(name: str, dtype) -> np.ndarray:
         return np.concatenate([getattr(client, name) for client in clients]).astype(dtype)
 
@@ -242,6 +255,7 @@ def pack(clients: list[Client], device: torch.device) -> PackedBatch:
         profile_key_ids=tensor(join("profile_key_ids", np.int64)),
         profile_value_ids=tensor(join("profile_value_ids", np.int64)),
         profile_positions=tensor(join("profile_positions", np.int64)),
+        profile_time_log=tensor(join("profile_time_log", np.float32)),
         profiles=profiles,
         history=history,
         history_profile_slot=tensor(history_profile_slot),
@@ -442,6 +456,9 @@ class Model(nn.Module):
     def _profiles_flash(self, data: PackedBatch) -> torch.Tensor:
         """
         Энкодер анкеты на плоских токенах: [B, d] из позиции [USR].
+
+        Углы TimeRoPE по времени анкеты считаются в fp32 один раз и
+        служат всем блокам — как у истории.
         """
 
         encoder = self.profile
@@ -451,8 +468,10 @@ class Model(nn.Module):
             torch.ones_like(data.profile_key_ids, dtype=torch.bool),
         )
 
-        for layer in encoder.layers:
-            x = encoder_layer_varlen(layer, x, data.profiles)
+        cos, sin = encoder.rope.angles(data.profile_time_log)
+
+        for block in encoder.layers:
+            x = history_block_varlen(block, encoder.rope, x, cos, sin, data.profiles)
 
         return encoder.norm(x)[data.profiles.cu_seqlens[:-1]]
 
@@ -566,6 +585,13 @@ class Model(nn.Module):
 
         for bucket in data.profiles.buckets:
 
+            # Время хвоста — ноль: маска и так закрывает его, а
+            # индекс хвоста смотрит на настоящий токен со своим
+            # временем.
+            positions = torch.where(
+                bucket.mask, data.profile_time_log[bucket.index], 0.0
+            )
+
             parts.append(
                 self.profile(
                     self.embedding.embed(
@@ -574,7 +600,8 @@ class Model(nn.Module):
                         data.profile_positions[bucket.index],
                         bucket.mask,
                     ),
-                    ~bucket.mask,
+                    positions,
+                    bucket.mask,
                 )
             )
             indices.append(bucket.segments)
@@ -648,6 +675,17 @@ def load_model(
 
     specials = load_special_tokens()
 
+    # Веса 09 и 11 собраны под словарь и анкету определённого
+    # кода; прежние молча легли бы на новые номера токенов.
+    # Отсутствующий файл весов называет _weights ниже.
+    for path, module in ((embeddings_dir(group) / EMBEDDING_WEIGHTS, "src.embedding"),
+                         (profiles_dir(group) / PROFILE_WEIGHTS, "src.profile")):
+
+        problem = path.exists() and lineage_problem(path.parent, f"python -m {module}.run {group}")
+
+        if problem:
+            raise InputError(problem)
+
     saved = _weights(embeddings_dir(group) / EMBEDDING_WEIGHTS, "src.embedding", group)
 
     embedding = InputEmbedding(
@@ -669,7 +707,7 @@ def load_model(
     saved = _weights(profiles_dir(group) / PROFILE_WEIGHTS, "src.profile", group)
     config = ProfileConfig.from_dict(saved["config"])
     profile = ProfileEncoder(dim, config.layers, config.heads, config.feedforward,
-                             config.dropout, config.seed)
+                             config.dropout, config.rope_base, config.seed)
     profile.load_state_dict(saved["state_dict"])
 
     saved = _weights(history_dir(group) / HISTORY_WEIGHTS, "src.history", group)

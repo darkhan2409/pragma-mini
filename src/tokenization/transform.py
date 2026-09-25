@@ -7,8 +7,14 @@ from pathlib import Path
 import pyarrow as pa
 
 from src.preprocessing.artifacts import TableWriter, write_json
-from src.preprocessing.keys import KeysError
-from src.preprocessing.profile_state import EXCLUDED_FIELDS, INCLUDED_FIELDS, PROFILE_SEMANTICS
+from src.preprocessing.keys import PROFILE_LIFELONG_KEY, KeysError
+from src.preprocessing.profile_state import (
+    EXCLUDED_FIELDS,
+    INCLUDED_FIELDS,
+    LIFELONG_TYPES,
+    PROFILE_SEMANTICS,
+)
+from src.temporal.position import TIME_TRANSFORM
 from src.preprocessing.read import Group, ReadError
 from src.preprocessing.settings import PreprocessingConfig
 
@@ -35,16 +41,16 @@ from .specials import UNK
 #   data/04_tokenized/<group>/profile.parquet
 #
 # Профиль здесь уже закодирован: это представление анкеты
-# токенами, а не копия выгрузки. Он описывает клиента НА НАЧАЛО
-# ПЕРИОДА ЦЕЛЕЙ группы, а не на конец её выгрузки: события
-# периода целей модель восстанавливает, и анкета не имеет права
-# их пересказывать.
+# токенами, а не копия выгрузки. Он описывает клиента на cutoff
+# событий группы: Attributes на cutoff и вехи Lifelong строго
+# раньше него (PROFILE_SEMANTICS). У каждого токена анкеты есть
+# время: у вех — момент вехи, у [USR] и Attributes — null.
 #
-# Отсюда третий файл — meta.json. В нём записаны оба среза и
-# версия формата: каталог, собранный прежним кодом, несёт анкету
-# на конец выгрузки, и смешивать его с новым нельзя. Читатель
-# (05_dataset) версию проверяет и на старом каталоге
-# останавливается.
+# Отсюда третий файл — meta.json. В нём записаны cutoff, смысл
+# анкеты, набор вех и версия формата: каталог, собранный прежним
+# кодом, несёт анкету другого смысла, и смешивать его с новым
+# нельзя. Читатель (05_dataset) это проверяет и на старом
+# каталоге останавливается.
 #
 # client_id и event_time сохраняются: по ним датасет группирует
 # и сортирует. Границы значений отдельными массивами не лежат:
@@ -64,8 +70,10 @@ META_FILE = "meta.json"
 #     годится);
 # 2 — анкета на начало периода целей;
 # 3 — анкета на cutoff событий (PROFILE_SEMANTICS), возраст и
-#     признак пенсионера посчитаны от даты рождения.
-TOKENIZED_FORMAT = 3
+#     признак пенсионера посчитаны от даты рождения;
+# 4 — анкета это Attributes на cutoff и вехи Lifelong раньше
+#     него; у токенов анкеты есть время (колонка time).
+TOKENIZED_FORMAT = 4
 
 # В файлах лежит только то, что нужно модели. Число токенов
 # и значений не хранится: это длины массивов. Названия
@@ -82,12 +90,15 @@ EVENTS_SCHEMA = pa.schema(
     ]
 )
 
+# time — момент каждого токена анкеты: у вехи её время, у [USR]
+# и Attributes null.
 PROFILE_SCHEMA = pa.schema(
     [
         ("client_id", pa.string()),
         ("key_ids", pa.list_(pa.int32())),
         ("value_ids", pa.list_(pa.int32())),
         ("positions", pa.list_(pa.int32())),
+        ("time", pa.list_(pa.timestamp("us", tz="UTC"))),
     ]
 )
 
@@ -155,10 +166,18 @@ def encode_group(
 
     directory = Path(directory) if directory is not None else tokenized_dir(group)
 
+    # Словарь без ключа вех собран прежним кодом: вехи ушли бы в
+    # неизвестные ключи молча.
+    if artifacts.key_id(PROFILE_LIFELONG_KEY.key) is None:
+        raise TransformError(
+            f"в словаре нет ключа {PROFILE_LIFELONG_KEY.key}: словарь собран прежним кодом — "
+            "выполните python -m src.tokenization.run fit заново"
+        )
+
     window = group_window(group)
 
     # Один момент на всё: события строго раньше cutoff, анкета —
-    # состояние клиента на тот же cutoff.
+    # Attributes на тот же cutoff и вехи строго раньше него.
     cutoff = window.final_cutoff
 
     try:
@@ -222,7 +241,10 @@ def encode_group(
 
             # --- профиль ---
 
-            record = encode_profile(artifacts, history, config.max_pieces_per_value)
+            try:
+                record, times = encode_profile(artifacts, history, config.max_pieces_per_value)
+            except EncodeError as error:
+                raise TransformError(f"клиент {client_id}, анкета: {error}") from error
 
             _count_unknown(artifacts, record, counters)
 
@@ -242,6 +264,7 @@ def encode_group(
                             "key_ids": record.key_ids,
                             "value_ids": record.value_ids,
                             "positions": record.positions,
+                            "time": times,
                         }
                     ],
                     schema=PROFILE_SCHEMA,
@@ -259,6 +282,8 @@ def encode_group(
         "profile_semantics": PROFILE_SEMANTICS,
         "profile_fields": list(INCLUDED_FIELDS),
         "profile_fields_excluded": dict(EXCLUDED_FIELDS),
+        "profile_lifelong_types": list(LIFELONG_TYPES),
+        "profile_lifelong_time": {"anchor": "cutoff", "transform": TIME_TRANSFORM},
         "clients": counters.clients,
         "clients_with_profile": counters.profiles,
         "clients_with_empty_profile": counters.empty_profiles,

@@ -63,6 +63,10 @@ class ProfileConfig:
     # При сборке артефакта слой стоит в eval, и dropout выключен.
     dropout: float = 0.1
 
+    # Основание лестницы частот TimeRoPE по времени вех — то же,
+    # что у энкодера истории: шкала времени у них общая.
+    rope_base: float = 10000.0
+
     def validate(self) -> None:
 
         for name in ("layers", "heads", "feedforward"):
@@ -75,6 +79,9 @@ class ProfileConfig:
         if not 0.0 <= self.dropout < 1.0:
             raise ConfigError(f"dropout обязан лежать в [0, 1), получено {self.dropout}")
 
+        if self.rope_base <= 1.0:
+            raise ConfigError(f"rope_base обязан быть больше единицы, получено {self.rope_base}")
+
     def check_dim(self, dim: int) -> None:
         """
         Сверка с длиной вектора, пришедшей из весов этапа 09.
@@ -86,6 +93,12 @@ class ProfileConfig:
                 "каждая голова берёт свою часть вектора"
             )
 
+        if (dim // self.heads) % 2:
+            raise ConfigError(
+                f"на голову приходится {dim // self.heads} чисел, а TimeRoPE "
+                "поворачивает их парами и требует чётности"
+            )
+
     def as_dict(self) -> dict:
         return {
             "seed": self.seed,
@@ -93,6 +106,7 @@ class ProfileConfig:
             "heads": self.heads,
             "feedforward": self.feedforward,
             "dropout": self.dropout,
+            "rope_base": self.rope_base,
         }
 
     @staticmethod
@@ -112,6 +126,7 @@ class ProfileConfig:
             heads=int(data.get("heads", base.heads)),
             feedforward=int(data.get("feedforward", base.feedforward)),
             dropout=float(data.get("dropout", base.dropout)),
+            rope_base=float(data.get("rope_base", base.rope_base)),
         )
 
         config.validate()

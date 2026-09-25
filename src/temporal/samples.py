@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 
@@ -7,8 +8,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.dataset.build import SAMPLES_SCHEMA
+from src.dataset.lineage import lineage
 from src.preprocessing.artifacts import read_json
-from src.dataset.settings import DATASET_FORMAT, META_FILE, SAMPLES_FILE, dataset_dir
+from src.dataset.settings import META_FILE, SAMPLES_FILE, dataset_dir
 
 
 # ============================================================
@@ -71,13 +73,24 @@ class SamplesGroup:
 
         self.meta = read_json(meta_path)
 
-        found = self.meta.get("format")
+        # Этап ставит на свой результат клеймо lineage() текущего
+        # кода, поэтому вход обязан ему соответствовать: иначе
+        # набор прежнего смысла вышел бы из этапа с новым клеймом.
+        found = {
+            "dataset_format": self.meta.get("format"),
+            "profile_semantics": self.meta.get("profile_semantics"),
+            "profile_lifelong_types": self.meta.get("profile_lifelong_types"),
+        }
 
-        if found != DATASET_FORMAT:
+        if found != lineage():
             raise SamplesError(
-                f"{meta_path}: формат {found!r}, а нужен {DATASET_FORMAT}: выполните "
-                f"python -m src.dataset.run {group} заново"
+                f"{meta_path}: формат, смысл анкеты и вехи {found}, а нужны {lineage()} — "
+                f"набор собран прежним кодом: выполните python -m src.dataset.run {group} заново"
             )
+
+        # Момент, на который собрана анкета: от него считается
+        # давность вех.
+        self.cutoff = datetime.fromisoformat(self.meta["events_cutoff"])
 
     @property
     def rows(self) -> int:
