@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Iterator
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
+
+from src.generator.profile import LIFELONG_SOURCE_EVENTS, LIFELONG_SOURCE_FIELD
 
 from ..rawdata import (
     TYPE_KEY,
@@ -21,6 +25,7 @@ from ..rawdata import (
 from ..settings import PreprocessingConfig
 from .schema import (
     ENVELOPE_NAMES,
+    LIFELONG_SOURCE_COLUMN,
     NORMALIZED_FIELDS,
     TS_UTC,
     events_schema,
@@ -308,6 +313,102 @@ def parse_batch(manifest: RawManifest, batch: pa.Table, payload_names: list[str]
 # canonical нет.
 #
 # ============================================================
+# СОБЫТИЯ-ИСТОЧНИКИ ВЕХ
+# ============================================================
+#
+# Веха анкеты о продукте называет свой источник: source_id — это
+# card_id первой карты или contract_id первого кредита и вклада.
+# Акт источника записан в ленте строками типов
+# LIFELONG_SOURCE_EVENTS, у которых в поле LIFELONG_SOURCE_FIELD
+# тот же идентификатор; открытие договора со счётом — это две
+# строки одного момента, account_opened и product_opened.
+#
+# Строка находится по ссылке, а не по времени: соседнее событие
+# того же момента с другим идентификатором источником не
+# становится. Время здесь только сверяется — ссылка, указавшая на
+# строку другого момента, это сломанная выгрузка. Веха внутри
+# окна обязана найти свой акт, веха до окна — нет: её акт в
+# ленту не попал.
+# ============================================================
+
+
+# Тип строки -> вехи, источником которых она может быть.
+_SOURCE_KINDS: dict[str, tuple[str, ...]] = {
+    event_type: tuple(kind for kind, types in LIFELONG_SOURCE_EVENTS.items() if event_type in types)
+    for types in LIFELONG_SOURCE_EVENTS.values()
+    for event_type in types
+}
+
+
+def lifelong_sources(
+    batch: pa.Table,
+    event_types: list[str | None],
+    moments: list[datetime],
+    milestones: dict[str, list[dict]],
+    period_start: datetime,
+) -> pa.Array:
+    """
+    Тип вехи у каждой строки её акта-источника, у остальных null.
+
+    milestones — вехи анкеты по client_id, как в выгрузке.
+    """
+
+    client_ids = batch.column("client_id").to_pylist()
+    payloads = batch.column("payload")
+    raw_rows = batch.column("raw_row")
+
+    # (клиент, тип вехи, source_id) -> момент вехи.
+    wanted: dict[tuple[str, str, str], datetime] = {
+        (client_id, item["type"], item["source_id"]): item["event_time"]
+        for client_id in set(client_ids)
+        for item in milestones.get(client_id, ())
+        if item["source_id"] is not None
+    }
+
+    marks: list[str | None] = [None] * batch.num_rows
+    found: set[tuple[str, str, str]] = set()
+
+    for row, event_type in enumerate(event_types):
+
+        kinds = _SOURCE_KINDS.get(event_type)
+
+        if not kinds:
+            continue
+
+        payload = json.loads(payloads[row].as_py())
+
+        for kind in kinds:
+
+            link = (client_ids[row], kind, payload.get(LIFELONG_SOURCE_FIELD[kind]))
+
+            if link not in wanted:
+                continue
+
+            where = f"строка {raw_rows[row].as_py()} ({event_type})"
+
+            if marks[row] is not None:
+                raise CanonicalError(f"{where}: источник сразу двух вех, {marks[row]} и {kind}")
+
+            if moments[row] != wanted[link]:
+                raise CanonicalError(
+                    f"{where}: источник вехи {kind} ({link[2]}) записан в "
+                    f"{moments[row].isoformat()}, а веха — в {wanted[link].isoformat()}"
+                )
+
+            marks[row] = kind
+            found.add(link)
+
+    for link, moment in wanted.items():
+        if moment >= period_start and link not in found:
+            raise CanonicalError(
+                f"клиент {link[0]}: веха {link[1]} в {moment.isoformat()} внутри окна "
+                f"выгрузки, а её источника {link[2]} в ленте нет"
+            )
+
+    return pa.array(marks, pa.string())
+
+
+# ============================================================
 # СБОРКА ПАЧКИ
 # ============================================================
 
@@ -323,9 +424,11 @@ def build_batch(
     batch: pa.Table,
     payload_names: list[str],
     schema: pa.Schema,
+    milestones: dict[str, list[dict]],
 ) -> BatchResult:
     """
-    Пачка строк RAW в очищенную таблицу смысловых полей.
+    Пачка строк RAW в очищенную таблицу смысловых полей и пометку
+    событий-источников вех.
     """
 
     manifest = raw.manifest
@@ -354,6 +457,14 @@ def build_batch(
     }
 
     columns["event_time"] = pa.array(moments, type=TS_UTC)
+
+    columns[LIFELONG_SOURCE_COLUMN] = lifelong_sources(
+        batch,
+        event_types_of(batch.column("payload")).to_pylist(),
+        moments,
+        milestones,
+        manifest.period_start,
+    )
 
     for name in payload_names:
 
@@ -407,7 +518,12 @@ def _order(table: pa.Table, priority: dict[str, int]) -> pa.Array:
 
     leading = ["client_id", "event_time", _PRIORITY, TYPE_KEY, "source"]
 
-    rest = sorted(name for name in table.column_names if name not in leading)
+    # Пометка источника вехи — не данные события, и порядок от неё
+    # не зависит.
+    rest = sorted(
+        name for name in table.column_names
+        if name not in leading and name != LIFELONG_SOURCE_COLUMN
+    )
 
     unknown = len(priority)
 
@@ -434,6 +550,7 @@ __all__ = [
     "build_batch",
     "canonical_schema",
     "iter_client_batches",
+    "lifelong_sources",
     "normalize_text",
     "parse_batch",
 ]

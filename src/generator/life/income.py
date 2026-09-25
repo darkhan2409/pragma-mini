@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from .. import params as params_module
 from .. import config
-from ..rng import NS_INCOME, keyed_rng, stable_hash
+from ..rng import NS_EMPLOYMENT, NS_INCOME, keyed_rng, stable_hash
 from . import calendar as cal
 from .persona import PENSION_AGE, Persona, employer_payday
 from .stress import level_at
@@ -675,11 +675,93 @@ def monthly_income(streams: tuple, ts: datetime) -> int:
     return int(total)
 
 
+# ============================================================
+# НАЁМНАЯ РАБОТА ГЛАЗАМИ БАНКА
+# ============================================================
+#
+# Банк знает о работе клиента то, что ему сообщили: дату начала
+# работы и момент, когда запись о ней появилась. Запись без даты
+# начала — сообщение, что наёмной работы больше нет.
+#
+#   первая работа   на ней клиент был к началу потока зарплаты;
+#                   банк знает её с начала отношений. Даты начала
+#                   генератор прежде не знал: она разыгрывается
+#                   здесь, в своём пространстве NS_EMPLOYMENT, и
+#                   чужих розыгрышей не сдвигает;
+#   смена работы    новое место с даты выхода; банк узнаёт о нём
+#                   тогда же, когда об изменении анкеты, но не
+#                   раньше выхода на работу;
+#   потеря работы   запись без даты начала — только если потеря
+#                   оборвала зарплату, как и изменение анкеты.
+#
+# Событие, о котором банк не узнал, записи не даёт: банк о нём и
+# не знает. Работа не по найму (бизнес, фриланс, пенсия, учёба)
+# стажа на месте работы не имеет, и записей у неё нет.
+# ============================================================
+
+
+def job_start(persona: Persona, stream_start: datetime) -> date:
+    """
+    Начало работы, на которой клиент был к началу потока
+    зарплаты: не раньше совершеннолетия и не глубже
+    job_tenure_months_max месяцев.
+    """
+
+    settings = params_module.active().population
+
+    adult = persona.birth_date + timedelta(days=int(18 * 365.25))
+
+    available = max(0, int((stream_start - adult).days / 30.44))
+
+    months = keyed_rng(NS_EMPLOYMENT, persona.client_ordinal, 1).integers(
+        0, min(settings.job_tenure_months_max, available) + 1
+    )
+
+    return (stream_start - timedelta(days=int(months * 30.44))).date()
+
+
+def employment(persona: Persona, events: tuple, streams: tuple) -> list[tuple[date | None, datetime]]:
+    """
+    Записи банка о наёмной работе: (дата начала или None, момент
+    записи), по моменту записи.
+    """
+
+    settings = params_module.active().income
+
+    if settings.primary_kind_by_income_type.get(persona.income_type, "salary") != "salary":
+        return []
+
+    records: list[tuple[date | None, datetime]] = [
+        (job_start(persona, streams[0].valid_from), persona.relationship_start)
+    ]
+
+    for event in events:
+
+        if event.kind not in ("job_change", "job_loss") or event.known_to_bank_at is None:
+            continue
+
+        if event.kind == "job_loss":
+
+            if any(item.kind == "salary" and item.valid_to == event.ts for item in streams):
+                records.append((None, event.known_to_bank_at))
+
+            continue
+
+        start = event.ts + timedelta(days=int(event.payload.get("gap_days", 0)))
+
+        if any(item.kind == "salary" and item.valid_from == start for item in streams):
+            records.append((start.date(), max(event.known_to_bank_at, start)))
+
+    return sorted(records, key=lambda item: item[1])
+
+
 __all__ = [
     "IncomeStream",
     "Payout",
     "build_streams",
     "employer_schedule",
+    "employment",
+    "job_start",
     "monthly_income",
     "payouts",
     "vacation_payouts",

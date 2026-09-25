@@ -40,9 +40,10 @@ from .schema import SCHEMA_VERSION, payload_columns
 #   2. прочитать ленту и профиль;
 #   3. раскрыть payload вместе с ключом type;
 #   4. привести значения к объявленным типам;
-#   5. упорядочить события клиента по времени, а при равном
+#   5. пометить события-источники вех анкеты по их source_id;
+#   6. упорядочить события клиента по времени, а при равном
 #      времени — по причинному приоритету типа события;
-#   6. записать ленту.
+#   7. записать ленту.
 #
 # Любая строка, которую нельзя разобрать по контракту,
 # ОСТАНАВЛИВАЕТ этап: журнала отказов больше нет, а частичный
@@ -102,9 +103,17 @@ def build_group(
 
     events_writer = TableWriter(out_dir / EVENTS_FILE, schema.with_metadata(metadata))
 
+    # Вехи анкеты нужны пометке их событий-источников. Строка на
+    # клиента — это малая таблица рядом с лентой.
+    profile = raw.read("profile", ["client_id", "lifelong"])
+
+    milestones = dict(
+        zip(profile.column("client_id").to_pylist(), profile.column("lifelong").to_pylist())
+    )
+
     for batch in iter_client_batches(raw, config.batch_clients):
 
-        result = build_batch(raw, config, batch, payload_names, schema)
+        result = build_batch(raw, config, batch, payload_names, schema, milestones)
 
         events_writer.write(result.table)
 

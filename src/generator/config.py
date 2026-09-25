@@ -48,12 +48,27 @@ MERCHANT_REFERENCE_PATH = REFERENCE_DIR / "merchants.json"
 # вех lifelong — relationship_started, kyc_passed, app_adopted
 # (src/generator/profile.py). Вехи строго раньше as_of; лента
 # событий от них не меняется.
-GENERATOR_VERSION = "13.0"
-SCHEMA_VERSION = 16
+#
+# v17: в анкете нет колонок age и pensioner. Оба — производные от
+# birth_date (и начального вида дохода) на дату снимка, и храниться
+# как постоянный атрибут клиента не должны: возраст считает
+# препроцессинг на cutoff примера.
+#
+# v18: у анкеты есть записи о работе employment со своим
+# временем, а вехи lifelong теперь
+# bank_registered, app_registered, first_card_activated,
+# first_loan_opened и first_deposit_opened — по фактическому
+# состоянию клиента, без новых розыгрышей событий.
+#
+# v19: у вехи lifelong есть source_id — идентификатор карты или
+# договора, из которого она получена (null у прихода в банк и
+# приложения). По нему препроцессинг находит в ленте событие-
+# источник вехи.
+GENERATOR_VERSION = "16.0"
+SCHEMA_VERSION = 19
 
-# Возраст, с которого клиент считается пенсионером. Это правило
-# данных, а не деталь симуляции: по нему же препроцессинг
-# восстанавливает признак pensioner на дату.
+# Возраст, с которого клиент считается пенсионером в симуляции:
+# с него начинается пенсия и пенсионные продукты.
 PENSION_AGE = 63
 
 SEED = 42
@@ -748,7 +763,6 @@ SCHEMA_CHANGES: tuple[dict, ...] = (
 # ============================================================
 
 PROFILE_FIELDS = (
-    "age",
     "gender",
     "family_status",
     "children",
@@ -756,7 +770,6 @@ PROFILE_FIELDS = (
     "region",
     "city",
     "housing_type",
-    "pensioner",
     "income_type",
     "declared_income",
     "industry",

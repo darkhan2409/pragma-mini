@@ -272,8 +272,7 @@ def build_sample(
     flags = [eligible(item.event_time, window) for item in client.events]
 
     stubs = [
-        EventStub(index=number, event_type=item.event_type, n_tokens=item.n_tokens,
-                  eligible=flags[number])
+        EventStub(index=number, n_tokens=item.n_tokens, eligible=flags[number])
         for number, item in enumerate(client.events)
     ]
 
@@ -316,8 +315,13 @@ def build_sample(
         calendar.extend(item.calendar)
         moments.append(item.event_time)
         # Период целей решает, где цели разрешены; тип — может ли
-        # событие ей быть. Изменение анкеты остаётся контекстом.
-        target_mask.append(flags[position] and can_be_target(item.event_type))
+        # событие ей быть. Изменение анкеты и событие-источник вехи
+        # (пометка по ссылке вехи) остаются контекстом.
+        target_mask.append(
+            flags[position]
+            and can_be_target(item.event_type)
+            and item.lifelong_source is None
+        )
 
     sample = Sample(
         client_id=client.client_id,

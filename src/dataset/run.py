@@ -67,7 +67,8 @@ def run_group(args) -> int:
     )
     print(
         f"    усечено примеров {counts['truncated']} (событий за границей "
-        f"{counts['excluded_events']}); токенов в примере до {counts['max_tokens']}"
+        f"{counts['excluded_events']}); событий в истории до {counts['max_events_before']}, "
+        f"в примере до {counts['max_events']}; токенов в примере до {counts['max_tokens']}"
     )
 
     print(f"    [UNK] значений {report['unknown_values']}")

@@ -8,7 +8,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from src.generator.config import GENERATOR_VERSION, PENSION_AGE, SCHEMA_VERSION
+from src.generator.config import EVENT_TYPE_SOURCE, GENERATOR_VERSION, SCHEMA_VERSION
 from src.generator.emit import EVENTS_SCHEMA
 from src.generator.profile import PROFILE_SCHEMA
 from src.preprocessing.profile_state import (
@@ -90,8 +90,10 @@ SNAPSHOT = {
     "income_day": 10,
     "contracts_count": 5,
     "active_contracts": 3,
-    # Снимок возраста и пенсионера описывает конец выгрузки: в
-    # анкету они идут посчитанными от birth_date, а не отсюда.
+    # Возраста и пенсионера в выгрузке больше нет. Здесь они
+    # оставлены устаревшими нарочно: анкета не имеет права их
+    # читать — возраст считается от birth_date на cutoff, а
+    # пенсионера среди полей нет вовсе.
     "age": 42,
     "pensioner": True,
     # Невосстановимые поля в снимке есть и обязаны остаться за
@@ -205,10 +207,9 @@ def test_reconstructed_values_are_the_ones_written_by_hand():
         "industry": "trade",
         "income_day": 10,
         # Родилась 15.06.1984: на 1 января 2026 ей 41, а не 42 из
-        # снимка. Пришла работающей и моложе PENSION_AGE — не
-        # пенсионер, что бы ни стояло в снимке.
+        # снимка. Пенсионера среди полей нет, что бы ни стояло в
+        # снимке.
         "age": 41,
-        "pensioner": False,
     }
 
 
@@ -398,12 +399,14 @@ def test_shortcut_fields_are_the_event_derived_ones():
 
 
 # ============================================================
-# ВОЗРАСТ И ПЕНСИОНЕР ОТ ДАТЫ РОЖДЕНИЯ
+# ВОЗРАСТ ОТ ДАТЫ РОЖДЕНИЯ
 # ============================================================
 #
-# Оба поля меняются со временем без события, поэтому снимок для
-# них бесполезен: он описывает конец выгрузки. Считаются они от
-# постоянной birth_date — тем же правилом, что в генераторе.
+# Возраст меняется со временем без события, поэтому снимок для
+# него бесполезен: он описывает конец выгрузки. Возраст — полных
+# лет на местную дату cutoff по постоянной birth_date, с учётом
+# дня и месяца. Признака пенсионера среди полей нет: он был
+# производным от возраста и начального вида дохода.
 # ============================================================
 
 
@@ -411,20 +414,56 @@ def born(day: date, **fields) -> dict:
     return dict(SNAPSHOT, birth_date=day, **fields)
 
 
-def test_birth_date_fields_reach_the_profile():
+def local(text: str) -> datetime:
+    """
+    Момент по местному времени банка.
+    """
 
-    assert set(FROM_BIRTH_DATE) == {"age", "pensioner"}
+    return datetime.fromisoformat(text).replace(tzinfo=BANK)
+
+
+def age_at(day: date, moment: datetime) -> int:
+    return profile_at(born(day), [], moment, BANK).values["age"]
+
+
+def test_only_age_is_counted_from_the_birth_date():
+
+    assert FROM_BIRTH_DATE == ("age",)
     assert set(FROM_BIRTH_DATE) <= set(INCLUDED_FIELDS)
     assert not set(FROM_BIRTH_DATE) & set(EXCLUDED_FIELDS)
 
 
-def test_age_counts_only_birthdays_before_the_cutoff():
+def test_age_after_this_years_birthday():
 
-    before = profile_at(born(date(1990, 1, 1)), [], CUTOFF, BANK)
-    after = profile_at(born(date(1990, 1, 2)), [], CUTOFF, BANK)
+    assert age_at(date(1990, 3, 10), local("2026-05-01T00:00:00")) == 36
 
-    assert before.values["age"] == 36
-    assert after.values["age"] == 35
+
+def test_age_before_this_years_birthday_is_one_less():
+
+    assert age_at(date(1990, 6, 10), local("2026-05-01T00:00:00")) == 35
+
+
+def test_age_on_the_birthday_itself():
+    """
+    Cutoff ровно в день рождения: год уже исполнился. Мгновением
+    раньше — ещё нет.
+    """
+
+    assert age_at(date(1990, 5, 1), local("2026-05-01T00:00:00")) == 36
+    assert age_at(date(1990, 5, 1), local("2026-04-30T23:59:59")) == 35
+
+
+def test_one_birth_date_gives_the_age_of_each_cutoff():
+
+    day = date(1990, 5, 1)
+
+    ages = [
+        age_at(day, local(moment))
+        for moment in ("2025-05-01T00:00:00", "2026-01-01T00:00:00",
+                       "2026-05-01T00:00:00", "2026-09-01T00:00:00")
+    ]
+
+    assert ages == [35, 35, 36, 36]
 
 
 def test_age_is_counted_on_the_local_date_of_the_cutoff():
@@ -433,90 +472,77 @@ def test_age_is_counted_on_the_local_date_of_the_cutoff():
     1 января наступил, хотя по UTC дата ещё прежняя.
     """
 
-    moment = when("2025-12-31T19:00:00")
-
-    state = profile_at(born(date(1990, 1, 1)), [], moment, BANK)
-
-    assert state.values["age"] == 36
+    assert age_at(date(1990, 1, 1), when("2025-12-31T19:00:00")) == 36
 
 
-def test_pensioner_by_age_is_not_taken_from_the_future():
+def test_age_of_the_snapshot_is_never_read():
     """
-    Пенсионный возраст наступил ПОСЛЕ границы: в снимке признак
-    уже стоит, а на cutoff его ещё не было.
+    В снимке устаревший возраст 42. Анкета берёт возраст только от
+    даты рождения, а без неё возраста нет вовсе — ни из снимка, ни
+    подставленного.
     """
 
-    turning = date(2026 - PENSION_AGE, 3, 1)
+    assert SNAPSHOT["age"] == 42
 
-    at_cutoff = profile_at(born(turning, pensioner=True), [], CUTOFF, BANK)
-    later = profile_at(born(turning, pensioner=True), [], when("2026-03-01T00:00:00"), BANK)
-
-    assert at_cutoff.values["age"] == PENSION_AGE - 1
-    assert at_cutoff.values["pensioner"] is False
-
-    assert later.values["age"] == PENSION_AGE
-    assert later.values["pensioner"] is True
-
-
-def test_pensioner_by_initial_income_type_at_any_age():
-
-    state = profile_at(
-        born(date(1970, 5, 5), income_type="pensioner", pensioner=False), [], CUTOFF, BANK
-    )
-
-    assert state.values["age"] == 55
-    assert state.values["pensioner"] is True
-
-
-def test_income_type_change_does_not_move_pensioner():
-    """
-    Признак ставится по виду дохода, с которым клиент пришёл, а не
-    по текущему: так его считает генератор.
-    """
-
-    became = profile_at(
-        born(date(1970, 5, 5), income_type="pensioner"),
-        [change("2025-03-01T10:00:00", "income_type", "employed", "pensioner")],
-        CUTOFF, BANK,
-    )
-
-    left = profile_at(
-        born(date(1970, 5, 5), income_type="employed"),
-        [change("2025-03-01T10:00:00", "income_type", "pensioner", "employed")],
-        CUTOFF, BANK,
-    )
-
-    assert became.values["pensioner"] is False
-    assert left.values["pensioner"] is True
-
-
-def test_no_birth_date_gives_neither_field():
+    assert profile_at(born(date(1990, 1, 1)), [], CUTOFF, BANK).values["age"] == 36
 
     snapshot = dict(SNAPSHOT)
     del snapshot["birth_date"]
 
-    state = profile_at(snapshot, [], CUTOFF, BANK)
+    assert "age" not in profile_at(snapshot, [], CUTOFF, BANK).values
 
-    assert "age" not in state.values
+
+def test_events_after_the_cutoff_do_not_move_the_age():
+
+    later = [change("2026-03-01T10:00:00", "income_type", "employed", "pensioner")]
+
+    assert profile_at(born(date(1990, 1, 1)), later, CUTOFF, BANK).values["age"] == 36
+
+
+def test_pensioner_is_not_an_attribute():
+    """
+    Ни полем анкеты, ни исключённым полем, ни ключом словаря, ни
+    изменением анкеты пенсионер больше не бывает — даже если в
+    снимке он заполнен, а клиенту за 63.
+    """
+
+    from src.preprocessing.keys import CHANGEABLE_PROFILE_FIELDS, PROFILE_KEYS
+    from src.tokenization.schema import SemanticSchema
+
+    for names in (INCLUDED_FIELDS, EXCLUDED_FIELDS, PROFILE_KEYS, CHANGEABLE_PROFILE_FIELDS):
+        assert "pensioner" not in names
+
+    state = profile_at(
+        born(date(1950, 1, 1), income_type="pensioner", pensioner=True), [], CUTOFF, BANK
+    )
+
+    assert state.values["age"] == 76
     assert "pensioner" not in state.values
 
+    assert not [key for key in SemanticSchema().keys if "pensioner" in key]
 
-def test_unknown_initial_income_type_leaves_pensioner_out_only_for_the_young():
+
+def test_attributes_are_exactly_the_thirteen():
     """
-    Первое изменение вида дохода без прежнего значения: с чем
-    клиент пришёл, неизвестно. Молодому признак не подставляется,
-    а достигшему PENSION_AGE он следует из одного возраста.
+    Прежние поля без пенсионера и стаж на месте работы — ровно 13.
+    Порядок в кортеже — порядок объявления ключей, смысла он не
+    несёт: токены анкеты идут по номеру ключа.
     """
 
-    rows = [change("2025-03-01T10:00:00", "income_type", None, "employed")]
+    assert set(INCLUDED_FIELDS) == {
+        "age", "gender", "family_status", "education", "region", "city", "housing_type",
+        "income_type", "declared_income", "industry", "income_day", "children",
+        "job_tenure_months",
+    }
+    assert len(INCLUDED_FIELDS) == 13
 
-    young = profile_at(born(date(1985, 5, 5)), rows, CUTOFF, BANK)
-    old = profile_at(born(date(1950, 5, 5)), rows, CUTOFF, BANK)
 
-    assert young.values["age"] == 40
-    assert "pensioner" not in young.values
+def test_raw_profile_keeps_the_birth_date_not_the_age():
 
-    assert old.values["pensioner"] is True
+    assert "birth_date" in PROFILE_SCHEMA.names
+
+    for name in ("age", "pensioner"):
+        assert name not in PROFILE_SCHEMA.names
 
 
 # ============================================================
@@ -530,28 +556,26 @@ def test_unknown_initial_income_type_leaves_pensioner_out_only_for_the_young():
 
 RAW_CLIENT = "c000000000001"
 
-# Граница выгрузки write_raw: 1 июля 2026 у банка. Снимок анкеты
-# описывает клиента перед ней.
-AS_OF = datetime(2026, 7, 1, tzinfo=BANK).astimezone(UTC)
+# Граница выгрузки write_raw по умолчанию: 1 июля 2026 у банка.
+# Снимок анкеты описывает клиента перед ней.
+END = "2026-07-01T00:00:00+05:00"
+
+AS_OF = datetime.fromisoformat(END).astimezone(UTC)
 
 
 def raw_event(client: str, moment: str, payload: dict) -> dict:
     return {
         "client_id": client,
         "event_time": when(moment).astimezone(UTC).isoformat().replace("+00:00", "+00:00"),
-        "source": {
-            "profile_change": "profile",
-            "product_opened": "product_events",
-            "product_closed": "product_events",
-            "purchase": "transactions",
-        }[payload["type"]],
+        "source": EVENT_TYPE_SOURCE[payload["type"]],
         "payload": json.dumps(payload, ensure_ascii=False),
     }
 
 
-def write_raw(directory, events: list[dict], snapshot: dict) -> None:
+def write_raw(directory, events: list[dict], snapshot: dict, end: str = END) -> None:
     """
     Выгрузка группы по контракту RAW: две таблицы и манифест.
+    end — граница выгрузки, она же as_of снимка.
     """
 
     directory.mkdir(parents=True, exist_ok=True)
@@ -561,7 +585,8 @@ def write_raw(directory, events: list[dict], snapshot: dict) -> None:
     pq.write_table(table, directory / "events.parquet", compression="zstd")
 
     row = {name: None for name in PROFILE_SCHEMA.names}
-    row["as_of"] = AS_OF
+    row["as_of"] = datetime.fromisoformat(end).astimezone(UTC)
+    row["employment"] = []
     row["lifelong"] = []
     row.update(snapshot)
     row["client_id"] = RAW_CLIENT
@@ -580,7 +605,7 @@ def write_raw(directory, events: list[dict], snapshot: dict) -> None:
         "period_start": "2024-01-01T00:00:00+05:00",
         # Выгрузка идёт дальше cutoff val (1 мая): события после T
         # в ней есть, и тесты проверяют, что они никуда не доходят.
-        "period_end": "2026-07-01T00:00:00+05:00",
+        "period_end": end,
         "seed": 1,
         "world_seed": 1,
         "total_clients": 1,
@@ -599,7 +624,7 @@ def write_raw(directory, events: list[dict], snapshot: dict) -> None:
     )
 
 
-def prepare(stage, events: list[dict], snapshot: dict, group: str = "val"):
+def prepare(stage, events: list[dict], snapshot: dict, group: str = "val", end: str = END):
     """
     Выгрузка → препроцессинг → история клиента на cutoff группы.
     """
@@ -608,7 +633,7 @@ def prepare(stage, events: list[dict], snapshot: dict, group: str = "val"):
     from src.preprocessing.read import Group
     from src.preprocessing.settings import PreprocessingConfig, group_dir, raw_group_dir
 
-    write_raw(raw_group_dir(group), events, snapshot)
+    write_raw(raw_group_dir(group), events, snapshot, end)
 
     settings = PreprocessingConfig.load(None)
 
@@ -718,10 +743,25 @@ def test_profile_change_stays_an_event_of_the_history(stage):
     ]
 
 
-LIFELONG_VALUES = ("relationship_started", "kyc_passed", "app_adopted")
+LIFELONG_VALUES = (
+    "bank_registered", "app_registered", "first_card_activated",
+    "first_loan_opened", "first_deposit_opened",
+)
+
+# Возрасты, которые «видел train» крошечного словаря: каждый — своё
+# значение. Остальные возрасты словарю неизвестны.
+AGE_VALUES = ("34", "35", "36", "39", "62", "63")
+
+# Метки стажа, которые «видел train» крошечного словаря.
+TENURE_VALUES = ("0-5", "6-11", "54-59")
 
 
-def write_profile_vocab(root, lifelong: tuple[str, ...] | None = LIFELONG_VALUES) -> None:
+def write_profile_vocab(
+    root,
+    lifelong: tuple[str, ...] | None = LIFELONG_VALUES,
+    age_scale: bool = False,
+    event_types: tuple[str, ...] = (),
+) -> None:
     """
     Крошечный словарь, знающий ключи анкеты.
 
@@ -729,14 +769,21 @@ def write_profile_vocab(root, lifelong: tuple[str, ...] | None = LIFELONG_VALUES
     значение профиля стало бы [UNK]: проверка совпадения токенов
     выполнялась бы сама собой.
 
+    Ключи — все поля анкеты (INCLUDED_FIELDS) и вехи: словарь без
+    ключа поля кодирование отвергает. Значения известны у немногих
+    ключей, остальным хватает пустого домена.
+
     lifelong — известные словарю типы вех; None — словарь прежнего
-    кода, без ключа вех вовсе.
+    кода, без ключа вех вовсе. age_scale — словарь прежнего кода,
+    где возраст кодировался диапазонами. event_types — известные
+    словарю типы событий: без них событие это один маркер [EVT].
     """
 
     import json as _json
 
     from tokenizers import Tokenizer, models
 
+    from src.preprocessing.keys import NUMERIC, PROFILE_KEYS
     from src.tokenization.finalvocab import build_final_vocab
     from src.tokenization.settings import (
         BPE_FILE,
@@ -754,16 +801,36 @@ def write_profile_vocab(root, lifelong: tuple[str, ...] | None = LIFELONG_VALUES
 
     specials = build_special_tokens()
 
-    catalogue = {
+    domains = {
         "profile_gender": ("F", "M"),
         "profile_city": ("Almaty", "Astana", "Shymkent"),
         "profile_children": ("0", "1", "2"),
+        "profile_age": AGE_VALUES,
+        "profile_income_type": ("employed", "unemployed"),
+        "profile_job_tenure_months": TENURE_VALUES,
     }
+
+    catalogue: dict[str, tuple[str, ...]] = {}
+    scales: list[str] = []
+
+    for name in INCLUDED_FIELDS:
+
+        key = PROFILE_KEYS[name]
+
+        if key.kind == NUMERIC or (age_scale and key.key == "profile_age"):
+            scales.append(key.key)
+        else:
+            catalogue[key.key] = domains.get(key.key, ())
 
     if lifelong is not None:
         catalogue["profile_lifelong"] = lifelong
 
-    keys = {name: len(specials) + number for number, name in enumerate(catalogue)}
+    if event_types:
+        catalogue["event_type"] = event_types
+
+    names = [*catalogue, *scales]
+
+    keys = {name: len(specials) + number for number, name in enumerate(names)}
 
     number = len(specials) + len(keys)
 
@@ -775,16 +842,28 @@ def write_profile_vocab(root, lifelong: tuple[str, ...] | None = LIFELONG_VALUES
             values[key][item] = number
             number += 1
 
+    # Два диапазона на число: граница — середина шкалы ключа.
+    middle = {"profile_age": 40.0, "profile_declared_income": 500_000.0}
+
+    buckets: dict[str, dict[str, dict]] = {}
+
+    for key in scales:
+        buckets[key] = {
+            f"{key}_bucket_1": {"id": number, "min": None, "max": middle[key]},
+            f"{key}_bucket_2": {"id": number + 1, "min": middle[key], "max": None},
+        }
+        number += 2
+
     bpe = BpeModel(tokenizer=Tokenizer(models.BPE(vocab={"ab": 0}, merges=[])))
 
-    vocab = build_final_vocab(specials, keys, values, {}, bpe)
+    vocab = build_final_vocab(specials, keys, values, buckets, bpe)
 
     for name, data in (
         (FINAL_VOCAB_FILE, vocab),
         (SPECIAL_TOKENS_FILE, specials),
         (KEY_VOCAB_FILE, keys),
         (VALUE_VOCAB_FILE, values),
-        (BUCKETS_FILE, {}),
+        (BUCKETS_FILE, buckets),
     ):
         (directory / name).write_text(
             _json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -888,22 +967,71 @@ def test_pipeline_profile_carries_no_shortcut_key(stage):
     assert set(profile) <= {f"profile_{name}" for name in INCLUDED_FIELDS}
 
 
-def test_pipeline_age_and_pensioner_on_the_local_cutoff(stage):
+def test_pipeline_age_on_the_local_cutoff(stage):
     """
     cutoff val — полночь 1 мая у банка, то есть 19:00 UTC 30
-    апреля. Клиентке, родившейся 1 мая, в этот момент уже
-    PENSION_AGE: по UTC вышло бы на год меньше и не пенсионер.
-    События после cutoff на оба поля не влияют.
+    апреля. Клиентке, родившейся 1 мая 1963-го, в этот момент уже
+    63: по UTC вышло бы на год меньше. События после cutoff на
+    возраст не влияют, а пенсионера в анкете нет вовсе.
     """
 
-    day = date(2026 - PENSION_AGE, 5, 1)
+    day = date(1963, 5, 1)
 
     quiet = prepare(stage, EARLY, dict(QUIET_SNAPSHOT, birth_date=day)).profile
     busy = prepare(stage, EARLY + AFTER, dict(BUSY_SNAPSHOT, birth_date=day)).profile
 
-    assert quiet["profile_age"] == PENSION_AGE
-    assert quiet["profile_pensioner"] is True
+    assert quiet["profile_age"] == 63
+    assert "profile_pensioner" not in quiet
     assert quiet == busy
+
+
+def test_end_of_the_export_does_not_change_the_age(stage):
+    """
+    Одна и та же клиентка в выгрузках, кончающихся 1 июля и 1
+    сентября: на cutoff val возраст и вся анкета одни и те же.
+    Прежде возраст брался бы из снимка на конец выгрузки и
+    разошёлся бы.
+    """
+
+    snapshot = dict(QUIET_SNAPSHOT, birth_date=date(1963, 7, 15),
+                    lifelong=[{"type": "bank_registered", "event_time": when("2021-05-17T00:00:00")}])
+
+    short = prepare(stage, EARLY, snapshot, end="2026-07-01T00:00:00+05:00")
+    long = prepare(stage, EARLY, snapshot, end="2026-09-01T00:00:00+05:00")
+
+    assert short.profile["profile_age"] == 62
+    assert short.profile == long.profile
+    assert short.lifelong == long.lifelong == [("bank_registered", when("2021-05-17T00:00:00"))]
+
+
+def test_age_is_a_profile_token_and_birth_date_is_not(stage):
+    """
+    Модель видит возраст на cutoff токеном анкеты. Даты рождения
+    нет ни среди значений анкеты, ни среди ключей словаря, ни в
+    токенах.
+    """
+
+    from src.tokenization.encode import encode_profile
+    from src.tokenization.finalvocab import FrozenArtifacts
+    from src.tokenization.schema import SemanticSchema
+
+    write_profile_vocab(stage)
+
+    artifacts = FrozenArtifacts.load()
+
+    history = prepare(stage, EARLY, dict(QUIET_SNAPSHOT, birth_date=date(1990, 1, 1)))
+
+    record, _ = encode_profile(artifacts, history, 4)
+
+    names = [artifacts.describe(token) for token in record.key_ids]
+
+    assert history.profile["profile_age"] == 36
+    assert artifacts.key_id("profile_age") in record.key_ids
+    assert not record.unknown_keys
+
+    assert not [key for key in history.profile if "birth" in key]
+    assert not [name for name in names if "birth" in name or "pensioner" in name]
+    assert not [key for key in SemanticSchema().keys if "birth" in key]
 
 
 def test_vocab_fit_and_encoding_read_the_same_cutoff(stage, monkeypatch):
@@ -1036,7 +1164,8 @@ def test_encoded_group_records_the_profile_semantics(stage):
     assert "profile_moment" not in meta
     assert meta["profile_fields"] == list(INCLUDED_FIELDS)
     assert meta["profile_lifelong_types"] == list(LIFELONG_TYPES) == [
-        "relationship_started", "kyc_passed", "app_adopted",
+        "bank_registered", "app_registered", "first_card_activated",
+        "first_loan_opened", "first_deposit_opened",
     ]
     assert meta["profile_lifelong_time"] == {"anchor": "cutoff", "transform": "8*log1p(seconds/8)"}
 
@@ -1069,6 +1198,12 @@ def test_tokenized_of_the_previous_semantics_is_refused(stage):
     for meta in (
         {"format": 2, "profile_moment": "2026-01-01T00:00:00+00:00"},
         {"format": 3, "profile_semantics": "state_at_event_cutoff"},
+        # Формат 4 — анкета ещё с признаком пенсионера, формат 5 —
+        # прежние вехи и без стажа.
+        {"format": 4, "profile_semantics": PROFILE_SEMANTICS,
+         "profile_lifelong_types": list(LIFELONG_TYPES)},
+        {"format": 5, "profile_semantics": PROFILE_SEMANTICS,
+         "profile_lifelong_types": ["relationship_started", "kyc_passed", "app_adopted"]},
         {"format": TOKENIZED_FORMAT, "profile_moment": "2026-01-01T00:00:00+00:00"},
         {"format": TOKENIZED_FORMAT, "profile_semantics": PROFILE_SEMANTICS,
          "profile_lifelong_types": list(LIFELONG_TYPES)[:2]},

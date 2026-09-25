@@ -481,7 +481,6 @@ class CommunitySimulation:
     def _initial_profile(self, persona: Persona) -> dict:
 
         return {
-            "age": persona.age_at(config.HISTORY_START),
             "gender": persona.gender,
             "family_status": persona.family_status,
             "children": persona.children,
@@ -491,7 +490,6 @@ class CommunitySimulation:
             # становится: у села имени в генераторе нет.
             "city": geography.by_name(persona.settlement).public_name,
             "housing_type": persona.housing_type,
-            "pensioner": persona.is_pensioner_at(config.HISTORY_START),
             "income_type": persona.income_type,
             "declared_income": persona.declared_income,
             "industry": persona.industry,

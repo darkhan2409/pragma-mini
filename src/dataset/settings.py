@@ -36,43 +36,37 @@ META_FILE = "meta.json"
 # 3 — анкета на cutoff событий (state_at_event_cutoff), возраст и
 #     признак пенсионера посчитаны от даты рождения;
 # 4 — анкета это Attributes на cutoff и вехи Lifelong раньше
-#     него, с временем каждого токена (profile_time).
-DATASET_FORMAT = 4
+#     него, с временем каждого токена (profile_time);
+# 5 — признака пенсионера среди Attributes нет; возраст — только
+#     от birth_date на cutoff и точным числом полных лет;
+# 6 — стаж на месте работы в Attributes, новые вехи Lifelong;
+#     событие-источник вехи целью не бывает;
+# 7 — событие-источник вехи находит ссылка вехи (source_id), а не
+#     совпадение времени и типа; стаж только при наёмном виде
+#     дохода на cutoff.
+DATASET_FORMAT = 7
 
 GROUPS: tuple[str, ...] = ("train", "val", "test")
 
 # Политика отбора истории в один пример.
-POLICY_ALL = "all"
-POLICY_RECENT_PLUS_MILESTONES = "recent_plus_milestones"
-
-POLICIES: tuple[str, ...] = (POLICY_ALL, POLICY_RECENT_PLUS_MILESTONES)
-
-
-# Важные старые события в порядке приоритета. Порядок и есть
-# решение: при нехватке резерва берутся те, что выше.
 #
-# Сверху то, что меняет положение клиента необратимо (просрочка,
-# мошенничество, блокировка), ниже жизненный цикл продукта, и в
-# конце изменение анкеты.
-DEFAULT_MILESTONES: tuple[str, ...] = (
-    "delinquency_registered",
-    "installment_missed",
-    "arrears_cleared",
-    "fraud_alert",
-    "fraud_decision",
-    "card_blocked",
-    "card_unblocked",
-    "loan_disbursement",
-    "loan_restructured",
-    "loan_closed",
-    "early_repayment",
-    "application_decision",
-    "product_opened",
-    "product_closed",
-    "product_migrated",
-    "account_opened",
-    "profile_change",
-)
+#   all     вся видимая история;
+#   recent  последние max_events событий, в исходном порядке.
+POLICY_ALL = "all"
+POLICY_RECENT = "recent"
+
+POLICIES: tuple[str, ...] = (POLICY_ALL, POLICY_RECENT)
+
+# Сколько последних событий попадает в пример по умолчанию.
+#
+# Предел нужен шагу обучения: память forward+backward растёт
+# линейно с длиной истории. Самый длинный клиент train — 20 300
+# событий, 121 623 токена — требует 3,49 ГиБ, больше свободных
+# 3,2 ГиБ у RTX 3050 под WSL, и уходит в системную память. При
+# 12 000 самый тяжёлый шаг train занимает 2,53 ГиБ (flash-attn,
+# bf16). Долгосрочные факты о клиенте при этом не теряются: они
+# лежат в Lifelong анкеты, а не в ленте.
+MAX_EVENTS = 12000
 
 
 class ConfigError(ValueError):
@@ -85,17 +79,14 @@ class ConfigError(ValueError):
 class ContextPolicy:
     """
     Сколько истории попадает в один пример.
-
-    Лимит событий и лимит токенов это РАЗНЫЕ настройки: сто
-    коротких экранов приложения и сто кредитных событий стоят
-    модели по-разному, и один предел через другой не выражается.
     """
 
-    policy: str = POLICY_ALL
+    policy: str = POLICY_RECENT
 
-    # None значит «предела нет». У политики all это норма.
-    max_events: int | None = None
-    max_tokens: int | None = None
+    # Предел числа событий. У recent он обязателен; у all это
+    # объявленная граница: история длиннее неё — ошибка, а не
+    # повод обрезать молча.
+    max_events: int | None = MAX_EVENTS
 
     # Предел на одну запись. Он действует ВСЕГДА, даже когда
     # берётся вся история: значение, не помещающееся в одно
@@ -103,56 +94,27 @@ class ContextPolicy:
     max_event_tokens: int = 4096
     max_profile_tokens: int = 4096
 
-    milestone_event_types: tuple[str, ...] = DEFAULT_MILESTONES
-
-    # Какая доля обоих бюджетов резервируется под важные старые
-    # события.
-    milestone_share: float = 0.25
-
-    # Отдать недоизрасходованный резерв недавним событиям.
-    return_unused_budget: bool = True
-
     def validate(self) -> None:
 
         if self.policy not in POLICIES:
             raise ConfigError(f"неизвестная политика контекста {self.policy!r}: известны {list(POLICIES)}")
 
-        for name in ("max_events", "max_tokens"):
-            value = getattr(self, name)
-            if value is not None and value < 1:
-                raise ConfigError(f"{name} обязан быть положительным или None")
+        if self.max_events is not None and self.max_events < 1:
+            raise ConfigError("max_events обязан быть положительным или None")
+
+        if self.policy == POLICY_RECENT and self.max_events is None:
+            raise ConfigError("политика recent без max_events отбирать нечего")
 
         for name in ("max_event_tokens", "max_profile_tokens"):
             if getattr(self, name) < 1:
                 raise ConfigError(f"{name} обязан быть положительным")
 
-        if not 0.0 <= self.milestone_share < 1.0:
-            raise ConfigError("доля резерва вех лежит в [0, 1): весь бюджет под вехи не отдаётся")
-
-        if len(set(self.milestone_event_types)) != len(self.milestone_event_types):
-            raise ConfigError("тип события назван вехой дважды: приоритет тогда неоднозначен")
-
-        if self.policy == POLICY_RECENT_PLUS_MILESTONES:
-
-            if self.max_events is None and self.max_tokens is None:
-                raise ConfigError(
-                    "политика recent_plus_milestones без единого бюджета отбирать нечего: "
-                    "задайте max_events, max_tokens или обе"
-                )
-
-            if self.milestone_share > 0.0 and not self.milestone_event_types:
-                raise ConfigError("резерв под вехи объявлен, а список важных типов пуст")
-
     def as_dict(self) -> dict:
         return {
             "policy": self.policy,
             "max_events": self.max_events,
-            "max_tokens": self.max_tokens,
             "max_event_tokens": self.max_event_tokens,
             "max_profile_tokens": self.max_profile_tokens,
-            "milestone_event_types": list(self.milestone_event_types),
-            "milestone_share": self.milestone_share,
-            "return_unused_budget": self.return_unused_budget,
         }
 
     @staticmethod
@@ -169,14 +131,8 @@ class ContextPolicy:
             base,
             policy=str(data.get("policy", base.policy)),
             max_events=_optional_int(data, "max_events", base.max_events),
-            max_tokens=_optional_int(data, "max_tokens", base.max_tokens),
             max_event_tokens=int(data.get("max_event_tokens", base.max_event_tokens)),
             max_profile_tokens=int(data.get("max_profile_tokens", base.max_profile_tokens)),
-            milestone_event_types=tuple(
-                str(item) for item in data.get("milestone_event_types", base.milestone_event_types)
-            ),
-            milestone_share=float(data.get("milestone_share", base.milestone_share)),
-            return_unused_budget=bool(data.get("return_unused_budget", base.return_unused_budget)),
         )
 
         policy.validate()
@@ -261,11 +217,11 @@ def dataset_dir(group: str) -> Path:
 
 __all__ = [
     "DATASET_DIR",
-    "DEFAULT_MILESTONES",
     "GROUPS",
+    "MAX_EVENTS",
     "POLICIES",
     "POLICY_ALL",
-    "POLICY_RECENT_PLUS_MILESTONES",
+    "POLICY_RECENT",
     "DATASET_FORMAT",
     "META_FILE",
     "SAMPLES_FILE",

@@ -6,7 +6,6 @@ from typing import Iterable, Mapping
 
 import pyarrow as pa
 
-from src.generator.config import PENSION_AGE
 from src.generator.profile import LIFELONG_TYPES as RAW_LIFELONG_TYPES
 from src.generator.profile import PROFILE_FIELD_TYPES
 
@@ -54,10 +53,15 @@ from .keys import CATEGORICAL, COUNT, NUMERIC, PROFILE_KEYS, SemanticKey
 #   откат по изменению     событие profile_change несёт прежнее
 #                          значение, и первое изменение в момент T
 #                          или позже возвращает то, что было на T;
-#   счёт от даты рождения  возраст и признак пенсионера меняются
-#                          со временем без события, но выгрузка
-#                          несёт постоянную birth_date, и по ней
-#                          оба считаются на любую дату.
+#   счёт от даты рождения  возраст меняется со временем без
+#                          события, но выгрузка несёт постоянную
+#                          birth_date, и по ней возраст считается
+#                          на любую дату. Самой даты рождения среди
+#                          полей анкеты нет: модель видит возраст
+#                          на cutoff, а не дату;
+#   датированные факты     у записей о работе в снимке своё
+#                          время, и на T берутся те, что были
+#                          известны банку строго раньше T.
 #
 # Остальные поля в анкету не идут (EXCLUDED_FIELDS), у каждого
 # названа причина:
@@ -75,7 +79,7 @@ from .keys import CATEGORICAL, COUNT, NUMERIC, PROFILE_KEYS, SemanticKey
 # отсутствие поля стало бы сообщением о клиенте.
 #
 # Клиент мог прийти в банк уже после T. Событий до T у него нет,
-# вехи relationship_started до T нет тоже, а откат полей даёт
+# вехи bank_registered до T нет тоже, а откат полей даёт
 # значения, с которыми клиент пришёл.
 # ============================================================
 
@@ -87,6 +91,10 @@ PROFILE_SEMANTICS = "attributes_and_lifelong_at_event_cutoff"
 
 # Типы вех Lifelong. Источник истины — контракт выгрузки.
 LIFELONG_TYPES: tuple[str, ...] = RAW_LIFELONG_TYPES
+
+# Шаг меток стажа, в месяцах: 0-5, 6-11, 12-17, … Граница задана
+# шагом, а не данными train.
+JOB_TENURE_STEP = 6
 
 
 class ProfileStateError(ValueError):
@@ -119,12 +127,30 @@ CHANGED_BY_EVENT: tuple[str, ...] = (
 
 # Поле считается на дату из birth_date выгрузки:
 #
-#   age        полных лет на местную дату момента;
-#   pensioner  вид дохода при приходе клиента — пенсия, или
-#              возраст не меньше PENSION_AGE. Так признак ставит
-#              генератор: по начальному виду дохода, а не по
-#              текущему, поэтому смена вида дохода его не трогает.
-FROM_BIRTH_DATE: tuple[str, ...] = ("age", "pensioner")
+#   age  полных лет на местную дату момента — с учётом дня и
+#        месяца рождения, а не разностью годов.
+#
+# Признака пенсионера среди полей нет: он был производным от
+# возраста и начального вида дохода, отдельного банковского
+# статуса за ним не стоит, а обе его части модель уже видит —
+# возраст полем, вид дохода полем и изменениями анкеты в ленте.
+FROM_BIRTH_DATE: tuple[str, ...] = ("age",)
+
+
+# Поле считается на дату по датированным фактам снимка:
+#
+#   job_tenure_months  стаж на последней работе по найму, о которой
+#                      банк узнал строго раньше T: полных месяцев от
+#                      её начала до T, меткой полугодия. Нет такой
+#                      работы, последняя запись — «работы нет» или
+#                      вид дохода на T не наёмный — поля нет.
+FROM_DATED_FACTS: tuple[str, ...] = ("job_tenure_months",)
+
+# Виды дохода работы по найму: стаж бывает только при них. Записи
+# о работе и вид дохода — разные факты анкеты, и расходятся они,
+# например, у безработного, чья новая работа началась позже, чем
+# банк о ней узнал: вид дохода на T ещё unemployed.
+SALARIED_INCOME_TYPES: tuple[str, ...] = ("employed", "state_employee")
 
 
 _FROM_CONTRACTS = (
@@ -155,7 +181,7 @@ SHORTCUT_FIELDS: dict[str, str] = {
 # Выводятся из вехи Lifelong.
 FROM_LIFELONG: dict[str, str] = {
     "relationship_months": (
-        "стаж — производное от вехи relationship_started: модель получает "
+        "стаж — производное от вехи bank_registered: модель получает "
         "саму дату в Lifelong, а давность до cutoff видит временным каналом"
     ),
 }
@@ -183,7 +209,7 @@ def _check_coverage() -> None:
     """
 
     groups = (
-        CONSTANT_FIELDS, CHANGED_BY_EVENT, FROM_BIRTH_DATE,
+        CONSTANT_FIELDS, CHANGED_BY_EVENT, FROM_BIRTH_DATE, FROM_DATED_FACTS,
         tuple(SHORTCUT_FIELDS), tuple(FROM_LIFELONG),
     )
 
@@ -382,23 +408,47 @@ def profile_at(
 
     born = snapshot.get("birth_date")
 
-    # Даты рождения нет — нет и обоих полей. Дата постоянна,
-    # поэтому её отсутствие о будущем клиента ничего не говорит.
+    # Возраст — только от даты рождения и только на moment: ни
+    # снимок, ни конец выгрузки в него не входят. Даты рождения нет
+    # — нет и возраста; дата постоянна, поэтому её отсутствие о
+    # будущем клиента ничего не говорит.
     if born is not None:
+        values["age"] = _full_years(born, moment.astimezone(timezone).date())
 
-        age = _full_years(born, moment.astimezone(timezone).date())
+    # --- датированные факты ---
 
-        values["age"] = age
+    known = [item for item in snapshot.get("employment") or () if item["record_time"] < moment]
 
-        initial = _initial_income_type(snapshot, rows)
+    if known and values.get("income_type") in SALARIED_INCOME_TYPES:
 
-        # Клиент моложе PENSION_AGE без известного начального вида
-        # дохода: признак из данных не следует, и False не
-        # подставляется.
-        if age >= PENSION_AGE or initial is not None:
-            values["pensioner"] = age >= PENSION_AGE or initial == "pensioner"
+        start = max(known, key=lambda item: item["record_time"])["start_date"]
+
+        if start is not None:
+            values["job_tenure_months"] = tenure_label(
+                _full_months(start, moment.astimezone(timezone).date())
+            )
 
     return ProfileAt(values, notes, tuple(sorted(absent)), lifelong)
+
+
+def tenure_label(months: int) -> str:
+    """
+    Метка полугодия стажа: 0-5, 6-11, 12-17, … Стаж 41 — «36-41»,
+    стаж 42 — «42-47».
+    """
+
+    low = (int(months) // JOB_TENURE_STEP) * JOB_TENURE_STEP
+
+    return f"{low}-{low + JOB_TENURE_STEP - 1}"
+
+
+def _full_months(start: date, day: date) -> int:
+    """
+    Полных месяцев от start до day: месяц засчитан, когда число
+    месяца дошло до числа начала.
+    """
+
+    return (day.year - start.year) * 12 + (day.month - start.month) - (day.day < start.day)
 
 
 def _full_years(born: date, day: date) -> int:
@@ -409,35 +459,23 @@ def _full_years(born: date, day: date) -> int:
     return day.year - born.year - ((day.month, day.day) < (born.month, born.day))
 
 
-def _initial_income_type(
-    snapshot: Mapping[str, object], rows: list[Mapping[str, object]]
-) -> str | None:
-    """
-    Вид дохода, с которым клиент пришёл: прежнее значение
-    самого первого изменения во всей ленте, а без изменений —
-    значение снимка. None — прежнее значение не названо.
-    """
-
-    for row in rows:
-        if row["type"] == "profile_change" and row.get("field_name") == "income_type":
-            return as_declared("income_type", row.get("old_value"))
-
-    return snapshot.get("income_type")
-
-
 __all__ = [
     "CHANGED_BY_EVENT",
     "CONSTANT_FIELDS",
     "EXCLUDED_FIELDS",
     "FROM_BIRTH_DATE",
+    "FROM_DATED_FACTS",
     "FROM_LIFELONG",
     "INCLUDED_FIELDS",
+    "JOB_TENURE_STEP",
     "LIFELONG_TYPES",
     "PROFILE_SEMANTICS",
+    "SALARIED_INCOME_TYPES",
     "SHORTCUT_FIELDS",
     "as_declared",
     "ProfileAt",
     "ProfileStateError",
     "profile_at",
+    "tenure_label",
     "typed_profile_value",
 ]

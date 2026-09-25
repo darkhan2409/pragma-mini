@@ -20,7 +20,7 @@ from src.generator.config import (
     TIMEZONE,
     key_catalogue,
 )
-from src.generator.profile import LIFELONG_TYPES, PROFILE_SCHEMA
+from src.generator.profile import LIFELONG_SOURCE_FIELD, LIFELONG_TYPES, PROFILE_SCHEMA
 
 from .artifacts import sha256_file
 
@@ -50,7 +50,7 @@ from .artifacts import sha256_file
 
 MANIFEST_NAME = "manifest.json"
 
-EXPECTED_SCHEMA_VERSION = 16
+EXPECTED_SCHEMA_VERSION = 19
 
 # Файлы, без которых группа не обрабатывается. Справочников
 # рядом с выгрузкой нет: они остались входом генератора.
@@ -988,15 +988,19 @@ def _check_profile_moments(raw: "RawDataset", manifest: RawManifest) -> None:
     Снимок описывает клиента непосредственно перед as_of, и as_of
     обязан быть границей самой выгрузки. Вехи строго раньше as_of,
     каждая не больше одного раза, по времени, а при равном времени
-    — в порядке объявления типов.
+    — в порядке объявления типов. source_id есть ровно у вех с
+    источником в ленте (LIFELONG_SOURCE_FIELD); найдётся ли он там,
+    проверяет препроцессинг.
     """
 
-    table = raw.read("profile", columns=["client_id", "as_of", "lifelong"])
+    columns = ("client_id", "as_of", "lifelong", "employment")
+
+    table = raw.read("profile", columns=list(columns))
 
     boundary = manifest.period_end
 
-    for row, (client_id, as_of, items) in enumerate(
-        zip(*[table.column(name).to_pylist() for name in ("client_id", "as_of", "lifelong")])
+    for row, (client_id, as_of, items, jobs) in enumerate(
+        zip(*[table.column(name).to_pylist() for name in columns])
     ):
 
         where = f"profile.parquet, строка {row} ({client_id})"
@@ -1028,6 +1032,13 @@ def _check_profile_moments(raw: "RawDataset", manifest: RawManifest) -> None:
                     f"{as_of.isoformat()} — снимок не может знать будущего"
                 )
 
+            if (item["source_id"] is None) == (kind in LIFELONG_SOURCE_FIELD):
+                _fail(
+                    f"{where}: у вехи {kind} "
+                    + ("нет source_id — её источник не назван" if kind in LIFELONG_SOURCE_FIELD
+                       else "есть source_id, а источника в ленте у неё не бывает")
+                )
+
             order.append((moment, LIFELONG_TYPES.index(kind)))
 
         kinds = [item["type"] for item in items]
@@ -1037,6 +1048,33 @@ def _check_profile_moments(raw: "RawDataset", manifest: RawManifest) -> None:
 
         if order != sorted(order):
             _fail(f"{where}: вехи не по времени: {kinds}")
+
+        _check_employment(where, as_of, jobs)
+
+
+def _check_employment(where: str, as_of: datetime, items: list | None) -> None:
+    """
+    Записи о работе: строго раньше as_of, по моменту записи, и
+    работа начинается не позже, чем банк о ней записал.
+    """
+
+    if items is None:
+        _fail(f"{where}: нет employment; у клиента без работы по найму список пуст")
+
+    for item in items:
+
+        start, moment = item["start_date"], item["record_time"]
+
+        if moment is None or moment >= as_of:
+            _fail(f"{where}: запись о работе не раньше as_of — снимок не может знать будущего")
+
+        if start is not None and start > moment.astimezone(TIMEZONE).date():
+            _fail(f"{where}: работа с {start} записана раньше, {moment.isoformat()}")
+
+    moments = [item["record_time"] for item in items]
+
+    if moments != sorted(moments):
+        _fail(f"{where}: записи о работе не по времени")
 
 
 def iter_event_types(table: pa.Table) -> Iterator[tuple[str, pa.Table]]:
