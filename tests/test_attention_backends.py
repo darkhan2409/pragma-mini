@@ -430,3 +430,163 @@ def test_flash_path_and_buckets_agree(monkeypatch, clients):
 
     assert torch.allclose(flat.logits, buckets.logits, atol=1e-5, rtol=1e-5)
     assert float(flat.loss) == pytest.approx(float(buckets.loss), rel=1e-5)
+
+
+# ============================================================
+# ЧЕМ ИМЕННО ЗОВЁТСЯ ЯДРО
+# ============================================================
+
+
+def test_kernel_is_called_bidirectionally_with_flat_arguments(monkeypatch, clients):
+    """
+    Аргументы flash_attn_varlen_func, а не только формы Q/K/V.
+
+    Библиотеки здесь нет, поэтому вместо неё ставится модуль,
+    который запоминает вызов и считает эталон. Проверяется то, что
+    без такой подмены видно только на машине с flash-attn:
+
+      causal=False    — внимание двустороннее, а не причинное;
+      cu_seqlens      — int32, общий для Q и K, растёт от нуля;
+      max_seqlen      — наибольшая длина сегмента;
+      dropout         — ноль в eval.
+
+    Ошибка в любом из них меняет СМЫСЛ внимания, но не форму
+    выхода, и потому не ловится проверками формы.
+    """
+
+    seen: list[dict] = []
+
+    def kernel(query, key, value, cu_q, cu_k, max_q, max_k,
+               dropout_p=0.0, causal=False, **rest):
+
+        seen.append(
+            {
+                "rows": int(query.shape[0]),
+                "same": query.shape == key.shape == value.shape,
+                "dtype": cu_q.dtype,
+                "shared": cu_q is cu_k,
+                "bounds": cu_q.tolist(),
+                "max": (max_q, max_k),
+                "causal": causal,
+                "dropout": dropout_p,
+                "rest": rest,
+            }
+        )
+
+        return reference_attend(
+            query, key, value, types.SimpleNamespace(cu_seqlens=cu_q), dropout_p
+        )
+
+    library = types.ModuleType("flash_attn")
+    library.flash_attn_varlen_func = kernel
+
+    monkeypatch.setitem(sys.modules, "flash_attn", library)
+
+    built = world.model(attention="flash")
+    built.eval()
+
+    monkeypatch.setattr(built, "_flash", lambda: True)
+
+    with torch.no_grad():
+        built(pack(clients, CPU))
+
+    assert seen, "ядро не вызывалось"
+
+    for call in seen:
+
+        # Двустороннее внимание: причинная маска отрезала бы
+        # каждому токену правую часть его же события.
+        assert call["causal"] is False
+
+        assert call["same"]
+        assert call["dtype"] is torch.int32
+        assert call["shared"], "Q и K режутся одними границами"
+
+        bounds = call["bounds"]
+
+        assert bounds[0] == 0
+        assert bounds[-1] == call["rows"], "ни одной строки заполнителя"
+        assert all(later > earlier for earlier, later in zip(bounds, bounds[1:]))
+
+        longest = max(later - earlier for earlier, later in zip(bounds, bounds[1:]))
+
+        assert call["max"] == (longest, longest)
+
+        assert call["dropout"] == 0.0
+        assert not call["rest"], f"ядру уходят лишние аргументы: {call['rest']}"
+
+
+# ============================================================
+# MICRO-BATCH БЕЗ ЦЕЛЕЙ
+# ============================================================
+
+
+def quiet_clients(clients: list) -> list:
+    """
+    Только те клиенты, у которых маска не скрыла ни одного значения.
+    """
+
+    return [client for client in clients if client.n_targets == 0]
+
+
+def test_flat_path_survives_a_batch_without_targets(monkeypatch, clients):
+    """
+    Окно без целей на плоском пути: ни падения, ни NaN.
+
+    В _events_flash при target_token.numel() == 0 контекст целей не
+    берётся вовсе, и дальше голова получает пустую заготовку.
+    Граф обязан остаться связным: иначе backward на таком окне
+    оборвётся, а оно встречается на настоящих данных.
+    """
+
+    monkeypatch.setattr("src.mlm.varlen.attend", reference_attend)
+
+    quiet = quiet_clients(clients)
+
+    assert quiet, "в наборе должен быть клиент без целей"
+
+    built = world.model(attention="flash")
+
+    monkeypatch.setattr(built, "_flash", lambda: True)
+
+    data = pack(quiet, CPU)
+
+    assert int(data.target_token.numel()) == 0
+
+    out = built(data)
+
+    assert out.logits.shape == (0, world.VOCAB)
+    assert float(out.loss.detach()) == 0.0
+    assert bool(torch.isfinite(out.loss))
+
+    out.loss.backward()
+
+    for name, parameter in built.named_parameters():
+        assert parameter.grad is not None, name
+        assert bool(torch.isfinite(parameter.grad).all()), name
+
+
+def test_both_paths_agree_on_a_batch_without_targets(monkeypatch, clients):
+    """
+    Пустое окно обязано выглядеть одинаково обоими путями.
+    """
+
+    monkeypatch.setattr("src.mlm.varlen.attend", reference_attend)
+
+    quiet = quiet_clients(clients)
+
+    built = world.model(attention="flash")
+    built.eval()
+
+    data = pack(quiet, CPU)
+
+    with torch.no_grad():
+
+        buckets = built(data)
+
+        monkeypatch.setattr(built, "_flash", lambda: True)
+
+        flat = built(data)
+
+    assert flat.logits.shape == buckets.logits.shape
+    assert float(flat.loss) == float(buckets.loss) == 0.0
