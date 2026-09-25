@@ -43,9 +43,11 @@ from src.tokenization.specials import EVT, PAD, USR, load_special_tokens
 # эмбеддингов, а не энкодера события.
 #
 # Энкодер события читает тот же файл и тем же кодом, но календарь
-# ему нужен. Поэтому у читателя есть один флаг: просить колонку
-# или нет. Обещание «эмбеддинги календаря не видят» от этого не
-# слабеет — его держит значение флага, а не отсутствие кода.
+# ему нужен. Поэтому у читателя есть флаг: просить колонку или
+# нет. Обещание «эмбеддинги календаря не видят» от этого не
+# слабеет — его держит значение флага, а не отсутствие кода. Так
+# же энкодер анкеты просит время её токенов (profile_time_log):
+# эмбеддингам оно не нужно.
 # ============================================================
 
 
@@ -82,6 +84,10 @@ MASKED_COLUMNS = [
 
 # Шесть чисел на событие. Нужны энкодеру события, не входу.
 CALENDAR_COLUMN = "calendar"
+
+# Давность токенов анкеты до cutoff. Нужна энкодеру анкеты, не
+# входу.
+PROFILE_TIME_COLUMN = "profile_time_log"
 
 CALENDAR_PER_EVENT = 6
 
@@ -157,6 +163,9 @@ class Loaded:
     # нулевой».
     calendar: np.ndarray | None = None
 
+    # [B, P], и только если время анкеты просили.
+    profile_time_log: np.ndarray | None = None
+
 
 class Source:
     """
@@ -167,15 +176,19 @@ class Source:
     бы перечитывать одно и то же.
     """
 
-    def __init__(self, group: str, with_calendar: bool = False):
+    def __init__(self, group: str, with_calendar: bool = False, with_profile_time: bool = False):
 
         self.group = group
         self.with_calendar = with_calendar
+        self.with_profile_time = with_profile_time
 
         self.columns = list(BATCH_COLUMNS)
 
         if with_calendar:
             self.columns.append(CALENDAR_COLUMN)
+
+        if with_profile_time:
+            self.columns.append(PROFILE_TIME_COLUMN)
 
         self.batches_path = batches_dir(group) / BATCHES_FILE
         self.masked_path = masked_dir(group) / MASKED_FILE
@@ -252,10 +265,18 @@ class Source:
                     f"{events * CALENDAR_PER_EVENT} — не по шесть на событие"
                 )
 
+        profile_time_log = None
+
+        if self.with_profile_time:
+            profile_time_log = _matrix(
+                batch, PROFILE_TIME_COLUMN, model.profile_width, np.float32
+            )
+
         return Loaded(
             model=model,
             rows=batch.select(STRUCTURE_COLUMNS).to_pylist(),
             calendar=calendar,
+            profile_time_log=profile_time_log,
         )
 
 
@@ -497,6 +518,7 @@ __all__ = [
     "CALENDAR_COLUMN",
     "CALENDAR_PER_EVENT",
     "MASKED_COLUMNS",
+    "PROFILE_TIME_COLUMN",
     "STRUCTURE_COLUMNS",
     "BatchInput",
     "InputError",

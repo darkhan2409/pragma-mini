@@ -74,6 +74,7 @@ BATCH_COLUMNS = [
     "profile_key_ids",
     "profile_value_ids",
     "profile_positions",
+    "profile_time_log",
 ]
 
 MASKED_COLUMNS = ["batch_index", "client_id", "value_ids", "labels", "reason"]
@@ -118,6 +119,7 @@ class Client:
     profile_key_ids: np.ndarray
     profile_value_ids: np.ndarray
     profile_positions: np.ndarray
+    profile_time_log: np.ndarray  # давность вехи до cutoff, ноль у [USR] и Attributes
 
     @property
     def n_tokens(self) -> int:
@@ -302,6 +304,9 @@ class Source:
             profile_key_ids=_ints(batch["profile_key_ids"][:profile_tokens]),
             profile_value_ids=_ints(batch["profile_value_ids"][:profile_tokens]),
             profile_positions=_ints(batch["profile_positions"][:profile_tokens]),
+            profile_time_log=np.asarray(
+                batch["profile_time_log"][:profile_tokens], dtype=np.float32
+            ),
         )
 
         _check(client, _bools(batch["event_mask"][:n_events]),

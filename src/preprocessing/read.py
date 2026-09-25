@@ -39,10 +39,10 @@ from .settings import PreprocessingConfig, group_dir, raw_group_dir
 # отбор event_time < cutoff, а не отдельный этап.
 #
 # Срез ОДИН — cutoff T: события строго раньше T, анкета —
-# состояние клиента на тот же T (profile_state.PROFILE_SEMANTICS).
-# Данных позже T в историю не попадает ничего. Лента после T
-# читается только откатом анкеты: он снимает изменения, которых
-# на T ещё не было.
+# Attributes на тот же T и Lifelong строго раньше T
+# (profile_state.PROFILE_SEMANTICS). Данных позже T в историю не
+# попадает ничего. Лента после T читается только откатом
+# анкеты: он снимает изменения, которых на T ещё не было.
 #
 # Модель получает ФАКТИЧЕСКИЕ поля под смысловыми ключами:
 # производных признаков здесь нет ни одного. Ни интервалов, ни
@@ -101,6 +101,9 @@ class ClientHistory:
     client_id: str
     cutoff: datetime
     events: list[ClientEvent]
+
+    # Attributes @ cutoff: значения полей анкеты под смысловыми
+    # ключами.
     profile: dict[str, object]
 
     # Есть ли у клиента анкета вообще. Пустой словарь значений
@@ -109,6 +112,10 @@ class ClientHistory:
     has_profile: bool = False
 
     limitations: list[str] = field(default_factory=list)
+
+    # Lifelong: вехи (тип, время) строго раньше cutoff, по времени.
+    # Отдельно от profile — у вехи есть время, у поля нет.
+    lifelong: list[tuple[str, datetime]] = field(default_factory=list)
 
     @property
     def n_events(self) -> int:
@@ -283,6 +290,14 @@ class Group:
 
         snapshot = self._profile_rows.get(client_id)
 
+        # Снимок описывает клиента перед as_of, и вперёд его не
+        # восстановить: состояние позже снимка из данных не следует.
+        if snapshot is not None and cutoff > snapshot["as_of"]:
+            raise ReadError(
+                f"{client_id}: cutoff {cutoff.isoformat()} позже снимка анкеты "
+                f"as_of {snapshot['as_of'].isoformat()}"
+            )
+
         state = profile_at(snapshot, all_rows, cutoff, self.timezone)
 
         notes.extend(state.notes)
@@ -294,6 +309,7 @@ class Group:
             profile=profile_values(state.values),
             has_profile=snapshot is not None,
             limitations=sorted(set(notes)),
+            lifelong=list(state.lifelong),
         )
 
     def histories(

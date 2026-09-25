@@ -5,6 +5,7 @@ from datetime import datetime
 
 import numpy as np
 
+from src.preprocessing.keys import PROFILE_LIFELONG_KEY
 from src.preprocessing.settings import GroupWindow
 from src.tokenization.finalvocab import FrozenArtifacts
 from src.tokenization.specials import PAD
@@ -36,6 +37,10 @@ from .tokenized import TokenizedClient
 # Маска целей это период целей своей группы: старая история
 # validation и test остаётся видимым контекстом, но целью чужой
 # группы не становится.
+#
+# Анкета это Attributes на cutoff и вехи Lifelong строго раньше
+# него. Время есть только у вех — profile_time, у остальных
+# токенов анкеты NaT.
 #
 # Клиент без событий остаётся примером. Никакой выдуманной
 # покупки: пустая история это факт о клиенте, а не пустое место.
@@ -72,6 +77,7 @@ class Sample:
     profile_key_ids: np.ndarray
     profile_value_ids: np.ndarray
     profile_positions: np.ndarray
+    profile_time: np.ndarray
 
     # --- не попадает в файл ---
     #
@@ -106,13 +112,14 @@ class Sample:
     def profile_tokens(self) -> int:
         return int(self.profile_key_ids.size)
 
-    def check(self, artifacts: FrozenArtifacts) -> None:
+    def check(self, artifacts: FrozenArtifacts, cutoff: datetime) -> None:
         """
         Инварианты примера.
 
         Проверяется то, на что будет опираться Masker и модель:
         согласованность длин, покрытие токенов границами, один
-        маркер на запись и принадлежность каждого ID словарю.
+        маркер на запись, принадлежность каждого ID словарю и
+        время анкеты — только у вех и строго раньше cutoff.
         """
 
         if not (self.key_ids.size == self.value_ids.size == self.positions.size):
@@ -158,6 +165,8 @@ class Sample:
 
         _check_positions(self.client_id, "профиль", self.profile_positions, 1, self.profile_tokens)
 
+        _check_profile_time(self, artifacts, cutoff)
+
         # ID в пространстве словаря, [PAD] нигде не написан.
         pad = artifacts.special(PAD)
         size = artifacts.size
@@ -174,6 +183,39 @@ class Sample:
                     f"{self.client_id}: в {name} встретился [PAD]. Он существует только для "
                     "выравнивания batch и в сохранённом примере невозможен"
                 )
+
+
+def _check_profile_time(sample: Sample, artifacts: FrozenArtifacts, cutoff: datetime) -> None:
+    """
+    Время анкеты: есть ровно у токенов вех, строго раньше cutoff
+    и не убывает — вехи идут по времени.
+    """
+
+    if sample.profile_time.size != sample.profile_tokens:
+        raise SampleError(f"{sample.client_id}: время анкеты не по одному на токен")
+
+    dated = ~np.isnat(sample.profile_time)
+
+    lifelong = sample.profile_key_ids == artifacts.key_id(PROFILE_LIFELONG_KEY.key)
+
+    if not np.array_equal(dated, lifelong):
+        raise SampleError(
+            f"{sample.client_id}: время анкеты есть не ровно у вех — у Attributes и [USR] "
+            "его быть не может, а у вехи оно обязательно"
+        )
+
+    moments = sample.profile_time[dated]
+
+    if moments.size == 0:
+        return
+
+    anchor = np.datetime64(cutoff.replace(tzinfo=None), "us")
+
+    if bool((moments >= anchor).any()):
+        raise SampleError(f"{sample.client_id}: веха анкеты не раньше cutoff {cutoff.isoformat()}")
+
+    if bool((moments[1:] < moments[:-1]).any()):
+        raise SampleError(f"{sample.client_id}: вехи анкеты идут не по времени")
 
 
 def _check_record(client_id: str, what: str, key_ids: np.ndarray, value_ids: np.ndarray,
@@ -284,28 +326,39 @@ def build_sample(
         positions=_ints(positions),
         event_starts=_ints(event_starts),
         event_lengths=_ints(event_lengths),
-        # Время уже в UTC, и numpy хранит его без пояса: пояс
-        # снимается явно, чтобы никто не пересчитал его вторично.
-        event_time=np.asarray(
-            [moment.replace(tzinfo=None) for moment in moments], dtype="datetime64[us]"
-        ),
+        event_time=_utc_moments(moments),
         calendar=np.asarray(calendar, dtype=np.float32),
         target_event_mask=np.asarray(target_mask, dtype=bool),
         profile_key_ids=_ints(client.profile_key_ids),
         profile_value_ids=_ints(client.profile_value_ids),
         profile_positions=_ints(client.profile_positions),
+        profile_time=_utc_moments(client.profile_time),
         truncated=selection.truncated,
         excluded_events=selection.n_excluded,
         excluded_eligible=selection.excluded_eligible,
     )
 
-    sample.check(artifacts)
+    sample.check(artifacts, window.final_cutoff)
 
     return sample
 
 
 def _ints(values) -> np.ndarray:
     return np.asarray(list(values), dtype=np.int32)
+
+
+def _utc_moments(moments) -> np.ndarray:
+    """
+    Моменты UTC как datetime64[us]; None становится NaT.
+
+    Время уже в UTC, и numpy хранит его без пояса: пояс снимается
+    явно, чтобы никто не пересчитал его вторично.
+    """
+
+    return np.asarray(
+        [None if moment is None else moment.replace(tzinfo=None) for moment in moments],
+        dtype="datetime64[us]",
+    )
 
 
 __all__ = [

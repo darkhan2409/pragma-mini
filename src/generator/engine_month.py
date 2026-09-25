@@ -24,6 +24,7 @@ from .life import calendar as cal
 from .life import lifecycle as lifecycle_module
 from .life import stress as stress_module
 from .observe import defects as defect_module
+from .profile import lifelong, utc
 from .rng import (
     NS_CARD_CREDIT,
     NS_CONSENT,
@@ -959,11 +960,20 @@ def finish(sim) -> CommunityResult:
             events.append(_row(event))
 
         # Одна итоговая строка на клиента: анкета такой, какой
-        # она стала к границе выгрузки. Клиент, о котором банк
-        # ещё ничего не посчитал, строки не получает вовсе.
+        # она стала к границе выгрузки, и сама граница as_of.
+        # Клиент, о котором банк ещё ничего не посчитал, строки не
+        # получает вовсе.
         if state.profile_known:
-            row = {"client_id": state.client_id, "birth_date": state.persona.birth_date.date()}
+            persona = state.persona
+            row = {
+                "client_id": state.client_id,
+                "as_of": utc(config.HISTORY_END),
+                "birth_date": persona.birth_date.date(),
+            }
             row.update({name: state.profile_values.get(name) for name in PROFILE_FIELDS})
+            row["lifelong"] = lifelong(
+                persona.relationship_start, state.app_adopted_at, config.HISTORY_END
+            )
             profile_rows.append(row)
 
     return CommunityResult(events=events, profile_rows=profile_rows)

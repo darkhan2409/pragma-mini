@@ -43,8 +43,13 @@ MERCHANT_REFERENCE_PATH = REFERENCE_DIR / "merchants.json"
 # рождения. Ключом модели она не становится: из неё
 # препроцессинг считает возраст и признак пенсионера на нужную
 # дату.
-GENERATOR_VERSION = "12.0"
-SCHEMA_VERSION = 15
+#
+# v16: у анкеты есть момент снимка as_of и список датированных
+# вех lifelong — relationship_started, kyc_passed, app_adopted
+# (src/generator/profile.py). Вехи строго раньше as_of; лента
+# событий от них не меняется.
+GENERATOR_VERSION = "13.0"
+SCHEMA_VERSION = 16
 
 # Возраст, с которого клиент считается пенсионером. Это правило
 # данных, а не деталь симуляции: по нему же препроцессинг

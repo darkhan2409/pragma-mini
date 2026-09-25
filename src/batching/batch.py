@@ -133,6 +133,9 @@ def _client(index: int, row: dict, size: Widths, pad: int) -> dict:
         "profile_key_ids": _pad(row["profile_key_ids"], size.profile_tokens, pad),
         "profile_value_ids": _pad(row["profile_value_ids"], size.profile_tokens, pad),
         "profile_positions": _pad(row["profile_positions"], size.profile_tokens, 0),
+        # Как у событий: ноль заполнителя совпадает с нулём [USR]
+        # и Attributes, и отличить его можно ТОЛЬКО по маске.
+        "profile_time_log": _pad(row["profile_time_log"], size.profile_tokens, 0.0),
         "profile_token_mask": _mask(profile_n_tokens, size.profile_tokens),
     }
 
@@ -180,6 +183,7 @@ def check(row: dict, size: Widths, pad: int) -> None:
         ("profile_key_ids", size.profile_tokens),
         ("profile_value_ids", size.profile_tokens),
         ("profile_positions", size.profile_tokens),
+        ("profile_time_log", size.profile_tokens),
         ("profile_token_mask", size.profile_tokens),
     ):
         if len(row[name]) != width:
@@ -210,6 +214,13 @@ def check(row: dict, size: Widths, pad: int) -> None:
             f"{client}: у последнего настоящего события позиция "
             f"{row['event_time_log'][row['n_events'] - 1]!r}, а не ноль: "
             "временные позиции не соответствуют событиям"
+        )
+
+    # [USR] это якорь анкеты: его время — сам cutoff, то есть ноль.
+    if row["profile_n_tokens"] and row["profile_time_log"][0] != 0.0:
+        raise BatchError(
+            f"{client}: у маркера анкеты временная позиция "
+            f"{row['profile_time_log'][0]!r}, а не ноль"
         )
 
     # Заполнитель лёг справа, а не поверх настоящих токенов.

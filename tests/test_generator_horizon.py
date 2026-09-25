@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timedelta
 
@@ -62,6 +63,41 @@ def tape(directory) -> list[tuple]:
     table = pq.read_table(directory / "events.parquet")
 
     return list(zip(*[table.column(name).to_pylist() for name in COLUMNS]))
+
+
+def digest(rows: list[tuple]) -> str:
+    """
+    Отпечаток ленты по содержимому строк, а не по байтам файла:
+    байты parquet зависят ещё и от версии pyarrow.
+    """
+
+    value = hashlib.sha256()
+
+    for row in rows:
+        value.update(("\x1f".join(row) + "\n").encode("utf-8"))
+
+    return value.hexdigest()
+
+
+def milestones(directory) -> dict[str, list[tuple]]:
+
+    rows = pq.read_table(directory / "profile.parquet").to_pylist()
+
+    return {
+        row["client_id"]: [(item["type"], item["event_time"]) for item in row["lifelong"]]
+        for row in rows
+    }
+
+
+# Ленты обоих окон, снятые кодом до появления вех анкеты (коммит
+# bb96b3f). Вехи берут готовые даты персоны и новых розыгрышей не
+# делают, поэтому лента обязана остаться той же строка в строку.
+# Намеренное изменение генератора меняет и эти отпечатки — тогда
+# их переснимают вместе с изменением и объясняют почему.
+TAPE_BEFORE_LIFELONG = {
+    "short": (605, "db2a7e194ea295ecfef9b6c44987426c31571f053bd758632d3edde0282cb4b7"),
+    "long": (1218, "94fcb15b52314dceb459f0f595b95e2cdca1cc7bf122c4dbbf4d2df80601a4ae"),
+}
 
 
 @pytest.fixture(scope="module")
@@ -153,6 +189,34 @@ def test_no_client_disappears_and_newcomers_have_no_past(runs, boundary):
     assert early == before, f"в общем отрезке появились новые клиенты: {sorted(early - before)}"
 
 
+def test_milestones_do_not_rewrite_the_tape(runs):
+
+    for name, (count, expected) in TAPE_BEFORE_LIFELONG.items():
+
+        rows = tape(runs[name])
+
+        assert (len(rows), digest(rows)) == (count, expected), name
+
+
+def test_long_window_keeps_the_early_milestones(runs, boundary):
+    """
+    Вехи не зависят от конца окна: всё, что короткая выгрузка
+    знала до своей границы, длинная знает так же. Новые вехи
+    появляются только после неё.
+    """
+
+    short = milestones(runs["short"])
+    long = milestones(runs["long"])
+
+    assert any(short.values()), "проверка вырождена: вех нет вовсе"
+
+    for client_id, items in short.items():
+
+        early = [item for item in long[client_id] if item[1] < boundary]
+
+        assert items == early, client_id
+
+
 def test_profile_keeps_every_earlier_client(runs):
 
     short = pq.read_table(runs["short"] / "profile.parquet").to_pylist()
@@ -181,6 +245,18 @@ def test_repeat_after_another_window_is_identical(runs):
     """
 
     assert tape(runs["short"]) == tape(runs["again"])
+
+
+def test_repeat_gives_the_same_profile(runs):
+    """
+    Анкета с вехами повторяется целиком: kyc_passed и остальные
+    вехи не зависят от того, что считалось в процессе раньше.
+    """
+
+    short = pq.read_table(runs["short"] / "profile.parquet").to_pylist()
+    again = pq.read_table(runs["again"] / "profile.parquet").to_pylist()
+
+    assert short == again
 
 
 def test_repeat_gives_the_same_manifest(runs):

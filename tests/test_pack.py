@@ -363,6 +363,7 @@ def test_profile_without_a_marker_is_refused(clients):
         profile_key_ids=empty,
         profile_value_ids=empty,
         profile_positions=empty,
+        profile_time_log=np.array([], dtype=np.float32),
     )
 
     with pytest.raises(ValueError, match="анкеты: пустой сегмент"):

@@ -6,6 +6,7 @@ import numpy as np
 import pyarrow as pa
 import torch
 
+from src.dataset.lineage import write_lineage
 from src.preprocessing.artifacts import TableWriter
 from src.tokenization.finalvocab import FrozenArtifacts
 from src.tokenization.specials import EVT, USR, load_special_tokens
@@ -116,6 +117,11 @@ def build_group(
 
     _save(layer, config, vocab.size, weights_path)
 
+    # Только после полной записи. Таблица этапа собрана под
+    # словарь и анкету текущего кода, и потребители весов это
+    # сверяют: веса прежнего словаря иначе читались бы молча.
+    write_lineage(directory)
+
     return {
         "group": group,
         "table": str(table_path),
@@ -223,8 +229,8 @@ def _save(layer: InputEmbedding, config: EmbeddingConfig, vocab_size: int,
 
 def _clear(directory: Path) -> None:
     """
-    Каталог группы держит только свои два файла: прежний
-    результат стирается целиком.
+    Каталог группы держит только свои файлы: прежний результат
+    стирается целиком.
     """
 
     directory.mkdir(parents=True, exist_ok=True)

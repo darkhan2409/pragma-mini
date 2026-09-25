@@ -8,6 +8,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.batching.build import BATCHES_SCHEMA
+from src.dataset.lineage import lineage_problem
 from src.batching.settings import BATCHES_FILE, batches_dir
 from src.event.build import EVENTS_SCHEMA
 from src.event.settings import EVENTS_FILE, events_dir
@@ -109,6 +110,13 @@ class Source:
         self._profiles = _open(
             self.profiles_path, PROFILES_SCHEMA, f"python -m src.profile.run {group}"
         )
+
+        # Схема векторов анкеты от энкодера не зависит: векторы
+        # прежнего энкодера выглядели бы исправными.
+        problem = lineage_problem(self.profiles_path.parent, f"python -m src.profile.run {group}")
+
+        if problem:
+            raise InputError(problem)
 
         counts = {
             "батчей": self._batches.num_row_groups,

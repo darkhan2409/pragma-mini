@@ -72,6 +72,10 @@ EPOCH = datetime(2026, 1, 1, tzinfo=timezone.utc)
 # Событие описывается списком полей, поле — тройкой
 # (ключ, куски значения, цель ли это). Маркер [EVT] ставится сам
 # и занимает оба слота; анкета так же начинается с [USR].
+#
+# Поле анкеты — пара (ключ, куски) или тройка (ключ, куски,
+# время). Время это profile_time_log: ноль у поля Attributes,
+# давность до cutoff у вехи. Оно общее у всех кусков значения.
 # ============================================================
 
 Field = tuple[int, list[int], bool]
@@ -95,7 +99,7 @@ class Made:
 def make(
     client_id: str,
     events: list[Event],
-    profile: list[tuple[int, list[int]]],
+    profile: list[tuple],
     *,
     batch_index: int = 0,
     targetable: bool = True,
@@ -151,12 +155,14 @@ def make(
     profile_key_ids: list[int] = [USR]
     profile_value_ids: list[int] = [USR]
     profile_positions: list[int] = [0]
+    profile_time_log: list[float] = [0.0]
 
-    for key, pieces in profile:
+    for key, pieces, *time in profile:
         for number, piece in enumerate(pieces):
             profile_key_ids.append(key)
             profile_value_ids.append(piece)
             profile_positions.append(number)
+            profile_time_log.append(float(time[0]) if time else 0.0)
 
     count = len(events)
 
@@ -181,6 +187,7 @@ def make(
         profile_key_ids=np.asarray(profile_key_ids, dtype=np.int64),
         profile_value_ids=np.asarray(profile_value_ids, dtype=np.int64),
         profile_positions=np.asarray(profile_positions, dtype=np.int64),
+        profile_time_log=np.asarray(profile_time_log, dtype=np.float32),
     )
 
     return Made(
@@ -216,7 +223,8 @@ def population(prefix: str = "c") -> list[Made]:
 
     Разная форма здесь и есть смысл: одно событие и много,
     значение из одного куска и из трёх, клиент вовсе без целей,
-    событие из одного маркера, анкета из одного [USR].
+    событие из одного маркера, анкета из одного [USR], вехи
+    анкеты со временем рядом с полями без него.
     """
 
     return [
@@ -228,10 +236,11 @@ def population(prefix: str = "c") -> list[Made]:
                 [(KEY_A, [14], True)],
                 [(KEY_C, [15, 16], False)],
             ],
-            [(KEY_A, [20]), (KEY_B, [21, 22])],
+            # Веха из двух кусков: время у обоих одно.
+            [(KEY_A, [20]), (KEY_B, [21, 22], 30.5)],
         ),
-        # Одно событие, одна цель.
-        make(f"{prefix}-one", [[(KEY_C, [17], True)]], [(KEY_A, [23])]),
+        # Одно событие, одна цель, поле и веха в анкете.
+        make(f"{prefix}-one", [[(KEY_C, [17], True)]], [(KEY_A, [23]), (KEY_C, [30], 12.25)]),
         # Целей нет вовсе.
         make(
             f"{prefix}-quiet",
@@ -344,6 +353,7 @@ def _batch_table(index: int, batch: list[Made]) -> pa.Table:
             _pad(client.profile_value_ids, profile, PAD)
         )
         columns["profile_positions"].append(_pad(client.profile_positions, profile, 0))
+        columns["profile_time_log"].append(_pad(client.profile_time_log, profile, 0.0))
         columns["profile_token_mask"].append(
             _flags(client.profile_n_tokens, profile)
         )
@@ -412,7 +422,7 @@ def model(
     return Model(
         embedding=embedding(vocab, dim, seed),
         event=EventEncoder(dim, layers, heads, FEEDFORWARD, dropout, seed),
-        profile=ProfileEncoder(dim, layers, heads, FEEDFORWARD, dropout, seed),
+        profile=ProfileEncoder(dim, layers, heads, FEEDFORWARD, dropout, ROPE_BASE, seed),
         history=HistoryEncoder(dim, layers, heads, FEEDFORWARD, dropout, ROPE_BASE, seed),
         head=Mlm(dim, seed),
         events_per_chunk=events_per_chunk,
@@ -490,10 +500,10 @@ def write_weights(
                 "dim": dim,
                 "config": ProfileConfig(
                     seed=seed, layers=layers, heads=heads,
-                    feedforward=FEEDFORWARD, dropout=dropout,
+                    feedforward=FEEDFORWARD, dropout=dropout, rope_base=ROPE_BASE,
                 ).as_dict(),
                 "state_dict": ProfileEncoder(
-                    dim, layers, heads, FEEDFORWARD, dropout, seed
+                    dim, layers, heads, FEEDFORWARD, dropout, ROPE_BASE, seed
                 ).state_dict(),
             },
         ),
@@ -517,6 +527,11 @@ def write_weights(
         directory.mkdir(parents=True, exist_ok=True)
 
         torch.save(saved, directory / "weights.pt")
+
+        # Отметка происхождения там же, где её пишут настоящие
+        # этапы 09 и 11: без неё load_model веса отвергнет.
+        if name in ("09_embeddings", "11_profiles"):
+            write_lineage(directory)
 
 
 def write_vocab(root: Path) -> None:

@@ -34,7 +34,7 @@ from .projection import EVENT_TYPE_FIELD, SEMANTIC_PAYLOAD_FIELDS, validate_proj
 # ============================================================
 
 
-KEYS_VERSION = "12.0.0"
+KEYS_VERSION = "13.0.0"
 
 
 # ------------------------------------------------------------
@@ -311,6 +311,19 @@ PROFILE_KEYS: dict[str, SemanticKey] = {
 }
 
 
+# Вехи Lifelong: один ключ на все вехи, значение — тип вехи.
+# Ключ повторяется столько раз, сколько у клиента вех, а
+# различает их время, а не имя ключа. В PROFILE_KEYS он не
+# входит: там поля снимка, у которых есть значение на T, а у
+# вехи есть время.
+PROFILE_LIFELONG_KEY = SemanticKey(
+    "profile_lifelong",
+    CATEGORICAL,
+    "веха отношений клиента с банком; время вехи идёт отдельным каналом",
+    derived_from=("type",),
+)
+
+
 # ------------------------------------------------------------
 # ИЗМЕНЕНИЕ ПРОФИЛЯ
 # ------------------------------------------------------------
@@ -517,6 +530,7 @@ def _all_declared_keys() -> list[SemanticKey]:
 
     out: list[SemanticKey] = [
         *PROFILE_KEYS.values(),
+        PROFILE_LIFELONG_KEY,
     ]
 
     for old, new in PROFILE_CHANGE_KEYS.values():
@@ -553,6 +567,11 @@ def keys_registry(catalogue: dict) -> dict:
 
     for name, key in PROFILE_KEYS.items():
         rows.setdefault(key.key, {**key.as_dict(), "physical_fields": [f"profile.{name}"]})
+
+    rows.setdefault(
+        PROFILE_LIFELONG_KEY.key,
+        {**PROFILE_LIFELONG_KEY.as_dict(), "physical_fields": ["profile.lifelong"]},
+    )
 
     for field_name, (old, new) in PROFILE_CHANGE_KEYS.items():
         rows.setdefault(old.key, {**old.as_dict(), "physical_fields": [f"profile_change[{field_name}].old_value"]})
@@ -600,6 +619,7 @@ __all__ = [
     "PROFILE_CATEGORICAL",
     "PROFILE_CHANGE_KEYS",
     "PROFILE_KEYS",
+    "PROFILE_LIFELONG_KEY",
     "PROFILE_NUMERIC",
     "TEXT",
     "KeysError",

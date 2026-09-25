@@ -20,7 +20,7 @@ from src.generator.config import (
     TIMEZONE,
     key_catalogue,
 )
-from src.generator.profile import PROFILE_SCHEMA
+from src.generator.profile import LIFELONG_TYPES, PROFILE_SCHEMA
 
 from .artifacts import sha256_file
 
@@ -50,7 +50,7 @@ from .artifacts import sha256_file
 
 MANIFEST_NAME = "manifest.json"
 
-EXPECTED_SCHEMA_VERSION = 15
+EXPECTED_SCHEMA_VERSION = 16
 
 # Файлы, без которых группа не обрабатывается. Справочников
 # рядом с выгрузкой нет: они остались входом генератора.
@@ -976,7 +976,67 @@ def check_raw(raw_dir: Path) -> "RawDataset":
             + "); профиль это одна итоговая строка на клиента"
         )
 
+    _check_profile_moments(raw, manifest)
+
     return raw
+
+
+def _check_profile_moments(raw: "RawDataset", manifest: RawManifest) -> None:
+    """
+    Момент снимка и вехи анкеты.
+
+    Снимок описывает клиента непосредственно перед as_of, и as_of
+    обязан быть границей самой выгрузки. Вехи строго раньше as_of,
+    каждая не больше одного раза, по времени, а при равном времени
+    — в порядке объявления типов.
+    """
+
+    table = raw.read("profile", columns=["client_id", "as_of", "lifelong"])
+
+    boundary = manifest.period_end
+
+    for row, (client_id, as_of, items) in enumerate(
+        zip(*[table.column(name).to_pylist() for name in ("client_id", "as_of", "lifelong")])
+    ):
+
+        where = f"profile.parquet, строка {row} ({client_id})"
+
+        if as_of is None:
+            _fail(f"{where}: нет as_of — момент снимка анкеты не назван")
+
+        if as_of != boundary:
+            _fail(f"{where}: as_of {as_of.isoformat()}, а выгрузка кончается {boundary.isoformat()}")
+
+        if items is None:
+            _fail(f"{where}: нет lifelong; у клиента без вех список пуст, а не пропущен")
+
+        order: list[tuple[datetime, int]] = []
+
+        for item in items:
+
+            kind, moment = item["type"], item["event_time"]
+
+            if kind not in LIFELONG_TYPES:
+                _fail(f"{where}: веха {kind!r} вне контракта; объявлены {list(LIFELONG_TYPES)}")
+
+            if moment is None:
+                _fail(f"{where}: у вехи {kind} нет времени")
+
+            if moment >= as_of:
+                _fail(
+                    f"{where}: веха {kind} в {moment.isoformat()} не раньше as_of "
+                    f"{as_of.isoformat()} — снимок не может знать будущего"
+                )
+
+            order.append((moment, LIFELONG_TYPES.index(kind)))
+
+        kinds = [item["type"] for item in items]
+
+        if len(set(kinds)) != len(kinds):
+            _fail(f"{where}: веха повторяется: {kinds}")
+
+        if order != sorted(order):
+            _fail(f"{where}: вехи не по времени: {kinds}")
 
 
 def iter_event_types(table: pa.Table) -> Iterator[tuple[str, pa.Table]]:

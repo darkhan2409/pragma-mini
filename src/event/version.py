@@ -23,7 +23,7 @@ from __future__ import annotations
 
 FORMAT_VERSION = "2.0.0"
 
-IMPLEMENTATION_VERSION = "2.0.0"
+IMPLEMENTATION_VERSION = "2.1.0"
 
 SCHEMA_VERSION = 2
 

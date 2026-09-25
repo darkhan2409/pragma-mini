@@ -7,6 +7,7 @@ from typing import Iterable, Mapping
 import pyarrow as pa
 
 from src.generator.config import PENSION_AGE
+from src.generator.profile import LIFELONG_TYPES as RAW_LIFELONG_TYPES
 from src.generator.profile import PROFILE_FIELD_TYPES
 
 from .keys import CATEGORICAL, COUNT, NUMERIC, PROFILE_KEYS, SemanticKey
@@ -16,14 +17,29 @@ from .keys import CATEGORICAL, COUNT, NUMERIC, PROFILE_KEYS, SemanticKey
 # АНКЕТА НА CUTOFF СОБЫТИЙ
 # ============================================================
 #
-# Пример для модели это события строго раньше cutoff T и анкета —
-# состояние клиента на тот же T (PROFILE_SEMANTICS). Данных
-# позже T нет ни в событиях, ни в анкете.
+# Пример для модели это события строго раньше cutoff T и анкета
+# клиента на тот же T (PROFILE_SEMANTICS). Анкета из двух частей:
 #
-# В выгрузке анкета одна: снимок на границу выгрузки
+#   Attributes @ T  недатированное состояние клиента на T —
+#                   значения полей анкеты;
+#   Lifelong < T    датированные вехи клиента строго раньше T.
+#
+# Данных позже T нет ни в событиях, ни в анкете.
+#
+# В выгрузке анкета одна: снимок на её границу as_of
 # (src/generator/profile.py), а она может лежать позже T. Версий
 # анкеты здесь не заводится: снимок откатывается назад по самой
-# ленте — только на изменения с временем >= T.
+# ленте — только на изменения с временем >= T. Вперёд снимок не
+# восстанавливается: T позже as_of это ошибка, а не повод
+# выдумать состояние.
+#
+# Вехи отката не требуют: это факты с собственным временем, и
+# анкета на T — ровно те из них, что случились строго раньше T.
+# Контракт тот же полуоткрытый, что у событий. Вехи лежат в
+# снимке, а не в ленте, поэтому переживают окно выгрузки: клиент,
+# пришедший в 2021 году, остаётся клиентом с 2021 года, хотя его
+# события видны только с 2024-го. Со значениями полей вехи не
+# смешиваются.
 #
 # Изменения анкеты (profile_change) остаются событиями ленты.
 # Анкета на T — лишь их итог к этому моменту. Целями MLM они не
@@ -51,22 +67,26 @@ from .keys import CATEGORICAL, COUNT, NUMERIC, PROFILE_KEYS, SemanticKey
 #                      бы готовым ответом на закрытое событие:
 #                      закрыт product_opened кредитной карты, а
 #                      holds_credit_card = True его выдаёт;
-#   UNPROVABLE_FIELDS  значение на T из данных не следует, а
-#                      выдумывать его нельзя.
+#   FROM_LIFELONG      выводятся из вехи. Модель получает саму
+#                      веху с её временем, а не посчитанный из
+#                      неё признак.
 #
 # Состав полей ОДИНАКОВ для всех клиентов группы. Иначе само
 # отсутствие поля стало бы сообщением о клиенте.
 #
-# ЧЕГО ЗДЕСЬ НЕ ПРОВЕРЯЕТСЯ. Клиент мог прийти в банк уже после
-# T; отличить такого клиента лента не позволяет — отдельного
-# события о приходе в банк в ней нет. Откат в этом случае даёт
+# Клиент мог прийти в банк уже после T. Событий до T у него нет,
+# вехи relationship_started до T нет тоже, а откат полей даёт
 # значения, с которыми клиент пришёл.
 # ============================================================
 
 
-# Смысл анкеты в артефактах этапов 04 и 05: состояние клиента на
-# тот же cutoff, до которого ему доступны события.
-PROFILE_SEMANTICS = "state_at_event_cutoff"
+# Смысл анкеты в артефактах этапов 04 и 05: Attributes на тот же
+# cutoff, до которого клиенту доступны события, и Lifelong строго
+# раньше него.
+PROFILE_SEMANTICS = "attributes_and_lifelong_at_event_cutoff"
+
+# Типы вех Lifelong. Источник истины — контракт выгрузки.
+LIFELONG_TYPES: tuple[str, ...] = RAW_LIFELONG_TYPES
 
 
 class ProfileStateError(ValueError):
@@ -132,19 +152,18 @@ SHORTCUT_FIELDS: dict[str, str] = {
 }
 
 
-# Значение на T из данных не следует.
-UNPROVABLE_FIELDS: dict[str, str] = {
+# Выводятся из вехи Lifelong.
+FROM_LIFELONG: dict[str, str] = {
     "relationship_months": (
-        "стаж пересчитывается со временем без события, а даты прихода в "
-        "банк в выгрузке нет; вычесть месяцы из снимка нельзя — снимок "
-        "относится к последнему пересчёту анкеты"
+        "стаж — производное от вехи relationship_started: модель получает "
+        "саму дату в Lifelong, а давность до cutoff видит временным каналом"
     ),
 }
 
 
 # Чего в анкете нет и почему. Текст уходит в метаданные этапа:
 # исключение обязано быть названным, а не молчаливым.
-EXCLUDED_FIELDS: dict[str, str] = {**SHORTCUT_FIELDS, **UNPROVABLE_FIELDS}
+EXCLUDED_FIELDS: dict[str, str] = {**SHORTCUT_FIELDS, **FROM_LIFELONG}
 
 
 # Поля, которые модельная анкета несёт. Порядок как в
@@ -165,7 +184,7 @@ def _check_coverage() -> None:
 
     groups = (
         CONSTANT_FIELDS, CHANGED_BY_EVENT, FROM_BIRTH_DATE,
-        tuple(SHORTCUT_FIELDS), tuple(UNPROVABLE_FIELDS),
+        tuple(SHORTCUT_FIELDS), tuple(FROM_LIFELONG),
     )
 
     named = [name for group in groups for name in group]
@@ -258,7 +277,8 @@ def as_declared(name: str, value: object) -> object:
 @dataclass(frozen=True)
 class ProfileAt:
     """
-    Анкета клиента на дату: поля и то, чего не хватило.
+    Анкета клиента на дату: поля (Attributes), вехи (Lifelong) и
+    то, чего не хватило.
     """
 
     values: dict[str, object]
@@ -268,6 +288,9 @@ class ProfileAt:
     # названо: на дату значения не было. Считается отдельно,
     # чтобы «не было» не путалось с «не смогли».
     rolled_back_to_absent: tuple[str, ...] = ()
+
+    # Вехи строго раньше даты: (тип, время) в порядке снимка.
+    lifelong: tuple[tuple[str, datetime], ...] = ()
 
 
 def profile_at(
@@ -293,6 +316,14 @@ def profile_at(
         return ProfileAt({})
 
     rows = list(rows)
+
+    # Вехи: только строго раньше moment. Порядок снимка — по
+    # времени — сохраняется.
+    lifelong = tuple(
+        (item["type"], item["event_time"])
+        for item in snapshot.get("lifelong") or ()
+        if item["event_time"] < moment
+    )
 
     later = [row for row in rows if row["event_time"] >= moment]
 
@@ -367,7 +398,7 @@ def profile_at(
         if age >= PENSION_AGE or initial is not None:
             values["pensioner"] = age >= PENSION_AGE or initial == "pensioner"
 
-    return ProfileAt(values, notes, tuple(sorted(absent)))
+    return ProfileAt(values, notes, tuple(sorted(absent)), lifelong)
 
 
 def _full_years(born: date, day: date) -> int:
@@ -399,11 +430,12 @@ __all__ = [
     "CONSTANT_FIELDS",
     "EXCLUDED_FIELDS",
     "FROM_BIRTH_DATE",
+    "FROM_LIFELONG",
     "INCLUDED_FIELDS",
+    "LIFELONG_TYPES",
     "PROFILE_SEMANTICS",
     "SHORTCUT_FIELDS",
     "as_declared",
-    "UNPROVABLE_FIELDS",
     "ProfileAt",
     "ProfileStateError",
     "profile_at",

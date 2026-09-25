@@ -6,6 +6,7 @@ import numpy as np
 import pyarrow as pa
 import torch
 
+from src.dataset.lineage import lineage_problem, write_lineage
 from src.embedding.inputs import BatchInput, Loaded, Source
 from src.embedding.layer import InputEmbedding
 from src.embedding.settings import WEIGHTS_FILE as EMBEDDING_WEIGHTS
@@ -28,7 +29,12 @@ from .settings import PROFILES_FILE, WEIGHTS_FILE, ProfileConfig, profiles_dir
 #
 # Строка это клиент, и это ТА ЖЕ строка, что в batches.parquet:
 # тот же порядок, та же группа строк на батч. Сами токены анкеты
-# здесь не дублируются — они лежат рядом в 07.
+# здесь не дублируются — они лежат рядом в 07, вместе с временем
+# каждого токена (profile_time_log): у вех это давность до cutoff,
+# у [USR] и Attributes ноль.
+#
+# Рядом с весами лежит lineage.json: веса собраны под анкету и
+# словарь текущего кода, и потребители это сверяют.
 #
 # Входной слой не разыгрывается заново: он грузится из
 # data/09_embeddings/<group>/weights.pt вместе с vocab_size, dim
@@ -72,8 +78,9 @@ def build_group(
     Векторы клиентов всей группы.
     """
 
-    # Календарь не просится: анкета его не видит.
-    source = Source(group)
+    # Календарь не просится: анкета его не видит. Время её
+    # токенов — просится.
+    source = Source(group, with_profile_time=True)
 
     specials = load_special_tokens()
 
@@ -87,6 +94,7 @@ def build_group(
         heads=config.heads,
         feedforward=config.feedforward,
         dropout=config.dropout,
+        rope_base=config.rope_base,
         seed=config.seed,
     )
 
@@ -110,7 +118,9 @@ def build_group(
             loaded = source.batch(number)
 
             with torch.no_grad():
-                vectors = encode(embedding, encoder, loaded.model)
+                vectors = encode(
+                    embedding, encoder, loaded.model, torch.tensor(loaded.profile_time_log)
+                )
 
             if bool(vectors.isnan().any()):
                 raise ProfileError(f"батч {number}: в векторах клиентов появился NaN")
@@ -124,6 +134,10 @@ def build_group(
         rows = writer.close()
 
     _save(encoder, config, embedding.dim, weights_path)
+
+    # Только после полной записи: прерванная сборка отметки не
+    # получает, и читатель её отвергнет.
+    write_lineage(directory)
 
     return {
         "group": group,
@@ -145,9 +159,11 @@ def encode(
     embedding: InputEmbedding,
     encoder: ProfileEncoder,
     model: BatchInput,
+    times: torch.Tensor,
 ) -> torch.Tensor:
     """
-    Векторы всех клиентов батча: [B, d].
+    Векторы всех клиентов батча: [B, d]. times — время токенов
+    анкеты [B, P].
 
     Анкета крошечная — два десятка токенов на клиента, — поэтому
     батч идёт одним куском, без нарезки на порции.
@@ -160,7 +176,7 @@ def encode(
         model.profile_token_mask,
     )
 
-    return encoder(tokens, ~model.profile_token_mask)
+    return encoder(tokens, times, model.profile_token_mask)
 
 
 def _table(model: BatchInput, vectors: torch.Tensor, dim: int) -> pa.Table:
@@ -194,6 +210,11 @@ def _embedding(group: str, specials: dict) -> InputEmbedding:
 
     if not path.exists():
         raise ProfileError(f"нет {path}: выполните python -m src.embedding.run {group}")
+
+    problem = lineage_problem(path.parent, f"python -m src.embedding.run {group}")
+
+    if problem:
+        raise ProfileError(problem)
 
     saved = torch.load(path, map_location="cpu", weights_only=True)
 
@@ -230,8 +251,8 @@ def _save(encoder: ProfileEncoder, config: ProfileConfig, dim: int, path: Path) 
 
 def _clear(directory: Path) -> None:
     """
-    Каталог группы держит только свои два файла: прежний
-    результат стирается целиком.
+    Каталог группы держит только свои файлы: прежний результат
+    стирается целиком.
     """
 
     directory.mkdir(parents=True, exist_ok=True)

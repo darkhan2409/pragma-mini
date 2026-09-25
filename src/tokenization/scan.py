@@ -7,7 +7,7 @@ from typing import Iterable
 
 from src.preprocessing.canonical.events import normalize_text
 from src.preprocessing.read import ClientHistory
-from src.preprocessing.keys import CATEGORICAL, NUMERIC, TEXT
+from src.preprocessing.keys import CATEGORICAL, NUMERIC, PROFILE_LIFELONG_KEY, TEXT
 
 from .schema import SemanticSchema, WEIGHT_PER_CLIENT
 
@@ -447,6 +447,27 @@ def scan(
                     _add_text(stats, key, value, client_id)
                 else:
                     raise ScanError(f"ключ {key}: неизвестный вид значения {info.value_kind!r}")
+
+        # --- вехи анкеты: значение — тип вехи под одним ключом ---
+
+        if history.lifelong:
+
+            key = PROFILE_LIFELONG_KEY.key
+
+            info = schema.keys.get(key)
+
+            if info is None or info.weight_rule != WEIGHT_PER_CLIENT:
+                raise ScanError(
+                    f"ключ {key} несёт вехи анкеты, но не объявлен ключом профиля"
+                )
+
+            for kind, _ in history.lifelong:
+
+                stats.values += 1
+
+                _note_key(stats, key, value_type(kind), client_id)
+
+                _add_categorical(stats, key, kind, client_id)
 
         for item in history.limitations:
             stats.limitations[item] = stats.limitations.get(item, 0) + 1

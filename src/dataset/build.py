@@ -7,7 +7,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.preprocessing.artifacts import write_json
-from src.preprocessing.profile_state import INCLUDED_FIELDS, PROFILE_SEMANTICS
+from src.preprocessing.profile_state import INCLUDED_FIELDS, LIFELONG_TYPES, PROFILE_SEMANTICS
 from src.preprocessing.settings import PreprocessingConfig
 from src.tokenization.finalvocab import FrozenArtifacts
 from src.tokenization.settings import TokenizerConfig
@@ -64,10 +64,12 @@ SAMPLES_SCHEMA = pa.schema(
         # --- что разрешено маскировать ---
         ("target_event_mask", pa.list_(pa.bool_())),
 
-        # --- профиль ---
+        # --- профиль: Attributes на cutoff и вехи раньше него ---
         ("profile_key_ids", pa.list_(pa.int32())),
         ("profile_value_ids", pa.list_(pa.int32())),
         ("profile_positions", pa.list_(pa.int32())),
+        # Время токена анкеты: у вехи её момент, у остальных null.
+        ("profile_time", pa.list_(pa.timestamp("us", tz="UTC"))),
     ]
 )
 
@@ -106,6 +108,7 @@ def _row(sample: Sample) -> dict:
         "profile_key_ids": sample.profile_key_ids.tolist(),
         "profile_value_ids": sample.profile_value_ids.tolist(),
         "profile_positions": sample.profile_positions.tolist(),
+        "profile_time": sample.profile_time.tolist(),
     }
 
 
@@ -225,6 +228,7 @@ def build_group(
         "events_cutoff": cutoff.isoformat(),
         "profile_semantics": PROFILE_SEMANTICS,
         "profile_fields": list(INCLUDED_FIELDS),
+        "profile_lifelong_types": list(LIFELONG_TYPES),
         "samples": counters.samples,
     }
 

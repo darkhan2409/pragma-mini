@@ -88,7 +88,8 @@ def reference(model: Model, data) -> dict:
                     data.profile_key_ids[index], data.profile_value_ids[index],
                     data.profile_positions[index], ones(length),
                 ).unsqueeze(0),
-                torch.zeros(1, length, dtype=torch.bool),
+                data.profile_time_log[index].unsqueeze(0),
+                ones(length).unsqueeze(0),
             )[0]
         )
 

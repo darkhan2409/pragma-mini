@@ -16,7 +16,7 @@ from src.tokenization.transform import (
     PROFILE_FILE,
     TOKENIZED_FORMAT,
 )
-from src.preprocessing.profile_state import PROFILE_SEMANTICS
+from src.preprocessing.profile_state import LIFELONG_TYPES, PROFILE_SEMANTICS
 
 
 # ============================================================
@@ -90,6 +90,10 @@ class TokenizedClient:
     profile_value_ids: list[int] = field(default_factory=list)
     profile_positions: list[int] = field(default_factory=list)
 
+    # Время каждого токена анкеты: у вехи её момент, у [USR] и
+    # Attributes None.
+    profile_time: list[datetime | None] = field(default_factory=list)
+
     @property
     def n_events(self) -> int:
         return len(self.events)
@@ -118,17 +122,22 @@ class TokenizedGroup:
                 )
 
         # Версия формата, а не только наличие файлов. Каталог
-        # прежней сборки несёт анкету другого смысла: формат 1 —
-        # на конец выгрузки, формат 2 — на начало периода целей.
+        # прежней сборки несёт анкету другого смысла или другой
+        # набор вех.
         self.meta = read_json(self.directory / META_FILE)
 
-        found = self.meta.get("format")
+        found = (
+            self.meta.get("format"),
+            self.meta.get("profile_semantics"),
+            self.meta.get("profile_lifelong_types"),
+        )
 
-        if found != TOKENIZED_FORMAT or self.meta.get("profile_semantics") != PROFILE_SEMANTICS:
+        needed = (TOKENIZED_FORMAT, PROFILE_SEMANTICS, list(LIFELONG_TYPES))
+
+        if found != needed:
             raise TokenizedError(
-                f"{self.directory / META_FILE}: формат {found!r}, смысл анкеты "
-                f"{self.meta.get('profile_semantics')!r}, а нужны {TOKENIZED_FORMAT} и "
-                f"{PROFILE_SEMANTICS!r}. Каталог собран прежним кодом — выполните "
+                f"{self.directory / META_FILE}: формат, смысл анкеты и вехи {found!r}, а нужны "
+                f"{needed!r}. Каталог собран прежним кодом — выполните "
                 f"python -m src.tokenization.run encode {group} заново"
             )
 
@@ -268,6 +277,7 @@ class TokenizedGroup:
             profile_key_ids=list(profile["key_ids"]),
             profile_value_ids=list(profile["value_ids"]),
             profile_positions=list(profile["positions"]),
+            profile_time=list(profile["time"]),
         )
 
 
