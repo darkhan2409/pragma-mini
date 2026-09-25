@@ -8,6 +8,7 @@ import pyarrow.parquet as pq
 
 from .calendar import calendar_features
 from .canonical.build import EVENTS_FILE
+from .canonical.schema import LIFELONG_SOURCE_COLUMN
 from .keys import (
     DIRECT_KEYS,
     DYNAMIC_FIELDS,
@@ -74,6 +75,11 @@ class ClientEvent:
     # Полем события не является и в словари не входит.
     calendar: tuple[float, ...] = ()
 
+    # Тип вехи анкеты, чей источник записан этим событием, иначе
+    # None. Значением события не является: модели не отдаётся, а
+    # только выводит событие из целей MLM.
+    lifelong_source: str | None = None
+
     def model_values(self) -> dict[str, object]:
         """
         Всё, что событие отдаёт модели. Это ровно его значения:
@@ -89,6 +95,7 @@ class ClientEvent:
             "source": self.source,
             "values": dict(self.values),
             "calendar": list(self.calendar),
+            "lifelong_source": self.lifelong_source,
         }
 
 
@@ -163,6 +170,14 @@ class Group:
             )
 
         self._events = pq.ParquetFile(events_path)
+
+        # Без пометки источников вех события-источники молча стали
+        # бы целями MLM: такой слой собран прежним кодом.
+        if LIFELONG_SOURCE_COLUMN not in self._events.schema_arrow.names:
+            raise ReadError(
+                f"{events_path}: нет колонки {LIFELONG_SOURCE_COLUMN} — слой собран "
+                f"прежним кодом; выполните preprocess {group} заново"
+            )
 
         self._profile_rows: dict[str, dict] = {
             row["client_id"]: row for row in pq.read_table(self.profile_path).to_pylist()
@@ -285,6 +300,7 @@ class Group:
                     source=row["source"],
                     values=values,
                     calendar=tuple(float(value) for value in calendars[index]),
+                    lifelong_source=row[LIFELONG_SOURCE_COLUMN],
                 )
             )
 
@@ -301,6 +317,17 @@ class Group:
         state = profile_at(snapshot, all_rows, cutoff, self.timezone)
 
         notes.extend(state.notes)
+
+        # Помеченное событие раньше cutoff, и его веха того же
+        # момента обязана быть в Lifelong того же cutoff.
+        for item in events:
+            if item.lifelong_source is not None and (
+                (item.lifelong_source, item.event_time) not in state.lifelong
+            ):
+                raise ReadError(
+                    f"{client_id}: событие {item.event_time.isoformat()} помечено источником "
+                    f"вехи {item.lifelong_source}, а такой вехи в анкете на cutoff нет"
+                )
 
         return ClientHistory(
             client_id=client_id,

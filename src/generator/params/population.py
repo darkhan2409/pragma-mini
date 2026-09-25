@@ -274,6 +274,10 @@ class PopulationParams:
     tenure_months_gamma: tuple = (2.0, 26.0)
     tenure_months_max: int = 168
 
+    # Стаж на первой известной работе к её точке отсчёта — не
+    # больше стольких месяцев и не раньше совершеннолетия.
+    job_tenure_months_max: int = 240
+
     # Доля клиентов, регистрирующихся внутри окна наблюдения.
     registration_in_window_share: float = 0.18
 

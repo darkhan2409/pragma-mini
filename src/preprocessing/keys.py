@@ -34,7 +34,7 @@ from .projection import EVENT_TYPE_FIELD, SEMANTIC_PAYLOAD_FIELDS, validate_proj
 # ============================================================
 
 
-KEYS_VERSION = "13.0.0"
+KEYS_VERSION = "15.0.0"
 
 
 # ------------------------------------------------------------
@@ -270,7 +270,6 @@ BY_SOURCE_KEYS: dict[str, dict[str, SemanticKey]] = {
 # ------------------------------------------------------------
 
 PROFILE_NUMERIC: dict[str, tuple[str, str | None]] = {
-    "age": ("возраст клиента", "years"),
     "declared_income": ("заявленный доход", "KZT"),
     "relationship_months": ("месяцев отношений с банком по данным профиля", "months"),
     "credit_limit": ("кредитный лимит клиента", "KZT"),
@@ -280,7 +279,11 @@ PROFILE_NUMERIC: dict[str, tuple[str, str | None]] = {
 # Счётчики лежат здесь, а не среди чисел: у них важно точное
 # значение. Единицу им даёт таблица UNITS, и по ней же привод
 # типа узнаёт, что строка изменения профиля это целое число.
+#
+# Возраст тоже здесь: полных лет на cutoff — точное целое, и
+# каждый возраст получает своё значение словаря, а не диапазон.
 PROFILE_CATEGORICAL: dict[str, str] = {
+    "age": "возраст клиента: полных лет на cutoff",
     "children": "число детей",
     "contracts_count": "договоров всего по данным профиля",
     "active_contracts": "действующих договоров по данным профиля",
@@ -290,10 +293,12 @@ PROFILE_CATEGORICAL: dict[str, str] = {
     "region": "регион проживания",
     "city": "город проживания",
     "housing_type": "тип жилья",
-    "pensioner": "пенсионер",
     "income_type": "вид дохода",
     "industry": "отрасль занятости",
     "income_day": "день выплаты основного дохода: число это код дня месяца",
+    # Стаж полугодиями: метка «0-5», «6-11», … месяцев. Границы
+    # заданы шагом, а не данными.
+    "job_tenure_months": "стаж на текущем месте работы по найму, полугодиями",
     "holds_credit_card": "держит кредитную карту",
     "holds_debit_card": "держит дебетовую карту",
     "holds_deposit": "держит вклад",
@@ -360,7 +365,6 @@ CHANGEABLE_PROFILE_FIELDS: tuple[str, ...] = (
     "income_type",
     "industry",
     "income_day",
-    "pensioner",
     "consent_marketing",
 )
 

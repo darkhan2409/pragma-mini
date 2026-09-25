@@ -217,6 +217,29 @@ def test_long_window_keeps_the_early_milestones(runs, boundary):
         assert items == early, client_id
 
 
+def test_long_window_keeps_the_early_employment_records(runs, boundary):
+    """
+    Записи банка о работе, сделанные до границы короткой выгрузки,
+    в длинной те же: ни начало работы, ни момент записи от конца
+    окна не зависят.
+    """
+
+    def records(directory) -> dict[str, list[tuple]]:
+        rows = pq.read_table(directory / "profile.parquet").to_pylist()
+        return {
+            row["client_id"]: [(item["start_date"], item["record_time"]) for item in row["employment"]]
+            for row in rows
+        }
+
+    short = records(runs["short"])
+    long = records(runs["long"])
+
+    assert any(short.values()), "проверка вырождена: записей о работе нет вовсе"
+
+    for client_id, items in short.items():
+        assert items == [item for item in long[client_id] if item[1] < boundary], client_id
+
+
 def test_profile_keeps_every_earlier_client(runs):
 
     short = pq.read_table(runs["short"] / "profile.parquet").to_pylist()
@@ -249,8 +272,8 @@ def test_repeat_after_another_window_is_identical(runs):
 
 def test_repeat_gives_the_same_profile(runs):
     """
-    Анкета с вехами повторяется целиком: kyc_passed и остальные
-    вехи не зависят от того, что считалось в процессе раньше.
+    Анкета с вехами и записями о работе повторяется целиком: они не
+    зависят от того, что считалось в процессе раньше.
     """
 
     short = pq.read_table(runs["short"] / "profile.parquet").to_pylist()

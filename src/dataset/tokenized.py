@@ -48,8 +48,8 @@ from src.preprocessing.profile_state import LIFELONG_TYPES, PROFILE_SEMANTICS
 # ============================================================
 
 
-# Ключ, по которому читается тип события: политика отбора
-# контекста смотрит на него, когда решает, что такое веха.
+# Ключ, по которому читается тип события: по типу решается, может
+# ли событие стать целью MLM (targets.can_be_target).
 EVENT_TYPE_KEY = "event_type"
 
 
@@ -71,6 +71,10 @@ class TokenizedEvent:
     value_ids: list[int]
     positions: list[int]
     calendar: list[float]
+
+    # Тип вехи анкеты, чей источник записан этим событием, иначе
+    # None: такое событие остаётся контекстом, но не целью.
+    lifelong_source: str | None = None
 
     @property
     def n_tokens(self) -> int:
@@ -262,6 +266,7 @@ class TokenizedGroup:
                 value_ids=list(row["value_ids"]),
                 positions=list(row["positions"]),
                 calendar=list(row["calendar"]),
+                lifelong_source=row["lifelong_source"],
             )
             for row in rows
         ]

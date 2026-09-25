@@ -27,7 +27,8 @@ from ..rawdata import DTYPE_MAP, ENVELOPE_SCHEMA, RawManifest
 # ============================================================
 
 
-SCHEMA_VERSION = 15
+# 16 — колонка lifelong_source: пометка события-источника вехи.
+SCHEMA_VERSION = 16
 
 # Время события в слое УЖЕ нормализовано: в выгрузке это
 # строка ISO 8601 со смещением, здесь — момент в UTC.
@@ -49,9 +50,17 @@ TS_UTC = pa.timestamp("us", tz="UTC")
 #
 # Нормализованный текст ложится в само поле: двух записей
 # одного значения рядом не держим.
+#
+# Одна служебная колонка всё же есть — lifelong_source: тип вехи
+# анкеты, чей источник записан этой строкой, иначе null. Её
+# находит ссылка source_id вехи на карту или договор, пока
+# идентификаторы ещё в payload. Модели она не отдаётся: по ней
+# датасет только исключает строку из целей MLM.
 # ------------------------------------------------------------
 
 ENVELOPE_NAMES: tuple[str, ...] = tuple(name for name in ENVELOPE_SCHEMA.names if name != "payload")
+
+LIFELONG_SOURCE_COLUMN = "lifelong_source"
 
 # Поля, текст которых нормализуется на месте.
 NORMALIZED_FIELDS: tuple[str, ...] = ("merchant_name", "counterparty")
@@ -95,11 +104,14 @@ def events_schema(manifest: RawManifest) -> pa.Schema:
 
     fields += payload_columns(manifest)
 
+    fields.append((LIFELONG_SOURCE_COLUMN, pa.string()))
+
     return pa.schema(fields)
 
 
 __all__ = [
     "ENVELOPE_NAMES",
+    "LIFELONG_SOURCE_COLUMN",
     "NORMALIZED_FIELDS",
     "TS_UTC",
     "SCHEMA_VERSION",

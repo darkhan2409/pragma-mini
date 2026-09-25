@@ -7,7 +7,7 @@ from pathlib import Path
 import pyarrow as pa
 
 from src.preprocessing.artifacts import TableWriter, write_json
-from src.preprocessing.keys import PROFILE_LIFELONG_KEY, KeysError
+from src.preprocessing.keys import PROFILE_KEYS, PROFILE_LIFELONG_KEY, KeysError
 from src.preprocessing.profile_state import (
     EXCLUDED_FIELDS,
     INCLUDED_FIELDS,
@@ -20,6 +20,7 @@ from src.preprocessing.settings import PreprocessingConfig
 
 from .encode import EncodeError, encode_event, encode_profile
 from .finalvocab import FrozenArtifacts
+from .schema import SemanticSchema
 from .settings import TokenizerConfig, tokenized_dir
 from .specials import UNK
 
@@ -72,13 +73,29 @@ META_FILE = "meta.json"
 # 3 — анкета на cutoff событий (PROFILE_SEMANTICS), возраст и
 #     признак пенсионера посчитаны от даты рождения;
 # 4 — анкета это Attributes на cutoff и вехи Lifelong раньше
-#     него; у токенов анкеты есть время (колонка time).
-TOKENIZED_FORMAT = 4
+#     него; у токенов анкеты есть время (колонка time);
+# 5 — признака пенсионера среди Attributes нет; возраст — только
+#     от birth_date на cutoff и точным числом полных лет: каждый
+#     возраст своё значение словаря, а не диапазон;
+# 6 — в Attributes есть стаж на месте работы полугодиями; вехи
+#     Lifelong —
+#     bank_registered, app_registered, first_card_activated,
+#     first_loan_opened, first_deposit_opened;
+# 7 — у события есть колонка lifelong_source: тип вехи, чей
+#     источник записан этим событием (ссылка source_id вехи,
+#     найденная препроцессингом), иначе null; стаж есть только при
+#     наёмном виде дохода на cutoff.
+TOKENIZED_FORMAT = 7
 
 # В файлах лежит только то, что нужно модели. Число токенов
 # и значений не хранится: это длины массивов. Названия
 # ключей рядом с их номерами тоже: их восстанавливает словарь.
 # Тип события и его источник уже лежат внутри пар ключ/значение.
+#
+# lifelong_source токеном не является: это пометка события-
+# источника вехи анкеты, по которой датасет не делает его целью.
+# Она едет вместе со строкой события, поэтому переживает и отбор
+# контекста, и раскладку по batch.
 EVENTS_SCHEMA = pa.schema(
     [
         ("client_id", pa.string()),
@@ -87,6 +104,7 @@ EVENTS_SCHEMA = pa.schema(
         ("value_ids", pa.list_(pa.int32())),
         ("positions", pa.list_(pa.int32())),
         ("calendar", pa.list_(pa.float32())),
+        ("lifelong_source", pa.string()),
     ]
 )
 
@@ -166,13 +184,7 @@ def encode_group(
 
     directory = Path(directory) if directory is not None else tokenized_dir(group)
 
-    # Словарь без ключа вех собран прежним кодом: вехи ушли бы в
-    # неизвестные ключи молча.
-    if artifacts.key_id(PROFILE_LIFELONG_KEY.key) is None:
-        raise TransformError(
-            f"в словаре нет ключа {PROFILE_LIFELONG_KEY.key}: словарь собран прежним кодом — "
-            "выполните python -m src.tokenization.run fit заново"
-        )
+    check_vocab(artifacts)
 
     window = group_window(group)
 
@@ -231,6 +243,7 @@ def encode_group(
                         "value_ids": record.value_ids,
                         "positions": record.positions,
                         "calendar": list(event.calendar),
+                        "lifelong_source": event.lifelong_source,
                     }
                 )
 
@@ -311,6 +324,45 @@ def encode_group(
     }
 
 
+def check_vocab(artifacts: FrozenArtifacts) -> None:
+    """
+    Словарь собран тем же кодом, что кодирует.
+
+    Своей версии у словаря нет, поэтому сверяется содержание:
+    словарь прежнего кода кодировал бы анкету молча и неверно —
+    поля без ключа ушли бы в неизвестные ключи, возраст стал бы
+    диапазоном, а вехи прежнего набора — известными значениями.
+    """
+
+    schema = SemanticSchema()
+
+    command = "словарь собран прежним кодом — выполните python -m src.tokenization.run fit заново"
+
+    features = {key for key, info in schema.keys.items() if info.is_model_feature}
+
+    gone = sorted(set(artifacts.keys) - features)
+
+    if gone:
+        raise TransformError(f"в словаре ключи, которых больше нет: {gone}; {command}")
+
+    needed = [PROFILE_KEYS[name].key for name in INCLUDED_FIELDS] + [PROFILE_LIFELONG_KEY.key]
+
+    missing = sorted(key for key in needed if artifacts.key_id(key) is None)
+
+    if missing:
+        raise TransformError(f"в словаре нет ключей анкеты {missing}; {command}")
+
+    scaled = sorted(key for key in schema.categorical_keys if key in artifacts.buckets)
+
+    if scaled:
+        raise TransformError(f"у категориальных ключей {scaled} в словаре числовая шкала; {command}")
+
+    stale = sorted(set(artifacts.values.get(PROFILE_LIFELONG_KEY.key, {})) - set(LIFELONG_TYPES))
+
+    if stale:
+        raise TransformError(f"в словаре вехи прежнего набора {stale}; {command}")
+
+
 def _clear(directory: Path) -> None:
     """
     Каталог группы держит только два файла: прежний результат
@@ -331,6 +383,7 @@ __all__ = [
     "PROFILE_FILE",
     "PROFILE_SCHEMA",
     "TransformError",
+    "check_vocab",
     "encode_group",
     "group_cutoff",
 ]

@@ -174,7 +174,7 @@ def render(data: dict, limit: int | None, since: datetime | None,
         out.append("ПРОФИЛЬ")
         for row in data["profile"]:
             out.append(
-                f"  возраст {row.get('age')}, город {row.get('city')}, "
+                f"  дата рождения {row.get('birth_date')}, город {row.get('city')}, "
                 f"доход {_money(row.get('declared_income'))}"
             )
         out.append("")

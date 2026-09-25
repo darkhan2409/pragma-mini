@@ -12,6 +12,7 @@ from .config import (
 )
 from .engine import _HANDLERS, _emit_money
 from .engine_credit import emit_product_closed
+from .engine_products import LOAN_FAMILIES
 from .finance import cards as card_rules
 from .finance import deposits as deposit_rules
 from .finance.entities import (
@@ -21,10 +22,11 @@ from .finance.entities import (
 )
 from .finance.ledger import COUNTERPART_BANK, COUNTERPART_GOVERNMENT, NON_PAYMENT_KINDS
 from .life import calendar as cal
+from .life import income as income_module
 from .life import lifecycle as lifecycle_module
 from .life import stress as stress_module
 from .observe import defects as defect_module
-from .profile import lifelong, utc
+from .profile import employment, lifelong, utc
 from .rng import (
     NS_CARD_CREDIT,
     NS_CONSENT,
@@ -912,8 +914,6 @@ def _update_profile(
 
     values.update(
         {
-            "age": persona.age_at(day),
-            "pensioner": persona.is_pensioner_at(day),
             "relationship_months": persona.relationship_months_at(day),
             "contracts_count": len(state.contracts),
             "active_contracts": len(open_contracts),
@@ -971,12 +971,66 @@ def finish(sim) -> CommunityResult:
                 "birth_date": persona.birth_date.date(),
             }
             row.update({name: state.profile_values.get(name) for name in PROFILE_FIELDS})
-            row["lifelong"] = lifelong(
-                persona.relationship_start, state.app_adopted_at, config.HISTORY_END
+            row["employment"] = employment(
+                income_module.employment(persona, state.life_events, state.income_streams),
+                config.HISTORY_END,
             )
+            row["lifelong"] = lifelong(milestones(state), config.HISTORY_END)
             profile_rows.append(row)
 
     return CommunityResult(events=events, profile_rows=profile_rows)
+
+
+# Семейства вкладов: те же, что в holds_deposit анкеты.
+DEPOSIT_FAMILIES = ("deposit", "deposit_certificate")
+
+
+def milestones(state: ClientState) -> dict:
+    """
+    Вехи клиента по его фактическому состоянию — включая договоры
+    предыстории, событий по которым в ленте нет: тип -> (момент,
+    source_id) или None. Ни одного нового розыгрыша: каждая дата
+    уже прожита симуляцией.
+
+    Первая активация карты считается по картам договоров:
+    перевыпуск — это не новая активация. Кредит — договор с
+    графиком (LOAN_FAMILIES); кредитная карта — карта. source_id —
+    идентификатор этой карты или договора; при равном времени
+    первым считается выданный раньше.
+    """
+
+    cards = [
+        (card.activated_at, card.card_id)
+        for card in state.cards.values()
+        if card.reissued_from is None and card.activated_at is not None
+    ]
+
+    loans = [
+        (item.opened_at, item.contract_id)
+        for item in state.contracts.values()
+        if item.product_family in LOAN_FAMILIES
+    ]
+
+    deposits = [
+        (item.opened_at, item.contract_id)
+        for item in state.contracts.values()
+        if item.product_family in DEPOSIT_FAMILIES
+    ]
+
+    def first(items: list) -> tuple | None:
+        # min по одному времени оставляет первый из равных — в
+        # порядке выдачи, как лежат словари состояния.
+        return min(items, key=lambda item: item[0], default=None)
+
+    adopted = state.app_adopted_at
+
+    return {
+        "bank_registered": (state.persona.relationship_start, None),
+        "app_registered": None if adopted is None else (adopted, None),
+        "first_card_activated": first(cards),
+        "first_loan_opened": first(loans),
+        "first_deposit_opened": first(deposits),
+    }
 
 
 def _tape_order(event) -> tuple:

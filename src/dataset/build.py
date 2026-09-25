@@ -90,6 +90,9 @@ class Counters:
     empty_profiles: int = 0
     truncated: int = 0
     excluded_events: int = 0
+    # Самая длинная история до отбора и самый длинный пример после.
+    max_events_before: int = 0
+    max_events: int = 0
     max_tokens: int = 0
     unknown: int = 0
 
@@ -189,7 +192,7 @@ def build_group(
                 raise BuildError(
                     f"группа {group}, клиент {client.client_id}: отбор контекста выбросил "
                     f"{sample.excluded_eligible} событий периода целей. В оценочной группе это "
-                    "запрещено: поднимите бюджет контекста или соберите её политикой all"
+                    "запрещено: поднимите max_events или соберите её политикой all"
                 )
 
             counters.samples += 1
@@ -205,6 +208,8 @@ def build_group(
             counters.empty_profiles += int(sample.profile_tokens <= 1)
             counters.truncated += int(sample.truncated)
             counters.excluded_events += sample.excluded_events
+            counters.max_events_before = max(counters.max_events_before, client.n_events)
+            counters.max_events = max(counters.max_events, sample.n_events)
             counters.max_tokens = max(counters.max_tokens, sample.n_tokens)
 
             _count_unknown(artifacts, sample, counters)
@@ -229,6 +234,10 @@ def build_group(
         "profile_semantics": PROFILE_SEMANTICS,
         "profile_fields": list(INCLUDED_FIELDS),
         "profile_lifelong_types": list(LIFELONG_TYPES),
+        # Какой отбор истории дал эти примеры и сколько он отнял.
+        "context": config.context.as_dict(),
+        "truncated_samples": counters.truncated,
+        "excluded_events": counters.excluded_events,
         "samples": counters.samples,
     }
 
@@ -251,6 +260,8 @@ def build_group(
             "empty_profiles": counters.empty_profiles,
             "truncated": counters.truncated,
             "excluded_events": counters.excluded_events,
+            "max_events_before": counters.max_events_before,
+            "max_events": counters.max_events,
             "max_tokens": counters.max_tokens,
         },
         "unknown_values": counters.unknown,

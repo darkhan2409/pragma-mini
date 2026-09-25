@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import numpy as np
 import pyarrow.parquet as pq
 import pytest
 import torch
 
+from src.generator.profile import LIFELONG_SOURCE_FIELD
 from src.mlm.model import pack
 from src.preprocessing.profile_state import (
     EXCLUDED_FIELDS,
@@ -28,6 +29,7 @@ from tests.test_profile_state import (
     RAW_CLIENT,
     UTC,
     prepare,
+    raw_event,
     val_cutoff,
     write_profile_vocab,
     write_raw,
@@ -68,7 +70,16 @@ MICROSECOND = timedelta(microseconds=1)
 
 
 def life(*items: tuple[str, datetime]) -> list[dict]:
-    return [{"type": kind, "event_time": moment} for kind, moment in items]
+    """
+    Вехи снимка. У вех о продуктах источник назван: ссылка на
+    карту или договор (source_id).
+    """
+
+    return [
+        {"type": kind, "event_time": moment,
+         "source_id": f"src_{kind}" if kind in LIFELONG_SOURCE_FIELD else None}
+        for kind, moment in items
+    ]
 
 
 def with_life(snapshot: dict, *items: tuple[str, datetime]) -> dict:
@@ -84,16 +95,21 @@ def test_milestone_just_before_the_cutoff_is_seen_and_at_it_is_not(stage):
 
     cutoff = val_cutoff()
 
-    history = prepare(stage, EARLY, with_life(
+    # Первая карта активирована за микросекунду до T: внутри окна у
+    # вехи есть событие-источник в ленте.
+    activated = raw_event(RAW_CLIENT, (cutoff - MICROSECOND).replace(tzinfo=None).isoformat(), {
+        "type": "card_activated", "product_id": "prd_card", "card_id": "src_first_card_activated"})
+
+    history = prepare(stage, EARLY + [activated], with_life(
         QUIET_SNAPSHOT,
-        ("relationship_started", OLD),
-        ("kyc_passed", cutoff - MICROSECOND),
-        ("app_adopted", cutoff),
+        ("bank_registered", OLD),
+        ("first_card_activated", cutoff - MICROSECOND),
+        ("app_registered", cutoff),
     ))
 
     assert history.lifelong == [
-        ("relationship_started", OLD),
-        ("kyc_passed", cutoff - MICROSECOND),
+        ("bank_registered", OLD),
+        ("first_card_activated", cutoff - MICROSECOND),
     ]
 
 
@@ -101,11 +117,11 @@ def test_milestone_after_the_cutoff_is_not_seen(stage):
 
     history = prepare(stage, EARLY, with_life(
         QUIET_SNAPSHOT,
-        ("relationship_started", OLD),
-        ("app_adopted", val_cutoff() + timedelta(days=20)),
+        ("bank_registered", OLD),
+        ("app_registered", val_cutoff() + timedelta(days=20)),
     ))
 
-    assert history.lifelong == [("relationship_started", OLD)]
+    assert history.lifelong == [("bank_registered", OLD)]
 
 
 def test_milestone_older_than_the_tape_survives(stage):
@@ -114,10 +130,10 @@ def test_milestone_older_than_the_tape_survives(stage):
     Lifelong берётся из снимка, а не из видимой истории.
     """
 
-    history = prepare(stage, EARLY, with_life(QUIET_SNAPSHOT, ("relationship_started", OLD)))
+    history = prepare(stage, EARLY, with_life(QUIET_SNAPSHOT, ("bank_registered", OLD)))
 
     assert min(event.event_time for event in history.events).year == 2024
-    assert history.lifelong == [("relationship_started", OLD)]
+    assert history.lifelong == [("bank_registered", OLD)]
 
 
 def test_future_raw_data_does_not_change_the_profile(stage):
@@ -134,13 +150,13 @@ def test_future_raw_data_does_not_change_the_profile(stage):
 
     artifacts = FrozenArtifacts.load()
 
-    before = (("relationship_started", OLD), ("kyc_passed", OLD))
+    before = (("bank_registered", OLD), ("first_card_activated", OLD))
 
     quiet = prepare(stage, EARLY, with_life(QUIET_SNAPSHOT, *before))
     quiet_tokens, quiet_times = encode_profile(artifacts, quiet, 4)
 
     busy = prepare(stage, EARLY + AFTER, with_life(
-        BUSY_SNAPSHOT, *before, ("app_adopted", val_cutoff() + timedelta(days=20))
+        BUSY_SNAPSHOT, *before, ("app_registered", val_cutoff() + timedelta(days=20))
     ))
     busy_tokens, busy_times = encode_profile(artifacts, busy, 4)
 
@@ -171,7 +187,7 @@ def test_attributes_and_lifelong_stay_apart(stage):
     вехи, в Attributes не возвращается, хотя в снимке он есть.
     """
 
-    history = prepare(stage, EARLY, with_life(QUIET_SNAPSHOT, ("relationship_started", OLD)))
+    history = prepare(stage, EARLY, with_life(QUIET_SNAPSHOT, ("bank_registered", OLD)))
 
     assert QUIET_SNAPSHOT["relationship_months"] == 40
 
@@ -206,9 +222,9 @@ def test_milestones_follow_the_attributes_with_their_time(stage):
 
     history = prepare(stage, EARLY, with_life(
         QUIET_SNAPSHOT,
-        ("relationship_started", OLD),
-        ("kyc_passed", OLD),
-        ("app_adopted", adopted),
+        ("bank_registered", OLD),
+        ("first_card_activated", OLD),
+        ("app_registered", adopted),
     ))
 
     record, times = encode_profile(artifacts, history, 4)
@@ -216,13 +232,13 @@ def test_milestones_follow_the_attributes_with_their_time(stage):
     key = artifacts.key_id("profile_lifelong")
 
     assert record.key_ids[0] == artifacts.special(USR)
-    assert record.key_ids[1:4] == [
+    assert record.key_ids[1:4] == sorted(
         artifacts.key_id(name) for name in ("profile_gender", "profile_city", "profile_children")
-    ]
+    )
     assert record.key_ids[4:] == [key, key, key]
     assert record.value_ids[4:] == [
         artifacts.categorical_id("profile_lifelong", name)
-        for name in ("relationship_started", "kyc_passed", "app_adopted")
+        for name in ("bank_registered", "first_card_activated", "app_registered")
     ]
     assert record.positions[4:] == [0, 0, 0]
 
@@ -235,18 +251,18 @@ def test_milestone_unknown_to_the_vocab_becomes_unk(stage):
     from src.tokenization.finalvocab import FrozenArtifacts
     from src.tokenization.specials import UNK
 
-    write_profile_vocab(stage, lifelong=("relationship_started", "kyc_passed"))
+    write_profile_vocab(stage, lifelong=("bank_registered", "first_card_activated"))
 
     artifacts = FrozenArtifacts.load()
 
     history = prepare(stage, EARLY, with_life(
-        QUIET_SNAPSHOT, ("relationship_started", OLD), ("app_adopted", OLD + timedelta(days=1))
+        QUIET_SNAPSHOT, ("bank_registered", OLD), ("app_registered", OLD + timedelta(days=1))
     ))
 
     record, _ = encode_profile(artifacts, history, 4)
 
     assert record.value_ids[-2:] == [
-        artifacts.categorical_id("profile_lifelong", "relationship_started"),
+        artifacts.categorical_id("profile_lifelong", "bank_registered"),
         artifacts.special(UNK),
     ]
 
@@ -261,9 +277,9 @@ def test_vocab_learns_milestones_from_train_only(stage):
     from src.tokenization.schema import SemanticSchema
     from src.tokenization.settings import TokenizerConfig
 
-    prepare(stage, EARLY, with_life(QUIET_SNAPSHOT, ("relationship_started", OLD)), group="train")
+    prepare(stage, EARLY, with_life(QUIET_SNAPSHOT, ("bank_registered", OLD)), group="train")
     prepare(stage, EARLY, with_life(
-        QUIET_SNAPSHOT, ("relationship_started", OLD), ("app_adopted", OLD + timedelta(days=1))
+        QUIET_SNAPSHOT, ("bank_registered", OLD), ("app_registered", OLD + timedelta(days=1))
     ))
 
     corpus = read_train(TokenizerConfig.load(None), SemanticSchema.open())
@@ -271,7 +287,7 @@ def test_vocab_learns_milestones_from_train_only(stage):
     seen = {text for key, _, text in corpus.statistics.categorical if key == "profile_lifelong"}
 
     assert corpus.group == "train"
-    assert seen == {"relationship_started"}
+    assert seen == {"bank_registered"}
 
 
 def test_vocab_without_the_milestone_key_is_refused(stage):
@@ -286,7 +302,7 @@ def test_vocab_without_the_milestone_key_is_refused(stage):
 
     write_profile_vocab(stage, lifelong=None)
 
-    prepare(stage, EARLY, with_life(QUIET_SNAPSHOT, ("relationship_started", OLD)))
+    prepare(stage, EARLY, with_life(QUIET_SNAPSHOT, ("bank_registered", OLD)))
 
     with pytest.raises(TransformError, match="fit"):
         encode_group(FrozenArtifacts.load(), "val", TokenizerConfig.load(None))
@@ -318,8 +334,8 @@ def lifelong_client(times: list):
         profile_value_ids=[
             usr,
             artifacts.categorical_id("profile_gender", "F"),
-            artifacts.categorical_id("profile_lifelong", "relationship_started"),
-            artifacts.categorical_id("profile_lifelong", "app_adopted"),
+            artifacts.categorical_id("profile_lifelong", "bank_registered"),
+            artifacts.categorical_id("profile_lifelong", "app_registered"),
         ],
         profile_positions=[0, 0, 0, 0],
         profile_time=times,
@@ -431,7 +447,7 @@ def test_time_reaches_the_batches_anchored_at_the_cutoff(stage):
     adopted = datetime(2025, 2, 10, tzinfo=BANK).astimezone(UTC)
 
     prepare(stage, EARLY, with_life(
-        QUIET_SNAPSHOT, ("relationship_started", OLD), ("app_adopted", adopted)
+        QUIET_SNAPSHOT, ("bank_registered", OLD), ("app_registered", adopted)
     ))
 
     artifacts = FrozenArtifacts.load()
@@ -564,11 +580,24 @@ def test_raw_of_the_previous_contract_is_refused(stage):
     cases = (
         ({"as_of": None}, "нет as_of"),
         ({"as_of": AS_OF - timedelta(days=1)}, "выгрузка кончается"),
-        ({"lifelong": life(("relationship_started", AS_OF))}, "не раньше as_of"),
+        ({"lifelong": life(("bank_registered", AS_OF))}, "не раньше as_of"),
         ({"lifelong": life(("account_opened", OLD))}, "вне контракта"),
-        ({"lifelong": life(("kyc_passed", OLD), ("kyc_passed", OLD))}, "повторяется"),
-        ({"lifelong": life(("app_adopted", OLD + MICROSECOND), ("kyc_passed", OLD))}, "не по времени"),
-        ({"lifelong": life(("kyc_passed", OLD), ("relationship_started", OLD))}, "не по времени"),
+        # Прежние вехи — тоже вне контракта.
+        ({"lifelong": life(("relationship_started", OLD))}, "вне контракта"),
+        ({"lifelong": life(("app_adopted", OLD))}, "вне контракта"),
+        ({"employment": [{"start_date": date(2020, 1, 1), "record_time": AS_OF}]}, "не раньше as_of"),
+        ({"employment": [{"start_date": date(2025, 1, 1), "record_time": OLD}]}, "записана раньше"),
+        ({"employment": [{"start_date": None, "record_time": OLD + MICROSECOND},
+                         {"start_date": date(2019, 1, 1), "record_time": OLD}]}, "не по времени"),
+        ({"lifelong": life(("first_card_activated", OLD), ("first_card_activated", OLD))}, "повторяется"),
+        ({"lifelong": life(("app_registered", OLD + MICROSECOND), ("first_card_activated", OLD))}, "не по времени"),
+        ({"lifelong": life(("first_card_activated", OLD), ("bank_registered", OLD))}, "не по времени"),
+        # Веха о продукте без ссылки на источник и ссылка у вехи,
+        # у которой источника в ленте не бывает.
+        ({"lifelong": [{"type": "first_loan_opened", "event_time": OLD, "source_id": None}]},
+         "нет source_id"),
+        ({"lifelong": [{"type": "bank_registered", "event_time": OLD, "source_id": "ctr_1"}]},
+         "не бывает"),
     )
 
     for snapshot, reason in cases:
@@ -581,7 +610,7 @@ def test_raw_of_the_previous_contract_is_refused(stage):
     write_raw(directory, [], QUIET_SNAPSHOT)
 
     manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
-    manifest["schema_version"] = 15
+    manifest["schema_version"] = 18
     (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(RawContractError, match="schema_version"):
@@ -602,6 +631,9 @@ def test_samples_of_the_previous_format_are_refused(stage):
 
     for meta in (
         {"format": 3, "profile_semantics": "state_at_event_cutoff"},
+        # Формат 4 — анкета ещё с признаком пенсионера.
+        {"format": 4, "profile_semantics": PROFILE_SEMANTICS,
+         "profile_lifelong_types": list(LIFELONG_TYPES)},
         {"format": DATASET_FORMAT, "profile_semantics": PROFILE_SEMANTICS},
         {"format": DATASET_FORMAT, "profile_semantics": PROFILE_SEMANTICS,
          "profile_lifelong_types": ["relationship_started"]},
@@ -694,4 +726,10 @@ def test_declared_milestones_are_the_raw_contract():
 
     from src.generator.profile import LIFELONG_TYPES as RAW
 
-    assert LIFELONG_TYPES == RAW == ("relationship_started", "kyc_passed", "app_adopted")
+    assert LIFELONG_TYPES == RAW == (
+        "bank_registered", "app_registered", "first_card_activated",
+        "first_loan_opened", "first_deposit_opened",
+    )
+
+    for old in ("relationship_started", "kyc_passed", "app_adopted"):
+        assert old not in LIFELONG_TYPES
