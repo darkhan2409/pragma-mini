@@ -16,6 +16,11 @@ from .config import PROFILE_FIELDS
 # История изменений анкеты не пропала — она живёт событиями
 # profile_change в ленте, где у каждого изменения есть своё
 # точное время, старое и новое значение.
+#
+# birth_date — календарная дата рождения в поясе банка. Полем
+# анкеты для модели она не является и в PROFILE_FIELDS не входит:
+# возраст и признак пенсионера меняются со временем без события,
+# и только по дате рождения их можно посчитать на любую дату.
 # ============================================================
 
 
@@ -45,7 +50,7 @@ PROFILE_FIELD_TYPES: dict[str, pa.DataType] = {
 
 
 PROFILE_SCHEMA = pa.schema(
-    [("client_id", pa.string())]
+    [("client_id", pa.string()), ("birth_date", pa.date32())]
     + [(name, PROFILE_FIELD_TYPES[name]) for name in PROFILE_FIELDS]
 )
 

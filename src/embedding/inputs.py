@@ -8,6 +8,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 
+from src.dataset.lineage import lineage_problem
 from src.batching.build import BATCHES_SCHEMA
 from src.batching.settings import BATCHES_FILE, batches_dir
 from src.masking.build import MASKED_SCHEMA
@@ -281,6 +282,13 @@ def _open(path: Path, schema: pa.Schema, command: str) -> pq.ParquetFile:
     # всплыло бы посреди разбора, уже без имени виноватого этапа.
     if not handle.schema_arrow.equals(schema, check_metadata=False):
         raise InputError(f"{path} собран другой схемой: выполните {command} заново")
+
+    # Схема от смысла анкеты не зависит: происхождение каталога
+    # сверяется отдельно.
+    problem = lineage_problem(path.parent, command)
+
+    if problem is not None:
+        raise InputError(problem)
 
     return handle
 

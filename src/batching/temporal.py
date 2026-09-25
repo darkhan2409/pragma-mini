@@ -7,6 +7,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from src.dataset.lineage import lineage_problem
 from src.temporal.build import TEMPORAL_SCHEMA
 from src.temporal.settings import TEMPORAL_FILE, temporal_dir
 
@@ -77,6 +78,13 @@ class TemporalGroup:
                 f"{self.path} собран другой схемой: выполните "
                 f"python -m src.temporal.run {group} заново"
             )
+
+        # Схема от смысла анкеты не зависит: происхождение
+        # сверяется отдельно.
+        problem = lineage_problem(self.directory, f"python -m src.temporal.run {group}")
+
+        if problem is not None:
+            raise TemporalError(problem)
 
     @property
     def rows(self) -> int:

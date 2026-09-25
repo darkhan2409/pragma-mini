@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pyarrow as pa
 
+from src.dataset.lineage import write_lineage
 from src.preprocessing.artifacts import TableWriter
 from src.tokenization.specials import MASK, UNK, load_special_tokens
 
@@ -118,6 +119,10 @@ def build_group(
 
     finally:
         rows_written = writer.close()
+
+    # Только после полной записи: прерванная сборка отметки не
+    # получает, и читатель её отвергнет.
+    write_lineage(directory)
 
     return {
         "group": group,

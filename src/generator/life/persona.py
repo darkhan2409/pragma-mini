@@ -33,7 +33,7 @@ from .traits import Traits, draw_traits
 # ============================================================
 
 
-PENSION_AGE = 63
+PENSION_AGE = config.PENSION_AGE
 
 
 @dataclass(frozen=True)

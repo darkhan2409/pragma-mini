@@ -7,7 +7,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.preprocessing.artifacts import write_json
-from src.preprocessing.profile_state import INCLUDED_FIELDS
+from src.preprocessing.profile_state import INCLUDED_FIELDS, PROFILE_SEMANTICS
 from src.preprocessing.settings import PreprocessingConfig
 from src.tokenization.finalvocab import FrozenArtifacts
 from src.tokenization.settings import TokenizerConfig
@@ -142,13 +142,17 @@ def build_group(
     except TokenizedError as error:
         raise BuildError(str(error)) from error
 
-    # Срезов у группы два, и они не совпадают: события доступны
-    # до конца окна, анкета описывает начало периода целей.
-    # Момент анкеты приходит с закодированной группой, а не
-    # считается здесь заново: два вычисления одного значения
-    # разошлись бы молча.
+    # Cutoff у группы один: события строго раньше него, анкета —
+    # состояние на него же. Закодированная группа обязана быть
+    # собрана на тот же cutoff, иначе набор молча смешал бы два.
     cutoff = window.final_cutoff
-    profile_moment = source.profile_moment
+
+    if source.meta.get("events_cutoff") != cutoff.isoformat():
+        raise BuildError(
+            f"группа {group} закодирована на cutoff {source.meta.get('events_cutoff')}, "
+            f"а окно группы — {cutoff.isoformat()}: выполните "
+            f"python -m src.tokenization.run encode {group} заново"
+        )
 
     _clear(directory)
 
@@ -219,7 +223,7 @@ def build_group(
         "format": DATASET_FORMAT,
         "group": group,
         "events_cutoff": cutoff.isoformat(),
-        "profile_moment": profile_moment,
+        "profile_semantics": PROFILE_SEMANTICS,
         "profile_fields": list(INCLUDED_FIELDS),
         "samples": counters.samples,
     }
@@ -229,7 +233,6 @@ def build_group(
     return {
         "group": group,
         "cutoff": cutoff.isoformat(),
-        "profile_moment": profile_moment,
         "meta": meta,
         "file": str(directory / SAMPLES_FILE),
         "counts": {

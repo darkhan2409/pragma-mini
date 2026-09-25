@@ -11,7 +11,7 @@ from src.tokenization.specials import PAD
 
 from .context import EventStub, Selection, select
 from .settings import ContextPolicy
-from .targets import eligible
+from .targets import can_be_target, eligible
 from .tokenized import TokenizedClient
 
 
@@ -273,7 +273,9 @@ def build_sample(
 
         calendar.extend(item.calendar)
         moments.append(item.event_time)
-        target_mask.append(flags[position])
+        # Период целей решает, где цели разрешены; тип — может ли
+        # событие ей быть. Изменение анкеты остаётся контекстом.
+        target_mask.append(flags[position] and can_be_target(item.event_type))
 
     sample = Sample(
         client_id=client.client_id,

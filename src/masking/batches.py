@@ -6,6 +6,7 @@ from typing import Iterator
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from src.dataset.lineage import lineage_problem
 from src.batching.build import BATCHES_SCHEMA
 from src.batching.settings import BATCHES_FILE, batches_dir
 
@@ -60,6 +61,13 @@ class BatchesGroup:
                 f"{self.path} собран другой схемой батчей: выполните "
                 f"python -m src.batching.run {group} заново"
             )
+
+        # Схема от смысла анкеты не зависит: происхождение
+        # сверяется отдельно.
+        problem = lineage_problem(self.directory, f"python -m src.batching.run {group}")
+
+        if problem is not None:
+            raise BatchesError(problem)
 
     @property
     def rows(self) -> int:
