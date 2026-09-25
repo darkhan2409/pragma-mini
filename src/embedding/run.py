@@ -20,11 +20,10 @@ from .settings import ConfigError, EmbeddingConfig
 #
 # Вход: data/07_batches/<group>/batches.parquet и
 # data/08_masked/<group>/masked.parquet, оба сразу.
-# Выход: data/09_embeddings/<group>/ — векторы всех токенов и
-# веса слоя.
+# Выход: data/09_embeddings/<group>/ — веса слоя и отметка
+# происхождения. Векторы токенов считает модель в прямом проходе.
 #
-# Этап считает вход модели и показывает его человеку. Энкодеров,
-# внимания, MLM-головы и обучения здесь нет.
+# Энкодеров, внимания, MLM-головы и обучения здесь нет.
 # ============================================================
 
 
@@ -58,11 +57,14 @@ def run_group(args) -> int:
         print(f"[embedding] группа {group}: {error}")
         return EXIT_BLOCKED
 
-    print(f"[embedding] группа {group} → {report['table']}")
-    print(f"    веса {report['weights']}")
+    print(f"[embedding] группа {group} → {report['weights']}")
     print(
-        f"    клиентов {report['clients']}, векторов {report['vectors']} "
-        f"по {report['dim']} чисел; {report['size'] / (1 << 20):.1f} МиБ"
+        f"    словарь {report['vocab_size']} × d {report['dim']}, seed {report['seed']}; "
+        f"{report['size'] / (1 << 20):.1f} МиБ"
+    )
+    print(
+        f"    сверено батчей {report['batches']}: клиентов {report['clients']}, "
+        f"токенов {report['tokens']}"
     )
 
     return EXIT_OK

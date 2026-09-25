@@ -13,18 +13,19 @@ from __future__ import annotations
 # IMPLEMENTATION_VERSION — версия кода пакета. Поднимается при
 # ЛЮБОЙ правке модуля, даже если контракт не тронут.
 #
-# SCHEMA_VERSION — схема embeddings.parquet. Появилась вместе с
-# самим файлом: пока этап писал только страницу и веса, схемы у
-# него не было вовсе, и номера ей не заводили.
+# SCHEMA_VERSION — файлы этапа на диске. Версия 1 — снимок
+# векторов embeddings.parquet рядом с весами. Версия 2 — снимка
+# больше нет: этап пишет weights.pt и lineage.json, а векторы
+# считает модель.
 
 # ============================================================
 
 
 FORMAT_VERSION = "2.2.0"
 
-IMPLEMENTATION_VERSION = "2.4.0"
+IMPLEMENTATION_VERSION = "3.0.0"
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 __all__ = ["FORMAT_VERSION", "IMPLEMENTATION_VERSION", "SCHEMA_VERSION"]

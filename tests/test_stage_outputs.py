@@ -159,56 +159,91 @@ def test_masking_command_succeeds(stage):
 # ============================================================
 
 
-def test_embeddings_are_one_row_per_client(stage):
+def test_embedding_stage_writes_weights_not_vectors(stage):
+    """
+    Этап оставляет веса и отметку происхождения, и только их.
+    Снимок векторов прежней сборки стирается: векторы считает
+    модель по номерам токенов и этим весам.
+    """
 
-    from src.embedding.build import EMBEDDINGS_SCHEMA, build_group
-    from src.embedding.settings import (
-        EMBEDDINGS_FILE, WEIGHTS_FILE, EmbeddingConfig, embeddings_dir,
-    )
+    import torch
+
+    from src.dataset.lineage import LINEAGE_FILE, lineage_problem
+    from src.embedding.build import build_group
+    from src.embedding.layer import InputEmbedding
+    from src.embedding.settings import WEIGHTS_FILE, EmbeddingConfig, embeddings_dir
+    from src.tokenization.finalvocab import FrozenArtifacts
 
     people = settle(stage)
 
-    config = EmbeddingConfig(dim=world.DIM, seed=world.SEED)
+    directory = embeddings_dir("train")
+    directory.mkdir(parents=True, exist_ok=True)
 
-    report = build_group("train", config)
+    # Так выглядел каталог прежней версии этапа.
+    (directory / "embeddings.parquet").write_bytes(b"old snapshot")
 
-    path = embeddings_dir("train") / EMBEDDINGS_FILE
+    report = build_group("train", EmbeddingConfig(dim=world.DIM, seed=world.SEED))
 
-    written = pq.ParquetFile(path)
+    assert sorted(path.name for path in directory.iterdir()) == [LINEAGE_FILE, WEIGHTS_FILE]
+    assert lineage_problem(directory, "python -m src.embedding.run train") is None
 
-    assert written.schema_arrow.equals(EMBEDDINGS_SCHEMA, check_metadata=False)
-    assert written.metadata.num_rows == len(people)
+    # Сверены все батчи и все настоящие токены.
+    assert report["batches"] == 2
+    assert report["clients"] == len(people)
+    assert report["tokens"] == sum(
+        made.client.n_tokens + made.client.profile_n_tokens for made in people
+    )
 
-    table = pq.read_table(path).to_pylist()
+    # Веса — ровно розыгрыш слоя по seed: тем же весам модель
+    # потом посчитает те же векторы.
+    saved = torch.load(directory / WEIGHTS_FILE, map_location="cpu", weights_only=True)
 
-    # Строка хранит весь прямоугольник батча: настоящие токены и
-    # за ними заполнитель. Заполнитель обязан быть ровно нулём —
-    # это единственное, чем [PAD] отличается от значения.
-    batches = [people[:2], people[2:]]
+    size = FrozenArtifacts.load().size
 
-    place = 0
+    assert (saved["vocab_size"], saved["dim"], saved["seed"]) == (size, world.DIM, world.SEED)
 
-    for batch in batches:
+    expected = InputEmbedding(size, world.DIM, world.SEED, markers=(world.EVT, world.USR))
 
-        width = max(made.client.n_tokens for made in batch)
-        profile = max(made.client.profile_n_tokens for made in batch)
+    assert saved["state_dict"].keys() == expected.state_dict().keys()
 
-        for made in batch:
+    for name, value in expected.state_dict().items():
+        assert torch.equal(saved["state_dict"][name], value), name
 
-            row = table[place]
-            place += 1
 
-            assert row["client_id"] == made.client.client_id
-            assert row["dim"] == world.DIM
+def test_input_layer_sums_three_terms_and_zeroes_padding():
+    """
+    Обычный токен — E[key]·√d + E[value]·√d + P[кусок], маркер —
+    один E[маркер]·√d, заполнитель — ноль. Прежде это было видно
+    только в снимке векторов этапа 09; теперь проверяется на
+    самом слое.
+    """
 
-            assert len(row["tokens"]) == width * world.DIM
-            assert len(row["profile"]) == profile * world.DIM
+    import math
 
-            assert not any(row["tokens"][made.client.n_tokens * world.DIM :])
-            assert not any(row["profile"][made.client.profile_n_tokens * world.DIM :])
+    import torch
 
-    assert (embeddings_dir("train") / WEIGHTS_FILE).exists()
-    assert report["dim"] == world.DIM
+    from src.embedding.layer import InputEmbedding
+
+    layer = InputEmbedding(world.VOCAB, world.DIM, world.SEED, markers=(world.EVT, world.USR))
+
+    table = layer.weight.detach()
+    scale = math.sqrt(world.DIM)
+
+    key_ids = torch.tensor([[world.EVT, world.KEY_A, world.KEY_A, world.KEY_B]])
+    value_ids = torch.tensor([[world.EVT, 10, 11, world.PAD]])
+    positions = torch.tensor([[0, 0, 1, 0]])
+    mask = torch.tensor([[True, True, True, False]])
+
+    with torch.no_grad():
+        out = layer.embed(key_ids, value_ids, positions, mask)[0]
+
+    def piece(number: int) -> torch.Tensor:
+        return layer.pieces_of(torch.tensor(number))
+
+    assert torch.equal(out[0], table[world.EVT] * scale)
+    assert torch.allclose(out[1], table[world.KEY_A] * scale + table[10] * scale + piece(0))
+    assert torch.allclose(out[2], table[world.KEY_A] * scale + table[11] * scale + piece(1))
+    assert torch.equal(out[3], torch.zeros(world.DIM))
 
 
 def test_embeddings_command_succeeds(stage):
