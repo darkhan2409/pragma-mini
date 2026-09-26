@@ -36,8 +36,9 @@ from .version import IMPLEMENTATION_VERSION
 #       что было целью, что предсказано и с какими потерями.
 #       Полного массива логитов нет — только top-k;
 #   preview.html    — один пример, показанный человеку;
-#   weights.pt      — веса головы. Веса четырёх энкодеров лежат в
-#       своих этапах и здесь не дублируются.
+#   weights.pt      — веса головы. Веса входного слоя и энкодеров
+#       лежат в data/09_embeddings и data/09_backbone и здесь не
+#       дублируются.
 #
 # Сам проход дифференцируемый и живёт в model.py. Здесь он
 # вызывается под no_grad, потому что это отчёт: градиенты нужны
@@ -46,6 +47,10 @@ from .version import IMPLEMENTATION_VERSION
 # ВАЖНО. Всё, что тут посчитано, посчитано НЕОБУЧЕННОЙ моделью.
 # Потери около ln(размер словаря) означают ровно случайное
 # угадывание и качеством модели не являются.
+#
+# Этап — диагностика, а не вход обучения: python -m src.mlm.train
+# его файлов не читает. Модель та же, что учится: входной слой
+# train и начальные веса backbone, для любой группы.
 # ============================================================
 
 
@@ -101,7 +106,6 @@ def build_group(
     device = _device(config.device)
 
     model = load_model(
-        group=group,
         seed=config.seed,
         events_per_chunk=config.events_per_chunk,
         label_smoothing=config.label_smoothing,
@@ -355,8 +359,9 @@ def _save(model: Model, config: MlmConfig, path: Path) -> None:
     """
     Веса головы.
 
-    Четыре энкодера сюда не копируются: их веса лежат в этапах
-    09-12, и второй их копии быть не должно.
+    Входной слой и энкодеры сюда не копируются: их веса лежат в
+    data/09_embeddings и data/09_backbone, и второй их копии быть
+    не должно.
     """
 
     path.parent.mkdir(parents=True, exist_ok=True)

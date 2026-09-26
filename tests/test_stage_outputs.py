@@ -273,14 +273,11 @@ def ready(root: Path) -> list[world.Made]:
 def test_one_row_is_one_real_event(stage):
 
     from src.event.build import EVENTS_SCHEMA, build_group
-    from src.event.settings import EVENTS_FILE, EventConfig, events_dir
+    from src.event.settings import EVENTS_FILE, events_dir
 
     people = ready(stage)
 
-    config = EventConfig(
-        seed=world.SEED, layers=world.LAYERS, heads=world.HEADS,
-        feedforward=world.FEEDFORWARD, dropout=0.0,
-    )
+    config = world.encoder_configs()[0]
 
     report = build_group("train", config)
 
@@ -339,14 +336,11 @@ def test_events_command_reports_missing_weights(stage, capsys):
 def test_profiles_are_one_row_per_client(stage):
 
     from src.profile.build import PROFILES_SCHEMA, build_group
-    from src.profile.settings import PROFILES_FILE, ProfileConfig, profiles_dir
+    from src.profile.settings import PROFILES_FILE, profiles_dir
 
     people = ready(stage)
 
-    config = ProfileConfig(
-        seed=world.SEED, layers=world.LAYERS, heads=world.HEADS,
-        feedforward=world.FEEDFORWARD, dropout=0.0,
-    )
+    config = world.encoder_configs()[1]
 
     build_group("train", config)
 
@@ -397,26 +391,18 @@ def grown(root: Path) -> list[world.Made]:
     """
 
     from src.event.build import build_group as build_events
-    from src.event.settings import EventConfig
     from src.profile.build import build_group as build_profiles
-    from src.profile.settings import ProfileConfig
 
     people = ready(root)
 
     build_events(
         "train",
-        EventConfig(
-            seed=world.SEED, layers=world.LAYERS, heads=world.HEADS,
-            feedforward=world.FEEDFORWARD, dropout=0.0,
-        ),
+        world.encoder_configs()[0],
     )
 
     build_profiles(
         "train",
-        ProfileConfig(
-            seed=world.SEED, layers=world.LAYERS, heads=world.HEADS,
-            feedforward=world.FEEDFORWARD, dropout=0.0,
-        ),
+        world.encoder_configs()[1],
     )
 
     return people
@@ -424,13 +410,7 @@ def grown(root: Path) -> list[world.Made]:
 
 def history_config():
 
-    from src.history.settings import HistoryConfig
-
-    return HistoryConfig(
-        seed=world.SEED, layers=world.LAYERS, heads=world.HEADS,
-        feedforward=world.FEEDFORWARD, dropout=0.0,
-        rope_base=world.ROPE_BASE, device="cpu",
-    )
+    return world.encoder_configs()[2]
 
 
 def test_one_row_is_one_client_and_only_the_final_vector(stage):
@@ -507,14 +487,10 @@ def test_history_command_reports_a_missing_input(stage, capsys):
 
     # События посчитаны, анкеты нет: истории собирать не из чего.
     from src.event.build import build_group as build_events
-    from src.event.settings import EventConfig
 
     build_events(
         "train",
-        EventConfig(
-            seed=world.SEED, layers=world.LAYERS, heads=world.HEADS,
-            feedforward=world.FEEDFORWARD, dropout=0.0,
-        ),
+        world.encoder_configs()[0],
     )
 
     assert cli("src.history.run", "train") == EXIT_BLOCKED

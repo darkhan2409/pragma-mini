@@ -50,6 +50,7 @@ PLACES = (
     ("src.batching.settings", "BATCHES_DIR", "07_batches"),
     ("src.masking.settings", "MASKED_DIR", "08_masked"),
     ("src.embedding.settings", "EMBEDDINGS_DIR", "09_embeddings"),
+    ("src.mlm.settings", "BACKBONE_DIR", "09_backbone"),
     ("src.event.settings", "EVENTS_DIR", "10_events"),
     ("src.profile.settings", "PROFILES_DIR", "11_profiles"),
     ("src.history.settings", "HISTORY_DIR", "12_history"),
@@ -104,7 +105,8 @@ def data_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
 @pytest.fixture(scope="session")
 def groups(data_root: Path) -> dict[str, list[world.Made]]:
     """
-    Мир на диске: батчи, маски и веса этапов 09-12 для train и val.
+    Мир на диске: батчи, маски, веса этапа 09 для train и val и
+    backbone train.
 
     Клиенты разложены по двум батчам, поэтому проверяется и
     переход между группами строк, и нумерация batch_index.

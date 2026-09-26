@@ -6,7 +6,7 @@ import torch
 from src.mlm.inputs import Source, micro_batches
 from src.mlm.model import pack
 from src.mlm.settings import best_checkpoint_path, checkpoint_path
-from src.mlm.train import train, validate
+from src.mlm.train import Scores, train, validate
 
 from tests import world
 from tests.test_scheduler import many
@@ -89,7 +89,8 @@ def test_validation_averages_over_targets_not_over_micro_batches(stage):
     model = fresh(stage, config)
     model.eval()
 
-    loss, targets = validate(model, Source("val"), CPU, config.token_budget)
+    scores = validate(model, Source("val"), CPU, config.token_budget)
+    loss, targets = scores.loss, scores.targets
 
     expected, count, each = by_hand(model, config.token_budget)
 
@@ -137,7 +138,8 @@ def test_micro_batch_without_targets_does_not_move_the_average(stage):
 
     model = fresh(stage, config)
 
-    with_quiet, targets = validate(model, Source("val"), CPU, config.token_budget)
+    scores = validate(model, Source("val"), CPU, config.token_budget)
+    with_quiet, targets = scores.loss, scores.targets
 
     settle(
         stage,
@@ -145,7 +147,8 @@ def test_micro_batch_without_targets_does_not_move_the_average(stage):
         val_people=[made for made in uneven_val() if made.targetable],
     )
 
-    without, fewer = validate(model, Source("val"), CPU, config.token_budget)
+    scores = validate(model, Source("val"), CPU, config.token_budget)
+    without, fewer = scores.loss, scores.targets
 
     assert targets == fewer
     assert with_quiet == pytest.approx(without, rel=1e-9)
@@ -159,10 +162,13 @@ def test_group_without_targets_gives_no_loss_at_all(stage):
 
     config = tiny(token_budget=8)
 
-    loss, targets = validate(fresh(stage, config), Source("val"), CPU, config.token_budget)
+    scores = validate(fresh(stage, config), Source("val"), CPU, config.token_budget)
 
-    assert loss is None
-    assert targets == 0
+    assert scores.loss is None
+    assert scores.targets == 0
+
+    # Без целей нет и долей: ни деления на ноль, ни выдуманного нуля.
+    assert scores.top1_accuracy is None and scores.top5_accuracy is None
 
 
 def test_validation_uses_the_model_it_was_given(stage):
@@ -177,12 +183,12 @@ def test_validation_uses_the_model_it_was_given(stage):
 
     model = fresh(stage, config)
 
-    before, _ = validate(model, Source("val"), CPU, config.token_budget)
+    before = validate(model, Source("val"), CPU, config.token_budget).loss
 
     with torch.no_grad():
         model.head.proj.bias.add_(1.0)
 
-    after, _ = validate(model, Source("val"), CPU, config.token_budget)
+    after = validate(model, Source("val"), CPU, config.token_budget).loss
 
     assert before != pytest.approx(after, rel=1e-6)
 
@@ -202,7 +208,7 @@ def scripted(monkeypatch, values: list[float | None], targets: int = 5):
 
     def fake(model, source, device, token_budget):
         value = next(seen)
-        return value, (0 if value is None else targets)
+        return Scores() if value is None else Scores(loss_sum=value * targets, targets=targets)
 
     monkeypatch.setattr("src.mlm.train.validate", fake)
 
@@ -344,7 +350,7 @@ def test_a_paused_epoch_gets_no_validation(stage, monkeypatch):
     def fake(model, source, device, token_budget):
         nonlocal called
         called += 1
-        return 0.5, 5
+        return Scores(loss_sum=2.5, targets=5)
 
     monkeypatch.setattr("src.mlm.train.validate", fake)
 

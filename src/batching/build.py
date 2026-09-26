@@ -121,11 +121,14 @@ def build_group(
 
             # Колонка длины нужна была только для порядка: в
             # файле батчей её место занимает n_tokens строки.
-            rows = window.drop_columns([LENGTH]).to_pylist()
+            window = window.drop_columns([LENGTH])
 
-            for start in range(0, len(rows), config.batch_size):
+            # Окно остаётся в Arrow, списками Python становится только
+            # батч: окно из window_clients клиентов списками Python
+            # заняло бы в разы больше памяти, чем вся WSL.
+            for start in range(0, window.num_rows, config.batch_size):
 
-                chunk = rows[start:start + config.batch_size]
+                chunk = window.slice(start, config.batch_size).to_pylist()
 
                 index = counters.batches
 

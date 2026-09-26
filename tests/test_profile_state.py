@@ -603,7 +603,7 @@ def write_raw(directory, events: list[dict], snapshot: dict, end: str = END) -> 
         "generator_version": GENERATOR_VERSION,
         "timezone": "Asia/Almaty",
         "period_start": "2024-01-01T00:00:00+05:00",
-        # Выгрузка идёт дальше cutoff val (1 мая): события после T
+        # Выгрузка идёт дальше cutoff val (1 апреля): события после T
         # в ней есть, и тесты проверяют, что они никуда не доходят.
         "period_end": end,
         "seed": 1,
@@ -649,7 +649,7 @@ def val_cutoff() -> datetime:
     return PreprocessingConfig.load(None).windows["val"].final_cutoff
 
 
-# cutoff val — полночь 1 мая 2026 у банка (19:00 UTC 30 апреля).
+# cutoff val — полночь 1 апреля 2026 у банка (19:00 UTC 31 марта).
 
 EARLY = [
     raw_event(RAW_CLIENT, "2024-03-01T09:00:00", {
@@ -969,13 +969,13 @@ def test_pipeline_profile_carries_no_shortcut_key(stage):
 
 def test_pipeline_age_on_the_local_cutoff(stage):
     """
-    cutoff val — полночь 1 мая у банка, то есть 19:00 UTC 30
-    апреля. Клиентке, родившейся 1 мая 1963-го, в этот момент уже
+    cutoff val — полночь 1 апреля у банка, то есть 19:00 UTC 31
+    марта. Клиентке, родившейся 1 апреля 1963-го, в этот момент уже
     63: по UTC вышло бы на год меньше. События после cutoff на
     возраст не влияют, а пенсионера в анкете нет вовсе.
     """
 
-    day = date(1963, 5, 1)
+    day = date(1963, 4, 1)
 
     quiet = prepare(stage, EARLY, dict(QUIET_SNAPSHOT, birth_date=day)).profile
     busy = prepare(stage, EARLY + AFTER, dict(BUSY_SNAPSHOT, birth_date=day)).profile

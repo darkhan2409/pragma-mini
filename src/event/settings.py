@@ -33,6 +33,8 @@ EVENTS_FILE = "events.parquet"
 
 WEIGHTS_FILE = "weights.pt"
 
+DEVICES = ("auto", "cpu", "cuda")
+
 
 class ConfigError(ValueError):
     """
@@ -50,9 +52,10 @@ class EventConfig:
     # слоя: тот разыгран раньше и лежит на диске.
     seed: int = 42
 
-    # Блоков трансформера. В эталоне энкодер события самый
-    # глубокий в модели (5 при d=192), но данных у нас пока мало.
-    layers: int = 2
+    # Блоков трансформера. Энкодер события — самый глубокий в
+    # модели, как в эталоне: 5 блоков против 1 у анкеты и 2 у
+    # истории.
+    layers: int = 5
 
     # Голов внимания. d обязана делиться на это число.
     heads: int = 4
@@ -68,6 +71,11 @@ class EventConfig:
     # память: весь батч сразу это сотни мегабайт заполнителя.
     events_per_chunk: int = 1024
 
+    # Где считать диагностический проход этапа 10. auto берёт CUDA,
+    # если она есть. Веса от устройства не зависят: они разыграны
+    # на CPU и только потом переезжают.
+    device: str = "auto"
+
     def validate(self) -> None:
 
         for name in ("layers", "heads", "events_per_chunk"):
@@ -82,6 +90,9 @@ class EventConfig:
 
         if not 0.0 <= self.dropout < 1.0:
             raise ConfigError(f"dropout обязан лежать в [0, 1), получено {self.dropout}")
+
+        if self.device not in DEVICES:
+            raise ConfigError(f"device обязан быть одним из {list(DEVICES)}, получено {self.device!r}")
 
     def check_dim(self, dim: int) -> None:
         """
@@ -102,6 +113,7 @@ class EventConfig:
             "feedforward": self.feedforward,
             "dropout": self.dropout,
             "events_per_chunk": self.events_per_chunk,
+            "device": self.device,
         }
 
     @staticmethod
@@ -122,6 +134,7 @@ class EventConfig:
             feedforward=int(data.get("feedforward", base.feedforward)),
             dropout=float(data.get("dropout", base.dropout)),
             events_per_chunk=int(data.get("events_per_chunk", base.events_per_chunk)),
+            device=str(data.get("device", base.device)),
         )
 
         config.validate()
@@ -148,6 +161,7 @@ def events_dir(group: str) -> Path:
 
 
 __all__ = [
+    "DEVICES",
     "EVENTS_DIR",
     "EVENTS_FILE",
     "WEIGHTS_FILE",

@@ -7,6 +7,7 @@ import numpy as np
 import pyarrow as pa
 import torch
 
+from src.mlm.backbone import initial_history, payload
 from src.preprocessing.artifacts import TableWriter
 
 from .encoder import HistoryEncoder
@@ -35,6 +36,10 @@ from .settings import HISTORY_FILE, WEIGHTS_FILE, HistoryConfig, history_dir
 # розыгрышем весов всех четырёх слоёв. При обучении они обязаны
 # считаться вместе в одном прямом проходе, и файлы этапов 10-12
 # замороженным входом обучения не являются.
+#
+# Этап — диагностика: начальные веса обучения даёт python -m
+# src.mlm.init_backbone без прохода по данным. Веса здесь
+# разыгрываются той же функцией (backbone.initial_history).
 # ============================================================
 
 
@@ -74,19 +79,9 @@ def build_group(
 
     dim = source.dim
 
-    config.check_dim(dim)
-
     device = _device(config.device)
 
-    encoder = HistoryEncoder(
-        dim=dim,
-        layers=config.layers,
-        heads=config.heads,
-        feedforward=config.feedforward,
-        dropout=config.dropout,
-        rope_base=config.rope_base,
-        seed=config.seed,
-    )
+    encoder = initial_history(config, dim)
 
     encoder.eval()
 
@@ -253,25 +248,13 @@ def _device(name: str) -> torch.device:
 
 def _save(encoder: HistoryEncoder, config: HistoryConfig, dim: int, path: Path) -> None:
     """
-    Веса энкодера рядом с векторами.
-
-    Состояние берётся с CPU: иначе файл зависел бы от того, на
-    чём считали.
+    Веса энкодера рядом с векторами — в формате backbone.payload:
+    состояние на CPU, чтобы файл не зависел от того, где считали.
     """
 
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    torch.save(
-        {
-            "dim": dim,
-            "config": config.as_dict(),
-            "state_dict": {
-                name: value.detach().cpu()
-                for name, value in encoder.state_dict().items()
-            },
-        },
-        path,
-    )
+    torch.save(payload(encoder, config, dim), path)
 
 
 def _clear(directory: Path) -> None:

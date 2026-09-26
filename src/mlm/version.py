@@ -16,7 +16,7 @@ from __future__ import annotations
 
 FORMAT_VERSION = "1.0.0"
 
-IMPLEMENTATION_VERSION = "3.3.0"
+IMPLEMENTATION_VERSION = "4.0.0"
 
 SCHEMA_VERSION = 1
 

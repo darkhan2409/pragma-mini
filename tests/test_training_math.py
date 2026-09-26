@@ -97,7 +97,6 @@ def fresh(root: Path, config: MlmConfig):
     from src.mlm.model import load_model
 
     return load_model(
-        group="train",
         seed=config.seed,
         events_per_chunk=config.events_per_chunk,
         label_smoothing=config.label_smoothing,

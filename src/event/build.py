@@ -11,6 +11,7 @@ from src.embedding.inputs import Loaded, Source
 from src.embedding.layer import InputEmbedding
 from src.embedding.settings import WEIGHTS_FILE as EMBEDDING_WEIGHTS
 from src.embedding.settings import embeddings_dir
+from src.mlm.backbone import initial_event, payload
 from src.preprocessing.artifacts import TableWriter
 from src.tokenization.specials import EVT, USR, load_special_tokens
 
@@ -45,6 +46,15 @@ from .settings import EVENTS_FILE, WEIGHTS_FILE, EventConfig, events_dir
 # ВАЖНО, чем этот файл НЕ является. Векторы посчитаны начальным
 # розыгрышем весов. При обучении они считаются заново, в прямом
 # проходе; замороженным входом обучения файл не является.
+#
+# Этап — диагностика: обучению он не нужен, его начальные веса
+# даёт python -m src.mlm.init_backbone без прохода по данным. Веса
+# здесь разыгрываются той же функцией (backbone.initial_event),
+# поэтому при одном конфиге они те же, что у init_backbone.
+#
+# Устройство — config.device: auto берёт CUDA, если она есть. Веса
+# разыгрываются на CPU и только потом переезжают; векторы
+# возвращаются на CPU перед записью.
 # ============================================================
 
 
@@ -83,20 +93,15 @@ def build_group(
 
     specials = load_special_tokens()
 
-    embedding = _embedding(group, specials)
+    device = _device(config.device)
 
-    config.check_dim(embedding.dim)
+    embedding = _embedding(group, specials).to(device)
 
-    encoder = EventEncoder(
-        dim=embedding.dim,
-        layers=config.layers,
-        heads=config.heads,
-        feedforward=config.feedforward,
-        dropout=config.dropout,
-        seed=config.seed,
-    )
+    encoder = initial_event(config, embedding.dim)
 
     encoder.eval()
+
+    encoder.to(device)
 
     directory = Path(directory) if directory is not None else events_dir(group)
 
@@ -140,6 +145,7 @@ def build_group(
         "seed": config.seed,
         "layers": config.layers,
         "heads": config.heads,
+        "device": str(device),
         "rows": rows,
         "batches": source.count,
         "clients": clients,
@@ -171,7 +177,7 @@ def encode(
 
         dated[chunk.where] = encode_chunk(
             embedding, encoder, loaded, chunk
-        ).dated.numpy()
+        ).dated.detach().cpu().numpy()
 
     return dated
 
@@ -183,25 +189,30 @@ def encode_chunk(
     chunk: Chunk,
 ) -> Encoded:
     """
-    Одна порция событий через оба слоя.
+    Одна порция событий через оба слоя, на устройстве энкодера.
+
+    Порция собирается на CPU — батч лежит там — и переезжает
+    целиком: внутри слоёв копий между устройствами нет.
     """
 
     model = loaded.model
+
+    device = next(encoder.parameters()).device
 
     rows = torch.from_numpy(chunk.client)[:, None]
     column = torch.from_numpy(chunk.column)
     pad = torch.from_numpy(chunk.pad)
 
     tokens = embedding.embed(
-        model.key_ids[rows, column],
-        model.value_ids[rows, column],
-        model.positions[rows, column],
-        ~pad,
+        model.key_ids[rows, column].to(device),
+        model.value_ids[rows, column].to(device),
+        model.positions[rows, column].to(device),
+        (~pad).to(device),
     )
 
-    calendar = torch.from_numpy(calendar_of(loaded.calendar, chunk))
+    calendar = torch.from_numpy(calendar_of(loaded.calendar, chunk)).to(device)
 
-    return encoder(tokens, pad, calendar)
+    return encoder(tokens, pad.to(device), calendar)
 
 
 def _table(loaded: Loaded, events: Events, dated: np.ndarray) -> pa.Table:
@@ -263,7 +274,7 @@ def _embedding(group: str, specials: dict) -> InputEmbedding:
 
 def _save(encoder: EventEncoder, config: EventConfig, dim: int, path: Path) -> None:
     """
-    Веса энкодера рядом с векторами.
+    Веса энкодера рядом с векторами — в формате backbone.payload.
 
     Веса входного слоя сюда не копируются: они лежат в
     data/09_embeddings и остаются одним файлом на всю модель.
@@ -271,14 +282,21 @@ def _save(encoder: EventEncoder, config: EventConfig, dim: int, path: Path) -> N
 
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    torch.save(
-        {
-            "dim": dim,
-            "config": config.as_dict(),
-            "state_dict": encoder.state_dict(),
-        },
-        path,
-    )
+    torch.save(payload(encoder, config, dim), path)
+
+
+def _device(name: str) -> torch.device:
+    """
+    Где считать.
+    """
+
+    if name == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if name == "cuda" and not torch.cuda.is_available():
+        raise EventError("device cuda запрошен, но CUDA недоступна")
+
+    return torch.device(name)
 
 
 def _clear(directory: Path) -> None:

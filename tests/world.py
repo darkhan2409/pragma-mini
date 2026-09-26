@@ -438,7 +438,7 @@ def install(
     dropout: float = 0.0,
 ) -> None:
     """
-    Весь мир на диск: батчи, маски и веса этапов 09-12.
+    Весь мир на диск: батчи, маски, веса этапа 09 и backbone.
 
     Вызывается ПОСЛЕ подмены каталогов: batches_dir и masked_dir
     читают свои глобалы в момент вызова.
@@ -454,6 +454,27 @@ def install(
         write_weights(root, group, dropout=dropout)
 
 
+def encoder_configs(
+    *,
+    heads: int = HEADS,
+    layers: int = LAYERS,
+    dropout: float = 0.0,
+    seed: int = SEED,
+) -> tuple[EventConfig, ProfileConfig, HistoryConfig]:
+    """
+    Конфиги энкодеров крошечного мира: считаются на CPU, как тесты.
+    """
+
+    return (
+        EventConfig(seed=seed, layers=layers, heads=heads, feedforward=FEEDFORWARD,
+                    dropout=dropout, device="cpu"),
+        ProfileConfig(seed=seed, layers=layers, heads=heads, feedforward=FEEDFORWARD,
+                      dropout=dropout, rope_base=ROPE_BASE, device="cpu"),
+        HistoryConfig(seed=seed, layers=layers, heads=heads, feedforward=FEEDFORWARD,
+                      dropout=dropout, rope_base=ROPE_BASE, device="cpu"),
+    )
+
+
 def write_weights(
     root: Path,
     group: str,
@@ -464,74 +485,39 @@ def write_weights(
     layers: int = LAYERS,
     dropout: float = 0.0,
     seed: int = SEED,
+    backbone: bool = True,
 ) -> None:
     """
-    Веса этапов 09-12 теми ключами, которых ждёт load_model.
+    Начальные веса модели так, как их готовит конвейер: входной слой
+    этапа 09 группы и — для train — backbone настоящим init_backbone.
+    backbone=False оставляет только этап 09.
 
-    Каждый файл несёт и конфигурацию, и состояние: размерности в
-    конфиге этапа 13 не дублируются, и разойтись им негде.
+    Этапы 10–12 весов модели не дают: они диагностика.
     """
 
     import torch
 
-    parts = {
-        "09_embeddings": (
-            {
-                "vocab_size": vocab,
-                "dim": dim,
-                "seed": seed,
-                "state_dict": embedding(vocab, dim, seed).state_dict(),
-            },
-        ),
-        "10_events": (
-            {
-                "dim": dim,
-                "config": EventConfig(
-                    seed=seed, layers=layers, heads=heads,
-                    feedforward=FEEDFORWARD, dropout=dropout,
-                ).as_dict(),
-                "state_dict": EventEncoder(
-                    dim, layers, heads, FEEDFORWARD, dropout, seed
-                ).state_dict(),
-            },
-        ),
-        "11_profiles": (
-            {
-                "dim": dim,
-                "config": ProfileConfig(
-                    seed=seed, layers=layers, heads=heads,
-                    feedforward=FEEDFORWARD, dropout=dropout, rope_base=ROPE_BASE,
-                ).as_dict(),
-                "state_dict": ProfileEncoder(
-                    dim, layers, heads, FEEDFORWARD, dropout, ROPE_BASE, seed
-                ).state_dict(),
-            },
-        ),
-        "12_history": (
-            {
-                "dim": dim,
-                "config": HistoryConfig(
-                    seed=seed, layers=layers, heads=heads,
-                    feedforward=FEEDFORWARD, dropout=dropout, rope_base=ROPE_BASE,
-                ).as_dict(),
-                "state_dict": HistoryEncoder(
-                    dim, layers, heads, FEEDFORWARD, dropout, ROPE_BASE, seed
-                ).state_dict(),
-            },
-        ),
-    }
+    from src.mlm.backbone import init_backbone
 
-    for name, (saved,) in parts.items():
+    directory = root / "09_embeddings" / group
+    directory.mkdir(parents=True, exist_ok=True)
 
-        directory = root / name / group
-        directory.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "vocab_size": vocab,
+            "dim": dim,
+            "seed": seed,
+            "state_dict": embedding(vocab, dim, seed).state_dict(),
+        },
+        directory / "weights.pt",
+    )
 
-        torch.save(saved, directory / "weights.pt")
+    # Отметка происхождения там же, где её пишет настоящий этап 09:
+    # без неё веса не примут ни init_backbone, ни load_model.
+    write_lineage(directory)
 
-        # Отметка происхождения там же, где её пишут настоящие
-        # этапы 09 и 11: без неё load_model веса отвергнет.
-        if name in ("09_embeddings", "11_profiles"):
-            write_lineage(directory)
+    if group == "train" and backbone:
+        init_backbone(*encoder_configs(heads=heads, layers=layers, dropout=dropout, seed=seed))
 
 
 def write_vocab(root: Path) -> None:
@@ -623,7 +609,7 @@ __all__ = [
     "DIM", "EVT", "FEEDFORWARD", "HEADS", "IGNORE", "KEY_A", "KEY_B", "KEY_C",
     "LAYERS", "MASK", "PAD", "ROPE_BASE", "SEED", "UNK", "USR", "VOCAB",
     "Made", "calendar_of", "clients", "cuda_ready", "embedding",
-    "flash_ready", "make", "model",
+    "encoder_configs", "flash_ready", "make", "model",
     "install", "population", "write_batches", "write_masked", "write_vocab",
     "write_weights",
 ]

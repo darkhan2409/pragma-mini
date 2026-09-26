@@ -226,14 +226,14 @@ def test_tenure_reaches_the_tokens_and_unseen_labels_are_unk(stage):
         record, _ = encode_profile(artifacts, history, 4)
         return history.profile["profile_job_tenure_months"], record.value_ids[record.key_ids.index(key)]
 
-    # С 1.11.2021 до cutoff val (1 мая 2026 у банка) — 54 месяца.
-    label, value = token(date(2021, 11, 1))
+    # С 1.10.2021 до cutoff val (1 апреля 2026 у банка) — 54 месяца.
+    label, value = token(date(2021, 10, 1))
 
     assert label == "54-59" and label in TENURE_VALUES
     assert artifacts.describe(value) == "value:profile_job_tenure_months=54-59"
 
-    # С 1.12.2021 — 53 месяца, метка 48-53: словарю она неизвестна.
-    label, value = token(date(2021, 12, 1))
+    # С 1.11.2021 — 53 месяца, метка 48-53: словарю она неизвестна.
+    label, value = token(date(2021, 11, 1))
 
     assert label == "48-53" and label not in TENURE_VALUES
     assert value == artifacts.special(UNK)

@@ -105,17 +105,56 @@ def _dt(value: str | datetime) -> datetime:
     return stamped.astimezone(timezone.utc)
 
 
+# ------------------------------------------------------------
+# ОКНА ГРУПП
+# ------------------------------------------------------------
+#
+# У группы два окна, оба полуоткрытые [начало, конец):
+#
+#   контекст     [history_start, final_cutoff) — события, которые
+#                пример видит; анкета снята на final_cutoff;
+#   маскирование [target_start, target_end) — события, которые
+#                могут стать целями MLM.
+#
+#   группа  контекст                   маскирование
+#   train   [2024-01-01, 2026-01-01)   [2024-01-01, 2026-01-01)
+#   val     [2024-01-01, 2026-04-01)   [2026-01-01, 2026-04-01)
+#   test    [2024-01-01, 2026-08-01)   [2026-05-01, 2026-08-01)
+#
+# Границы — полночь по времени банка. Конец контекста совпадает с
+# концом выгрузки группы (DATASETS генератора). Событие вне окна
+# маскирования остаётся контекстом: внимание двунаправленное, и
+# цель val или test видит всю историю до общего cutoff. Окно
+# маскирования только сужает, где цели разрешены; события-
+# источники вех и изменения анкеты целями не бывают и внутри
+# него (dataset/targets.py). Окна записаны в meta этапа 05 и в
+# lineage этапов 06–09 и 11: смена окна отвергает их с командой
+# пересборки.
+# ------------------------------------------------------------
+
+
 @dataclass(frozen=True)
 class GroupWindow:
     """
-    Окно группы: начало доступной истории включительно, конечный
-    cutoff исключительно, период будущих целей MLM [start, end).
+    Окна группы: контекст [history_start, final_cutoff) и
+    маскирование MLM [target_start, target_end).
     """
 
     history_start: datetime
     final_cutoff: datetime
     target_start: datetime
     target_end: datetime
+
+    def __post_init__(self) -> None:
+
+        # Окно маскирования лежит внутри контекста и не пусто:
+        # цель, которой пример не видит, выбрать нельзя.
+        if not self.history_start <= self.target_start < self.target_end <= self.final_cutoff:
+            raise ValueError(
+                f"окна группы не вложены: контекст [{self.history_start.isoformat()}, "
+                f"{self.final_cutoff.isoformat()}), маскирование [{self.target_start.isoformat()}, "
+                f"{self.target_end.isoformat()})"
+            )
 
     def as_dict(self) -> dict:
         return {
@@ -145,10 +184,10 @@ def default_windows() -> dict[str, GroupWindow]:
 
     return {
         "train": GroupWindow(start, _dt(datetime(2026, 1, 1)), start, _dt(datetime(2026, 1, 1))),
-        "val": GroupWindow(start, _dt(datetime(2026, 5, 1)), _dt(datetime(2026, 1, 1)),
-                           _dt(datetime(2026, 5, 1))),
-        "test": GroupWindow(start, _dt(datetime(2026, 9, 1)), _dt(datetime(2026, 5, 1)),
-                            _dt(datetime(2026, 9, 1))),
+        "val": GroupWindow(start, _dt(datetime(2026, 4, 1)), _dt(datetime(2026, 1, 1)),
+                           _dt(datetime(2026, 4, 1))),
+        "test": GroupWindow(start, _dt(datetime(2026, 8, 1)), _dt(datetime(2026, 5, 1)),
+                            _dt(datetime(2026, 8, 1))),
     }
 
 
