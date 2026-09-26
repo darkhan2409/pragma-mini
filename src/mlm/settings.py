@@ -17,12 +17,27 @@ from src.generator.config import DATA_DIR
 # параметры оптимизатора обучения.
 #
 # Размерности, глубины и seed'ы четырёх энкодеров сюда НЕ
-# входят: они приходят из весов этапов 09-12 вместе с их
+# входят: они приходят из весов входного слоя (этап 09) и
+# начальных весов backbone (init_backbone) вместе с их
 # конфигурациями. Двум числам про одно и то же негде разойтись.
 # ============================================================
 
 
-# Один каталог на группу и три файла в нём.
+# Начальные веса backbone — энкодеров события, анкеты и истории.
+# Один каталог на модель: учится одна модель, на train, и val,
+# test и отчёты считаются ею же. Пишет его python -m
+# src.mlm.init_backbone: по весам этапа 09, без прохода по данным.
+#
+#   data/09_backbone/event.pt      энкодер события
+#   data/09_backbone/profile.pt    энкодер анкеты
+#   data/09_backbone/history.pt    энкодер истории
+#   data/09_backbone/lineage.json  из чего и каким кодом собран
+BACKBONE_DIR = DATA_DIR / "09_backbone"
+
+BACKBONE_FILES = {"event": "event.pt", "profile": "profile.pt", "history": "history.pt"}
+
+# Один каталог на группу и три файла в нём — отчёт этапа 13.
+# Обучению он не нужен.
 #
 #   data/13_mlm/<group>/targets.parquet
 #   data/13_mlm/<group>/preview.html
@@ -238,6 +253,14 @@ class MlmConfig:
         return MlmConfig.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
+def backbone_dir() -> Path:
+    """
+    Каталог начальных весов backbone. Группы в пути нет: модель одна.
+    """
+
+    return BACKBONE_DIR
+
+
 def mlm_dir(group: str) -> Path:
     """
     Каталог результатов головы для группы.
@@ -263,6 +286,8 @@ def best_checkpoint_path() -> Path:
 
 
 __all__ = [
+    "BACKBONE_DIR",
+    "BACKBONE_FILES",
     "BEST_CHECKPOINT_FILE",
     "CHECKPOINT_FILE",
     "ATTENTION_BACKENDS",
@@ -274,6 +299,7 @@ __all__ = [
     "WEIGHTS_FILE",
     "ConfigError",
     "MlmConfig",
+    "backbone_dir",
     "best_checkpoint_path",
     "checkpoint_path",
     "mlm_dir",

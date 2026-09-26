@@ -665,25 +665,28 @@ def test_stage_06_stamped_by_the_previous_code_is_refused(stage):
         TemporalGroup("val")
 
 
-@pytest.mark.parametrize("stamped", ["09_embeddings", "11_profiles"])
-def test_weights_without_a_stamp_are_refused(stage, stamped: str):
+@pytest.mark.parametrize("stamped, reason", [
+    ("09_embeddings/train", "прежним кодом"),
+    ("09_backbone", "не собраны"),
+])
+def test_weights_without_a_stamp_are_refused(stage, stamped: str, reason: str):
     """
-    Веса 09 собраны под словарь, веса 11 — под анкету. Без отметки
-    происхождения load_model их не берёт.
+    Веса 09 собраны под словарь и анкету, backbone — под веса 09.
+    Без отметки происхождения load_model их не берёт.
     """
 
     from src.dataset.lineage import LINEAGE_FILE
-    from src.mlm.inputs import InputError
+    from src.mlm.backbone import BackboneError
     from src.mlm.model import load_model
 
     world.install(stage, {"train": [world.population()]})
 
-    load_model("train", 1, 512, 0.1, CPU, "sdpa")
+    load_model(1, 512, 0.1, CPU, "sdpa")
 
-    (stage / stamped / "train" / LINEAGE_FILE).unlink()
+    (stage / stamped / LINEAGE_FILE).unlink()
 
-    with pytest.raises(InputError, match="прежним кодом"):
-        load_model("train", 1, 512, 0.1, CPU, "sdpa")
+    with pytest.raises(BackboneError, match=reason):
+        load_model(1, 512, 0.1, CPU, "sdpa")
 
 
 def test_profile_stage_refuses_unstamped_embeddings(stage):

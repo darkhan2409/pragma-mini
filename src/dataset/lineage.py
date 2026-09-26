@@ -4,6 +4,7 @@ from pathlib import Path
 
 from src.preprocessing.artifacts import read_json, write_json
 from src.preprocessing.profile_state import LIFELONG_TYPES, PROFILE_SEMANTICS
+from src.preprocessing.settings import PreprocessingConfig
 
 from .settings import DATASET_FORMAT
 
@@ -19,9 +20,12 @@ from .settings import DATASET_FORMAT
 # анкеты) собраны под ту же анкету и тот же словарь.
 #
 # Поэтому каждый из них пишет рядом с результатом lineage.json —
-# формат набора, смысл анкеты и набор её вех, из которых он
-# собран, — а читатель сверяет его с текущими. Нет файла или он
-# другой — каталог отвергается с командой пересборки.
+# формат набора, смысл анкеты, набор её вех и окна групп
+# (контекст и маскирование), из которых он собран, — а читатель
+# сверяет его с текущими. Нет файла или он другой — каталог
+# отвергается с командой пересборки. Окно маскирования решает,
+# какие события вообще могут стать целями: маска 08 прежнего окна
+# молча оценивала бы не тот период.
 # ============================================================
 
 
@@ -37,6 +41,10 @@ def lineage() -> dict:
         "dataset_format": DATASET_FORMAT,
         "profile_semantics": PROFILE_SEMANTICS,
         "profile_lifelong_types": list(LIFELONG_TYPES),
+        "windows": {
+            group: window.as_dict()
+            for group, window in sorted(PreprocessingConfig.load(None).windows.items())
+        },
     }
 
 

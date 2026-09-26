@@ -4,7 +4,7 @@ import argparse
 import math
 import os
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from src.generator.rng import stable_hash
@@ -25,9 +25,16 @@ from .settings import ConfigError, MlmConfig, best_checkpoint_path, checkpoint_p
 #                           [--masking-config путь] [--resume]
 #
 # Вход: data/07_batches/train, для validation data/07_batches/val
-# и data/08_masked/val; начальные веса энкодеров из этапов 09-12.
+# и data/08_masked/val; начальные веса — входной слой
+# data/09_embeddings/train и backbone data/09_backbone (python -m
+# src.mlm.init_backbone). Этапы 10–13 не нужны: это диагностика.
 # Выход: data/14_train/checkpoint.pt (последнее состояние) и
 # data/14_train/best_checkpoint.pt (лучший val_loss).
+#
+# Устройство: CUDA обязательна (device auto или cuda), тихого
+# отката на CPU нет — CPU только явным device=cpu. На CUDA внимание
+# идёт только через FlashAttention под bf16 autocast: auto здесь
+# значит «строго flash», SDPA — только явным attention_backend=sdpa.
 #
 # Маска train НЕ читается из data/08_masked/train: каждая эпоха
 # разыгрывает её заново тем же маскером этапа 08 по
@@ -58,7 +65,7 @@ from .settings import ConfigError, MlmConfig, best_checkpoint_path, checkpoint_p
 # --max-steps в него не входит, он только останавливает прогон, а
 # --resume берёт горизонт из чекпойнта и продолжает ту же кривую.
 #
-# Промежуточные parquet этапов 09-12 сюда не читаются: через файл
+# Промежуточные parquet этапов 10–13 сюда не читаются: через файл
 # градиент не течёт. Весь проход собран в model.Model, и здесь он
 # вызывается без no_grad.
 #
@@ -67,6 +74,14 @@ from .settings import ConfigError, MlmConfig, best_checkpoint_path, checkpoint_p
 # no_grad, те же micro-batch'и, без backward и шага. Среднее — по
 # всем целям val. По нему обновляется лучший чекпойнт и считается
 # early stopping.
+#
+# Кроме потерь считается точность MLM — Top-1 и Top-5 — только по
+# настоящим целям (метка != -100): контекст, незакрытые токены и
+# запрещённые цели в знаменатель не входят. На train она копится по
+# micro-batch'ам эпохи, на val — по той же фиксированной маске,
+# поэтому val сравним между эпохами. Строка эпохи печатает train и
+# val, а история эпох едет в чекпойнте. Лучший чекпойнт выбирается
+# по-прежнему по val_loss. test здесь не читается никогда.
 #
 # --resume продолжает с checkpoint.pt: веса, AdamW, расписание,
 # счётчики, генераторы случайности и место внутри эпохи.
@@ -90,6 +105,8 @@ CHECKPOINT_KEYS = (
     "masking",
     "rng_state",
     "cuda_rng_state",
+    "train_scores",
+    "history",
 )
 
 
@@ -97,6 +114,130 @@ class CheckpointError(ValueError):
     """
     Чекпойнт нельзя прочитать или продолжить.
     """
+
+
+class DeviceError(RuntimeError):
+    """
+    Учиться негде: нужной CUDA нет, а тихий откат на CPU запрещён.
+    """
+
+
+def training_device(name: str):
+    """
+    Где учиться.
+
+    auto и cuda — только CUDA: обучение не откатывается на CPU
+    молча, иначе полный прогон шёл бы часами не там. CPU — лишь
+    явным device=cpu (проверки и совместимость).
+    """
+
+    import torch
+
+    if name == "cpu":
+        return torch.device("cpu")
+
+    if not torch.cuda.is_available():
+        raise DeviceError(
+            f"device={name}: CUDA недоступна, а обучение на CPU запускается "
+            "только явным device=cpu"
+        )
+
+    return torch.device("cuda")
+
+
+def describe_model(model, device) -> dict:
+    """
+    Что и где учится: устройство, бэкенд внимания, архитектура.
+    """
+
+    import torch
+
+    info = {
+        "device": str(device),
+        "attention": model.attention,
+        "dim": int(model.embedding.dim),
+        "heads": {
+            "profile": model.profile.layers[0].heads,
+            "event": model.event.layers[0].self_attn.num_heads,
+            "history": model.history.layers[0].heads,
+        },
+        "blocks": {
+            "profile": len(model.profile.layers),
+            "event": len(model.event.layers),
+            "history": len(model.history.layers),
+        },
+        "parameters": sum(value.numel() for value in model.parameters()),
+        "torch": torch.__version__,
+    }
+
+    if device.type == "cuda":
+        info.update(
+            gpu=torch.cuda.get_device_name(device),
+            cuda=torch.version.cuda,
+            bf16=torch.cuda.is_bf16_supported(),
+        )
+
+    if model.attention == "flash":
+        import flash_attn
+
+        info["flash_attn"] = flash_attn.__version__
+
+    return info
+
+
+@dataclass
+class Scores:
+    """
+    Счёт MLM по целям: сумма потерь, число целей и сколько из них
+    угадано первым ответом (top1) и попало в первые пять (top5).
+
+    Доли — по числу настоящих целей; без целей их нет (None), а не
+    ноль и не деление на ноль.
+    """
+
+    loss_sum: float = 0.0
+    targets: int = 0
+    top1: int = 0
+    top5: int = 0
+
+    def add(self, out) -> None:
+        """
+        Прибавить проход модели (model.Predicted).
+        """
+
+        from .model import hits
+
+        if out.count == 0:
+            return
+
+        first, five = hits(out.logits, out.targets, 5)
+
+        self.loss_sum += out.loss.item() * out.count
+        self.targets += out.count
+        self.top1 += first
+        self.top5 += five
+
+    def share(self, value: float) -> float | None:
+        return value / self.targets if self.targets else None
+
+    @property
+    def loss(self) -> float | None:
+        return self.share(self.loss_sum)
+
+    @property
+    def top1_accuracy(self) -> float | None:
+        return self.share(self.top1)
+
+    @property
+    def top5_accuracy(self) -> float | None:
+        return self.share(self.top5)
+
+    def as_dict(self) -> dict:
+        return {"loss_sum": self.loss_sum, "targets": self.targets, "top1": self.top1, "top5": self.top5}
+
+    def summary(self) -> dict:
+        return {"loss": self.loss, "top1": self.top1_accuracy, "top5": self.top5_accuracy,
+                "targets": self.targets}
 
 
 def for_epoch(masking: MaskingConfig, epoch: int) -> MaskingConfig:
@@ -230,16 +371,17 @@ def save_checkpoint(state: dict, path: Path) -> None:
     os.replace(temporary, path)
 
 
-def validate(model, source, device, token_budget: int) -> tuple[float | None, int]:
+def validate(model, source, device, token_budget: int) -> Scores:
     """
-    Потери обучаемой модели на группе source, без обновления весов.
+    Потери и точность обучаемой модели на группе source, без
+    обновления весов.
 
     Модель передаётся готовой: это тот же экземпляр, что только
     что учился. Своих весов validation не грузит. Клиенты идут
     теми же micro-batch'ами, что и в обучении, по одному проходу
-    модели на каждый. Среднее берётся по всем целям группы;
-    micro-batch без целей в него не входит. Группа без целей даёт
-    None.
+    модели на каждый. Среднее и доли берутся по всем целям группы;
+    micro-batch без целей в них не входит. У группы без целей
+    потерь и долей нет (None).
     """
 
     import torch
@@ -250,8 +392,7 @@ def validate(model, source, device, token_budget: int) -> tuple[float | None, in
 
     model.eval()
 
-    total = 0.0
-    targets = 0
+    scores = Scores()
 
     with torch.no_grad():
 
@@ -260,13 +401,9 @@ def validate(model, source, device, token_budget: int) -> tuple[float | None, in
             with autocast(device):
                 out = model(pack(clients, device))
 
-            if out.count == 0:
-                continue
+            scores.add(out)
 
-            total += out.loss.item() * out.count
-            targets += out.count
-
-    return (total / targets if targets else None), targets
+    return scores
 
 
 def train(
@@ -292,10 +429,9 @@ def train(
     # обязана сказать, что поставить, а не упасть на импорте.
     import torch
 
-    from .build import _device
     from .inputs import Source, micro_batches
     from .model import load_model, pack
-    from .varlen import autocast
+    from .varlen import BackendError, autocast
 
     latest_path = checkpoint_path()
     best_path = best_checkpoint_path()
@@ -308,15 +444,59 @@ def train(
         config = MlmConfig.from_dict(state["config"])
         masking = MaskingConfig.from_dict(state["masking"])
 
-    device = _device(config.device)
+    device = training_device(config.device)
 
-    model = load_model(
-        group="train",
-        seed=config.seed,
-        events_per_chunk=config.events_per_chunk,
-        label_smoothing=config.label_smoothing,
-        device=device,
-        attention_backend=config.attention_backend,
+    # На CUDA обучение идёт только через FlashAttention: auto здесь
+    # значит «строго flash», а не «flash, если получится». SDPA на
+    # CUDA — только явным attention_backend=sdpa.
+    backend = config.attention_backend
+
+    if device.type == "cuda" and backend == "auto":
+        backend = "flash"
+
+    if device.type == "cuda" and backend == "flash" and not torch.cuda.is_bf16_supported():
+        raise DeviceError("FlashAttention считает в bf16, а эта CUDA bf16 не поддерживает")
+
+    try:
+        model = load_model(
+            seed=config.seed,
+            events_per_chunk=config.events_per_chunk,
+            label_smoothing=config.label_smoothing,
+            device=device,
+            attention_backend=backend,
+        )
+    except BackendError as error:
+        raise BackendError(
+            f"{error}. Обучение на CUDA идёт через FlashAttention; SDPA — только явным "
+            "attention_backend=sdpa"
+        ) from error
+
+    # Модель целиком на устройстве и учится целиком: таблица
+    # эмбеддингов, три энкодера и голова.
+    elsewhere = [name for name, value in model.named_parameters() if value.device.type != device.type]
+
+    if elsewhere:
+        raise DeviceError(f"параметры не на {device}: {elsewhere[:5]}")
+
+    frozen = [name for name, value in model.named_parameters() if not value.requires_grad]
+
+    if frozen:
+        raise RuntimeError(f"замороженные параметры: {frozen[:5]} — модель обязана учиться целиком")
+
+    described = describe_model(model, device)
+
+    if device.type == "cuda":
+        print(
+            f"[train] {device}: {described['gpu']}; CUDA {described['cuda']}, PyTorch "
+            f"{described['torch']}, bf16 {'да' if described['bf16'] else 'нет'}"
+        )
+
+    print(
+        f"[train] внимание {described['attention']}"
+        + (f" (flash-attn {described['flash_attn']}, активации bf16)" if "flash_attn" in described else "")
+        + f"; d {described['dim']}, голов {described['heads']['event']}; блоков: анкета "
+        f"{described['blocks']['profile']}, событие {described['blocks']['event']}, история "
+        f"{described['blocks']['history']}; параметров {described['parameters']:,}"
     )
 
     # Параметры всей модели: общая таблица эмбеддингов, энкодеры
@@ -352,6 +532,7 @@ def train(
 
         step, best, stale = 0, None, 0
         first_epoch, skip = 1, 0
+        epoch_scores, history = Scores(), []
 
     else:
         # Порядок важен: оптимизатор грузится после создания
@@ -373,6 +554,7 @@ def train(
         step = int(state["step"])
         best = state["best_val_loss"]
         stale = int(state["epochs_without_improvement"])
+        history = list(state["history"])
 
         # Полная эпоха — продолжаем со следующей. Неполная (её
         # прервал --max-steps) — с той же, пропуская уже пройденные
@@ -380,8 +562,11 @@ def train(
         # детерминированы, а окно на остановке было пустым.
         if state["epoch_complete"]:
             first_epoch, skip = int(state["epoch"]) + 1, 0
+            epoch_scores = Scores()
         else:
+            # Счёт эпохи продолжается с того же места, что и эпоха.
             first_epoch, skip = int(state["epoch"]), int(state["micro_batches_done"])
+            epoch_scores = Scores(**state["train_scores"])
 
         if (
             stale >= config.early_stopping_patience
@@ -395,6 +580,7 @@ def train(
                 "best_val_loss": best,
                 "epochs_without_improvement": stale,
                 "device": str(device),
+                "model": described,
                 "reason": "nothing",
             }
 
@@ -429,6 +615,9 @@ def train(
     window_targets = 0
     window_loss = 0.0
 
+    # LR последнего сделанного шага — для строки эпохи.
+    last_lr = optimizer.param_groups[0]["lr"]
+
     def close_window() -> None:
         """
         Шаг оптимизатора по накопленному окну.
@@ -443,7 +632,7 @@ def train(
         обучающего сигнала.
         """
 
-        nonlocal step, window_batches, window_targets, window_loss
+        nonlocal step, window_batches, window_targets, window_loss, last_lr
 
         if window_targets > 0:
 
@@ -454,6 +643,7 @@ def train(
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
 
             lr = optimizer.param_groups[0]["lr"]
+            last_lr = lr
 
             optimizer.step()
             scheduler.step()
@@ -493,6 +683,8 @@ def train(
             "cuda_rng_state": (
                 torch.cuda.get_rng_state(device) if device.type == "cuda" else None
             ),
+            "train_scores": epoch_scores.as_dict(),
+            "history": list(history),
         }
 
     for epoch in range(first_epoch, epochs + 1):
@@ -536,6 +728,8 @@ def train(
                 window_targets += out.count
                 window_loss += out.loss.item() * out.count
 
+            epoch_scores.add(out)
+
             if window_batches == config.grad_accum_steps:
                 close_window()
 
@@ -554,7 +748,9 @@ def train(
         if window_batches:
             close_window()
 
-        val_loss, val_targets = validate(model, val_source, device, config.token_budget)
+        val_scores = validate(model, val_source, device, config.token_budget)
+
+        val_loss, val_targets = val_scores.loss, val_scores.targets
 
         # val без целей сигнала не даёт: ни улучшением, ни
         # ухудшением это не считается.
@@ -567,15 +763,30 @@ def train(
         elif val_loss is not None:
             stale += 1
 
-        shown = f"{val_loss:.4f}" if val_loss is not None else "n/a"
-        best_shown = f"{best:.4f}" if best is not None else "n/a"
+        def shown(value: float | None) -> str:
+            return f"{value:.4f}" if value is not None else "n/a"
 
         print(
-            f"epoch={epoch} val_loss={shown} val_targets={val_targets} "
-            f"best_val_loss={best_shown} patience={stale}/{config.early_stopping_patience}"
+            f"epoch={epoch} train_loss={shown(epoch_scores.loss)} "
+            f"train_top1={shown(epoch_scores.top1_accuracy)} "
+            f"train_top5={shown(epoch_scores.top5_accuracy)} "
+            f"val_loss={shown(val_loss)} val_top1={shown(val_scores.top1_accuracy)} "
+            f"val_top5={shown(val_scores.top5_accuracy)} val_targets={val_targets} "
+            f"lr={last_lr:.2e} best_val_loss={shown(best)} "
+            f"patience={stale}/{config.early_stopping_patience}"
         )
 
+        history.append({
+            "epoch": epoch,
+            "step": step,
+            "learning_rate": last_lr,
+            "train": epoch_scores.summary(),
+            "val": val_scores.summary(),
+        })
+
         current = snapshot(True, 0)
+
+        epoch_scores = Scores()
 
         if improved:
             save_checkpoint(current, best_path)
@@ -597,6 +808,7 @@ def train(
         "best_val_loss": best,
         "epochs_without_improvement": stale,
         "device": str(device),
+        "model": described,
         "reason": reason,
     }
 
@@ -604,6 +816,7 @@ def train(
 def run_training(args) -> int:
 
     try:
+        from .backbone import BackboneError
         from .build import MlmError
         from .inputs import InputError
         from .varlen import BackendError
@@ -637,7 +850,7 @@ def run_training(args) -> int:
 
     except (
         ConfigError, MaskingConfigError, InputError, MlmError, BackendError,
-        CheckpointError, FileNotFoundError,
+        BackboneError, CheckpointError, DeviceError, FileNotFoundError,
     ) as error:
         print(f"[train] {error}")
         return EXIT_BLOCKED
@@ -676,10 +889,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m src.mlm.train")
 
     parser.add_argument(
-        "--epochs", type=_positive, default=1,
+        "--epochs", type=_positive, default=10,
         help=(
-            "сколько эпох всего, считая от начала обучения; первый запуск ими же "
-            "задаёт горизонт cosine"
+            "сколько эпох всего, считая от начала обучения (по умолчанию 10, "
+            "early stopping может остановить раньше); первый запуск ими же задаёт "
+            "горизонт cosine"
         ),
     )
     parser.add_argument(
@@ -721,7 +935,9 @@ def main(argv: list[str] | None = None) -> None:
 __all__ = [
     "CHECKPOINT_KEYS",
     "CheckpointError",
+    "DeviceError",
     "build_parser",
+    "describe_model",
     "for_epoch",
     "horizon",
     "load_checkpoint",
@@ -731,6 +947,7 @@ __all__ = [
     "run_training",
     "save_checkpoint",
     "train",
+    "training_device",
     "validate",
 ]
 

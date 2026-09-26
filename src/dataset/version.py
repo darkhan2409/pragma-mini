@@ -22,9 +22,9 @@ from __future__ import annotations
 # ============================================================
 
 
-FORMAT_VERSION = "10.0.0"
+FORMAT_VERSION = "11.0.0"
 
-IMPLEMENTATION_VERSION = "10.0.0"
+IMPLEMENTATION_VERSION = "11.0.0"
 
 SCHEMA_VERSION = 4
 

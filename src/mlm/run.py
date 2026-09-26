@@ -18,12 +18,13 @@ from .settings import ConfigError, MlmConfig
 #
 #   python -m src.mlm.run train|val|test
 #
-# Вход: data/07_batches и data/08_masked; веса энкодеров из
-# data/09_embeddings, 10_events, 11_profiles и 12_history.
-# Выход: data/13_mlm/<group>/ — результаты по целям, страница и
-# веса головы.
+# Вход: data/07_batches и data/08_masked группы; модель — входной
+# слой data/09_embeddings/train и начальные веса data/09_backbone
+# (python -m src.mlm.init_backbone). Выход: data/13_mlm/<group>/ —
+# результаты по целям, страница и веса головы.
 #
-# Этап считает потери необученной модели. Обучения здесь нет.
+# Этап считает потери необученной модели. Обучения здесь нет, и
+# обучению его результат не нужен: это диагностика.
 # ============================================================
 
 
@@ -32,6 +33,7 @@ def run_group(args) -> int:
     group = normalize_group(args.group)
 
     try:
+        from .backbone import BackboneError
         from .build import MlmError, build_group
         from .inputs import InputError
         from .varlen import BackendError
@@ -48,7 +50,7 @@ def run_group(args) -> int:
 
         report = build_group(group, config)
 
-    except (ConfigError, InputError, MlmError, BackendError, FileNotFoundError) as error:
+    except (ConfigError, InputError, MlmError, BackendError, BackboneError, FileNotFoundError) as error:
         print(f"[mlm] группа {group}: {error}")
         return EXIT_BLOCKED
 

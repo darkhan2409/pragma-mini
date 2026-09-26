@@ -11,6 +11,7 @@ from src.embedding.inputs import BatchInput, Loaded, Source
 from src.embedding.layer import InputEmbedding
 from src.embedding.settings import WEIGHTS_FILE as EMBEDDING_WEIGHTS
 from src.embedding.settings import embeddings_dir
+from src.mlm.backbone import initial_profile, payload
 from src.preprocessing.artifacts import TableWriter
 from src.tokenization.specials import EVT, USR, load_special_tokens
 
@@ -44,6 +45,14 @@ from .settings import PROFILES_FILE, WEIGHTS_FILE, ProfileConfig, profiles_dir
 # розыгрышем весов обоих слоёв. При обучении веса меняются на
 # каждом шаге, и вектор клиента считается заново, вместе с
 # InputEmbedding. Файл — снимок для просмотра, а не вход обучения.
+#
+# Этап — диагностика: начальные веса обучения даёт python -m
+# src.mlm.init_backbone без прохода по данным. Веса здесь
+# разыгрываются той же функцией (backbone.initial_profile).
+#
+# Устройство — config.device: auto берёт CUDA, если она есть. Веса
+# разыгрываются на CPU и только потом переезжают; векторы
+# возвращаются на CPU перед записью.
 # ============================================================
 
 
@@ -84,21 +93,15 @@ def build_group(
 
     specials = load_special_tokens()
 
-    embedding = _embedding(group, specials)
+    device = _device(config.device)
 
-    config.check_dim(embedding.dim)
+    embedding = _embedding(group, specials).to(device)
 
-    encoder = ProfileEncoder(
-        dim=embedding.dim,
-        layers=config.layers,
-        heads=config.heads,
-        feedforward=config.feedforward,
-        dropout=config.dropout,
-        rope_base=config.rope_base,
-        seed=config.seed,
-    )
+    encoder = initial_profile(config, embedding.dim)
 
     encoder.eval()
+
+    encoder.to(device)
 
     directory = Path(directory) if directory is not None else profiles_dir(group)
 
@@ -120,7 +123,7 @@ def build_group(
             with torch.no_grad():
                 vectors = encode(
                     embedding, encoder, loaded.model, torch.tensor(loaded.profile_time_log)
-                )
+                ).detach().cpu()
 
             if bool(vectors.isnan().any()):
                 raise ProfileError(f"батч {number}: в векторах клиентов появился NaN")
@@ -147,6 +150,7 @@ def build_group(
         "seed": config.seed,
         "layers": config.layers,
         "heads": config.heads,
+        "device": str(device),
         "rows": rows,
         "batches": source.count,
         "clients": clients,
@@ -166,17 +170,22 @@ def encode(
     анкеты [B, P].
 
     Анкета крошечная — два десятка токенов на клиента, — поэтому
-    батч идёт одним куском, без нарезки на порции.
+    батч идёт одним куском, без нарезки на порции. Батч лежит на
+    CPU и переезжает на устройство энкодера целиком.
     """
 
+    device = next(encoder.parameters()).device
+
+    mask = model.profile_token_mask.to(device)
+
     tokens = embedding.embed(
-        model.profile_key_ids,
-        model.profile_value_ids,
-        model.profile_positions,
-        model.profile_token_mask,
+        model.profile_key_ids.to(device),
+        model.profile_value_ids.to(device),
+        model.profile_positions.to(device),
+        mask,
     )
 
-    return encoder(tokens, times, model.profile_token_mask)
+    return encoder(tokens, times.to(device), mask)
 
 
 def _table(model: BatchInput, vectors: torch.Tensor, dim: int) -> pa.Table:
@@ -234,19 +243,26 @@ def _embedding(group: str, specials: dict) -> InputEmbedding:
 
 def _save(encoder: ProfileEncoder, config: ProfileConfig, dim: int, path: Path) -> None:
     """
-    Веса энкодера рядом с векторами.
+    Веса энкодера рядом с векторами — в формате backbone.payload.
     """
 
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    torch.save(
-        {
-            "dim": dim,
-            "config": config.as_dict(),
-            "state_dict": encoder.state_dict(),
-        },
-        path,
-    )
+    torch.save(payload(encoder, config, dim), path)
+
+
+def _device(name: str) -> torch.device:
+    """
+    Где считать.
+    """
+
+    if name == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if name == "cuda" and not torch.cuda.is_available():
+        raise ProfileError("device cuda запрошен, но CUDA недоступна")
+
+    return torch.device(name)
 
 
 def _clear(directory: Path) -> None:

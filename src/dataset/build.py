@@ -234,6 +234,10 @@ def build_group(
         "profile_semantics": PROFILE_SEMANTICS,
         "profile_fields": list(INCLUDED_FIELDS),
         "profile_lifelong_types": list(LIFELONG_TYPES),
+        # Окна группы: контекст [history_start, final_cutoff) и
+        # маскирование [target_start, target_end) — по нему
+        # построена target_event_mask.
+        "window": window.as_dict(),
         # Какой отбор истории дал эти примеры и сколько он отнял.
         "context": config.context.as_dict(),
         "truncated_samples": counters.truncated,

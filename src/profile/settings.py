@@ -33,6 +33,8 @@ PROFILES_FILE = "profiles.parquet"
 
 WEIGHTS_FILE = "weights.pt"
 
+DEVICES = ("auto", "cpu", "cuda")
+
 
 class ConfigError(ValueError):
     """
@@ -52,7 +54,7 @@ class ProfileConfig:
 
     # Блоков трансформера. В эталоне анкета — самый мелкий
     # энкодер модели: depth_profile 1/1/3/9 против depth_event
-    # 2/5/16/45. У нас событие берёт два блока, анкета один.
+    # 2/5/16/45. У нас событие берёт пять блоков, анкета один.
     layers: int = 1
 
     heads: int = 4
@@ -66,6 +68,11 @@ class ProfileConfig:
     # Основание лестницы частот TimeRoPE по времени вех — то же,
     # что у энкодера истории: шкала времени у них общая.
     rope_base: float = 10000.0
+
+    # Где считать диагностический проход этапа 11. auto берёт CUDA,
+    # если она есть. Веса от устройства не зависят: они разыграны
+    # на CPU и только потом переезжают.
+    device: str = "auto"
 
     def validate(self) -> None:
 
@@ -81,6 +88,9 @@ class ProfileConfig:
 
         if self.rope_base <= 1.0:
             raise ConfigError(f"rope_base обязан быть больше единицы, получено {self.rope_base}")
+
+        if self.device not in DEVICES:
+            raise ConfigError(f"device обязан быть одним из {list(DEVICES)}, получено {self.device!r}")
 
     def check_dim(self, dim: int) -> None:
         """
@@ -107,6 +117,7 @@ class ProfileConfig:
             "feedforward": self.feedforward,
             "dropout": self.dropout,
             "rope_base": self.rope_base,
+            "device": self.device,
         }
 
     @staticmethod
@@ -127,6 +138,7 @@ class ProfileConfig:
             feedforward=int(data.get("feedforward", base.feedforward)),
             dropout=float(data.get("dropout", base.dropout)),
             rope_base=float(data.get("rope_base", base.rope_base)),
+            device=str(data.get("device", base.device)),
         )
 
         config.validate()
@@ -153,6 +165,7 @@ def profiles_dir(group: str) -> Path:
 
 
 __all__ = [
+    "DEVICES",
     "PROFILES_DIR",
     "PROFILES_FILE",
     "WEIGHTS_FILE",

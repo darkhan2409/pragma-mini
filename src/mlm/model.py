@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -11,22 +10,13 @@ from torch import nn
 
 from src.embedding.inputs import CALENDAR_PER_EVENT
 from src.embedding.layer import InputEmbedding
-from src.embedding.settings import WEIGHTS_FILE as EMBEDDING_WEIGHTS
-from src.embedding.settings import embeddings_dir
 from src.event.encoder import EventEncoder
-from src.event.settings import WEIGHTS_FILE as EVENT_WEIGHTS
-from src.event.settings import EventConfig, events_dir
 from src.history.encoder import HistoryEncoder
-from src.history.settings import WEIGHTS_FILE as HISTORY_WEIGHTS
-from src.history.settings import HistoryConfig, history_dir
 from src.profile.encoder import ProfileEncoder
-from src.profile.settings import WEIGHTS_FILE as PROFILE_WEIGHTS
-from src.profile.settings import ProfileConfig, profiles_dir
 from src.tokenization.specials import EVT, USR, load_special_tokens
 
-from src.dataset.lineage import lineage_problem
-
-from .inputs import IGNORE, Client, InputError
+from .backbone import load_backbone, read_embedding
+from .inputs import IGNORE, Client
 from .varlen import (
     BackendError,
     VarlenLayout,
@@ -326,6 +316,28 @@ def mlm_loss(
     )
 
 
+def hits(logits: torch.Tensor, targets: torch.Tensor, k: int = 5) -> tuple[int, int]:
+    """
+    Сколько целей угадано первым ответом и сколько попало в первые k.
+
+    logits [M, словарь] и targets [M] — строки настоящих целей
+    (pack берёт только позиции с меткой != -100); метка -100, если
+    она всё же пришла, в счёт не идёт. Знаменатель доли — число
+    целей, его считает вызывающий. Без целей — (0, 0).
+    """
+
+    real = targets != IGNORE
+
+    if not bool(real.any()):
+        return 0, 0
+
+    logits, targets = logits.detach()[real], targets[real]
+
+    top = logits.topk(min(k, logits.shape[-1]), dim=-1).indices
+
+    return int((top[:, 0] == targets).sum()), int((top == targets[:, None]).any(dim=-1).sum())
+
+
 class Model(nn.Module):
     """
     Четыре энкодера и голова, собранные в один проход.
@@ -365,14 +377,7 @@ class Model(nn.Module):
         Micro-batch от токенов до потерь, одним проходом.
         """
 
-        if self._flash():
-            dated, token_vectors = self._events_flash(data)
-            profile = self._profiles_flash(data)
-            client_vectors, event_vectors = self._history_flash(data, profile, dated)
-        else:
-            dated, token_vectors = self._events(data)
-            profile = self._profiles(data)
-            client_vectors, event_vectors = self._history(data, profile, dated)
+        token_vectors, event_vectors, client_vectors = self._encode(data)
 
         if token_vectors is None:
             # Целей нет. Контекст пуст, но граф обязан остаться
@@ -396,6 +401,36 @@ class Model(nn.Module):
             event=data.target_local,
             client=data.target_client,
         )
+
+    def client_embeddings(self, data: PackedBatch) -> torch.Tensor:
+        """
+        client_embedding: [B, d] — позиция [USR] каждого клиента после
+        последнего блока энкодера истории и его финальной нормы.
+
+        Это тот же вектор клиента, что получает голова MLM, но без
+        головы: не вектор энкодера анкеты (он лишь вход истории, где
+        [USR] двунаправленно видит все события клиента) и не выход
+        головы. Путь внимания тот же, что у forward.
+        """
+
+        return self._encode(data)[2]
+
+    def _encode(self, data: PackedBatch) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
+        """
+        Векторы целевых токенов (None без целей), событий и клиентов
+        после энкодера истории.
+        """
+
+        if self._flash():
+            dated, token_vectors = self._events_flash(data)
+            profile = self._profiles_flash(data)
+            client_vectors, event_vectors = self._history_flash(data, profile, dated)
+        else:
+            dated, token_vectors = self._events(data)
+            profile = self._profiles(data)
+            client_vectors, event_vectors = self._history(data, profile, dated)
+
+        return token_vectors, event_vectors, client_vectors
 
     def _flash(self) -> bool:
         """
@@ -657,7 +692,6 @@ class Model(nn.Module):
 
 
 def load_model(
-    group: str,
     seed: int,
     events_per_chunk: int,
     label_smoothing: float,
@@ -665,28 +699,19 @@ def load_model(
     attention_backend: str = "auto",
 ) -> Model:
     """
-    Четыре энкодера из весов этапов 09-12 плюс свежая голова.
+    Модель: входной слой этапа 09 (train), начальные веса backbone
+    (python -m src.mlm.init_backbone) и свежая голова.
 
-    Ни одна размерность не объявляется здесь заново: и dim, и
-    глубины, и seed'ы лежат в самих файлах весов вместе с
-    состоянием. Поэтому сборка не может разойтись со снимками,
-    по которым её будут сверять.
+    Модель одна: обучение, validation и отчёты по любой группе
+    собирают её из одних и тех же весов. Ни одна размерность не
+    объявляется здесь заново: d, глубины и seed'ы лежат в файлах
+    весов вместе с состоянием. Этапы 10–13 не читаются — их векторы
+    и отчёты модели не нужны.
     """
 
     specials = load_special_tokens()
 
-    # Веса 09 и 11 собраны под словарь и анкету определённого
-    # кода; прежние молча легли бы на новые номера токенов.
-    # Отсутствующий файл весов называет _weights ниже.
-    for path, module in ((embeddings_dir(group) / EMBEDDING_WEIGHTS, "src.embedding"),
-                         (profiles_dir(group) / PROFILE_WEIGHTS, "src.profile")):
-
-        problem = path.exists() and lineage_problem(path.parent, f"python -m {module}.run {group}")
-
-        if problem:
-            raise InputError(problem)
-
-    saved = _weights(embeddings_dir(group) / EMBEDDING_WEIGHTS, "src.embedding", group)
+    saved = read_embedding()
 
     embedding = InputEmbedding(
         vocab_size=int(saved["vocab_size"]),
@@ -696,32 +721,14 @@ def load_model(
     )
     embedding.load_state_dict(saved["state_dict"])
 
-    dim = int(saved["dim"])
-
-    saved = _weights(events_dir(group) / EVENT_WEIGHTS, "src.event", group)
-    config = EventConfig.from_dict(saved["config"])
-    event = EventEncoder(dim, config.layers, config.heads, config.feedforward,
-                         config.dropout, config.seed)
-    event.load_state_dict(saved["state_dict"])
-
-    saved = _weights(profiles_dir(group) / PROFILE_WEIGHTS, "src.profile", group)
-    config = ProfileConfig.from_dict(saved["config"])
-    profile = ProfileEncoder(dim, config.layers, config.heads, config.feedforward,
-                             config.dropout, config.rope_base, config.seed)
-    profile.load_state_dict(saved["state_dict"])
-
-    saved = _weights(history_dir(group) / HISTORY_WEIGHTS, "src.history", group)
-    config = HistoryConfig.from_dict(saved["config"])
-    history = HistoryEncoder(dim, config.layers, config.heads, config.feedforward,
-                             config.dropout, config.rope_base, config.seed)
-    history.load_state_dict(saved["state_dict"])
+    event, profile, history = load_backbone(saved)
 
     model = Model(
         embedding=embedding,
         event=event,
         profile=profile,
         history=history,
-        head=Mlm(dim, seed),
+        head=Mlm(int(saved["dim"]), seed),
         events_per_chunk=events_per_chunk,
         label_smoothing=label_smoothing,
         # Недоступный явный flash — ошибка сразу, до первого шага.
@@ -731,14 +738,6 @@ def load_model(
 
     # Веса разыграны и загружены на CPU и только теперь переезжают.
     return model.to(device)
-
-
-def _weights(path: Path, module: str, group: str) -> dict:
-
-    if not path.exists():
-        raise FileNotFoundError(f"нет {path}: выполните python -m {module}.run {group}")
-
-    return torch.load(path, map_location="cpu", weights_only=True)
 
 
 @contextmanager
@@ -761,6 +760,7 @@ __all__ = [
     "Model",
     "PackedBatch",
     "Predicted",
+    "hits",
     "load_model",
     "mlm_loss",
     "pack",

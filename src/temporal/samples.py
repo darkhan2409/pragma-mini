@@ -76,15 +76,21 @@ class SamplesGroup:
         # Этап ставит на свой результат клеймо lineage() текущего
         # кода, поэтому вход обязан ему соответствовать: иначе
         # набор прежнего смысла вышел бы из этапа с новым клеймом.
+        # Окно у набора своей группы, а в клейме — окна всех групп.
+        current = lineage()
+
+        needed = dict(current, windows=current["windows"].get(group))
+
         found = {
             "dataset_format": self.meta.get("format"),
             "profile_semantics": self.meta.get("profile_semantics"),
             "profile_lifelong_types": self.meta.get("profile_lifelong_types"),
+            "windows": self.meta.get("window"),
         }
 
-        if found != lineage():
+        if found != needed:
             raise SamplesError(
-                f"{meta_path}: формат, смысл анкеты и вехи {found}, а нужны {lineage()} — "
+                f"{meta_path}: формат, смысл анкеты, вехи и окна {found}, а нужны {needed} — "
                 f"набор собран прежним кодом: выполните python -m src.dataset.run {group} заново"
             )
 

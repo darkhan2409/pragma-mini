@@ -21,7 +21,7 @@ from tests.test_profile_state import (
 # каждый возраст это своё значение ключа profile_age, а не
 # диапазон:
 #
-#   birth_date 1991-12-01, cutoff val (1 мая 2026 у банка)
+#   birth_date 1991-12-01, cutoff val (1 апреля 2026 у банка)
 #     -> age 34 -> токен value:profile_age=34
 #
 # Значения словарь берёт только из train, как у любой категории:
