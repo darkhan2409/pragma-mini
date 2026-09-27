@@ -827,18 +827,18 @@ DATASETS: dict[str, DatasetGroup] = {
         clients=10000,
         history_start=datetime(2024, 1, 1),
         history_end=datetime(2026, 1, 1),
-        seed=701,
+        seed=707,
     ),
     "val": DatasetGroup(
         clients=1500,
         history_start=datetime(2024, 1, 1),
         history_end=datetime(2026, 4, 1),
-        seed=801,
+        seed=808,
     ),
     "test": DatasetGroup(
         clients=1500,
         history_start=datetime(2024, 1, 1),
         history_end=datetime(2026, 8, 1),
-        seed=901,
+        seed=909,
     ),
 }
