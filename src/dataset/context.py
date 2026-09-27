@@ -11,13 +11,18 @@ from .settings import POLICY_ALL, POLICY_RECENT, ContextPolicy
 #
 # Какие события длинной истории попадут в один пример.
 #
-#   all     вся история; объявленный max_events — граница, за
-#           которой сборка останавливается;
-#   recent  последние max_events событий. Короче — берётся целиком.
+#   all     вся история; объявленные max_events и max_tokens —
+#           границы, за которыми сборка останавливается;
+#   recent  самый длинный свежий хвост, в котором одновременно не
+#           больше max_events событий и не больше max_tokens
+#           токенов событий. Укладывается в оба — берётся целиком.
 #
 # Правила отбора:
 #
-#   - предел считается по событиям, а не по токенам;
+#   - пределов два: число событий и сумма их токенов. Память шага
+#     растёт с токенами, а токенов на событие у клиентов от 5 до
+#     13, поэтому одного предела по событиям мало. Токены анкеты
+#     не считаются: анкета не режется;
 #   - отбираются только ЦЕЛЫЕ события. Текстовое значение и его
 #     границы не режутся никогда: половина названия магазина это
 #     не «меньше контекста», это другое значение;
@@ -92,12 +97,43 @@ def select(events: list[EventStub], policy: ContextPolicy) -> Selection:
                 f"{policy.max_events}: выберите политику recent либо снимите предел"
             )
 
+        tokens = sum(item.n_tokens for item in events)
+
+        if policy.max_tokens is not None and tokens > policy.max_tokens:
+            raise ContextError(
+                f"история из {tokens} токенов при политике all и пределе "
+                f"{policy.max_tokens}: выберите политику recent либо снимите предел"
+            )
+
         return _split(events, len(events))
 
     if policy.policy == POLICY_RECENT:
-        return _split(events, min(len(events), policy.max_events))
+        return _split(events, _tail(events, policy))
 
     raise ContextError(f"неизвестная политика контекста {policy.policy!r}")
+
+
+def _tail(events: list[EventStub], policy: ContextPolicy) -> int:
+    """
+    Сколько последних событий помещается в оба предела: хвост растёт
+    от самого свежего события, пока следующее не нарушило бы любой.
+    """
+
+    keep = 0
+    tokens = 0
+
+    for item in reversed(events):
+
+        if policy.max_events is not None and keep == policy.max_events:
+            break
+
+        if policy.max_tokens is not None and tokens + item.n_tokens > policy.max_tokens:
+            break
+
+        keep += 1
+        tokens += item.n_tokens
+
+    return keep
 
 
 def _split(events: list[EventStub], keep: int) -> Selection:

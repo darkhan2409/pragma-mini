@@ -70,6 +70,15 @@ POLICIES: tuple[str, ...] = (POLICY_ALL, POLICY_RECENT)
 # лежат в Lifelong анкеты, а не в ленте.
 MAX_EVENTS = 12000
 
+# Сколько токенов событий попадает в пример по умолчанию.
+#
+# Память шага растёт с числом токенов, а не событий: у клиентов
+# бывает от 5 до 13 токенов на событие, и 12 000 событий — это до
+# 99 794 токенов. При архитектуре 1/5/2 (flash-attn, bf16) шаг на
+# 60 021 токене занимает 2,97 ГиБ из 3,2 свободных, на 70 003 — уже
+# не помещается. Токены анкеты сюда не входят: анкета не режется.
+MAX_TOKENS = 58000
+
 
 class ConfigError(ValueError):
     """
@@ -90,6 +99,11 @@ class ContextPolicy:
     # повод обрезать молча.
     max_events: int | None = MAX_EVENTS
 
+    # Предел суммы токенов событий примера, так же: у recent —
+    # сколько токенов свежего хвоста остаётся, у all — объявленная
+    # граница. None — без предела.
+    max_tokens: int | None = MAX_TOKENS
+
     # Предел на одну запись. Он действует ВСЕГДА, даже когда
     # берётся вся история: значение, не помещающееся в одно
     # событие, это ошибка настройки, а не повод обрезать.
@@ -107,6 +121,14 @@ class ContextPolicy:
         if self.policy == POLICY_RECENT and self.max_events is None:
             raise ConfigError("политика recent без max_events отбирать нечего")
 
+        # Самое свежее событие обязано помещаться целиком: иначе
+        # хвост из целых событий мог бы оказаться пустым.
+        if self.max_tokens is not None and self.max_tokens < self.max_event_tokens:
+            raise ConfigError(
+                f"max_tokens {self.max_tokens} меньше предела одного события "
+                f"{self.max_event_tokens}"
+            )
+
         for name in ("max_event_tokens", "max_profile_tokens"):
             if getattr(self, name) < 1:
                 raise ConfigError(f"{name} обязан быть положительным")
@@ -115,6 +137,7 @@ class ContextPolicy:
         return {
             "policy": self.policy,
             "max_events": self.max_events,
+            "max_tokens": self.max_tokens,
             "max_event_tokens": self.max_event_tokens,
             "max_profile_tokens": self.max_profile_tokens,
         }
@@ -133,6 +156,7 @@ class ContextPolicy:
             base,
             policy=str(data.get("policy", base.policy)),
             max_events=_optional_int(data, "max_events", base.max_events),
+            max_tokens=_optional_int(data, "max_tokens", base.max_tokens),
             max_event_tokens=int(data.get("max_event_tokens", base.max_event_tokens)),
             max_profile_tokens=int(data.get("max_profile_tokens", base.max_profile_tokens)),
         )
@@ -221,6 +245,7 @@ __all__ = [
     "DATASET_DIR",
     "GROUPS",
     "MAX_EVENTS",
+    "MAX_TOKENS",
     "POLICIES",
     "POLICY_ALL",
     "POLICY_RECENT",

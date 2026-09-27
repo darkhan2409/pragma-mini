@@ -289,3 +289,167 @@ def test_train_may_lose_old_targets_to_the_limit(stage):
 
     assert report["counts"]["truncated"] == 1
     assert report["counts"]["max_events"] == 1
+
+
+# ============================================================
+# ПРЕДЕЛ ПО ТОКЕНАМ
+# ============================================================
+#
+# Хвост одновременно не длиннее MAX_EVENTS событий и MAX_TOKENS
+# токенов событий: он растёт от самого свежего события, пока
+# следующее не нарушило бы любой предел. События целые.
+# ============================================================
+
+
+def sized(*sizes: int) -> list[EventStub]:
+    return [EventStub(index=number, n_tokens=size, eligible=False) for number, size in enumerate(sizes)]
+
+
+def test_default_token_limit_is_58000():
+
+    from src.dataset.settings import MAX_TOKENS
+
+    assert MAX_TOKENS == 58000
+    assert DatasetConfig().context.max_tokens == 58000
+
+
+@pytest.mark.parametrize("total, kept", [(57999, 29), (58000, 29), (58001, 28)])
+def test_token_boundary(total: int, kept: int):
+    """
+    28 событий по 2000 токенов и самое старое на остаток: 57 999 и
+    58 000 проходят целиком, 58 001 теряет ровно самое старое.
+    """
+
+    events = sized(total - 28 * 2000, *[2000] * 28)
+
+    selection = select(events, ContextPolicy())
+
+    assert selection.n_kept == kept
+    assert selection.truncated == (kept < 29)
+    assert selection.kept == list(range(29 - kept, 29))
+
+
+def test_12000_events_within_the_token_limit_are_kept_whole():
+
+    selection = select(sized(*[4] * 12000), ContextPolicy())
+
+    assert not selection.truncated and selection.kept_tokens == 48000
+
+
+def test_12001_events_are_cut_by_the_event_limit():
+
+    selection = select(sized(*[4] * 12001), ContextPolicy())
+
+    assert selection.n_kept == 12000 and selection.excluded == [0]
+
+
+def test_few_heavy_events_are_cut_by_the_token_limit():
+    """
+    100 событий по 600 токенов: событий мало, а токенов 60 000.
+    Остаются последние 96 (57 600), 97-е дало бы 58 200.
+    """
+
+    selection = select(sized(*[600] * 100), ContextPolicy())
+
+    assert selection.n_kept == 96
+    assert selection.kept_tokens == 57600
+    assert selection.kept == list(range(4, 100))
+
+
+def test_both_limits_exceeded_the_stricter_one_wins():
+    """
+    13 000 событий по 5 токенов: предел событий оставил бы 12 000 —
+    60 000 токенов, поэтому решает предел токенов: 11 600 событий.
+    """
+
+    selection = select(sized(*[5] * 13000), ContextPolicy())
+
+    assert selection.n_kept == 11600
+    assert selection.kept_tokens == 58000
+    assert selection.kept == list(range(1400, 13000))
+
+
+def test_the_kept_tail_is_the_freshest_and_every_event_is_whole():
+    """
+    События разной длины: хвост непрерывный и самый свежий, токены
+    хвоста — ровно сумма его целых событий, а следующее старое
+    событие перешло бы предел.
+    """
+
+    sizes = [(number * 37) % 900 + 100 for number in range(400)]
+
+    selection = select(sized(*sizes), ContextPolicy())
+
+    border = selection.kept[0]
+
+    assert selection.kept == list(range(border, 400))
+    assert selection.kept_tokens == sum(sizes[border:]) <= 58000
+    assert selection.kept_tokens + sizes[border - 1] > 58000
+    assert selection.excluded_tokens == sum(sizes[:border])
+
+
+def test_token_limit_configuration():
+
+    with pytest.raises(ConfigError, match="max_tokens"):
+        ContextPolicy(max_tokens=100).validate()
+
+    assert ContextPolicy.from_dict({"max_tokens": None}).max_tokens is None
+    assert select(sized(*[600] * 100), ContextPolicy(max_tokens=None)).n_kept == 100
+
+    with pytest.raises(ContextError, match="токенов при политике all"):
+        select(sized(*[600] * 100), ContextPolicy(policy=POLICY_ALL, max_events=None))
+
+
+def test_token_truncated_sample_keeps_masks_provenance_and_profile(stage):
+    """
+    30 событий по 2001 токену в периоде целей val (60 030 токенов):
+    остаются последние 28. Маска целей, события-источники вех и
+    изменения анкеты — ровно у оставшихся событий; анкета и вехи не
+    тронуты.
+    """
+
+    from dataclasses import replace
+
+    from src.dataset.sample import build_sample
+    from src.dataset.targets import can_be_target, eligible
+    from src.preprocessing.settings import PreprocessingConfig
+
+    write_profile_vocab(stage)
+
+    window = PreprocessingConfig.load(None).windows["val"]
+
+    artifacts, client, profile = long_client(30, window)
+
+    events = []
+
+    for number, item in enumerate(client.events):
+        width = 2001
+        events.append(replace(
+            item,
+            key_ids=item.key_ids[:1] + [item.key_ids[1]] * (width - 1),
+            value_ids=item.value_ids[:1] + [item.value_ids[1]] * (width - 1),
+            positions=[0] * width,
+            lifelong_source="first_card_activated" if number % 5 == 3 else None,
+        ))
+
+    client = replace(client, events=events)
+
+    sample = build_sample(artifacts, client, window, ContextPolicy())
+
+    kept = events[2:]
+
+    assert sample.truncated and sample.excluded_events == 2 and sample.n_events == 28
+    assert sample.n_tokens == 28 * 2001
+
+    assert sample.event_time.tolist() == [event.event_time.replace(tzinfo=None) for event in kept]
+    assert sample.event_lengths.tolist() == [2001] * 28
+    assert sample.target_event_mask.tolist() == [
+        eligible(event.event_time, window) and can_be_target(event.event_type)
+        and event.lifelong_source is None
+        for event in kept
+    ]
+    assert not sample.target_event_mask[[number - 2 for number in range(30) if number % 5 == 3 and number >= 2]].any()
+
+    assert sample.profile_key_ids.tolist() == profile["profile_key_ids"]
+    assert sample.profile_value_ids.tolist() == profile["profile_value_ids"]
+    assert sample.profile_time.tolist()[2] == profile["profile_time"][2].replace(tzinfo=None)
