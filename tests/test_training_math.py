@@ -644,3 +644,53 @@ def test_training_starts_from_stage_09_weights_and_moves_the_table(stage):
     on_disk = torch.load(path, map_location="cpu", weights_only=True)["state_dict"]["table.weight"]
 
     assert torch.equal(on_disk, table)
+
+
+# ============================================================
+# ПАМЯТЬ МЕЖДУ ПРОХОДАМИ
+# ============================================================
+
+
+def test_logits_of_a_micro_batch_are_gone_before_the_next_pass(stage, monkeypatch):
+    """
+    Логиты [M, словарь] нужны только счёту точности. К следующему
+    проходу модели цикл обучения уже отпустил выход прошлого — и
+    тензор его логитов освобождён: иначе они лежали бы в памяти
+    поверх логитов нового прохода. Проверка не пустая: перед
+    следующими проходами ссылки на прошлые логиты обязаны быть
+    записаны.
+
+    Следится сам тензор из выхода модели, а не его память: копию
+    или view, сохранённые где-то ещё, этот тест не увидит. Память
+    шага меряет проба на GPU.
+    """
+
+    import weakref
+
+    from src.mlm.model import Model
+    from src.mlm.train import Scores
+
+    settle(stage, train_people=uneven(stage))
+
+    kept: list = []
+    seen: list[int] = []
+
+    add = Scores.add
+
+    def remember(self, out):
+        kept.append(weakref.ref(out.logits))
+        add(self, out)
+
+    forward = Model.forward
+
+    def look(self, data):
+        seen.append(len(kept))
+        assert all(ref() is None for ref in kept), "логиты прошлого прохода ещё живы"
+        return forward(self, data)
+
+    monkeypatch.setattr(Scores, "add", remember)
+    monkeypatch.setattr(Model, "forward", look)
+
+    train(tiny(token_budget=12), epochs=1, max_steps=None, masking=every_value())
+
+    assert max(seen) >= 2

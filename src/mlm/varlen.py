@@ -45,6 +45,17 @@ from torch import nn
 # заполнителя. Корзины остаются запасным путём: CPU, fp32, нет
 # библиотеки flash-attn.
 #
+# Сегменты идут в ядро ГРУППАМИ подряд, а не все одним вызовом.
+# Backward flash-attn (mha_varlen_bwd) заводит буфер dq_accum fp32
+# на total_q + 128·(число сегментов) строк: 128 строк запаса на
+# сегмент, сколько бы в нём ни было позиций. У энкодера события
+# сегмент — событие, их до 12 000 на клиента по 8 токенов в
+# среднем, и один вызов просил бы до 780 МиБ, из которых 96% —
+# запас. Группа держит не больше FLASH_ROWS строк вместе с
+# запасом. Результат тот же бит в бит: ядро считает каждый
+# сегмент само по себе, а генератор dropout сдвигается на группу
+# ровно так, как на её часть одного большого вызова.
+#
 # Varlen-слои ниже не заводят своих весов: они считают формулу
 # уже существующих модулей на их же параметрах —
 # nn.TransformerEncoderLayer энкодера события и Block с TimeRoPE,
@@ -54,6 +65,13 @@ from torch import nn
 
 
 BACKENDS = ("auto", "flash", "sdpa")
+
+# Строк запаса на сегмент в буферах backward flash-attn.
+FLASH_PAD = 128
+
+# Предел одного вызова ядра: строки сегментов плюс их запас. При 4
+# головах по 32 буфер dq_accum не больше 64 МиБ.
+FLASH_ROWS = 1 << 17
 
 
 class BackendError(RuntimeError):
@@ -82,21 +100,31 @@ class Bucket:
 
 
 @dataclass(frozen=True)
+class Group:
+    """
+    Сегменты подряд, которые идут в flash-attn одним вызовом.
+    """
+
+    rows: int                  # строк плоского массива у группы
+    cu_seqlens: torch.Tensor   # [S_g + 1], int32, от начала группы
+    max_seqlen: int
+
+
+@dataclass(frozen=True)
 class VarlenLayout:
     """
-    Границы сегментов плоского массива и их корзины.
+    Границы сегментов плоского массива, их корзины и группы.
 
     bucket_of и row_of говорят, где сегмент лежит в раскладке:
     номер корзины и строка внутри неё.
     """
 
     cu_seqlens: torch.Tensor   # [S + 1]
-    cu_seqlens_int32: torch.Tensor  # [S + 1], тот же, для flash-attn
     lengths: torch.Tensor      # [S]
-    max_seqlen: int
     buckets: tuple
     bucket_of: np.ndarray      # [S]
     row_of: np.ndarray         # [S]
+    groups: tuple              # вызовы flash-attn, по порядку сегментов
 
     @property
     def segments(self) -> int:
@@ -151,15 +179,50 @@ class VarlenLayout:
                 )
             )
 
+        groups = tuple(
+            Group(
+                rows=int(cu[last] - cu[first]),
+                cu_seqlens=torch.as_tensor((cu[first:last + 1] - cu[first]).astype(np.int32), device=device),
+                max_seqlen=int(lengths[first:last].max(initial=0)),
+            )
+            for first, last in _group_edges(lengths)
+        )
+
         return VarlenLayout(
             cu_seqlens=torch.as_tensor(cu, device=device),
-            cu_seqlens_int32=torch.as_tensor(cu.astype(np.int32), device=device),
             lengths=torch.as_tensor(lengths, device=device),
-            max_seqlen=int(lengths.max()) if lengths.size else 0,
             buckets=tuple(buckets),
             bucket_of=bucket_of,
             row_of=row_of,
+            groups=groups,
         )
+
+
+def _group_edges(lengths: np.ndarray) -> list[tuple[int, int]]:
+    """
+    Сегменты [first, last) каждой группы: подряд, пока строки с
+    запасом FLASH_PAD на сегмент помещаются в FLASH_ROWS.
+
+    Сегмент больше предела идёт отдельной группой. Без сегментов —
+    одна пустая группа: вызов остаётся прежним.
+    """
+
+    if not lengths.size:
+        return [(0, 0)]
+
+    price = np.cumsum(lengths + FLASH_PAD)
+
+    edges = [0]
+
+    while edges[-1] < lengths.size:
+
+        spent = int(price[edges[-1] - 1]) if edges[-1] else 0
+
+        fits = int(np.searchsorted(price, spent + FLASH_ROWS, side="right"))
+
+        edges.append(max(fits, edges[-1] + 1))
+
+    return list(zip(edges, edges[1:]))
 
 
 def assemble(parts: list[torch.Tensor], indices: list[torch.Tensor], count: int,
@@ -255,20 +318,36 @@ def attend(
     """
     Внимание внутри сегментов: [N, головы, размер] -> то же.
 
-    Сегмент видит только себя: границы задаёт cu_seqlens.
+    Сегмент видит только себя: границы задаёт cu_seqlens группы.
     Масштаб 1/sqrt(размер головы) — по умолчанию, как у SDPA и
     MultiheadAttention.
+
+    Группы вызываются строго по порядку и без других обращений к
+    генератору CUDA между ними: только так маски dropout совпадают
+    с одним большим вызовом. split, а не срезы: backward собирает
+    градиент групп одним cat, а не нулевым тензором на группу.
     """
 
     from flash_attn import flash_attn_varlen_func
 
-    return flash_attn_varlen_func(
-        query, key, value,
-        layout.cu_seqlens_int32, layout.cu_seqlens_int32,
-        layout.max_seqlen, layout.max_seqlen,
-        dropout_p=dropout,
-        causal=False,
-    )
+    def kernel(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, group: Group) -> torch.Tensor:
+        return flash_attn_varlen_func(
+            q, k, v,
+            group.cu_seqlens, group.cu_seqlens,
+            group.max_seqlen, group.max_seqlen,
+            dropout_p=dropout,
+            causal=False,
+        )
+
+    if len(layout.groups) == 1:
+        return kernel(query, key, value, layout.groups[0])
+
+    rows = [group.rows for group in layout.groups]
+
+    return torch.cat([
+        kernel(q, k, v, group)
+        for q, k, v, group in zip(query.split(rows), key.split(rows), value.split(rows), layout.groups)
+    ])
 
 
 def encoder_layer_varlen(
@@ -346,8 +425,11 @@ def history_block_varlen(
 
 __all__ = [
     "BACKENDS",
+    "FLASH_PAD",
+    "FLASH_ROWS",
     "BackendError",
     "Bucket",
+    "Group",
     "VarlenLayout",
     "assemble",
     "attend",

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 
+import numpy as np
 import pytest
 import torch
 
-from src.mlm.model import pack
-from src.mlm.varlen import VarlenLayout, attend, autocast
+from src.mlm import varlen
+from src.mlm.model import Mlm, mlm_loss, pack
+from src.mlm.varlen import FLASH_PAD, VarlenLayout, attend, autocast
 
 from tests import world
 from tests.test_attention_backends import reference_attend
@@ -366,3 +368,221 @@ def test_flash_step_changes_the_weights(clients):
     for name, value in built.named_parameters():
         assert value.dtype is torch.float32, name
         assert not torch.equal(value.detach(), before[name]), name
+
+
+# ============================================================
+# ПАМЯТЬ: ГРУППЫ ВЫЗОВОВ FLASH И ПОТЕРИ КУСКАМИ
+# ============================================================
+
+
+def event_lengths(count: int, total: int) -> np.ndarray:
+    """
+    count событий на total токенов, длины почти поровну.
+    """
+
+    lengths = np.full(count, total // count, dtype=np.int64)
+    lengths[: total % count] += 1
+
+    return lengths
+
+
+@flash_only
+@pytest.mark.parametrize("dropout", [0.0, 0.1])
+def test_groups_give_the_same_attention_bit_for_bit(monkeypatch, dropout: float):
+    """
+    Настоящий flash_attn_varlen_func: группы против одного вызова
+    на все сегменты. Выход, градиент и состояние генератора после
+    прохода совпадают бит в бит — в том числе с dropout: смещение
+    Philox у группы то же, что у её части одного вызова.
+    """
+
+    from flash_attn import flash_attn_varlen_func
+
+    monkeypatch.setattr(varlen, "FLASH_ROWS", 1 << 14)
+
+    lengths = np.random.default_rng(3).integers(1, 38, size=3000)
+
+    layout = VarlenLayout.build(lengths, device(), "события")
+
+    assert len(layout.groups) > 1
+
+    total = int(lengths.sum())
+
+    torch.manual_seed(5)
+
+    qkv = torch.randn(total, 3, 4, 32, device=device(), dtype=torch.bfloat16)
+    grad = torch.randn(total, 4, 32, device=device(), dtype=torch.bfloat16)
+
+    bounds = torch.as_tensor(
+        np.concatenate([[0], np.cumsum(lengths)]).astype(np.int32), device=device()
+    )
+    longest = int(lengths.max())
+
+    def one(query, key, value):
+        return flash_attn_varlen_func(
+            query, key, value, bounds, bounds, longest, longest,
+            dropout_p=dropout, causal=False,
+        )
+
+    def grouped(query, key, value):
+        return attend(query, key, value, layout, dropout)
+
+    def run(call):
+
+        leaf = qkv.clone().requires_grad_(True)
+
+        torch.cuda.manual_seed(9)
+
+        out = call(leaf[:, 0], leaf[:, 1], leaf[:, 2])
+        out.backward(grad)
+
+        return out.detach(), leaf.grad, torch.cuda.get_rng_state()
+
+    for left, right in zip(run(one), run(grouped)):
+        assert torch.equal(left, right)
+
+
+def backward_extra(layout: VarlenLayout, total: int) -> int:
+    """
+    Сколько памяти сверх уже живой занимает backward внимания.
+    """
+
+    query, key, value = (
+        torch.randn(total, 4, 32, device=device(), dtype=torch.bfloat16, requires_grad=True)
+        for _ in range(3)
+    )
+
+    out = attend(query, key, value, layout, 0.0)
+    grad = torch.ones_like(out)
+
+    torch.cuda.synchronize()
+
+    base = torch.cuda.memory_allocated()
+
+    torch.cuda.reset_peak_memory_stats()
+
+    out.backward(grad)
+
+    torch.cuda.synchronize()
+
+    return torch.cuda.max_memory_allocated() - base
+
+
+@flash_only
+def test_backward_of_the_largest_client_needs_no_huge_buffer(monkeypatch):
+    """
+    Клиент на пределе — 12 000 событий, 58 000 токенов. Одним
+    вызовом backward заводит dq_accum на 58 000 + 128·12 000 строк
+    (около 0,8 ГБ, почти весь — запас по 128 строк на событие).
+    Группами он не больше FLASH_ROWS строк: сверху остаются только
+    градиенты Q/K/V и их сборка.
+    """
+
+    lengths = event_lengths(12000, 58000)
+
+    limit = varlen.FLASH_ROWS
+
+    grouped = backward_extra(VarlenLayout.build(lengths, device(), "события"), 58000)
+
+    monkeypatch.setattr(varlen, "FLASH_ROWS", 1 << 30)
+
+    whole = backward_extra(VarlenLayout.build(lengths, device(), "события"), 58000)
+
+    # Контроль: одним вызовом буфер действительно огромный.
+    assert whole > 700 * 2**20
+
+    # Градиенты Q/K/V групп и их сборка — по 256 байт на токен
+    # каждый из шести; dq_accum и softmax_d — 512 + 16 байт на
+    # строку предела.
+    assert grouped <= 6 * 256 * 58000 + (512 + 16) * limit + 16 * 2**20
+
+
+def loss_extra(count: int) -> int:
+    """
+    Сколько памяти сверх уже живой занимают потери и их backward
+    на count целях при словаре и d этапа 14.
+    """
+
+    generator = torch.Generator(device=device()).manual_seed(4)
+
+    head = Mlm(128, 1).to(device())
+
+    weight = torch.randn(5721, 128, device=device(), generator=generator, requires_grad=True)
+
+    parts = [
+        torch.randn(count, 128, device=device(), generator=generator, requires_grad=True)
+        for _ in range(3)
+    ]
+
+    targets = torch.randint(0, 5721, (count,), device=device(), generator=generator)
+
+    torch.cuda.synchronize()
+
+    base = torch.cuda.memory_allocated()
+
+    torch.cuda.reset_peak_memory_stats()
+
+    with autocast(device()):
+        loss = mlm_loss(head, *parts, weight, targets, 0.1)
+
+    loss.backward()
+
+    torch.cuda.synchronize()
+
+    return torch.cuda.max_memory_allocated() - base
+
+
+@cuda_only
+def test_loss_memory_does_not_grow_with_the_vocabulary_times_targets():
+    """
+    Целиком кросс-энтропия под bf16 держала бы около 12 байт на
+    (цель, слово): на 30 000 целях — больше 2 ГБ. Кусками сверху
+    остаётся один кусок [2048, словарь] и линейные по целям
+    градиенты входов. Разница между 10 000 и 30 000 целей — только
+    эти линейные члены.
+    """
+
+    from src.mlm.model import TARGETS_PER_CHUNK
+
+    small = loss_extra(10000)
+    large = loss_extra(30000)
+
+    per_target = 8 * 512
+
+    assert large <= 16 * 5721 * TARGETS_PER_CHUNK + per_target * 30000 + 8 * 2**20
+    assert large - small <= per_target * 20000 + 16 * 2**20
+
+
+@flash_only
+def test_flash_model_is_the_same_with_and_without_groups(clients, monkeypatch):
+    """
+    Весь проход модели в обучении, с dropout: малый предел группы
+    не меняет ни логиты, ни потери — маски dropout те же, и
+    генератор дальше идёт тем же потоком.
+    """
+
+    built = world.model(attention="flash", dropout=0.1).to(device())
+    built.train()
+
+    def run():
+
+        torch.manual_seed(1)
+        torch.cuda.manual_seed(1)
+
+        data = pack(clients, device())
+
+        with autocast(device()):
+            out = built(data)
+
+        return data, out
+
+    _, whole = run()
+
+    monkeypatch.setattr(varlen, "FLASH_ROWS", 3 * FLASH_PAD)
+
+    data, split = run()
+
+    assert len(data.events.groups) > 1
+
+    assert torch.equal(split.logits, whole.logits)
+    assert torch.equal(split.loss, whole.loss)

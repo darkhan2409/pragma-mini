@@ -9,8 +9,10 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from src.mlm import varlen
 from src.mlm.model import Model, pack
 from src.mlm.varlen import (
+    FLASH_PAD,
     BackendError,
     VarlenLayout,
     encoder_layer_varlen,
@@ -437,7 +439,8 @@ def test_flash_path_and_buckets_agree(monkeypatch, clients):
 # ============================================================
 
 
-def test_kernel_is_called_bidirectionally_with_flat_arguments(monkeypatch, clients):
+@pytest.mark.parametrize("limit", [None, 3 * FLASH_PAD])
+def test_kernel_is_called_bidirectionally_with_flat_arguments(monkeypatch, clients, limit):
     """
     Аргументы flash_attn_varlen_func, а не только формы Q/K/V.
 
@@ -451,8 +454,12 @@ def test_kernel_is_called_bidirectionally_with_flat_arguments(monkeypatch, clien
       dropout         — ноль в eval.
 
     Ошибка в любом из них меняет СМЫСЛ внимания, но не форму
-    выхода, и потому не ловится проверками формы.
+    выхода, и потому не ловится проверками формы. С малым пределом
+    группы всё то же верно для каждого вызова по отдельности.
     """
+
+    if limit is not None:
+        monkeypatch.setattr(varlen, "FLASH_ROWS", limit)
 
     seen: list[dict] = []
 
@@ -514,6 +521,72 @@ def test_kernel_is_called_bidirectionally_with_flat_arguments(monkeypatch, clien
 
         assert call["dropout"] == 0.0
         assert not call["rest"], f"ядру уходят лишние аргументы: {call['rest']}"
+
+
+def test_grouped_kernel_calls_give_the_same_pass_and_gradients(monkeypatch, clients):
+    """
+    Группы — только способ позвать ядро: сегменты те же, каждый
+    считается сам по себе. Поэтому проход с малым пределом группы
+    бит в бит совпадает с проходом одним вызовом — и логиты, и
+    потери, и градиент каждого параметра. Каждый вызов получает
+    ровно сегменты своей группы, а группы событий вместе покрывают
+    все токены micro-batch.
+    """
+
+    calls: list[list[int]] = []
+
+    def kernel(query, key, value, cu_q, cu_k, max_q, max_k, dropout_p=0.0, causal=False):
+
+        calls.append(cu_q.tolist())
+
+        return reference_attend(
+            query, key, value, types.SimpleNamespace(cu_seqlens=cu_q), dropout_p
+        )
+
+    library = types.ModuleType("flash_attn")
+    library.flash_attn_varlen_func = kernel
+
+    monkeypatch.setitem(sys.modules, "flash_attn", library)
+
+    def run():
+
+        built = world.model(attention="flash")
+        built.eval()
+
+        monkeypatch.setattr(built, "_flash", lambda: True)
+
+        data = pack(clients, CPU)
+
+        calls.clear()
+
+        out = built(data)
+        out.loss.backward()
+
+        grads = {name: value.grad for name, value in built.named_parameters()}
+
+        return data, out, grads, list(calls)
+
+    _, whole, whole_grads, whole_calls = run()
+
+    monkeypatch.setattr(varlen, "FLASH_ROWS", 3 * FLASH_PAD)
+
+    data, split, split_grads, split_calls = run()
+
+    groups = data.events.groups
+
+    assert len(groups) > 1 and len(split_calls) > len(whole_calls)
+
+    # Слой события один: первые вызовы — его группы, по порядку.
+    assert split_calls[: len(groups)] == [group.cu_seqlens.tolist() for group in groups]
+    assert sum(group.rows for group in groups) == data.key_ids.numel()
+
+    assert torch.equal(split.logits, whole.logits)
+    assert torch.equal(split.loss, whole.loss)
+
+    assert whole_grads.keys() == split_grads.keys()
+
+    for name, value in whole_grads.items():
+        assert value is not None and torch.equal(split_grads[name], value), name
 
 
 # ============================================================

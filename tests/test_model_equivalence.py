@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import pytest
 import torch
+import torch.nn.functional as F
 
-from src.mlm.model import Mlm, Model, pack
+from src.mlm import model as mlm_model
+from src.mlm.inputs import IGNORE
+from src.mlm.model import Mlm, Model, mlm_loss, pack
 
 from tests import world
 from tests.test_isolation import long, short
@@ -273,15 +276,16 @@ def test_client_alone_matches_the_same_client_in_a_micro_batch(model):
     assert torch.allclose(together.logits[mine], alone.logits, atol=ATOL, rtol=ATOL)
 
 
-def test_loss_of_a_micro_batch_is_the_mean_over_its_targets(model):
+@pytest.mark.parametrize("chunk", [None, 3])
+def test_loss_of_a_micro_batch_is_the_mean_over_its_targets(model, monkeypatch, chunk):
     """
     loss * count обязан быть суммой потерь по целям: на этом
-    держится нормировка окна накопления.
+    держится нормировка окна накопления. В том числе когда потери
+    считаются кусками по три цели.
     """
 
-    import torch.nn.functional as F
-
-    from src.mlm.inputs import IGNORE
+    if chunk is not None:
+        monkeypatch.setattr(mlm_model, "TARGETS_PER_CHUNK", chunk)
 
     data = pack([short().client, long().client] + world.clients(), CPU)
 
@@ -297,6 +301,156 @@ def test_loss_of_a_micro_batch_is_the_mean_over_its_targets(model):
 
     assert out.count == each.numel()
     assert float(out.loss) * out.count == pytest.approx(float(each.sum()), rel=1e-6)
+
+
+# ============================================================
+# ПОТЕРИ КУСКАМИ
+# ============================================================
+
+
+def loss_inputs(count: int):
+    """
+    Голова, её входы и цели в float64: сравнение кусков с целым
+    упирается в ulp float64, а не float32.
+    """
+
+    generator = torch.Generator().manual_seed(11)
+
+    head = Mlm(world.DIM, world.SEED).double()
+
+    parts = [
+        torch.randn(count, world.DIM, generator=generator, dtype=torch.float64, requires_grad=True)
+        for _ in range(3)
+    ]
+
+    weight = torch.randn(
+        world.VOCAB, world.DIM, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+
+    targets = torch.randint(0, world.VOCAB, (count,), generator=generator)
+
+    return head, parts, weight, targets
+
+
+def test_loss_in_pieces_is_the_smoothed_mean_cross_entropy(monkeypatch):
+    """
+    Куски по три цели с неровным хвостом и кусок из одних -100
+    дают ту же потерю и те же градиенты, что кросс-энтропия
+    целиком: среднее по строкам с меткой, со сглаживанием.
+    """
+
+    monkeypatch.setattr(mlm_model, "TARGETS_PER_CHUNK", 3)
+
+    head, parts, weight, targets = loss_inputs(11)
+
+    targets[3:6] = IGNORE
+    targets[9] = IGNORE
+
+    leaves = [*parts, weight, *head.parameters()]
+
+    mine = mlm_loss(head, *parts, weight, targets, 0.1)
+
+    whole = F.cross_entropy(
+        head(*parts, weight), targets, ignore_index=IGNORE, label_smoothing=0.1
+    )
+
+    assert float(mine.detach()) == pytest.approx(float(whole.detach()), rel=1e-12)
+
+    for left, right in zip(torch.autograd.grad(mine, leaves), torch.autograd.grad(whole, leaves)):
+        assert torch.allclose(left, right, atol=1e-12, rtol=1e-10)
+
+
+def test_loss_without_targets_is_a_connected_zero():
+
+    head, parts, weight, targets = loss_inputs(4)
+
+    targets[:] = IGNORE
+
+    loss = mlm_loss(head, *parts, weight, targets, 0.1)
+
+    assert float(loss.detach()) == 0.0 and loss.requires_grad
+
+    loss.backward()
+
+    assert all(float(part.grad.abs().sum()) == 0.0 for part in parts)
+
+
+def wide(shapes: list[tuple]) -> list[tuple]:
+    """
+    Сохранённые тензоры шириной в словарь и длиннее самой таблицы:
+    строки по целям, а не вес. Голова законно сохраняет
+    weight.t() [d, словарь] — он сюда не попадает.
+    """
+
+    return [
+        shape for shape in shapes
+        if shape[-1:] == (world.VOCAB,) and torch.Size(shape).numel() > world.DIM * world.VOCAB
+    ]
+
+
+def saved_shapes(run) -> list[tuple]:
+    """
+    Формы всего, что autograd сохранил для backward за run().
+    """
+
+    shapes: list[tuple] = []
+
+    def save(tensor):
+        shapes.append(tuple(tensor.shape))
+        return tensor
+
+    with torch.autograd.graph.saved_tensors_hooks(save, lambda tensor: tensor):
+        run()
+
+    return shapes
+
+
+def test_loss_keeps_no_vocabulary_wide_tensor_for_backward(monkeypatch):
+    """
+    До backward потери держат только входы кусков: ни одной
+    матрицы [цели, словарь]. Контроль — та же кросс-энтропия
+    целиком: у неё такая матрица есть, то есть перехват
+    сохранённых тензоров действительно её видит.
+    """
+
+    monkeypatch.setattr(mlm_model, "TARGETS_PER_CHUNK", 16)
+
+    head, parts, weight, targets = loss_inputs(40)
+
+    whole = saved_shapes(
+        lambda: F.cross_entropy(head(*parts, weight), targets, label_smoothing=0.1)
+    )
+
+    assert wide(whole)
+
+    mine = saved_shapes(lambda: mlm_loss(head, *parts, weight, targets, 0.1))
+
+    assert mine, "перехват ничего не увидел"
+    assert not wide(mine), mine
+
+
+def test_the_model_takes_its_loss_in_pieces(monkeypatch, clients):
+    """
+    Тот же запрет на уровне всего прохода: Model.forward берёт
+    потери у mlm_loss, а не у полных логитов. Логиты целиком он
+    строит для точности, но матрица [цели, словарь] для backward
+    не сохраняется. Верни forward кросс-энтропию по logits — здесь
+    появится её log_softmax.
+    """
+
+    monkeypatch.setattr(mlm_model, "TARGETS_PER_CHUNK", 3)
+
+    built = world.model()
+    built.eval()
+
+    data = pack(clients, CPU)
+
+    found: dict = {}
+
+    shapes = saved_shapes(lambda: found.update(out=built(data)))
+
+    assert found["out"].count > max(3, world.DIM)
+    assert not wide(shapes), wide(shapes)
 
 
 # ============================================================

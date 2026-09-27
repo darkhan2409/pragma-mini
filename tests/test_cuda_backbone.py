@@ -133,8 +133,11 @@ def tensors_of(data) -> dict[str, torch.Tensor]:
 
         elif isinstance(value, VarlenLayout):
 
-            for part in ("cu_seqlens", "cu_seqlens_int32", "lengths"):
+            for part in ("cu_seqlens", "lengths"):
                 found[f"{item.name}.{part}"] = getattr(value, part)
+
+            for number, group in enumerate(value.groups):
+                found[f"{item.name}.group{number}.cu_seqlens"] = group.cu_seqlens
 
             for number, bucket in enumerate(value.buckets):
                 for part in ("segments", "index", "mask"):
@@ -170,7 +173,7 @@ def test_full_model_step_on_cuda(stage, monkeypatch):
     assert all(value.device.type == "cuda" for value in found.values()), [
         name for name, value in found.items() if value.device.type != "cuda"
     ]
-    assert found["events.cu_seqlens_int32"].dtype == torch.int32
+    assert found["events.group0.cu_seqlens"].dtype == torch.int32
 
     real = flash_attn.flash_attn_varlen_func
     calls = []

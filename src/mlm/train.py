@@ -403,6 +403,8 @@ def validate(model, source, device, token_budget: int) -> Scores:
 
             scores.add(out)
 
+            del out
+
     return scores
 
 
@@ -729,6 +731,11 @@ def train(
                 window_loss += out.loss.item() * out.count
 
             epoch_scores.add(out)
+
+            # Логиты [M, словарь] нужны только счёту точности. Без
+            # del они жили бы до конца следующего прохода модели,
+            # поверх его собственных.
+            del out
 
             if window_batches == config.grad_accum_steps:
                 close_window()

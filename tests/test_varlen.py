@@ -4,7 +4,8 @@ import numpy as np
 import pytest
 import torch
 
-from src.mlm.varlen import VarlenLayout, assemble
+from src.mlm import varlen
+from src.mlm.varlen import FLASH_PAD, FLASH_ROWS, VarlenLayout, assemble
 
 
 # ============================================================
@@ -20,6 +21,11 @@ from src.mlm.varlen import VarlenLayout, assemble
 # Поэтому проверяются точные числа, а не формы: границы корзин
 # ceil(log2), плотная нумерация корзин, ширина корзины по её
 # собственному максимуму и покрытие сегментов ровно по разу.
+#
+# Группы вызовов flash-attn — такая же тихая часть: сегмент,
+# попавший не в свою группу или со сдвинутой границей, смешался
+# бы с соседом без единой ошибки формы. Поэтому и у групп
+# проверяются точные границы, порядок и предел.
 # ============================================================
 
 
@@ -44,11 +50,16 @@ def test_cumulative_bounds_are_exact():
     built = layout([20, 3, 5, 2])
 
     assert built.cu_seqlens.tolist() == [0, 20, 23, 28, 30]
-    assert built.cu_seqlens_int32.tolist() == [0, 20, 23, 28, 30]
-    assert built.cu_seqlens_int32.dtype == torch.int32
     assert built.lengths.tolist() == [20, 3, 5, 2]
-    assert built.max_seqlen == 20
     assert built.segments == 4
+
+    # Всё помещается в один вызов flash-attn: границы те же, int32.
+    [group] = built.groups
+
+    assert group.rows == 30
+    assert group.cu_seqlens.tolist() == [0, 20, 23, 28, 30]
+    assert group.cu_seqlens.dtype == torch.int32
+    assert group.max_seqlen == 20
 
 
 @pytest.mark.parametrize(
@@ -207,7 +218,7 @@ def test_length_one_segment_survives():
 
     built = layout([1, 1, 1])
 
-    assert built.max_seqlen == 1
+    assert [group.max_seqlen for group in built.groups] == [1]
     assert len(built.buckets) == 1
     assert built.buckets[0].mask.tolist() == [[True], [True], [True]]
     assert built.buckets[0].index.tolist() == [[0], [1], [2]]
@@ -236,8 +247,12 @@ def test_no_segments_at_all_is_not_an_error():
     built = VarlenLayout.build(np.asarray([], dtype=np.int64), CPU, "события")
 
     assert built.cu_seqlens.tolist() == [0]
-    assert built.max_seqlen == 0
     assert built.buckets == ()
+
+    # Одна пустая группа: вызов ядра такой же, как без групп.
+    [group] = built.groups
+
+    assert (group.rows, group.cu_seqlens.tolist(), group.max_seqlen) == (0, [0], 0)
     assert built.segments == 0
 
 
@@ -292,3 +307,99 @@ def test_assemble_leaves_an_uncovered_row_at_zero():
     out = assemble([values[:2]], [torch.tensor([0, 2])], 4, values[:0])
 
     assert out.tolist() == [[0.0, 1.0], [0.0, 0.0], [2.0, 3.0], [0.0, 0.0]]
+
+
+# ============================================================
+# ГРУППЫ ВЫЗОВОВ FLASH-ATTN
+# ============================================================
+
+
+def price(group) -> int:
+    """
+    Строки группы вместе с запасом FLASH_PAD на сегмент.
+    """
+
+    return group.rows + FLASH_PAD * (len(group.cu_seqlens) - 1)
+
+
+def test_groups_cover_the_segments_in_order_with_exact_bounds(monkeypatch):
+    """
+    Группы идут подряд и вместе дают все сегменты по разу; границы
+    каждой — те же cu_seqlens, отсчитанные от начала группы; длина
+    — наибольшая в самой группе; предел соблюдён, и разрез жадный:
+    первый сегмент следующей группы в эту уже не влез бы.
+    """
+
+    monkeypatch.setattr(varlen, "FLASH_ROWS", 4 * FLASH_PAD)
+
+    lengths = np.random.default_rng(7).integers(1, 38, size=500)
+
+    built = layout(lengths.tolist())
+
+    cu = built.cu_seqlens.tolist()
+
+    assert len(built.groups) > 1
+
+    first = 0
+
+    for group in built.groups:
+
+        count = len(group.cu_seqlens) - 1
+        last = first + count
+
+        assert group.cu_seqlens.dtype == torch.int32
+        assert group.cu_seqlens.tolist() == [bound - cu[first] for bound in cu[first:last + 1]]
+        assert group.rows == cu[last] - cu[first]
+        assert group.max_seqlen == int(lengths[first:last].max())
+        assert price(group) <= 4 * FLASH_PAD
+
+        if last < len(lengths):
+            assert price(group) + int(lengths[last]) + FLASH_PAD > 4 * FLASH_PAD
+
+        first = last
+
+    assert first == len(lengths)
+    assert sum(group.rows for group in built.groups) == cu[-1]
+
+
+def test_a_segment_over_the_limit_is_a_group_of_its_own(monkeypatch):
+    """
+    Сегмент длиннее предела не теряется и не тянет соседей: он
+    идёт отдельным вызовом.
+    """
+
+    # Предел вмещает два коротких сегмента с запасом, но не
+    # короткий рядом с длинным.
+    monkeypatch.setattr(varlen, "FLASH_ROWS", 2 * FLASH_PAD + 8)
+
+    built = layout([3, 400, 2, 1])
+
+    assert [group.cu_seqlens.tolist() for group in built.groups] == [[0, 3], [0, 400], [0, 2, 3]]
+    assert [group.max_seqlen for group in built.groups] == [3, 400, 2]
+
+
+def test_the_largest_client_needs_few_calls_and_the_history_stays_whole():
+    """
+    Предел — клиент из 12 000 событий и 58 000 токенов: буфер
+    dq_accum одного вызова ограничен FLASH_ROWS строк, а вызовов на
+    слой немного. История — один сегмент из 12 001 позиции или 52
+    клиента micro-batch — остаётся одним вызовом в пределе.
+    """
+
+    lengths = np.full(12000, 58000 // 12000, dtype=np.int64)
+    lengths[: 58000 % 12000] += 1
+
+    events = layout(lengths.tolist())
+
+    assert sum(group.rows for group in events.groups) == 58000
+    assert all(price(group) <= FLASH_ROWS for group in events.groups)
+    assert len(events.groups) <= 13
+
+    # Один сегмент — всегда одна группа; важно, что и этот вызов
+    # укладывается в предел, как и история micro-batch из 52
+    # клиентов на 16 384 события.
+    for history in (layout([12001]), layout([16384 // 52 + 1] * 52)):
+
+        [group] = history.groups
+
+        assert price(group) <= FLASH_ROWS

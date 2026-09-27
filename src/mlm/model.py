@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from src.embedding.inputs import CALENDAR_PER_EVENT
 from src.embedding.layer import InputEmbedding
@@ -72,7 +73,9 @@ from .varlen import (
 # одни и те же веса и со стороны входа, и со стороны выхода.
 #
 # Потери — среднее по ВСЕМ целям micro-batch: цель одного клиента
-# весит столько же, сколько цель другого.
+# весит столько же, сколько цель другого. Считаются они кусками по
+# TARGETS_PER_CHUNK целей с пересчётом в backward (mlm_loss): память
+# потерь не растёт с числом целей.
 #
 # Внутри forward нет ни detach, ни NumPy, ни no_grad. Перевод
 # клиентов в тензоры и раскладка по корзинам сделаны в pack, до
@@ -262,6 +265,10 @@ def pack(clients: list[Client], device: torch.device) -> PackedBatch:
     )
 
 
+# Целей в одном куске потерь.
+TARGETS_PER_CHUNK = 2048
+
+
 class Mlm(nn.Module):
     """
     Голова: три вектора в один, дальше связанные логиты.
@@ -296,23 +303,61 @@ class Mlm(nn.Module):
 
 
 def mlm_loss(
-    logits: torch.Tensor,
+    head: Mlm,
+    token: torch.Tensor,
+    event: torch.Tensor,
+    client: torch.Tensor,
+    weight: torch.Tensor,
     targets: torch.Tensor,
     smoothing: float,
 ) -> torch.Tensor:
     """
-    Кросс-энтропия по размеченным позициям.
+    Кросс-энтропия по размеченным позициям: среднее по целям.
+
+    Голова и потери считаются кусками по TARGETS_PER_CHUNK целей
+    и пересчитываются в backward (checkpoint): до backward живут
+    только входы куска. Целиком под bf16 autocast кросс-энтропия
+    держала бы около 12·словарь байт на цель — bf16-логарифмы
+    вероятностей, их fp32-копию и градиенты, — а token_budget
+    число целей не ограничивает.
+
+    Сумма кусков с reduction="sum", делённая на число целей, — то
+    же среднее с тем же сглаживанием меток: torch сам считает
+    (1 − ε)·nll + ε/V·Σ по строкам с меткой.
 
     Ноль на пустом наборе возвращается СВЯЗАННЫМ С ГРАФОМ:
     torch.tensor(0.0) оборвал бы цепочку, и backward на клиенте
     без целей упал бы. Приём взят из эталона дословно.
     """
 
-    if targets.numel() == 0 or int((targets != IGNORE).sum()) == 0:
-        return logits.sum() * 0.0
+    count = int((targets != IGNORE).sum())
+
+    if count == 0:
+        return head(token, event, client, weight).sum() * 0.0
+
+    pieces = zip(*(part.split(TARGETS_PER_CHUNK) for part in (token, event, client, targets)))
+
+    total = sum(
+        checkpoint(_piece_loss, head, *piece, weight, smoothing, use_reentrant=False)
+        for piece in pieces
+    )
+
+    return total / count
+
+
+def _piece_loss(
+    head: Mlm,
+    token: torch.Tensor,
+    event: torch.Tensor,
+    client: torch.Tensor,
+    targets: torch.Tensor,
+    weight: torch.Tensor,
+    smoothing: float,
+) -> torch.Tensor:
 
     return F.cross_entropy(
-        logits, targets, ignore_index=IGNORE, label_smoothing=smoothing
+        head(token, event, client, weight), targets,
+        ignore_index=IGNORE, label_smoothing=smoothing, reduction="sum",
     )
 
 
@@ -326,14 +371,10 @@ def hits(logits: torch.Tensor, targets: torch.Tensor, k: int = 5) -> tuple[int, 
     целей, его считает вызывающий. Без целей — (0, 0).
     """
 
-    real = targets != IGNORE
-
-    if not bool(real.any()):
-        return 0, 0
-
-    logits, targets = logits.detach()[real], targets[real]
-
-    top = logits.topk(min(k, logits.shape[-1]), dim=-1).indices
+    # Без выборки по маске: она копировала бы [M, словарь] на
+    # каждом шаге, а метка -100 и так не совпадает ни с одним
+    # номером словаря.
+    top = logits.detach().topk(min(k, logits.shape[-1]), dim=-1).indices
 
     return int((top[:, 0] == targets).sum()), int((top == targets[:, None]).any(dim=-1).sum())
 
@@ -384,19 +425,22 @@ class Model(nn.Module):
             # связным, иначе backward на таком batch оборвётся.
             token_vectors = client_vectors[:0]
 
-        logits = self.head(
-            token_vectors,
-            event_vectors[data.target_event],
-            client_vectors[data.target_client],
-            self.embedding.weight,
-        )
+        event_rows = event_vectors[data.target_event]
+        client_rows = client_vectors[data.target_client]
+
+        # Логиты целиком — для точности и отчёта; потери считает
+        # mlm_loss кусками, по тем же входам головы.
+        logits = self.head(token_vectors, event_rows, client_rows, self.embedding.weight)
 
         targets = data.labels[data.target_token]
 
         return Predicted(
             logits=logits,
             targets=targets,
-            loss=mlm_loss(logits, targets, self.label_smoothing),
+            loss=mlm_loss(
+                self.head, token_vectors, event_rows, client_rows,
+                self.embedding.weight, targets, self.label_smoothing,
+            ),
             place=data.target_place,
             event=data.target_local,
             client=data.target_client,
@@ -760,6 +804,7 @@ __all__ = [
     "Model",
     "PackedBatch",
     "Predicted",
+    "TARGETS_PER_CHUNK",
     "hits",
     "load_model",
     "mlm_loss",
