@@ -1,0 +1,83 @@
+{
+  "train": {
+    "rows": 527776,
+    "fraud_1": 1699,
+    "fraud_0": 526077,
+    "fraud_rate": 0.003219168738252592,
+    "false_positive_rows": 152,
+    "by_type": {
+      "purchase": {
+        "rows": 482607,
+        "fraud_1": 1009
+      },
+      "transfer_out": {
+        "rows": 45169,
+        "fraud_1": 690
+      }
+    },
+    "by_episode_kind": {
+      "account_takeover": 267,
+      "card_compromise": 912,
+      "false_positive": 152,
+      "social_engineering": 147,
+      "suspicious_transfer": 276,
+      "unusual_purchase": 97
+    },
+    "eligible_before_sampling": 5259151,
+    "eligible_fraud_before_sampling": 1699
+  },
+  "val": {
+    "rows": 886625,
+    "fraud_1": 279,
+    "fraud_0": 886346,
+    "fraud_rate": 0.00031467644156210346,
+    "false_positive_rows": 32,
+    "by_type": {
+      "purchase": {
+        "rows": 808541,
+        "fraud_1": 193
+      },
+      "transfer_out": {
+        "rows": 78084,
+        "fraud_1": 86
+      }
+    },
+    "by_episode_kind": {
+      "account_takeover": 29,
+      "card_compromise": 181,
+      "false_positive": 32,
+      "social_engineering": 32,
+      "suspicious_transfer": 25,
+      "unusual_purchase": 12
+    },
+    "eligible_before_sampling": 886625,
+    "eligible_fraud_before_sampling": 279
+  },
+  "test": {
+    "rows": 1014958,
+    "fraud_1": 355,
+    "fraud_0": 1014603,
+    "fraud_rate": 0.0003497681677468427,
+    "false_positive_rows": 35,
+    "by_type": {
+      "purchase": {
+        "rows": 927169,
+        "fraud_1": 220
+      },
+      "transfer_out": {
+        "rows": 87789,
+        "fraud_1": 135
+      }
+    },
+    "by_episode_kind": {
+      "account_takeover": 69,
+      "card_compromise": 199,
+      "false_positive": 35,
+      "social_engineering": 28,
+      "suspicious_transfer": 38,
+      "unusual_purchase": 21
+    },
+    "eligible_before_sampling": 1014958,
+    "eligible_fraud_before_sampling": 355
+  }
+}

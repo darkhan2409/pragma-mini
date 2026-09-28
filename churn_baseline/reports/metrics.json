@@ -1,0 +1,102 @@
+{
+  "threshold": 0.32838310341660737,
+  "threshold_rule": "max F1 on val",
+  "groups": {
+    "val": {
+      "all": {
+        "rows": 1434,
+        "positives": 140,
+        "roc_auc": 0.9476153676308235,
+        "pr_auc": 0.6394022137898738,
+        "f1": 0.6583850931677019,
+        "precision": 0.5824175824175825,
+        "recall": 0.7571428571428571,
+        "confusion_matrix": {
+          "tn": 1218,
+          "fp": 76,
+          "fn": 34,
+          "tp": 106
+        }
+      },
+      "active_90_days": {
+        "rows": 1352,
+        "positives": 91,
+        "roc_auc": 0.94547324206325,
+        "pr_auc": 0.5375629432411148,
+        "f1": 0.5906735751295338,
+        "precision": 0.5588235294117647,
+        "recall": 0.6263736263736264,
+        "confusion_matrix": {
+          "tn": 1216,
+          "fp": 45,
+          "fn": 34,
+          "tp": 57
+        }
+      }
+    },
+    "test": {
+      "all": {
+        "rows": 1460,
+        "positives": 142,
+        "roc_auc": 0.9387035414306782,
+        "pr_auc": 0.6179536771111562,
+        "f1": 0.6583850931677019,
+        "precision": 0.5888888888888889,
+        "recall": 0.7464788732394366,
+        "confusion_matrix": {
+          "tn": 1244,
+          "fp": 74,
+          "fn": 36,
+          "tp": 106
+        }
+      },
+      "active_90_days": {
+        "rows": 1358,
+        "positives": 85,
+        "roc_auc": 0.9332285938727416,
+        "pr_auc": 0.5341214207681116,
+        "f1": 0.5798816568047337,
+        "precision": 0.5833333333333334,
+        "recall": 0.5764705882352941,
+        "confusion_matrix": {
+          "tn": 1238,
+          "fp": 35,
+          "fn": 36,
+          "tp": 49
+        }
+      }
+    }
+  },
+  "best_iteration": 560,
+  "params": {
+    "loss_function": "Logloss",
+    "eval_metric": "PRAUC",
+    "iterations": 3000,
+    "learning_rate": 0.03,
+    "depth": 6,
+    "od_type": "Iter",
+    "od_wait": 300,
+    "use_best_model": true,
+    "random_seed": 42,
+    "thread_count": 8,
+    "allow_writing_files": false
+  },
+  "features": 116,
+  "categorical": [
+    "gender",
+    "family_status",
+    "education",
+    "region",
+    "city",
+    "housing_type",
+    "income_type",
+    "industry"
+  ],
+  "eval_rows_sha256": "565704e4e5935188d97caf15bcd909b101c0b24a9843dae85976eaa176678bb0",
+  "train_rows_sha256": "f1112857bcc52a4bead299001c2f789419a29bc467ea44f38eb076e60d27d222",
+  "raw_events_sha256": {
+    "train": "414f6de76bf151d7339ec020bede8495274dc6caf6406a7af108ef14a191b53e",
+    "val": "510b583dab832d3563d0c870850c878fda0682b93ec790b86903f399c0b44c2b",
+    "test": "3763f88642a916f7196399a8b2e50ca2ca8c7e93758de6c988c550daf81c4dd0"
+  }
+}

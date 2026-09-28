@@ -1,0 +1,7 @@
+.venv/
+data/
+models/
+__pycache__/
+.pytest_cache/
+reports/eval_rows.parquet
+reports/train_rows.parquet
