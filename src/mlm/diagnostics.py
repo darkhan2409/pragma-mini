@@ -256,19 +256,14 @@ def diagnose(
     from src.tokenization.transform import META_FILE
 
     from .inputs import Source
-    from .model import load_model
-    from .settings import MlmConfig
-
-    state = torch.load(checkpoint, map_location="cpu", weights_only=True)
-
-    config = MlmConfig.from_dict(state["config"])
+    from .train import load_trained
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    def model(backend: str):
-        built = load_model(config.seed, config.events_per_chunk, config.label_smoothing, device, backend)
-        built.load_state_dict(state["model_state_dict"])
-        return built.eval()
+    # Модель из чекпойнта со сверкой backbone: на другой архитектуре
+    # веса загрузились бы молча. backend=None — бэкенд обучения.
+    def model(backend: str | None):
+        return load_trained(checkpoint, device, backend)
 
     # Нулевые вероятности: маскер не закрывает ничего, вход — как есть.
     nothing = MaskingConfig(
@@ -281,7 +276,7 @@ def diagnose(
 
     chosen = [pool[i] for i in sorted(rng.choice(len(pool), size=min(clients, len(pool)), replace=False))]
 
-    reference = model("sdpa")
+    reference, state = model("sdpa")
 
     full = embeddings(reference, chosen, device)
 
@@ -302,7 +297,7 @@ def diagnose(
     }
 
     # Тот же вектор настоящим путём обучения (flash под bf16, если он есть).
-    production = model(config.attention_backend)
+    production, _ = model(None)
 
     if production.attention != "sdpa":
         fast = embeddings(production, chosen, device)

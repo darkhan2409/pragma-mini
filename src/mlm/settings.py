@@ -69,6 +69,20 @@ CHECKPOINT_FILE = "checkpoint.pt"
 #   data/14_train/best_checkpoint.pt
 BEST_CHECKPOINT_FILE = "best_checkpoint.pt"
 
+# Веса после каждой полной эпохи: без них нельзя выбрать эпоху по
+# downstream-метрике, а best и last хранят одну-две.
+#
+#   data/14_train/epochs/epoch_03.pt
+EPOCHS_DIR = "epochs"
+
+# Телеметрия эпох — время, ожидание данных, нормы градиента,
+# память — по строке JSON на эпоху. Отдельно от чекпойнта: время
+# стены не результат обучения, и продолжение обязано давать тот же
+# чекпойнт, что непрерывный прогон.
+#
+#   data/14_train/telemetry.jsonl
+TELEMETRY_FILE = "telemetry.jsonl"
+
 
 class ConfigError(ValueError):
     """
@@ -269,20 +283,36 @@ def mlm_dir(group: str) -> Path:
     return MLM_DIR / group
 
 
-def checkpoint_path() -> Path:
+def train_dir(directory: Path | None = None) -> Path:
+    """
+    Каталог прогона: заданный --out или data/14_train.
+    """
+
+    return Path(directory) if directory is not None else TRAIN_DIR
+
+
+def checkpoint_path(directory: Path | None = None) -> Path:
     """
     Чекпойнт обучения. Учится только train, поэтому группы в пути нет.
     """
 
-    return TRAIN_DIR / CHECKPOINT_FILE
+    return train_dir(directory) / CHECKPOINT_FILE
 
 
-def best_checkpoint_path() -> Path:
+def best_checkpoint_path(directory: Path | None = None) -> Path:
     """
     Чекпойнт с лучшим val_loss.
     """
 
-    return TRAIN_DIR / BEST_CHECKPOINT_FILE
+    return train_dir(directory) / BEST_CHECKPOINT_FILE
+
+
+def epoch_weights_path(epoch: int, directory: Path | None = None) -> Path:
+    """
+    Веса модели после полной эпохи epoch.
+    """
+
+    return train_dir(directory) / EPOCHS_DIR / f"epoch_{epoch:02d}.pt"
 
 
 __all__ = [
@@ -292,6 +322,8 @@ __all__ = [
     "CHECKPOINT_FILE",
     "ATTENTION_BACKENDS",
     "DEVICES",
+    "EPOCHS_DIR",
+    "TELEMETRY_FILE",
     "MLM_DIR",
     "PREVIEW_FILE",
     "TARGETS_FILE",
@@ -302,5 +334,7 @@ __all__ = [
     "backbone_dir",
     "best_checkpoint_path",
     "checkpoint_path",
+    "epoch_weights_path",
     "mlm_dir",
+    "train_dir",
 ]

@@ -1,0 +1,440 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import numpy as np
+import pytest
+import torch
+import torch.nn.functional as F
+
+from src.mlm.inputs import Source, micro_batches
+from src.mlm.model import pack
+from src.mlm.settings import (
+    TELEMETRY_FILE,
+    best_checkpoint_path,
+    checkpoint_path,
+    epoch_weights_path,
+    train_dir,
+)
+from src.mlm.train import (
+    CheckpointError,
+    Scores,
+    TrainingError,
+    events_bin,
+    load_trained,
+    train,
+    validate,
+)
+
+from tests import world
+from tests.test_scheduler import many
+from tests.test_training_math import CPU, every_value, fresh, settle, tiny
+
+
+# ============================================================
+# ИДЕЯ
+# ============================================================
+#
+# Страховка и учёт обучения, которые не меняют самих шагов:
+#
+#   - нечисловой loss, градиент или val_loss останавливают
+#     обучение ДО записи: на диске остаётся прежнее состояние;
+#   - каждая полная эпоха оставляет свои веса, и их можно
+#     загрузить обратно той же моделью;
+#   - каталог прогона (--out) — единственное, что прогон пишет и
+#     чистит;
+#   - чекпойнт помнит backbone и данные, и продолжение или
+#     загрузка на других отказывают;
+#   - разбивка val — это NLL без сглаживания, честно поделённая
+#     по целям, а не второе число «примерно того же».
+#
+# Телеметрия лежит в своём файле, а не в чекпойнте: время стены у
+# продолжения другое, а чекпойнт обязан совпасть с непрерывным.
+# ============================================================
+
+
+def poisoned_loss(monkeypatch) -> None:
+    """
+    Потери модели становятся NaN — как при переполнении в bf16.
+
+    Подменяется функция потерь самой модели, а не шаг обучения:
+    проверяется реакция цикла, а не подмена.
+    """
+
+    import src.mlm.model as model
+
+    original = model.mlm_loss
+
+    def nan(*args, **kwargs):
+        return original(*args, **kwargs) * float("nan")
+
+    monkeypatch.setattr(model, "mlm_loss", nan)
+
+
+# ============================================================
+# НЕЧИСЛОВОЙ ШАГ
+# ============================================================
+
+
+def test_a_non_finite_loss_stops_before_the_optimizer_step(stage, monkeypatch):
+    """
+    Первая эпоха учится и сохраняется, во второй потери становятся
+    NaN. Обучение обязано упасть до optimizer.step: чекпойнт на
+    диске остаётся ровно тем, что записала первая эпоха, и весов
+    второй эпохи нет.
+    """
+
+    settle(stage, train_people=many())
+
+    config, masking = tiny(token_budget=6), every_value()
+
+    train(config, epochs=1, max_steps=None, masking=masking)
+
+    before = checkpoint_path().read_bytes()
+    best_before = best_checkpoint_path().read_bytes()
+
+    poisoned_loss(monkeypatch)
+
+    with pytest.raises(TrainingError, match="шаг не сделан"):
+        train(config, epochs=2, max_steps=None, masking=masking, resume=True)
+
+    assert checkpoint_path().read_bytes() == before
+    assert best_checkpoint_path().read_bytes() == best_before
+    assert not epoch_weights_path(2).exists()
+
+
+def test_a_non_finite_val_loss_writes_no_checkpoint(stage, monkeypatch):
+    """
+    NaN на val не бывает ни улучшением, ни ухудшением: эпоха не
+    пишет ни последнего, ни лучшего чекпойнта, ни своих весов.
+    """
+
+    settle(stage, train_people=many())
+
+    monkeypatch.setattr(
+        "src.mlm.train.validate",
+        lambda model, source, device, token_budget: Scores(loss_sum=float("nan"), targets=5),
+    )
+
+    with pytest.raises(TrainingError, match="val_loss nan"):
+        train(tiny(token_budget=6), epochs=1, max_steps=None, masking=every_value())
+
+    assert not checkpoint_path().exists()
+    assert not best_checkpoint_path().exists()
+    assert not epoch_weights_path(1).exists()
+
+
+# ============================================================
+# ВЕСА ЭПОХ И КАТАЛОГ ПРОГОНА
+# ============================================================
+
+
+def test_every_whole_epoch_leaves_its_weights(stage):
+    """
+    Три полные эпохи — три файла весов. Последний совпадает с
+    весами последнего чекпойнта побитно, а история в нём доходит
+    ровно до своей эпохи.
+    """
+
+    settle(stage, train_people=many())
+
+    train(tiny(token_budget=6, early_stopping_patience=10), epochs=3, max_steps=None,
+          masking=every_value())
+
+    latest = torch.load(checkpoint_path(), map_location="cpu", weights_only=True)
+
+    for epoch in (1, 2, 3):
+
+        saved = torch.load(epoch_weights_path(epoch), map_location="cpu", weights_only=True)
+
+        assert saved["epoch"] == epoch
+        assert [row["epoch"] for row in saved["history"]] == list(range(1, epoch + 1))
+        assert saved["backbone"] == latest["backbone"]
+        assert saved["data"] == latest["data"]
+
+    last = torch.load(epoch_weights_path(3), map_location="cpu", weights_only=True)
+
+    for name, value in latest["model_state_dict"].items():
+        assert torch.equal(value, last["model_state_dict"][name]), name
+
+    first = torch.load(epoch_weights_path(1), map_location="cpu", weights_only=True)
+
+    assert any(
+        not torch.equal(value, first["model_state_dict"][name])
+        for name, value in last["model_state_dict"].items()
+    ), "веса первой и третьей эпохи совпали — обучение не шло"
+
+
+def test_a_paused_epoch_leaves_no_weights(stage):
+    """
+    Эпоха, прерванная --max-steps, не пройдена целиком: ни
+    validation, ни весов эпохи.
+    """
+
+    settle(stage, train_people=many())
+
+    result = train(tiny(token_budget=6), epochs=2, max_steps=3, masking=every_value())
+
+    assert result["reason"] == "max_steps"
+    assert not epoch_weights_path(1).exists()
+
+
+def test_weights_of_an_epoch_load_back_into_the_same_model(stage):
+    """
+    Веса эпохи, загруженные обратно, дают на val ровно те потери,
+    что записаны в истории этой эпохи.
+    """
+
+    settle(stage, train_people=many())
+
+    config = tiny(token_budget=6, early_stopping_patience=10, label_smoothing=0.1)
+
+    train(config, epochs=2, max_steps=None, masking=every_value())
+
+    model, state = load_trained(epoch_weights_path(1), CPU)
+
+    assert not model.training
+
+    scores = validate(model, Source("val"), CPU, config.token_budget)
+
+    assert scores.loss == pytest.approx(state["history"][0]["val"]["loss"], rel=1e-6)
+    assert scores.detail == state["history"][0]["val_detail"]
+
+
+def test_a_run_directory_keeps_everything_to_itself(stage):
+    """
+    Прогон в своём каталоге пишет только туда. Новое обучение в
+    каталоге по умолчанию чужой каталог не трогает — и наоборот.
+    """
+
+    settle(stage, train_people=many())
+
+    config, masking = tiny(token_budget=6), every_value()
+
+    other = stage / "runs" / "a"
+
+    train(config, epochs=1, max_steps=None, masking=masking, directory=other)
+
+    assert checkpoint_path(other).exists()
+    assert epoch_weights_path(1, other).exists()
+    assert (other / TELEMETRY_FILE).exists()
+    assert not checkpoint_path().exists()
+
+    kept = checkpoint_path(other).read_bytes()
+
+    train(config, epochs=1, max_steps=None, masking=masking)
+
+    assert checkpoint_path().exists()
+    assert checkpoint_path(other).read_bytes() == kept
+    assert train_dir(other) != train_dir()
+
+
+def test_a_fresh_run_clears_the_weights_and_telemetry_of_the_last_one(stage):
+    """
+    Новое обучение без --resume в том же каталоге не оставляет
+    весов и телеметрии прошлого прогона: смешать эпохи двух
+    прогонов было бы нельзя заметить.
+    """
+
+    settle(stage, train_people=many())
+
+    masking = every_value()
+
+    train(tiny(token_budget=6, early_stopping_patience=10), epochs=3, max_steps=None, masking=masking)
+
+    assert epoch_weights_path(3).exists()
+
+    train(tiny(token_budget=6), epochs=1, max_steps=None, masking=masking)
+
+    assert epoch_weights_path(1).exists()
+    assert not epoch_weights_path(2).exists()
+    assert not epoch_weights_path(3).exists()
+
+    lines = (train_dir() / TELEMETRY_FILE).read_text().splitlines()
+
+    assert [json.loads(line)["epoch"] for line in lines] == [1]
+
+
+# ============================================================
+# ПРОИСХОЖДЕНИЕ
+# ============================================================
+
+
+def test_resume_refuses_changed_data(stage):
+    """
+    После паузы val пересобран на других клиентах: продолжение
+    ушло бы считать val по другой группе. Отказ называет файлы и
+    ничего не пишет.
+    """
+
+    settle(stage, train_people=many())
+
+    config, masking = tiny(token_budget=6), every_value()
+
+    train(config, epochs=2, max_steps=3, masking=masking)
+
+    paused = checkpoint_path().read_bytes()
+
+    settle(stage, train_people=many(), val_people=world.population("w"))
+
+    with pytest.raises(CheckpointError, match="данные изменились") as error:
+        train(config, epochs=2, max_steps=None, masking=masking, resume=True)
+
+    assert "08_masked/val" in str(error.value)
+    assert checkpoint_path().read_bytes() == paused
+
+
+def test_resume_and_loading_refuse_a_rebuilt_backbone(stage):
+    """
+    backbone пересобран с другим dropout: те же формы тензоров,
+    другая модель. И продолжение, и загрузка обученных весов
+    обязаны отказать, а не молча подставить новую архитектуру.
+    """
+
+    settle(stage, train_people=many())
+
+    config, masking = tiny(token_budget=6), every_value()
+
+    train(config, epochs=2, max_steps=3, masking=masking)
+    train(config, epochs=1, max_steps=None, masking=masking, directory=stage / "done")
+
+    settle(stage, train_people=many(), dropout=0.2)
+
+    with pytest.raises(CheckpointError, match="09_backbone"):
+        train(config, epochs=2, max_steps=None, masking=masking, resume=True)
+
+    with pytest.raises(CheckpointError, match="09_backbone"):
+        load_trained(best_checkpoint_path(stage / "done"), CPU)
+
+
+def test_loading_refuses_a_checkpoint_without_its_origin(stage):
+    """
+    Чекпойнт без отметки backbone (старый формат) не загружается:
+    проверить, на той ли архитектуре он учился, нечем.
+    """
+
+    settle(stage, train_people=many())
+
+    train(tiny(token_budget=6), epochs=1, max_steps=None, masking=every_value())
+
+    state = torch.load(checkpoint_path(), map_location="cpu", weights_only=True)
+    del state["backbone"]
+
+    old = stage / "old.pt"
+    torch.save(state, old)
+
+    with pytest.raises(CheckpointError, match="backbone"):
+        load_trained(old, CPU)
+
+
+# ============================================================
+# РАЗБИВКА VAL
+# ============================================================
+
+
+@pytest.mark.parametrize("n_events, name", [
+    (0, "0-100"), (99, "0-100"), (100, "100-300"), (299, "100-300"),
+    (300, "300-1000"), (2999, "1000-3000"), (3000, "3000+"), (12000, "3000+"),
+])
+def test_events_bin_edges(n_events: int, name: str):
+    assert events_bin(n_events) == name
+
+
+def test_validation_detail_is_the_unsmoothed_loss_split_by_target(stage):
+    """
+    NLL разбивки — кросс-энтропия БЕЗ сглаживания, посчитанная
+    независимо по логитам. Каждая разбивка делит одни и те же цели:
+    сумма целей, NLL и попаданий по группам равна общей.
+    """
+
+    settle(stage, train_people=many())
+
+    config = tiny(label_smoothing=0.1, token_budget=8)
+
+    model = fresh(stage, config)
+    model.eval()
+
+    scores = validate(model, Source("val"), CPU, config.token_budget)
+
+    detail = scores.detail
+
+    by_hand, count, first = 0.0, 0, 0
+
+    with torch.no_grad():
+        for clients in micro_batches(Source("val").clients(), config.token_budget):
+            out = model(pack(clients, CPU))
+            if out.count:
+                by_hand += float(F.cross_entropy(out.logits, out.targets, reduction="sum"))
+                count += out.count
+                first += int((out.logits.argmax(dim=-1) == out.targets).sum())
+
+    assert detail["targets"] == scores.targets == count
+    assert detail["nll"] == pytest.approx(by_hand / count, rel=1e-5)
+
+    # Сглаживание меняет число: иначе разбивка ничего не добавляла бы.
+    assert detail["nll"] != pytest.approx(scores.loss, rel=1e-3)
+
+    for kind in ("reason", "events", "key"):
+
+        rows = detail[kind].values()
+
+        assert sum(row["targets"] for row in rows) == count, kind
+        assert sum(row["nll"] * row["targets"] for row in rows) == pytest.approx(by_hand, rel=1e-5)
+        assert sum(round(row["top1"] * row["targets"]) for row in rows) == first, kind
+
+    assert set(detail["reason"]) <= {"event", "key", "value"}
+    assert len(detail["key"]) > 1, "ключей целей в мире несколько — разбивка обязана их различать"
+
+
+# ============================================================
+# ТЕЛЕМЕТРИЯ
+# ============================================================
+
+
+def test_telemetry_is_written_per_epoch_and_appended_on_resume(stage, capsys):
+    """
+    Строка телеметрии на каждую полную эпоху: число шагов совпадает
+    с шагами эпохи, нормы градиента положительны, время не
+    отрицательно. Продолжение дописывает, а не переписывает.
+    """
+
+    settle(stage, train_people=many())
+
+    config, masking = tiny(token_budget=6, early_stopping_patience=10), every_value()
+
+    first = train(config, epochs=1, max_steps=None, masking=masking)
+    second = train(config, epochs=2, max_steps=None, masking=masking, resume=True)
+
+    rows = [json.loads(line) for line in (train_dir() / TELEMETRY_FILE).read_text().splitlines()]
+
+    assert [row["epoch"] for row in rows] == [1, 2]
+    assert rows[0]["steps"] == first["step"]
+    assert rows[1]["steps"] == second["step"] - first["step"]
+
+    for row in rows:
+        assert 0.0 < row["grad_norm_mean"] <= row["grad_norm_max"]
+        assert 0.0 <= row["clipped_share"] <= 1.0
+        assert row["train_seconds"] >= row["data_wait_seconds"] >= 0.0
+        assert row["cuda_peak_allocated_gib"] is None
+
+    printed = capsys.readouterr().out
+
+    assert "grad_norm=" in printed and "wait=" in printed
+    assert "val nll" in printed
+
+
+def test_history_in_the_checkpoint_stays_free_of_wall_time(stage):
+    """
+    Время стены в чекпойнт не попадает: иначе продолжение не могло
+    бы совпасть с непрерывным прогоном (test_checkpoint_resume).
+    """
+
+    settle(stage, train_people=many())
+
+    train(tiny(token_budget=6), epochs=1, max_steps=None, masking=every_value())
+
+    state = torch.load(checkpoint_path(), map_location="cpu", weights_only=True)
+
+    assert set(state["history"][0]) == {"epoch", "step", "learning_rate", "train", "val", "val_detail"}
+    assert np.isfinite(state["history"][0]["val_detail"]["nll"])

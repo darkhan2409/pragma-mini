@@ -1,18 +1,32 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import math
 import os
 import sys
-from dataclasses import dataclass, replace
+import time
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+
+import numpy as np
 
 from src.generator.rng import stable_hash
 from src.masking.settings import ConfigError as MaskingConfigError
 from src.masking.settings import MaskingConfig
 from src.preprocessing.run import EXIT_BLOCKED, EXIT_OK
 
-from .settings import ConfigError, MlmConfig, best_checkpoint_path, checkpoint_path
+from .settings import (
+    EPOCHS_DIR,
+    TELEMETRY_FILE,
+    ConfigError,
+    MlmConfig,
+    best_checkpoint_path,
+    checkpoint_path,
+    epoch_weights_path,
+    train_dir,
+)
 
 
 # ============================================================
@@ -22,14 +36,27 @@ from .settings import ConfigError, MlmConfig, best_checkpoint_path, checkpoint_p
 # Одна команда, только на train:
 #
 #   python -m src.mlm.train [--epochs N] [--max-steps N] [--config путь]
-#                           [--masking-config путь] [--resume]
+#                           [--masking-config путь] [--out каталог] [--resume]
 #
 # Вход: data/07_batches/train, для validation data/07_batches/val
 # и data/08_masked/val; начальные веса — входной слой
 # data/09_embeddings/train и backbone data/09_backbone (python -m
 # src.mlm.init_backbone). Этапы 10–13 не нужны: это диагностика.
-# Выход: data/14_train/checkpoint.pt (последнее состояние) и
-# data/14_train/best_checkpoint.pt (лучший val_loss).
+# Выход — каталог прогона, по умолчанию data/14_train (--out задаёт
+# другой): checkpoint.pt (последнее состояние), best_checkpoint.pt
+# (лучший val_loss) и epochs/epoch_NN.pt — веса после каждой полной
+# эпохи. Новое обучение без --resume очищает ТОЛЬКО свой каталог.
+#
+# Чекпойнт помнит, на чём учился: lineage каталога backbone (а с
+# ним архитектуру энкодеров, словарь и входной слой) и sha256 трёх
+# файлов данных. Продолжение и загрузка обученной модели сверяют
+# его с текущими и при расхождении отказывают: другие веса на
+# другой архитектуре или другие клиенты не подменяются молча.
+#
+# Шаг с нечисловым loss или нормой градиента не делается: обучение
+# останавливается ошибкой до optimizer.step, веса и AdamW не
+# тронуты, на диске остаётся чекпойнт прошлой эпохи. То же с
+# нечисловым val_loss — до записи чекпойнтов.
 #
 # Устройство: CUDA обязательна (device auto или cuda), тихого
 # отката на CPU нет — CPU только явным device=cpu. На CUDA внимание
@@ -83,6 +110,15 @@ from .settings import ConfigError, MlmConfig, best_checkpoint_path, checkpoint_p
 # val, а история эпох едет в чекпойнте. Лучший чекпойнт выбирается
 # по-прежнему по val_loss. test здесь не читается никогда.
 #
+# val дополнительно разбирается по целям (Detail): NLL без
+# сглаживания меток и top-1 по механизму маски, по длине истории
+# клиента и по ключу цели. На выбор лучшего чекпойнта это не
+# влияет, но показывает, из чего сложен val_loss.
+#
+# Строка шага печатает норму градиента до клипа, ожидание данных и
+# время шага; строка эпохи — долю ожидания, клипа и пик памяти
+# CUDA. То же лежит в истории эпох.
+#
 # --resume продолжает с checkpoint.pt: веса, AdamW, расписание,
 # счётчики, генераторы случайности и место внутри эпохи.
 # ============================================================
@@ -107,12 +143,27 @@ CHECKPOINT_KEYS = (
     "cuda_rng_state",
     "train_scores",
     "history",
+    "backbone",
+    "data",
 )
+
+# Корзины длины истории клиента (число событий) в разбивке val:
+# короткие истории дают мало целей и в общем среднем не видны.
+EVENT_BINS = (100, 300, 1000, 3000)
+
+# Сколько байт читать за раз при подсчёте sha256 файла данных.
+DIGEST_CHUNK = 8 << 20
 
 
 class CheckpointError(ValueError):
     """
     Чекпойнт нельзя прочитать или продолжить.
+    """
+
+
+class TrainingError(RuntimeError):
+    """
+    Обучение разошлось: loss, градиент или val_loss не числа.
     """
 
 
@@ -200,6 +251,10 @@ class Scores:
     top1: int = 0
     top5: int = 0
 
+    # Разбивка по целям (Detail.summary) — только у validation. В
+    # чекпойнт как счёт эпохи не пишется.
+    detail: dict | None = None
+
     def add(self, out) -> None:
         """
         Прибавить проход модели (model.Predicted).
@@ -238,6 +293,304 @@ class Scores:
     def summary(self) -> dict:
         return {"loss": self.loss, "top1": self.top1_accuracy, "top5": self.top5_accuracy,
                 "targets": self.targets}
+
+
+def events_bin(n_events: int) -> str:
+    """
+    Корзина длины истории клиента: «0-100», …, «3000+».
+    """
+
+    low = 0
+
+    for high in EVENT_BINS:
+        if n_events < high:
+            return f"{low}-{high}"
+        low = high
+
+    return f"{low}+"
+
+
+def target_losses(logits, targets) -> tuple[np.ndarray, np.ndarray]:
+    """
+    По каждой цели: NLL без сглаживания меток и угадана ли она
+    первым ответом.
+
+    Кусками по TARGETS_PER_CHUNK: fp32-копия [M, словарь] целиком
+    заняла бы сотни мегабайт.
+    """
+
+    import torch.nn.functional as F
+
+    from .model import TARGETS_PER_CHUNK
+
+    nll, first = [], []
+
+    for piece, labels in zip(
+        logits.detach().split(TARGETS_PER_CHUNK), targets.split(TARGETS_PER_CHUNK)
+    ):
+        scores = piece.float()
+        nll.append(F.cross_entropy(scores, labels, reduction="none").cpu().numpy())
+        first.append((scores.argmax(dim=-1) == labels).cpu().numpy())
+
+    return np.concatenate(nll).astype(np.float64), np.concatenate(first)
+
+
+@dataclass
+class Detail:
+    """
+    Разбивка val по целям: NLL без сглаживания меток и top-1 — по
+    механизму маски (event, key, value), по корзине длины истории
+    клиента и по ключу цели.
+
+    val_loss сглажен и усреднён по всем целям группы, а цели дают в
+    основном длинные истории. По нему по-прежнему выбирается лучший
+    чекпойнт; разбивка показывает, из чего он сложен.
+    """
+
+    nll_sum: float = 0.0
+    targets: int = 0
+
+    # вид разбивки -> группа -> [целей, сумма NLL, угадано первым]
+    groups: dict = field(default_factory=dict)
+
+    def add(self, out, clients: list, key_names: np.ndarray) -> None:
+        """
+        Прибавить проход модели по micro-batch clients.
+        """
+
+        from .inputs import IGNORE
+
+        if out.count == 0:
+            return
+
+        nll, first = target_losses(out.logits, out.targets)
+
+        # Цели идут в порядке pack: клиент за клиентом, внутри — по
+        # номеру токена. В том же порядке берутся и их признаки.
+        chosen = [client.labels != IGNORE for client in clients]
+
+        labels = {
+            "reason": np.concatenate(
+                [np.asarray(client.reason, dtype=object)[mask] for client, mask in zip(clients, chosen)]
+            ),
+            "events": np.concatenate(
+                [
+                    np.full(int(mask.sum()), events_bin(client.n_events), dtype=object)
+                    for client, mask in zip(clients, chosen)
+                ]
+            ),
+            "key": key_names[
+                np.concatenate([client.key_ids[mask] for client, mask in zip(clients, chosen)])
+            ],
+        }
+
+        for kind, names in labels.items():
+
+            if len(names) != len(nll):
+                raise ValueError(
+                    f"целей в проходе {len(nll)}, а признаков «{kind}» {len(names)}: "
+                    "порядок целей pack разошёлся с клиентами"
+                )
+
+            table = self.groups.setdefault(kind, {})
+
+            for name in np.unique(names):
+                mask = names == name
+                row = table.setdefault(str(name), [0, 0.0, 0])
+                row[0] += int(mask.sum())
+                row[1] += float(nll[mask].sum())
+                row[2] += int(first[mask].sum())
+
+        self.nll_sum += float(nll.sum())
+        self.targets += len(nll)
+
+    def summary(self) -> dict | None:
+
+        if not self.targets:
+            return None
+
+        def order(kind: str, name: str):
+            # Корзины длины — по возрастанию длины, а не по алфавиту.
+            return int(name.split("-")[0].rstrip("+")) if kind == "events" else name
+
+        return {
+            "nll": self.nll_sum / self.targets,
+            "targets": self.targets,
+            **{
+                kind: {
+                    name: {"targets": count, "nll": total / count, "top1": first / count}
+                    for name, (count, total, first) in sorted(
+                        table.items(), key=lambda item: order(kind, item[0])
+                    )
+                }
+                for kind, table in self.groups.items()
+            },
+        }
+
+
+def describe_epoch(epoch: int, telemetry: dict, detail: dict | None) -> str:
+    """
+    Строки эпохи о времени, градиенте и памяти и о разбивке val.
+    """
+
+    train_seconds = telemetry["train_seconds"]
+    waited = telemetry["data_wait_seconds"]
+
+    parts = [
+        f"[epoch {epoch}] train {train_seconds / 60:.1f} мин, из них ожидание данных "
+        f"{waited / 60:.1f} мин ({waited / train_seconds if train_seconds else 0.0:.0%}), "
+        f"val {telemetry['val_seconds'] / 60:.1f} мин"
+    ]
+
+    if telemetry["steps"]:
+        parts.append(
+            f"шагов {telemetry['steps']}, норма градиента средняя {telemetry['grad_norm_mean']:.3f} "
+            f"наибольшая {telemetry['grad_norm_max']:.3f}, клип {telemetry['clipped_share']:.1%}"
+        )
+
+    if telemetry["cuda_peak_allocated_gib"] is not None:
+        parts.append(
+            f"пик CUDA allocated {telemetry['cuda_peak_allocated_gib']:.2f} ГиБ, reserved "
+            f"{telemetry['cuda_peak_reserved_gib']:.2f} ГиБ"
+        )
+
+    text = "; ".join(parts)
+
+    if detail is not None:
+
+        def rows(kind: str) -> str:
+            return ", ".join(
+                f"{name} {row['nll']:.3f}/{row['top1']:.3f}" for name, row in detail[kind].items()
+            )
+
+        text += (
+            f"\n[epoch {epoch}] val nll {detail['nll']:.4f}; nll/top1 по механизму: "
+            f"{rows('reason')}; по длине истории: {rows('events')}"
+        )
+
+    return text
+
+
+def file_digest(path: Path) -> str:
+    """
+    sha256 файла, по частям: файл батчей train — сотни мегабайт.
+    """
+
+    digest = hashlib.sha256()
+
+    with open(path, "rb") as handle:
+        while chunk := handle.read(DIGEST_CHUNK):
+            digest.update(chunk)
+
+    return digest.hexdigest()
+
+
+def data_record() -> dict:
+    """
+    Отпечаток данных обучения: sha256 трёх файлов, которые оно читает.
+
+    Имя — каталог этапа и группа, а не путь: каталог data/ у тестов
+    и у настоящего обучения разный.
+    """
+
+    from src.batching.settings import BATCHES_FILE, batches_dir
+    from src.masking.settings import MASKED_FILE, masked_dir
+
+    files = {
+        "07_batches/train": batches_dir("train") / BATCHES_FILE,
+        "07_batches/val": batches_dir("val") / BATCHES_FILE,
+        "08_masked/val": masked_dir("val") / MASKED_FILE,
+    }
+
+    return {name: file_digest(path) for name, path in files.items()}
+
+
+def backbone_record() -> dict:
+    """
+    lineage каталога backbone: архитектура энкодеров, словарь,
+    входной слой и версии кода, из которых собрана модель.
+    """
+
+    from src.dataset.lineage import LINEAGE_FILE
+    from src.preprocessing.artifacts import read_json
+
+    from .settings import backbone_dir
+
+    return read_json(backbone_dir() / LINEAGE_FILE)
+
+
+def origin_problems(state: dict, backbone: dict, data: dict | None) -> list[str]:
+    """
+    Чем текущие backbone и данные отличаются от записанных в
+    чекпойнте. data=None — данные не сверяются.
+    """
+
+    problems = []
+
+    if state.get("backbone") != backbone:
+        was = state.get("backbone") or {}
+        changed = sorted(key for key in set(was) | set(backbone) if was.get(key) != backbone.get(key))
+        problems.append(
+            f"data/09_backbone собран не так, как при обучении (разные {', '.join(changed)}): "
+            "веса легли бы на другую архитектуру, словарь или входной слой"
+        )
+
+    if data is not None and state.get("data") != data:
+        was = state.get("data") or {}
+        changed = sorted(name for name in set(was) | set(data) if was.get(name) != data.get(name))
+        problems.append(
+            f"данные изменились после чекпойнта ({', '.join(changed)}): обучение пошло бы "
+            "на других клиентах или другой маске val"
+        )
+
+    return problems
+
+
+def load_trained(path: Path, device, attention_backend: str | None = None):
+    """
+    Обученная модель в режиме eval и её чекпойнт — из checkpoint.pt,
+    best_checkpoint.pt или весов эпохи.
+
+    Архитектура энкодеров берётся из data/09_backbone, поэтому он
+    обязан совпасть с тем, на котором модель училась: другое число
+    голов или rope_base загрузились бы в те же тензоры молча.
+    attention_backend=None — бэкенд из конфига обучения.
+    """
+
+    import torch
+
+    from .model import load_model
+
+    try:
+        state = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception as error:
+        raise CheckpointError(f"{path} не читается: {error}") from error
+
+    missing = [key for key in ("model_state_dict", "config", "backbone") if key not in state]
+
+    if missing:
+        raise CheckpointError(
+            f"{path}: нет полей {missing} — это не чекпойнт обученной модели или его формат старый"
+        )
+
+    problems = origin_problems(state, backbone_record(), None)
+
+    if problems:
+        raise CheckpointError(f"{path}: {'; '.join(problems)}")
+
+    config = MlmConfig.from_dict(state["config"])
+
+    model = load_model(
+        seed=config.seed,
+        events_per_chunk=config.events_per_chunk,
+        label_smoothing=config.label_smoothing,
+        device=device,
+        attention_backend=attention_backend or config.attention_backend,
+    )
+
+    model.load_state_dict(state["model_state_dict"])
+
+    return model.eval(), state
 
 
 def for_epoch(masking: MaskingConfig, epoch: int) -> MaskingConfig:
@@ -382,9 +735,13 @@ def validate(model, source, device, token_budget: int) -> Scores:
     модели на каждый. Среднее и доли берутся по всем целям группы;
     micro-batch без целей в них не входит. У группы без целей
     потерь и долей нет (None).
+
+    Разбивка по целям (Detail) едет в scores.detail.
     """
 
     import torch
+
+    from src.tokenization.finalvocab import load_final_vocab
 
     from .inputs import micro_batches
     from .model import pack
@@ -393,6 +750,14 @@ def validate(model, source, device, token_budget: int) -> Scores:
     model.eval()
 
     scores = Scores()
+    detail = Detail()
+
+    # Имя токена по номеру: ключи целей в разбивке — именами.
+    vocab = load_final_vocab()
+    key_names = np.empty(len(vocab), dtype=object)
+
+    for token, number in vocab.items():
+        key_names[number] = token
 
     with torch.no_grad():
 
@@ -402,8 +767,11 @@ def validate(model, source, device, token_budget: int) -> Scores:
                 out = model(pack(clients, device))
 
             scores.add(out)
+            detail.add(out, clients, key_names)
 
             del out
+
+    scores.detail = detail.summary()
 
     return scores
 
@@ -414,6 +782,7 @@ def train(
     max_steps: int | None,
     masking: MaskingConfig,
     resume: bool = False,
+    directory: Path | None = None,
 ) -> dict:
     """
     Проход по micro-batch'ам train с обновлением весов всей модели.
@@ -425,6 +794,8 @@ def train(
     epochs задаёт и горизонт cosine, max_steps — нет: он только
     останавливает текущий прогон. Горизонт первого запуска лежит в
     чекпойнте и при продолжении не пересчитывается.
+
+    directory — каталог прогона (--out); None — data/14_train.
     """
 
     # torch импортируется здесь, а не в шапке: без него команда
@@ -435,8 +806,9 @@ def train(
     from .model import load_model, pack
     from .varlen import BackendError, autocast
 
-    latest_path = checkpoint_path()
-    best_path = best_checkpoint_path()
+    latest_path = checkpoint_path(directory)
+    best_path = best_checkpoint_path(directory)
+    telemetry_path = train_dir(directory) / TELEMETRY_FILE
 
     # Чекпойнт читается и проверяется первым: ни один файл не
     # пишется, пока продолжение не собрано целиком.
@@ -592,6 +964,22 @@ def train(
     # чтобы нехватка файлов стала видна до первого шага.
     val_source = Source("val")
 
+    # Происхождение прогона. Считается до первой записи: продолжение
+    # на другом backbone или других данных отказывает, не тронув ни
+    # одного файла.
+    backbone = backbone_record()
+    data = data_record()
+
+    if state is not None:
+
+        problems = origin_problems(state, backbone, data)
+
+        if problems:
+            raise CheckpointError(
+                f"{latest_path}: {'; '.join(problems)} — продолжать нельзя, начните "
+                "обучение заново без --resume"
+            )
+
     if epochs > planned_epochs:
         print(
             f"[train] расписание рассчитано на {planned_epochs} эпох ({total} шагов) и "
@@ -604,9 +992,14 @@ def train(
         # относятся, и продолжать их без --resume было бы нечем.
         # Удаляются здесь, а не раньше: модель, оптимизатор,
         # расписание и val уже собрались, и падение на сборке не
-        # стоило бы прошлого обучения.
+        # стоило бы прошлого обучения. Чистится только свой каталог.
         latest_path.unlink(missing_ok=True)
         best_path.unlink(missing_ok=True)
+
+        for old in (train_dir(directory) / EPOCHS_DIR).glob("epoch_*.pt"):
+            old.unlink()
+
+        telemetry_path.unlink(missing_ok=True)
 
     epoch = first_epoch
     reason = "epochs"
@@ -616,6 +1009,13 @@ def train(
     window_batches = 0
     window_targets = 0
     window_loss = 0.0
+
+    # Телеметрия окна и эпохи: сколько цикл ждал данных, когда окно
+    # открылось, нормы градиента до клипа.
+    window_wait = 0.0
+    window_started = time.perf_counter()
+    epoch_wait = 0.0
+    norms: list[float] = []
 
     # LR последнего сделанного шага — для строки эпохи.
     last_lr = optimizer.param_groups[0]["lr"]
@@ -632,9 +1032,14 @@ def train(
         среднего. Окно без целей шага не делает — ни оптимизатора,
         ни расписания: weight decay AdamW иначе сдвинул бы веса без
         обучающего сигнала.
+
+        Нечисловые loss или норма градиента останавливают обучение
+        до optimizer.step: один такой шаг сделал бы нечисловыми все
+        веса и состояние AdamW, а следующий чекпойнт сохранил бы их.
         """
 
         nonlocal step, window_batches, window_targets, window_loss, last_lr
+        nonlocal window_wait, window_started, epoch_wait
 
         if window_targets > 0:
 
@@ -642,7 +1047,17 @@ def train(
                 if parameter.grad is not None:
                     parameter.grad.div_(window_targets)
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
+            # Норма ДО клипа: по ней видно, как часто и насколько клип
+            # режет шаг.
+            norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm))
+            loss = window_loss / window_targets
+
+            if not (math.isfinite(norm) and math.isfinite(loss)):
+                raise TrainingError(
+                    f"эпоха {epoch}, шаг {step + 1}: loss {loss}, норма градиента {norm} — шаг "
+                    f"не сделан, веса и AdamW не тронуты; последнее сохранённое состояние — "
+                    f"{latest_path}"
+                )
 
             lr = optimizer.param_groups[0]["lr"]
             last_lr = lr
@@ -651,15 +1066,21 @@ def train(
             scheduler.step()
 
             step += 1
+            norms.append(norm)
 
             print(
-                f"epoch={epoch} step={step} loss={window_loss / window_targets:.4f} "
-                f"targets={window_targets} micro_batches={window_batches} lr={lr:.2e}"
+                f"epoch={epoch} step={step} loss={loss:.4f} "
+                f"targets={window_targets} micro_batches={window_batches} lr={lr:.2e} "
+                f"grad_norm={norm:.3f} wait={window_wait:.2f}s "
+                f"time={time.perf_counter() - window_started:.2f}s"
             )
 
         optimizer.zero_grad(set_to_none=True)
 
         window_batches, window_targets, window_loss = 0, 0, 0.0
+
+        epoch_wait += window_wait
+        window_wait, window_started = 0.0, time.perf_counter()
 
     def snapshot(complete: bool, done: int) -> dict:
         """
@@ -687,6 +1108,8 @@ def train(
             ),
             "train_scores": epoch_scores.as_dict(),
             "history": list(history),
+            "backbone": backbone,
+            "data": data,
         }
 
     for epoch in range(first_epoch, epochs + 1):
@@ -694,6 +1117,13 @@ def train(
         # Каждая эпоха начинается в режиме обучения: validation
         # прошлой эпохи оставил модель в eval, и dropout был выключен.
         model.train()
+
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+
+        started = time.perf_counter()
+        epoch_wait, norms = 0.0, []
+        window_wait, window_started = 0.0, started
 
         source = Source("train", masking=for_epoch(masking, epoch))
 
@@ -703,10 +1133,17 @@ def train(
         # пропущенные при resume.
         done = 0
 
+        # Момент, когда цикл снова готов взять micro-batch: всё время
+        # до следующего — ожидание данных (чтение, маска, сборка).
+        ready = started
+
         for clients in micro_batches(source.clients(), config.token_budget):
+
+            window_wait += time.perf_counter() - ready
 
             if done < skip:
                 done += 1
+                ready = time.perf_counter()
                 continue
 
             # Предел считает шаги оптимизатора. Проверка стоит перед
@@ -740,6 +1177,8 @@ def train(
             if window_batches == config.grad_accum_steps:
                 close_window()
 
+            ready = time.perf_counter()
+
         skip = 0
 
         # Эпоха, прерванная --max-steps, не пройдена целиком:
@@ -755,9 +1194,21 @@ def train(
         if window_batches:
             close_window()
 
+        train_seconds = time.perf_counter() - started
+
         val_scores = validate(model, val_source, device, config.token_budget)
 
+        val_seconds = time.perf_counter() - started - train_seconds
+
         val_loss, val_targets = val_scores.loss, val_scores.targets
+
+        # Нечисловой val_loss ни лучшим, ни худшим не бывает: модель
+        # сломана, и чекпойнт этой эпохи не пишется.
+        if val_loss is not None and not math.isfinite(val_loss):
+            raise TrainingError(
+                f"эпоха {epoch}: val_loss {val_loss} — чекпойнты эпохи не записаны; последнее "
+                f"сохранённое состояние — {latest_path}"
+            )
 
         # val без целей сигнала не даёт: ни улучшением, ни
         # ухудшением это не считается.
@@ -783,17 +1234,62 @@ def train(
             f"patience={stale}/{config.early_stopping_patience}"
         )
 
+        telemetry = {
+            "train_seconds": train_seconds,
+            "val_seconds": val_seconds,
+            "data_wait_seconds": epoch_wait,
+            "steps": len(norms),
+            "grad_norm_mean": float(np.mean(norms)) if norms else None,
+            "grad_norm_max": max(norms) if norms else None,
+            "clipped_share": (
+                sum(norm > config.max_grad_norm for norm in norms) / len(norms) if norms else None
+            ),
+            "cuda_peak_allocated_gib": (
+                torch.cuda.max_memory_allocated(device) / 2**30 if device.type == "cuda" else None
+            ),
+            "cuda_peak_reserved_gib": (
+                torch.cuda.max_memory_reserved(device) / 2**30 if device.type == "cuda" else None
+            ),
+        }
+
+        print(describe_epoch(epoch, telemetry, val_scores.detail))
+
+        # Телеметрия — строкой в свой файл, а не в историю чекпойнта:
+        # время стены не результат, и продолжение обязано дать тот же
+        # чекпойнт, что непрерывный прогон. У эпохи, продолженной
+        # посередине, она описывает только часть после продолжения.
+        telemetry_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(telemetry_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"epoch": epoch, "step": step, **telemetry}) + "\n")
+
         history.append({
             "epoch": epoch,
             "step": step,
             "learning_rate": last_lr,
             "train": epoch_scores.summary(),
             "val": val_scores.summary(),
+            "val_detail": val_scores.detail,
         })
 
         current = snapshot(True, 0)
 
         epoch_scores = Scores()
+
+        # Веса каждой полной эпохи: выбор эпохи по downstream-метрике
+        # и кривые «эпоха → качество» без переобучения.
+        save_checkpoint(
+            {
+                "epoch": epoch,
+                "model_state_dict": current["model_state_dict"],
+                "config": current["config"],
+                "masking": current["masking"],
+                "backbone": backbone,
+                "data": data,
+                "history": current["history"],
+            },
+            epoch_weights_path(epoch, directory),
+        )
 
         if improved:
             save_checkpoint(current, best_path)
@@ -853,11 +1349,13 @@ def run_training(args) -> int:
                 Path(args.masking_config) if args.masking_config else None
             )
 
-        result = train(config, args.epochs, args.max_steps, masking, resume=args.resume)
+        result = train(
+            config, args.epochs, args.max_steps, masking, resume=args.resume, directory=args.out
+        )
 
     except (
         ConfigError, MaskingConfigError, InputError, MlmError, BackendError,
-        BackboneError, CheckpointError, DeviceError, FileNotFoundError,
+        BackboneError, CheckpointError, DeviceError, TrainingError, FileNotFoundError,
     ) as error:
         print(f"[train] {error}")
         return EXIT_BLOCKED
@@ -919,8 +1417,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="JSON конфига маскирования, тот же, что у python -m src.masking.run",
     )
     parser.add_argument(
+        "--out", type=Path, default=None,
+        help=(
+            "каталог прогона (по умолчанию data/14_train): чекпойнты и веса эпох; новое "
+            "обучение очищает только его"
+        ),
+    )
+    parser.add_argument(
         "--resume", action="store_true",
-        help="продолжить с data/14_train/checkpoint.pt",
+        help="продолжить с checkpoint.pt каталога прогона",
     )
 
     parser.set_defaults(handler=run_training)
@@ -941,18 +1446,30 @@ def main(argv: list[str] | None = None) -> None:
 
 __all__ = [
     "CHECKPOINT_KEYS",
+    "EVENT_BINS",
     "CheckpointError",
+    "Detail",
     "DeviceError",
+    "Scores",
+    "TrainingError",
+    "backbone_record",
     "build_parser",
+    "data_record",
+    "describe_epoch",
     "describe_model",
+    "events_bin",
+    "file_digest",
     "for_epoch",
     "horizon",
     "load_checkpoint",
+    "load_trained",
     "lr_factor",
     "main",
+    "origin_problems",
     "resumed_horizon",
     "run_training",
     "save_checkpoint",
+    "target_losses",
     "train",
     "training_device",
     "validate",
