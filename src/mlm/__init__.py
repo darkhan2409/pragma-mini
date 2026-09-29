@@ -22,7 +22,7 @@ History Encoder -> MLM и считает по нему кросс-энтропи
 
 Тот же проход, но без no_grad: потери батча, backward, клип и шаг
 AdamW с warmup + cosine по всем весам модели. Маска train
-разыгрывается заново на каждую эпоху маскером этапа 08.
+разыгрывается заново на каждую эпоху маскером src.masking.
 Чекпойнты — data/14_train/checkpoint.pt (последний) и
 best_checkpoint.pt (лучший val_loss).
 """

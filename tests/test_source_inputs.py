@@ -7,8 +7,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from src.batching.settings import BATCHES_FILE, batches_dir
-from src.masking.settings import MASKED_FILE, masked_dir
+from src.dataset.settings import SAMPLES_FILE, dataset_dir
 from src.mlm.inputs import IGNORE, InputError, Source, _check, micro_batches
 
 from tests import world
@@ -19,17 +18,14 @@ from tests.test_training_math import every_value
 # ИДЕЯ
 # ============================================================
 #
-# Source сводит два файла, собранных разными этапами, и доверять
-# их совпадению нельзя: строки сверяются по клиенту и по номеру
-# батча, а не по позиции.
+# Source читает один файл — набор 05 — и считает при чтении время
+# и маску. Клиент доходит до модели ровно таким, каким лежит в
+# наборе, без заполнителя; группа строк — только единица чтения.
 #
 # Здесь же проверяются инварианты цели — то, из-за чего обучение
 # было бы бессмысленным, а не просто неточным: цель обязана быть
 # закрыта [MASK] на входе и лежать внутри события, которому
 # разрешено быть целью.
-#
-# Заполнитель до модели не доходит: клиент отрезается по своим
-# настоящим длинам.
 # ============================================================
 
 
@@ -66,19 +62,17 @@ def three() -> list[world.Made]:
 # ============================================================
 
 
-def test_padding_is_cut_off_before_the_model(stage):
+def test_each_client_reaches_the_model_as_stored(stage):
     """
-    В файле строки выровнены по самому длинному клиенту батча; до
-    модели доходят только настоящие длины.
+    Клиенты разной длины в одной группе строк: до модели доходит
+    ровно то, что лежит в наборе, без заполнителя.
     """
 
     people = three()
 
     settle(stage, [people])
 
-    width = max(made.client.n_tokens for made in people)
-
-    assert width > min(made.client.n_tokens for made in people)
+    assert len({made.client.n_tokens for made in people}) > 1
 
     for made, client in zip(people, Source("train").clients()):
 
@@ -88,14 +82,21 @@ def test_padding_is_cut_off_before_the_model(stage):
         assert client.profile_n_tokens == made.client.profile_n_tokens
 
         assert client.key_ids.tolist() == made.client.key_ids.tolist()
-        assert client.labels.tolist() == made.client.labels.tolist()
+        assert client.positions.tolist() == made.client.positions.tolist()
+        assert client.event_starts.tolist() == made.client.event_starts.tolist()
+        assert client.profile_value_ids.tolist() == made.client.profile_value_ids.tolist()
         assert client.calendar.shape == (client.n_events, 6)
         assert world.PAD not in client.key_ids.tolist()
+
+        # Маска меняет только значения: вне целей и [UNK] видно
+        # исходное значение набора.
+        kept = (client.labels == IGNORE) & (client.value_ids != world.MASK) & (client.value_ids != world.UNK)
+        assert client.value_ids[kept].tolist() == made.value_ids_source[kept].tolist()
 
 
 def test_sizes_agree_with_the_clients_they_describe(stage):
     """
-    sizes читает три колонки без масок — по ним считается число
+    sizes читает три колонки без времени и масок — по ним считается число
     micro-batch'ей до обучения. Разойтись с настоящими клиентами
     они не имеют права.
     """
@@ -130,7 +131,7 @@ def test_row_groups_are_batches(stage):
 
 def test_storage_layout_does_not_change_the_micro_batches(stage):
     """
-    Группы строк — это хранение. Одни и те же клиенты, разложенные
+    Группы строк — единица чтения. Одни и те же клиенты, разложенные
     по файлу иначе, обязаны собраться в те же micro-batch'и.
     """
 
@@ -163,7 +164,7 @@ def test_asking_for_a_batch_that_is_not_there(stage):
 
 
 # ============================================================
-# ДВА ФАЙЛА ОБЯЗАНЫ СОВПАДАТЬ
+# НАБОР, КОТОРЫЙ ПРОЧИТАТЬ НЕЛЬЗЯ
 # ============================================================
 
 
@@ -171,9 +172,9 @@ def test_missing_input_names_the_command_that_makes_it(stage):
 
     settle(stage, [three()])
 
-    (masked_dir("train") / MASKED_FILE).unlink()
+    (dataset_dir("train") / SAMPLES_FILE).unlink()
 
-    with pytest.raises(InputError, match="python -m src.masking.run train"):
+    with pytest.raises(InputError, match="python -m src.dataset.run train"):
         Source("train")
 
 
@@ -181,62 +182,10 @@ def test_a_file_of_another_schema_is_refused(stage):
 
     settle(stage, [three()])
 
-    path = masked_dir("train") / MASKED_FILE
+    pq.write_table(pa.table({"client_id": ["a"]}), dataset_dir("train") / SAMPLES_FILE)
 
-    pq.write_table(pa.table({"client_id": ["a"]}), path)
-
-    with pytest.raises(InputError, match="собран другой схемой"):
+    with pytest.raises(InputError, match="другой схемой"):
         Source("train")
-
-
-def test_files_built_at_different_times_are_refused(stage):
-    """
-    Разное число групп строк значит, что батчи и маски собраны из
-    разных данных.
-    """
-
-    people = three()
-
-    settle(stage, [people])
-
-    world.write_masked(masked_dir("train") / MASKED_FILE, [people[:1], people[1:]])
-
-    with pytest.raises(InputError, match="собраны в разное время"):
-        Source("train")
-
-
-def test_rows_are_matched_by_client_not_by_position(stage):
-
-    people = three()
-
-    settle(stage, [people])
-
-    world.write_masked(
-        masked_dir("train") / MASKED_FILE, [[people[1], people[0], people[2]]]
-    )
-
-    with pytest.raises(InputError, match="в батчах клиент a, а в масках b"):
-        list(Source("train").clients())
-
-
-def test_a_wrong_batch_number_inside_the_file_is_caught(stage):
-
-    settle(stage, [three()])
-
-    path = batches_dir("train") / BATCHES_FILE
-
-    table = pq.read_table(path)
-
-    broken = table.set_column(
-        table.schema.get_field_index("batch_index"),
-        "batch_index",
-        pa.array([7] * table.num_rows, type=pa.int32()),
-    )
-
-    pq.write_table(broken, path)
-
-    with pytest.raises(InputError, match="batch_index батчей равен 7"):
-        list(Source("train").clients())
 
 
 # ============================================================
@@ -262,12 +211,7 @@ def test_a_target_must_be_closed_by_mask_on_the_input():
     values[client.labels != IGNORE] = 42
 
     with pytest.raises(InputError, match="у цели на входе стоит не"):
-        _check(
-            replace(client, value_ids=values),
-            np.ones(client.n_events, dtype=bool),
-            np.ones(client.n_events, dtype=bool),
-            world.MASK,
-        )
+        _check(replace(client, value_ids=values), np.ones(client.n_events, dtype=bool), world.MASK)
 
 
 def test_a_target_outside_the_target_window_is_refused():
@@ -275,23 +219,7 @@ def test_a_target_outside_the_target_window_is_refused():
     client = three()[0].client
 
     with pytest.raises(InputError, match="вне периода целей"):
-        _check(
-            client,
-            np.ones(client.n_events, dtype=bool),
-            np.zeros(client.n_events, dtype=bool),
-            world.MASK,
-        )
-
-
-def test_padding_among_the_events_is_refused():
-
-    client = three()[1].client
-
-    mask = np.ones(client.n_events, dtype=bool)
-    mask[-1] = False
-
-    with pytest.raises(InputError, match="есть заполнитель"):
-        _check(client, mask, np.ones(client.n_events, dtype=bool), world.MASK)
+        _check(client, np.zeros(client.n_events, dtype=bool), world.MASK)
 
 
 def test_a_client_without_targets_passes_every_check():
@@ -300,23 +228,18 @@ def test_a_client_without_targets_passes_every_check():
 
     assert client.n_targets == 0
 
-    _check(
-        client,
-        np.ones(client.n_events, dtype=bool),
-        np.zeros(client.n_events, dtype=bool),
-        world.MASK,
-    )
+    _check(client, np.zeros(client.n_events, dtype=bool), world.MASK)
 
 
 def test_real_files_satisfy_the_invariants(stage):
     """
-    Тот же разбор, но на файлах: каждая цель закрыта [MASK], у неё
-    есть событие, и это событие разрешено.
+    Тот же разбор, но на наборе с маской при чтении: каждая цель
+    закрыта [MASK], у неё есть событие, и это событие разрешено.
     """
 
     settle(stage, [three()])
 
-    for client in Source("train").clients():
+    for client in Source("train", masking=every_value()).clients():
 
         where = np.nonzero(client.labels != IGNORE)[0]
 
@@ -331,21 +254,17 @@ def test_real_files_satisfy_the_invariants(stage):
         assert bool(inside.all())
 
 
-def test_dynamic_masking_reads_only_the_batches(stage):
+def test_every_group_is_masked_while_reading(stage):
     """
-    Обучение маску train из файла не читает: 08_masked ему не
-    нужен вовсе.
+    Файла масок нет ни у одной группы: и train, и val получают цели
+    при чтении набора.
     """
 
-    settle(stage, [three()])
+    settle(stage, [three()], val=three())
 
-    (masked_dir("train") / MASKED_FILE).unlink()
+    for group in ("train", "val"):
 
-    source = Source("train", masking=every_value())
+        clients = list(Source(group, masking=every_value()).clients())
 
-    assert source.masked_path is None
-
-    clients = list(source.clients())
-
-    assert clients
-    assert sum(client.n_targets for client in clients) > 0
+        assert clients
+        assert sum(client.n_targets for client in clients) > 0, group

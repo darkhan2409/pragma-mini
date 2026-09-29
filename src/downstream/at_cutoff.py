@@ -8,14 +8,13 @@ import torch
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 from src.dataset.sample import build_sample
-from src.dataset.settings import META_FILE, DatasetConfig, dataset_dir
+from src.dataset.settings import META_FILE, TIME_ANCHORS, DatasetConfig, dataset_dir
 from src.dataset.tokenized import EVENT_TYPE_KEY, TokenizedClient, TokenizedEvent, event_type_of
 from src.mlm.inputs import IGNORE, Client
 from src.preprocessing.artifacts import read_json
 from src.preprocessing.read import Group
 from src.preprocessing.settings import GroupWindow, PreprocessingConfig
 from src.temporal.position import profile_time_log, time_log
-from src.temporal.settings import META_FILE as TEMPORAL_META, TIME_ANCHORS, temporal_dir
 from src.tokenization.encode import encode_event, encode_profile
 from src.tokenization import finalvocab
 from src.tokenization.finalvocab import FrozenArtifacts
@@ -27,22 +26,20 @@ from src.tokenization.settings import TokenizerConfig
 # ============================================================
 #
 # Вход модели на произвольный момент T — те же функции, что у
-# этапов 04–07, но в памяти и без файлов:
+# этапов 04–05 и читателя набора, но в памяти и без файлов:
 #
 #   02 + анкета 01 -> Group.history(клиент, T)    события < T, анкета на T
 #   -> encode_event / encode_profile (словарь 03)  как этап 04
 #   -> build_sample с окном, кончающимся в T       как этап 05
-#   -> time_log / profile_time_log                   как этап 06, с его отсчётом
-#   -> Client без масок                              как 07 при чтении
+#   -> time_log / profile_time_log                   как TemporalGroup, с тем же отсчётом
+#   -> Client без масок                              как mlm.inputs.Source
 #
-# Обрезать готовые 07_batches по T нельзя: анкета, вехи и
-# временные позиции там посчитаны на конец окна группы, и будущее
-# (T, конец) осталось бы во входе.
+# Обрезать готовый набор 05 по T нельзя: анкета и вехи там собраны
+# на конец окна группы, и будущее (T, конец) осталось бы во входе.
 #
 # Маски нет: метки -100, значения видимы — это вход для вектора
-# клиента, а не для MLM. Контекст — тот же отбор истории, на
-# котором модель училась (05_dataset/train/meta.json), точка
-# отсчёта времени — та же, что у 06_temporal/train (meta.json).
+# клиента, а не для MLM. Контекст и точка отсчёта времени — те же,
+# на которых модель училась (05_dataset/train/meta.json).
 # ============================================================
 
 
@@ -106,20 +103,16 @@ class ClientsAtCutoff:
                 f"05_dataset/train ({trained})"
             )
 
-        # Точка отсчёта времени — та, с которой собраны данные
+        # Точка отсчёта времени — та, с которой собран набор
         # обучения: время от другой точки модель не видела.
-        path = temporal_dir("train") / TEMPORAL_META
-
-        if not path.exists():
-            raise CutoffError(
-                f"нет {path}: точка отсчёта времени данных обучения неизвестна — "
-                "выполните python -m src.temporal.run train заново"
-            )
-
-        self.anchor = read_json(path).get("time_anchor")
+        self.anchor = read_json(dataset_dir("train") / META_FILE).get("time_anchor")
 
         if self.anchor not in TIME_ANCHORS:
-            raise CutoffError(f"{path}: точка отсчёта {self.anchor!r} не из {TIME_ANCHORS}")
+            raise CutoffError(
+                f"05_dataset/train: точка отсчёта времени {self.anchor!r} не из "
+                f"{list(TIME_ANCHORS)} — набор собран прежним кодом: выполните "
+                "python -m src.dataset.run train заново"
+            )
 
         self._source = Group(group)
         self._event_type_key = self.artifacts.key_id(EVENT_TYPE_KEY)
@@ -209,7 +202,7 @@ class ClientsAtCutoff:
         )
 
         # Время примера — datetime64 UTC без пояса; позиции считаются
-        # от тех же моментов, что читает этап 06 из parquet.
+        # от тех же моментов, что TemporalGroup читает из parquet.
         moments = sample.event_time.tolist()
         profile_moments = sample.profile_time.tolist()
 

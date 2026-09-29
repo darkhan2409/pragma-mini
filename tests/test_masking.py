@@ -27,19 +27,20 @@ from tests.test_training_math import settle
 # эпоха обязана давать одну и ту же маску даже после перезапуска,
 # иначе продолжение внутри эпохи училось бы на других целях.
 #
-# val при этом остаётся с фиксированной маской из файла: сравнивать
-# эпохи между собой можно только по одной и той же мерке.
+# val при этом остаётся с фиксированной маской — seed конфига без
+# номера эпохи: сравнивать эпохи между собой можно только по одной
+# и той же мерке.
 # ============================================================
 
 
 def row_of(made: world.Made, *, targetable: bool | None = None) -> dict:
     """
-    Строка батча в том виде, в каком её читает маскер.
+    Строка набора в том виде, в каком её читает маскер.
     """
 
     client = made.client
 
-    allowed = made.targetable if targetable is None else targetable
+    allowed = world.targets_of(made) if targetable is None else [targetable] * client.n_events
 
     return {
         "client_id": client.client_id,
@@ -48,8 +49,7 @@ def row_of(made: world.Made, *, targetable: bool | None = None) -> dict:
         "positions": client.positions.tolist(),
         "event_starts": client.event_starts.tolist(),
         "event_lengths": client.event_lengths.tolist(),
-        "event_mask": [True] * client.n_events,
-        "target_event_mask": [allowed] * client.n_events,
+        "target_event_mask": allowed,
     }
 
 
@@ -396,16 +396,21 @@ def test_two_epochs_see_different_targets(stage):
     assert labels(1) != labels(2)
 
 
-def test_validation_mask_comes_from_the_file_and_never_changes(stage):
+def test_validation_mask_is_fixed_by_the_config_and_never_changes(stage):
     """
-    val читает фиксированную маску 08_masked: номер эпохи на неё
-    не влияет, иначе эпохи было бы не с чем сравнивать.
+    val разыгрывает маску по seed конфига, без номера эпохи: два
+    чтения дают одну и ту же маску, иначе эпохи было бы не с чем
+    сравнивать. Без конфига берётся MaskingConfig().
     """
 
     settle(stage, train_people=many())
 
-    first = [client.labels.tolist() for client in Source("val").clients()]
-    second = [client.labels.tolist() for client in Source("val").clients()]
+    masking = MaskingConfig(seed=9, value_probability=0.5)
+
+    first = [client.labels.tolist() for client in Source("val", masking=masking).clients()]
+    second = [client.labels.tolist() for client in Source("val", masking=masking).clients()]
 
     assert first == second
-    assert Source("val").masking is None
+    assert any(label != -100 for labels in first for label in labels)
+
+    assert Source("val").masking == MaskingConfig()

@@ -5,10 +5,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
-from src.generator.config import DATA_DIR
-
-
-
 # ============================================================
 # ИДЕЯ
 # ============================================================
@@ -24,15 +20,12 @@ from src.generator.config import DATA_DIR
 # текст занимает несколько позиций с одним ключом, и половина
 # названия это подсказка, а не задача. Поэтому token заменён на
 # value: 0.15 относится к ЗНАЧЕНИЮ целиком.
-# ============================================================
-
-
-# Один каталог на группу и один файл в нём.
 #
-#   data/08_masked/<group>/masked.parquet
-MASKED_DIR = DATA_DIR / "08_masked"
-
-MASKED_FILE = "masked.parquet"
+# Маска на диске не хранится: её разыгрывает читатель входа модели
+# (src.mlm.inputs.Source, src.embedding.inputs.Source). Розыгрыш
+# ключуется seed, группой и клиентом, поэтому одинаков при каждом
+# чтении, в любом порядке и в любом процессе.
+# ============================================================
 
 
 class ConfigError(ValueError):
@@ -47,9 +40,9 @@ class MaskingConfig:
     Решения человека о том, что прятать.
     """
 
-    # Seed розыгрыша. Результат сохраняется на диск, поэтому
-    # маска это свойство файла, а не эпохи: у val и test она
-    # фиксирована ровно так же, как у train.
+    # Seed розыгрыша. У val и test маска с этим seed одна и та же
+    # при каждом чтении; train каждую эпоху выводит из него свой
+    # (src.mlm.train.for_epoch).
     seed: int = 42
 
     # Отдельное значение целиком, со всеми его кусками BPE.
@@ -69,13 +62,16 @@ class MaskingConfig:
     # ни награды, ни штрафа.
     unknown_probability: float = 0.10
 
-    # Выбранный механизмом key ключ закрывается и в событиях вне
-    # периода целей — как контекст, без метки. Без этого на val
-    # (цели — последние 3 месяца) скрытое значение почти всегда
-    # видно в более ранних событиях клиента, и key проверяет
-    # копирование, а не восстановление. На train период целей —
-    # весь контекст, и маска почти не меняется.
-    key_hides_context: bool = False
+    # Значение ключа, выбранного механизмом key, в событии вне целей
+    # (контекст) независимо портится в [UNK] с этой вероятностью —
+    # целиком, со всеми кусками, без метки. Без порчи на val (цели —
+    # последние 3 месяца) скрытое значение почти всегда видно в более
+    # раннем событии клиента, и key проверяет копирование, а не
+    # восстановление; закрыть контекст целиком значило бы отнять и
+    # законные подсказки. Это отдельный механизм: unknown_probability
+    # от него не растёт. На train период целей — весь контекст, и
+    # портить там нечего.
+    key_context_corruption_probability: float = 0.5
 
     def validate(self) -> None:
 
@@ -84,6 +80,7 @@ class MaskingConfig:
             "event_probability",
             "key_probability",
             "unknown_probability",
+            "key_context_corruption_probability",
         ):
             probability = getattr(self, name)
 
@@ -97,7 +94,7 @@ class MaskingConfig:
             "event_probability": self.event_probability,
             "key_probability": self.key_probability,
             "unknown_probability": self.unknown_probability,
-            "key_hides_context": self.key_hides_context,
+            "key_context_corruption_probability": self.key_context_corruption_probability,
         }
 
     @staticmethod
@@ -119,7 +116,9 @@ class MaskingConfig:
             unknown_probability=float(
                 data.get("unknown_probability", base.unknown_probability)
             ),
-            key_hides_context=bool(data.get("key_hides_context", base.key_hides_context)),
+            key_context_corruption_probability=float(
+                data.get("key_context_corruption_probability", base.key_context_corruption_probability)
+            ),
         )
 
         config.validate()
@@ -137,18 +136,7 @@ class MaskingConfig:
         return MaskingConfig.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
-def masked_dir(group: str) -> Path:
-    """
-    Каталог масок группы.
-    """
-
-    return MASKED_DIR / group
-
-
 __all__ = [
-    "MASKED_DIR",
-    "MASKED_FILE",
     "ConfigError",
     "MaskingConfig",
-    "masked_dir",
 ]

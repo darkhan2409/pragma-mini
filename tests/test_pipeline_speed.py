@@ -114,26 +114,26 @@ def test_pipeline_runs_stages_in_order_and_builds_only_what_is_read():
     names = [name for name, _ in planned]
     argv = [" ".join(command[2:]) for _, command in planned]
 
-    order = ["preprocess", "fit", "encode", "dataset", "temporal", "batches", "masks", "embeddings",
-             "backbone"]
+    order = ["preprocess", "fit", "encode", "dataset", "embeddings", "backbone"]
 
     assert [name for name in order if name in names] == order
     assert names == sorted(names, key=order.index), "этапы идут строго по порядку"
 
-    assert "src.masking.run train" not in argv, "маска train не строится: обучение разыгрывает её само"
-    assert "src.masking.run val" in argv and "src.masking.run test" in argv
+    # Время и маски считаются при чтении набора: этапов, которые
+    # хранили бы их на диске, нет.
+    assert not [line for line in argv if line.split()[0] in (
+        "src.temporal.run", "src.batching.run", "src.masking.run")]
     assert [line for line in argv if line.startswith("src.embedding.run")] == ["src.embedding.run train"]
 
 
 def test_pipeline_range_groups_and_extra_arguments():
 
-    planned = commands("dataset", "batches", ("val",), {"dataset": ["--config", "ctx.json"]})
+    planned = commands("encode", "dataset", ("val",), {"dataset": ["--config", "ctx.json"]})
 
     assert [" ".join(command[2:]) for _, command in planned] == [
+        "src.tokenization.run encode val",
         "src.dataset.run val --config ctx.json",
-        "src.temporal.run val",
-        "src.batching.run val",
     ]
 
     with pytest.raises(ValueError, match="идёт после"):
-        commands("batches", "dataset", ("val",), {})
+        commands("dataset", "encode", ("val",), {})

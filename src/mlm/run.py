@@ -18,7 +18,8 @@ from .settings import ConfigError, MlmConfig
 #
 #   python -m src.mlm.run train|val|test
 #
-# Вход: data/07_batches и data/08_masked группы; модель — входной
+# Вход: data/05_dataset группы (время и маска считаются при чтении,
+# src.mlm.inputs); модель — входной
 # слой data/09_embeddings/train и начальные веса data/09_backbone
 # (python -m src.mlm.init_backbone). Выход: data/13_mlm/<group>/ —
 # результаты по целям, страница и веса головы.

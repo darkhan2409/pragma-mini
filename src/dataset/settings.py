@@ -176,6 +176,21 @@ def _optional_int(data: Mapping[str, Any], name: str, default: int | None) -> in
     return None if value is None else int(value)
 
 
+# Точка отсчёта времени событий (src.temporal.position.time_log):
+#
+#   cutoff      от cutoff T примера, как у анкеты (по умолчанию):
+#               давность «последнее событие → T» модели видна;
+#   last_event  от последнего события примера — прежний отсчёт,
+#               оставлен для сравнения (эксперимент LT волны 4).
+#
+# Сами позиции на диске не хранятся: их считает читатель набора
+# (src.temporal.samples.TemporalGroup). Выбор лежит в meta.json
+# набора, чтобы train, val, test и вход на T считали время одинаково.
+TIME_ANCHORS = ("last_event", "cutoff")
+
+DEFAULT_ANCHOR = "cutoff"
+
+
 @dataclass(frozen=True)
 class DatasetConfig:
     """
@@ -184,13 +199,21 @@ class DatasetConfig:
 
     context: ContextPolicy = field(default_factory=ContextPolicy)
 
-    # Сколько примеров лежит в одной группе строк parquet.
+    # Сколько примеров лежит в одной группе строк parquet. Группа
+    # строк — единица чтения: её читают обучение и этапы 09–13.
     row_group_samples: int = 32
+
+    time_anchor: str = DEFAULT_ANCHOR
 
     def validate(self) -> None:
 
         if self.row_group_samples < 1:
             raise ConfigError("row_group_samples обязан быть положительным")
+
+        if self.time_anchor not in TIME_ANCHORS:
+            raise ConfigError(
+                f"time_anchor обязан быть одним из {list(TIME_ANCHORS)}, получено {self.time_anchor!r}"
+            )
 
         self.context.validate()
 
@@ -198,6 +221,7 @@ class DatasetConfig:
         return {
             "context": self.context.as_dict(),
             "row_group_samples": self.row_group_samples,
+            "time_anchor": self.time_anchor,
         }
 
     @staticmethod
@@ -216,6 +240,7 @@ class DatasetConfig:
                 ContextPolicy.from_dict(data["context"]) if "context" in data else base.context
             ),
             row_group_samples=int(data.get("row_group_samples", base.row_group_samples)),
+            time_anchor=str(data.get("time_anchor", base.time_anchor)),
         )
 
         config.validate()
@@ -243,6 +268,7 @@ def dataset_dir(group: str) -> Path:
 
 __all__ = [
     "DATASET_DIR",
+    "DEFAULT_ANCHOR",
     "GROUPS",
     "MAX_EVENTS",
     "MAX_TOKENS",
@@ -252,6 +278,7 @@ __all__ = [
     "DATASET_FORMAT",
     "META_FILE",
     "SAMPLES_FILE",
+    "TIME_ANCHORS",
     "ConfigError",
     "ContextPolicy",
     "DatasetConfig",

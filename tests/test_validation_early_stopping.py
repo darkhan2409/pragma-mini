@@ -65,7 +65,7 @@ def by_hand(model, budget: int) -> tuple[float, int, list[float]]:
     each: list[float] = []
 
     with torch.no_grad():
-        for batch in micro_batches(Source("val").clients(), budget):
+        for batch in micro_batches(Source("val", masking=every_value()).clients(), budget):
             out = model(pack(batch, CPU))
             each.append(float(out.loss) if out.count else float("nan"))
             if out.count:
@@ -89,7 +89,7 @@ def test_validation_averages_over_targets_not_over_micro_batches(stage):
     model = fresh(stage, config)
     model.eval()
 
-    scores = validate(model, Source("val"), CPU, config.token_budget)
+    scores = validate(model, Source("val", masking=every_value()), CPU, config.token_budget)
     loss, targets = scores.loss, scores.targets
 
     expected, count, each = by_hand(model, config.token_budget)
@@ -115,7 +115,7 @@ def test_validation_leaves_the_model_and_its_weights_alone(stage):
 
     before = {name: value.clone() for name, value in model.state_dict().items()}
 
-    validate(model, Source("val"), CPU, config.token_budget)
+    validate(model, Source("val", masking=every_value()), CPU, config.token_budget)
 
     assert model.training is False
 
@@ -138,7 +138,7 @@ def test_micro_batch_without_targets_does_not_move_the_average(stage):
 
     model = fresh(stage, config)
 
-    scores = validate(model, Source("val"), CPU, config.token_budget)
+    scores = validate(model, Source("val", masking=every_value()), CPU, config.token_budget)
     with_quiet, targets = scores.loss, scores.targets
 
     settle(
@@ -147,7 +147,7 @@ def test_micro_batch_without_targets_does_not_move_the_average(stage):
         val_people=[made for made in uneven_val() if made.targetable],
     )
 
-    scores = validate(model, Source("val"), CPU, config.token_budget)
+    scores = validate(model, Source("val", masking=every_value()), CPU, config.token_budget)
     without, fewer = scores.loss, scores.targets
 
     assert targets == fewer
@@ -162,7 +162,7 @@ def test_group_without_targets_gives_no_loss_at_all(stage):
 
     config = tiny(token_budget=8)
 
-    scores = validate(fresh(stage, config), Source("val"), CPU, config.token_budget)
+    scores = validate(fresh(stage, config), Source("val", masking=every_value()), CPU, config.token_budget)
 
     assert scores.loss is None
     assert scores.targets == 0
@@ -183,12 +183,12 @@ def test_validation_uses_the_model_it_was_given(stage):
 
     model = fresh(stage, config)
 
-    before = validate(model, Source("val"), CPU, config.token_budget).loss
+    before = validate(model, Source("val", masking=every_value()), CPU, config.token_budget).loss
 
     with torch.no_grad():
         model.head.proj.bias.add_(1.0)
 
-    after = validate(model, Source("val"), CPU, config.token_budget).loss
+    after = validate(model, Source("val", masking=every_value()), CPU, config.token_budget).loss
 
     assert before != pytest.approx(after, rel=1e-6)
 

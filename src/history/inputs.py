@@ -7,13 +7,14 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from src.batching.build import BATCHES_SCHEMA
 from src.dataset.lineage import lineage_problem
-from src.batching.settings import BATCHES_FILE, batches_dir
+from src.dataset.settings import dataset_dir
 from src.event.build import EVENTS_SCHEMA
 from src.event.settings import EVENTS_FILE, events_dir
 from src.profile.build import PROFILES_SCHEMA
 from src.profile.settings import PROFILES_FILE, profiles_dir
+from src.temporal.position import TemporalError
+from src.temporal.samples import SamplesError, TemporalGroup
 
 
 # ============================================================
@@ -22,13 +23,13 @@ from src.profile.settings import PROFILES_FILE, profiles_dir
 #
 # История собирается из трёх мест, и каждое отвечает за своё:
 #
-#   data/07_batches  — сколько у клиента настоящих событий, где
-#       они и какая у каждого временная позиция;
+#   data/05_dataset  — сколько у клиента событий и какая у каждого
+#       временная позиция (считается при чтении, TemporalGroup);
 #   data/10_events   — вектор каждого события ПОСЛЕ календаря,
 #       строкой на событие;
 #   data/11_profiles — вектор анкеты, он же z_a.
 #
-# У батчей и анкет строка это клиент, у событий — событие,
+# У набора и анкет строка это клиент, у событий — событие,
 # поэтому сверка разная: клиенты сверяются построчно, а события
 # режутся по n_events и сверяются по client_id и по номеру внутри
 # клиента. Файлы собираются разными командами, и верить их
@@ -37,19 +38,12 @@ from src.profile.settings import PROFILES_FILE, profiles_dir
 # Колонка event (до календаря) из этапа 10 не читается: в историю
 # идёт только event_dated.
 #
-# Заполнитель наружу не выходит вовсе. Читатель отдаёт ровно
-# n_events векторов и ровно n_events позиций, поэтому [PAD] не
-# может повлиять ни на что ниже по течению — его там просто нет.
+# Заполнителя нет вовсе. Читатель отдаёт ровно n_events векторов
+# и ровно n_events позиций.
 # ============================================================
 
 
-BATCH_COLUMNS = [
-    "batch_index",
-    "client_id",
-    "n_events",
-    "event_mask",
-    "event_time_log",
-]
+SAMPLE_COLUMNS = ["client_id", "event_time_log"]
 
 EVENT_COLUMNS = ["batch_index", "client_id", "event", "vector"]
 
@@ -73,7 +67,7 @@ class Client:
 
     profile: np.ndarray    # [d] вектор анкеты
     events: np.ndarray     # [n, d] векторы событий после календаря
-    positions: np.ndarray  # [n] float32, log-секунды до точки отсчёта (06: --anchor)
+    positions: np.ndarray  # [n] float32, log-секунды до точки отсчёта (time_anchor набора)
 
     @property
     def n_events(self) -> int:
@@ -97,13 +91,15 @@ class Source:
 
         self.group = group
 
-        self.batches_path = batches_dir(group) / BATCHES_FILE
+        self.samples_path = dataset_dir(group)
         self.events_path = events_dir(group) / EVENTS_FILE
         self.profiles_path = profiles_dir(group) / PROFILES_FILE
 
-        self._batches = _open(
-            self.batches_path, BATCHES_SCHEMA, f"python -m src.batching.run {group}"
-        )
+        try:
+            self._samples = TemporalGroup(group, self.samples_path)
+        except SamplesError as error:
+            raise InputError(str(error)) from error
+
         self._events = _open(
             self.events_path, EVENTS_SCHEMA, f"python -m src.event.run {group}"
         )
@@ -119,7 +115,7 @@ class Source:
             raise InputError(problem)
 
         counts = {
-            "батчей": self._batches.num_row_groups,
+            "набора": self._samples.count,
             "событий": self._events.num_row_groups,
             "анкет": self._profiles.num_row_groups,
         }
@@ -131,7 +127,7 @@ class Source:
 
     @property
     def count(self) -> int:
-        return self._batches.num_row_groups
+        return self._samples.count
 
     @property
     def dim(self) -> int:
@@ -152,21 +148,24 @@ class Source:
                 f"номера от 0 до {self.count - 1}"
             )
 
-        batch = self._batches.read_row_group(index, columns=BATCH_COLUMNS).to_pylist()
+        try:
+            batch = self._samples.row_group(index, columns=SAMPLE_COLUMNS).to_pylist()
+        except TemporalError as error:
+            raise InputError(str(error)) from error
 
         events = self._events.read_row_group(index, columns=EVENT_COLUMNS)
         profiles = self._profiles.read_row_group(index, columns=PROFILE_COLUMNS).to_pylist()
 
         if len(batch) != len(profiles):
             raise InputError(
-                f"батч {index}: строк {len(batch)} в батчах, {len(profiles)} в анкетах"
+                f"батч {index}: строк {len(batch)} в наборе, {len(profiles)} в анкетах"
             )
 
         dim = _dim(profiles)
 
         vectors = _matrix(events, "vector", dim, index)
 
-        expected = sum(int(row["n_events"]) for row in batch)
+        expected = sum(len(row["event_time_log"]) for row in batch)
 
         if vectors.shape[0] != expected:
             raise InputError(
@@ -184,11 +183,11 @@ class Source:
 
             _agree(index, row, here, there)
 
-            n_events = int(here["n_events"])
+            positions = np.asarray(here["event_time_log"], dtype=np.float32)
+
+            n_events = int(positions.size)
 
             _slice_agrees(index, here["client_id"], owners, numbers, first, n_events)
-
-            positions = np.asarray(here["event_time_log"], dtype=np.float32)[:n_events]
 
             if n_events and bool((positions[1:] > positions[:-1]).any()):
                 raise InputError(
@@ -241,22 +240,20 @@ def _dim(profiles: list[dict]) -> int:
     return int(dims.pop())
 
 
-def _agree(index: int, row: int, batch: dict, profile: dict) -> None:
+def _agree(index: int, row: int, sample: dict, profile: dict) -> None:
     """
-    Батчи и анкеты говорят про одного и того же клиента.
+    Набор и анкеты говорят про одного и того же клиента.
     """
 
-    if batch["client_id"] != profile["client_id"]:
+    if sample["client_id"] != profile["client_id"]:
         raise InputError(
-            f"батч {index}, строка {row}: в батчах клиент {batch['client_id']}, "
+            f"батч {index}, строка {row}: в наборе клиент {sample['client_id']}, "
             f"а в анкетах {profile['client_id']}"
         )
 
-    numbers = {batch["batch_index"], profile["batch_index"], index}
-
-    if len(numbers) != 1:
+    if profile["batch_index"] != index:
         raise InputError(
-            f"батч {index}, строка {row}: разные batch_index — {sorted(numbers)}"
+            f"батч {index}, строка {row}: в анкетах batch_index {profile['batch_index']}"
         )
 
 

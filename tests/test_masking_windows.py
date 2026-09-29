@@ -194,28 +194,24 @@ def test_outside_the_window_is_context_not_a_target(stage, group: str):
 
 
 # ============================================================
-# 02 → 08: ФИКСИРОВАННАЯ МАСКА VAL
+# 02 → 05 → ЧТЕНИЕ: ФИКСИРОВАННАЯ МАСКА VAL
 # ============================================================
 
 
 def test_validation_labels_only_inside_its_window_and_repeat(stage):
     """
-    Выгрузка → 02 → 04 → 05 → 06 → 07 → 08 для val. Маскер закрывает
-    каждое допустимое событие: метки есть только у событий окна
-    [1 января, 1 апреля), кроме источника вехи. Событие в миг
-    cutoff до примера не доходит вовсе. Маска 08 повторяется от
-    сборки к сборке и читается из файла.
+    Выгрузка → 02 → 04 → 05 для val, маска при чтении. Маскер
+    закрывает каждое допустимое событие: метки есть только у событий
+    окна [1 января, 1 апреля), кроме источника вехи. Событие в миг
+    cutoff до примера не доходит вовсе. Маска с одним конфигом
+    повторяется от чтения к чтению.
     """
 
-    from src.batching.build import build_group as build_batches
-    from src.batching.settings import BatchingConfig
     from src.dataset.build import build_group as build_dataset
     from src.dataset.settings import DatasetConfig
     from src.masking.apply import IGNORE
-    from src.masking.build import build_group as build_masks
-    from src.masking.settings import MASKED_FILE, MaskingConfig, masked_dir
+    from src.masking.settings import MaskingConfig
     from src.mlm.inputs import Source
-    from src.temporal.build import build_group as build_temporal
     from src.tokenization.finalvocab import FrozenArtifacts
     from src.tokenization.settings import TokenizerConfig
     from src.tokenization.transform import encode_group
@@ -257,16 +253,12 @@ def test_validation_labels_only_inside_its_window_and_repeat(stage):
 
     encode_group(artifacts, "val", TokenizerConfig.load(None))
     build_dataset(artifacts, "val", DatasetConfig.load(None))
-    build_temporal("val")
-    build_batches("val", BatchingConfig.load(None))
 
     every_event = MaskingConfig(
         event_probability=1.0, value_probability=0.0, key_probability=0.0, unknown_probability=0.0
     )
 
-    build_masks("val", every_event)
-
-    (client,) = list(Source("val").clients())
+    (client,) = list(Source("val", masking=every_event).clients())
 
     labelled = [
         bool((client.labels[start:start + length] != IGNORE).any())
@@ -275,14 +267,15 @@ def test_validation_labels_only_inside_its_window_and_repeat(stage):
 
     assert labelled == expected
 
-    # Маска val — файл, а не розыгрыш при чтении: две сборки с
-    # обычным конфигом дают один и тот же файл.
-    def masks() -> list[dict]:
-        build_masks("val", MaskingConfig.load(None))
-        return pq.read_table(masked_dir("val") / MASKED_FILE).to_pylist()
+    # Маска val разыгрывается при чтении, и два чтения с обычным
+    # конфигом дают одну и ту же маску.
+    def masks() -> list[tuple]:
+        return [
+            (item.client_id, item.value_ids.tolist(), item.labels.tolist(), item.reason)
+            for item in Source("val", masking=MaskingConfig.load(None)).clients()
+        ]
 
     assert masks() == masks()
-    assert Source("val").masking is None
 
 
 # ============================================================
@@ -293,7 +286,7 @@ def test_validation_labels_only_inside_its_window_and_repeat(stage):
 def test_samples_without_their_window_are_refused(stage):
     """
     Набор 05 без окна или с окном прежней сборки (val до 1 мая)
-    читатель этапа 06 не принимает.
+    читатель набора не принимает.
     """
 
     from src.dataset.build import SAMPLES_SCHEMA

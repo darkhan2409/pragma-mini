@@ -424,22 +424,17 @@ def test_milestone_at_or_after_the_cutoff_has_no_time():
         check_profile("c", [0.0, 0.0], [None, cutoff - timedelta(days=1)])
 
 
-def test_time_reaches_the_batches_anchored_at_the_cutoff(stage):
+def test_time_reaches_the_model_input_anchored_at_the_cutoff(stage):
     """
-    Выгрузка → 04 → 05 → 06 → 07. Давность вехи считается до T
-    группы, а не до последнего события клиента.
+    Выгрузка → 04 → 05 → чтение набора. Давность вехи считается до
+    T группы, а не до последнего события клиента.
     """
 
-    from src.batching.batch import BatchError, check, widths
-    from src.batching.build import build_group as build_batches
-    from src.batching.settings import BATCHES_FILE, BatchingConfig, batches_dir
     from src.dataset.build import build_group as build_dataset
     from src.dataset.settings import DatasetConfig
-    from src.temporal.build import build_group as build_temporal
-    from src.temporal.settings import TEMPORAL_FILE, temporal_dir
+    from src.temporal.samples import TemporalGroup
     from src.tokenization.finalvocab import FrozenArtifacts
     from src.tokenization.settings import TokenizerConfig
-    from src.tokenization.specials import PAD
     from src.tokenization.transform import encode_group
 
     write_profile_vocab(stage)
@@ -454,9 +449,8 @@ def test_time_reaches_the_batches_anchored_at_the_cutoff(stage):
 
     encode_group(artifacts, "val", TokenizerConfig.load(None))
     build_dataset(artifacts, "val", DatasetConfig.load(None))
-    build_temporal("val")
 
-    row = pq.read_table(temporal_dir("val") / TEMPORAL_FILE).to_pylist()[0]
+    row = TemporalGroup("val").row_group(0).to_pylist()[0]
 
     cutoff = val_cutoff()
 
@@ -471,18 +465,6 @@ def test_time_reaches_the_batches_anchored_at_the_cutoff(stage):
     # Последнее событие примера раньше T: будь отсчёт от него,
     # давность приложения вышла бы другой.
     assert max(row["event_time"]) < cutoff - timedelta(days=30)
-
-    build_batches("val", BatchingConfig.load(None))
-
-    batch = pq.read_table(batches_dir("val") / BATCHES_FILE).to_pylist()[0]
-
-    assert batch["profile_time_log"] == row["profile_time_log"]
-
-    # Маркер анкеты — якорь: ненулевое время у него отвергается.
-    broken = dict(batch, profile_time_log=[1.0] + batch["profile_time_log"][1:])
-
-    with pytest.raises(BatchError, match="маркера анкеты"):
-        check(broken, widths([row]), artifacts.special(PAD))
 
 
 # ============================================================
@@ -644,27 +626,6 @@ def test_samples_of_the_previous_format_are_refused(stage):
             SamplesGroup("val")
 
 
-def test_stage_06_stamped_by_the_previous_code_is_refused(stage):
-
-    from src.batching.temporal import TemporalError, TemporalGroup
-    from src.dataset.lineage import LINEAGE_FILE
-    from src.temporal.build import TEMPORAL_SCHEMA
-    from src.temporal.settings import TEMPORAL_FILE, temporal_dir
-
-    directory = temporal_dir("val")
-    directory.mkdir(parents=True, exist_ok=True)
-
-    pq.write_table(TEMPORAL_SCHEMA.empty_table(), directory / TEMPORAL_FILE)
-
-    (directory / LINEAGE_FILE).write_text(
-        json.dumps({"dataset_format": 3, "profile_semantics": "state_at_event_cutoff"}),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(TemporalError, match="собран из"):
-        TemporalGroup("val")
-
-
 @pytest.mark.parametrize("stamped, reason", [
     ("09_embeddings/train", "прежним кодом"),
     ("09_backbone", "не собраны"),
@@ -705,14 +666,13 @@ def test_profile_stage_refuses_unstamped_embeddings(stage):
 
 def test_history_refuses_profiles_of_the_previous_encoder(stage):
 
-    from src.batching.settings import BATCHES_FILE, batches_dir
     from src.event.build import EVENTS_SCHEMA
     from src.event.settings import EVENTS_FILE, events_dir
     from src.history.inputs import InputError, Source
     from src.profile.build import PROFILES_SCHEMA
     from src.profile.settings import PROFILES_FILE, profiles_dir
 
-    world.write_batches(batches_dir("train") / BATCHES_FILE, [world.population()])
+    world.write_samples("train", [world.population()])
 
     for directory, name, schema in (
         (events_dir("train"), EVENTS_FILE, EVENTS_SCHEMA),

@@ -1,85 +1,63 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
 import torch
 
-from src.dataset.lineage import lineage_problem
-from src.batching.build import BATCHES_SCHEMA
-from src.batching.settings import BATCHES_FILE, batches_dir
-from src.masking.build import MASKED_SCHEMA
-from src.masking.settings import MASKED_FILE, masked_dir
-from src.tokenization.specials import EVT, PAD, USR, load_special_tokens
+from src.dataset.settings import dataset_dir
+from src.masking.apply import apply
+from src.masking.choose import choose
+from src.masking.settings import MaskingConfig
+from src.temporal.position import TemporalError
+from src.temporal.samples import SamplesError, TemporalGroup
+from src.tokenization.specials import EVT, MASK, PAD, UNK, USR, load_special_tokens
 
 
 # ============================================================
-# ВХОД МОДЕЛИ ИЗ ДВУХ ФАЙЛОВ
+# ВХОД СЛОЯ ЭМБЕДДИНГОВ
 # ============================================================
 #
-# Батч собирается из двух файлов, лежащих рядом:
+# Батч — одна группа строк собранного набора:
 #
-#   data/07_batches/<group>/batches.parquet  — ключи, номера
-#       кусков, анкета, маски и границы событий;
-#   data/08_masked/<group>/masked.parquet    — значения, которые
-#       модели РАЗРЕШЕНО видеть.
+#   data/05_dataset/<group>/samples.parquet
 #
-# Строка i одного файла это строка i другого, и батч это одна и
-# та же группа строк в обоих. Но верить этому на слово нельзя:
-# файлы собираются разными командами и могут разъехаться, если
-# один пересобрали, а другой нет. Поэтому до объединения
-# сверяются batch_index, client_id и равенство value_ids_source
-# исходным value_ids батча.
+# Маска разыгрывается при чтении тем же маскером, что у обучения
+# (choose + apply, конфиг masking), время анкеты — тем же читателем
+# набора (TemporalGroup). Файлов между набором и слоем нет.
 #
-# labels сюда не приходят вовсе: из масок читаются ровно четыре
-# колонки, и обещание «в эмбеддинг подаются только видимые
-# значения» видно по списку колонок, а не по доверию к коду ниже.
+# Слой считает прямоугольные тензоры [B, T] и [B, P], поэтому здесь,
+# и только здесь, клиенты группы дополняются заполнителем до общей
+# ширины: [PAD] в ключах и значениях, ноль в позициях, маска
+# «настоящее / заполнитель» рядом. Настоящее лежит слева, поэтому
+# маска это ровно «номер меньше длины», а смещения событий остаются
+# теми же числами. На диск выровненное не пишется.
 #
-# Календарь и event_time_log тоже не читаются: они лежат в
-# batches.parquet, но в списке колонок их нет. Это вход
-# эмбеддингов, а не энкодера события.
+# labels сюда не приходят вовсе: из маскера берутся только видимые
+# значения, и обещание «в эмбеддинг подаются только видимые
+# значения» видно по коду чтения, а не по доверию к коду ниже.
 #
-# Энкодер события читает тот же файл и тем же кодом, но календарь
-# ему нужен. Поэтому у читателя есть флаг: просить колонку или
-# нет. Обещание «эмбеддинги календаря не видят» от этого не
-# слабеет — его держит значение флага, а не отсутствие кода. Так
-# же энкодер анкеты просит время её токенов (profile_time_log):
-# эмбеддингам оно не нужно.
+# Календарь и event_time_log не читаются: это вход эмбеддингов, а
+# не энкодера события. Энкодеру события календарь нужен, энкодеру
+# анкеты — время её токенов (profile_time_log), поэтому у читателя
+# есть флаги: просить колонку или нет.
 # ============================================================
 
 
-# Что берётся из батчей. Календаря и временных позиций здесь
-# намеренно нет: их просят отдельно.
-BATCH_COLUMNS = [
-    "batch_index",
+# Что берётся из набора. Календаря и времени анкеты здесь намеренно
+# нет: их просят отдельно.
+SAMPLE_COLUMNS = [
     "client_id",
-    "n_tokens",
-    "n_events",
-    "profile_n_tokens",
     "key_ids",
     "value_ids",
     "positions",
-    "token_mask",
     "event_starts",
     "event_lengths",
     "event_time",
-    "event_mask",
     "target_event_mask",
     "profile_key_ids",
     "profile_value_ids",
     "profile_positions",
-    "profile_token_mask",
-]
-
-# Что берётся из масок. labels в списке нет.
-MASKED_COLUMNS = [
-    "batch_index",
-    "client_id",
-    "value_ids_source",
-    "value_ids",
 ]
 
 # Шесть чисел на событие. Нужны энкодеру события, не входу.
@@ -91,8 +69,9 @@ PROFILE_TIME_COLUMN = "profile_time_log"
 
 CALENDAR_PER_EVENT = 6
 
-# Устройство последовательности: границы событий и их время.
-# Слой их не видит — по ним собирают события те, кто идёт дальше.
+# Устройство последовательности: границы событий и их время, уже
+# выровненные. Слой их не видит — по ним собирают события те, кто
+# идёт дальше.
 STRUCTURE_COLUMNS = [
     "client_id",
     "n_tokens",
@@ -169,20 +148,26 @@ class Loaded:
 
 class Source:
     """
-    Пара файлов группы, открытая один раз.
+    Вход слоя одной группы, открытый один раз.
 
-    Батчей в группе бывает много, а заголовки parquet и сверка
-    схем одни на файл: открывать их заново на каждый батч значило
-    бы перечитывать одно и то же.
+    masking — по какому конфигу разыгрывается маска; без него
+    MaskingConfig(), как у стадий 13 и обучения по умолчанию.
     """
 
-    def __init__(self, group: str, with_calendar: bool = False, with_profile_time: bool = False):
+    def __init__(
+        self,
+        group: str,
+        with_calendar: bool = False,
+        with_profile_time: bool = False,
+        masking: MaskingConfig | None = None,
+    ):
 
         self.group = group
         self.with_calendar = with_calendar
         self.with_profile_time = with_profile_time
+        self.masking = masking if masking is not None else MaskingConfig()
 
-        self.columns = list(BATCH_COLUMNS)
+        self.columns = list(SAMPLE_COLUMNS)
 
         if with_calendar:
             self.columns.append(CALENDAR_COLUMN)
@@ -190,30 +175,22 @@ class Source:
         if with_profile_time:
             self.columns.append(PROFILE_TIME_COLUMN)
 
-        self.batches_path = batches_dir(group) / BATCHES_FILE
-        self.masked_path = masked_dir(group) / MASKED_FILE
+        self.directory = dataset_dir(group)
 
-        self._batches = _open(
-            self.batches_path, BATCHES_SCHEMA, f"python -m src.batching.run {group}"
-        )
-        self._masked = _open(
-            self.masked_path, MASKED_SCHEMA, f"python -m src.masking.run {group}"
-        )
+        try:
+            self._samples = TemporalGroup(group, self.directory)
+        except SamplesError as error:
+            raise InputError(str(error)) from error
 
-        if self._batches.num_row_groups != self._masked.num_row_groups:
-            raise InputError(
-                f"батчей {self._batches.num_row_groups}, а масок "
-                f"{self._masked.num_row_groups}: файлы собраны в разное время, "
-                f"выполните python -m src.masking.run {group}"
-            )
+        self._specials = load_special_tokens()
 
     @property
     def count(self) -> int:
-        return self._batches.num_row_groups
+        return self._samples.count
 
     def batch(self, index: int) -> Loaded:
         """
-        Один батч из двух файлов, со сверкой.
+        Одна группа строк набора, выровненная в памяти.
         """
 
         if index < 0 or index >= self.count:
@@ -222,62 +199,68 @@ class Source:
                 f"номера от 0 до {self.count - 1}"
             )
 
-        batch = self._batches.read_row_group(index, columns=self.columns)
-        mask = self._masked.read_row_group(index, columns=MASKED_COLUMNS)
+        try:
+            rows = self._samples.row_group(index, columns=self.columns).to_pylist()
+        except TemporalError as error:
+            raise InputError(str(error)) from error
 
-        if batch.num_rows == 0:
+        if not rows:
             raise InputError(f"батч {index} пуст: клиентов в нём нет")
 
-        if batch.num_rows != mask.num_rows:
-            raise InputError(
-                f"батч {index}: клиентов {batch.num_rows}, а строк масок {mask.num_rows}"
-            )
+        pad = self._specials[PAD]
 
-        arrays = _arrays(batch, mask)
+        for row in rows:
+            row["visible_value_ids"] = self._visible(row)
 
-        _check(index, arrays, load_special_tokens())
+        padded = _padded(rows, pad)
+
+        _check_markers(index, padded, (self._specials[EVT], self._specials[USR]))
 
         model = BatchInput(
             batch_index=index,
-            client_ids=tuple(arrays["client_id"]),
-            key_ids=_tensor(arrays["key_ids"], torch.int64),
-            value_ids=_tensor(arrays["visible_value_ids"], torch.int64),
-            positions=_tensor(arrays["positions"], torch.int64),
-            token_mask=_tensor(arrays["token_mask"], torch.bool),
-            profile_key_ids=_tensor(arrays["profile_key_ids"], torch.int64),
-            profile_value_ids=_tensor(arrays["profile_value_ids"], torch.int64),
-            profile_positions=_tensor(arrays["profile_positions"], torch.int64),
-            profile_token_mask=_tensor(arrays["profile_token_mask"], torch.bool),
+            client_ids=tuple(row["client_id"] for row in padded),
+            key_ids=_stack(padded, "key_ids", torch.int64),
+            value_ids=_stack(padded, "visible_value_ids", torch.int64),
+            positions=_stack(padded, "positions", torch.int64),
+            token_mask=_stack(padded, "token_mask", torch.bool),
+            profile_key_ids=_stack(padded, "profile_key_ids", torch.int64),
+            profile_value_ids=_stack(padded, "profile_value_ids", torch.int64),
+            profile_positions=_stack(padded, "profile_positions", torch.int64),
+            profile_token_mask=_stack(padded, "profile_token_mask", torch.bool),
         )
 
         calendar = None
 
         if self.with_calendar:
-            calendar = _matrix(
-                batch, CALENDAR_COLUMN, _width(batch, CALENDAR_COLUMN), np.float32
-            )
-
-            events = _width(batch, "event_mask")
-
-            if calendar.shape[1] != events * CALENDAR_PER_EVENT:
-                raise InputError(
-                    f"батч {index}: календарь из {calendar.shape[1]} чисел вместо "
-                    f"{events * CALENDAR_PER_EVENT} — не по шесть на событие"
-                )
+            calendar = np.asarray([row[CALENDAR_COLUMN] for row in padded], dtype=np.float32)
 
         profile_time_log = None
 
         if self.with_profile_time:
-            profile_time_log = _matrix(
-                batch, PROFILE_TIME_COLUMN, model.profile_width, np.float32
+            profile_time_log = np.asarray(
+                [row[PROFILE_TIME_COLUMN] for row in padded], dtype=np.float32
             )
 
         return Loaded(
             model=model,
-            rows=batch.select(STRUCTURE_COLUMNS).to_pylist(),
+            rows=[{name: row[name] for name in STRUCTURE_COLUMNS} for row in padded],
             calendar=calendar,
             profile_time_log=profile_time_log,
         )
+
+    def _visible(self, row: dict) -> list[int]:
+        """
+        Значения клиента, которые модели разрешено видеть.
+        """
+
+        selection = choose(self.group, row, self.masking)
+
+        masked = apply(
+            row["client_id"], row, selection.choices,
+            self._specials[MASK], self._specials[UNK], selection.corrupted,
+        )
+
+        return masked["value_ids"]
 
 
 def load_batch(group: str, index: int) -> Loaded:
@@ -288,237 +271,106 @@ def load_batch(group: str, index: int) -> Loaded:
     return Source(group).batch(index)
 
 
-def _open(path: Path, schema: pa.Schema, command: str) -> pq.ParquetFile:
+def _padded(rows: list[dict], pad: int) -> list[dict]:
     """
-    Файл этапа по стандартному пути, со сверкой схемы.
-    """
+    Клиенты группы, дополненные до общей ширины по трём осям:
+    токены событий T, события E (календарь — 6 * E) и токены
+    анкеты P.
 
-    if not path.exists():
-        raise InputError(f"нет {path}: выполните {command}")
-
-    handle = pq.ParquetFile(path)
-
-    # Схема сверяется с той, которой этап пишет сейчас. Это ловит
-    # файл, собранный до смены формата: иначе несовпадение
-    # всплыло бы посреди разбора, уже без имени виноватого этапа.
-    if not handle.schema_arrow.equals(schema, check_metadata=False):
-        raise InputError(f"{path} собран другой схемой: выполните {command} заново")
-
-    # Схема от смысла анкеты не зависит: происхождение каталога
-    # сверяется отдельно.
-    problem = lineage_problem(path.parent, command)
-
-    if problem is not None:
-        raise InputError(problem)
-
-    return handle
-
-
-def _arrays(batch: pa.Table, mask: pa.Table) -> dict:
-    """
-    Колонки обоих файлов как numpy-матрицы [B, ширина].
+    Заполнитель смещения события — КОНЕЦ последовательности, а не
+    ноль: пустое событие в конце безвредно, а ноль указывал бы на
+    первый настоящий токен клиента. У времени события заполнителя
+    нет (None): нулевого момента не существует.
     """
 
-    width = _width(batch, "key_ids")
-    profile_width = _width(batch, "profile_key_ids")
+    tokens = max(len(row["key_ids"]) for row in rows)
+    events = max(len(row["event_starts"]) for row in rows)
+    profile = max(len(row["profile_key_ids"]) for row in rows)
 
-    return {
-        "batch_index": batch.column("batch_index").to_pylist(),
-        "client_id": batch.column("client_id").to_pylist(),
-        "n_tokens": np.asarray(batch.column("n_tokens").to_pylist(), dtype=np.int64),
-        "profile_n_tokens": np.asarray(
-            batch.column("profile_n_tokens").to_pylist(), dtype=np.int64
-        ),
+    result = []
 
-        "key_ids": _matrix(batch, "key_ids", width, np.int64),
-        "batch_value_ids": _matrix(batch, "value_ids", width, np.int64),
-        "positions": _matrix(batch, "positions", width, np.int64),
-        "token_mask": _matrix(batch, "token_mask", width, np.bool_),
+    for row in rows:
 
-        "profile_key_ids": _matrix(batch, "profile_key_ids", profile_width, np.int64),
-        "profile_value_ids": _matrix(batch, "profile_value_ids", profile_width, np.int64),
-        "profile_positions": _matrix(batch, "profile_positions", profile_width, np.int64),
-        "profile_token_mask": _matrix(
-            batch, "profile_token_mask", profile_width, np.bool_
-        ),
+        n_tokens = len(row["key_ids"])
+        n_events = len(row["event_starts"])
+        profile_n_tokens = len(row["profile_key_ids"])
 
-        "masked_batch_index": mask.column("batch_index").to_pylist(),
-        "masked_client_id": mask.column("client_id").to_pylist(),
-        "source_value_ids": _matrix(mask, "value_ids_source", width, np.int64),
-        "visible_value_ids": _matrix(mask, "value_ids", width, np.int64),
-    }
+        item = {
+            "client_id": row["client_id"],
+            "n_tokens": n_tokens,
+            "n_events": n_events,
+            "profile_n_tokens": profile_n_tokens,
+            "key_ids": _pad(row["key_ids"], tokens, pad),
+            "visible_value_ids": _pad(row["visible_value_ids"], tokens, pad),
+            "positions": _pad(row["positions"], tokens, 0),
+            "token_mask": _mask(n_tokens, tokens),
+            "event_starts": _pad(row["event_starts"], events, n_tokens),
+            "event_lengths": _pad(row["event_lengths"], events, 0),
+            "event_time": _pad(row["event_time"], events, None),
+            "event_mask": _mask(n_events, events),
+            "target_event_mask": _pad(row["target_event_mask"], events, False),
+            "profile_key_ids": _pad(row["profile_key_ids"], profile, pad),
+            "profile_value_ids": _pad(row["profile_value_ids"], profile, pad),
+            "profile_positions": _pad(row["profile_positions"], profile, 0),
+            "profile_token_mask": _mask(profile_n_tokens, profile),
+        }
+
+        if CALENDAR_COLUMN in row:
+            item[CALENDAR_COLUMN] = _pad(row[CALENDAR_COLUMN], events * CALENDAR_PER_EVENT, 0.0)
+
+        # Ноль заполнителя совпадает с нулём [USR] и Attributes:
+        # отличить их можно ТОЛЬКО по маске анкеты.
+        if PROFILE_TIME_COLUMN in row:
+            item[PROFILE_TIME_COLUMN] = _pad(row[PROFILE_TIME_COLUMN], profile, 0.0)
+
+        result.append(item)
+
+    return result
 
 
-def _width(table: pa.Table, name: str) -> int:
+def _pad(values, width: int, fill) -> list:
     """
-    Ширина колонки списков по первой строке.
-
-    Равенство длин между строками батчер уже проверил при записи,
-    а здесь его подтверждает общее число элементов.
-    """
-
-    return len(table.column(name)[0])
-
-
-def _matrix(table: pa.Table, name: str, width: int, dtype) -> np.ndarray:
-
-    column = table.column(name).combine_chunks()
-
-    if isinstance(column, pa.ChunkedArray):
-        column = column.chunk(0)
-
-    flat = column.flatten().to_numpy(zero_copy_only=False)
-
-    if flat.size != table.num_rows * width:
-        raise InputError(
-            f"колонка {name}: {flat.size} значений вместо "
-            f"{table.num_rows} * {width} — строки разной длины"
-        )
-
-    return flat.astype(dtype, copy=False).reshape(table.num_rows, width)
-
-
-def _tensor(values: np.ndarray, dtype) -> torch.Tensor:
-    return torch.from_numpy(np.ascontiguousarray(values)).to(dtype)
-
-
-def _check(index: int, arrays: dict, specials: dict) -> None:
-    """
-    Пять сверок до объединения. Любая несовпавшая — отказ;
-    считать тут нечего, наружу идёт только согласие файлов.
+    Значения слева, заполнитель справа.
     """
 
-    pad = specials[PAD]
-    markers = (specials[EVT], specials[USR])
+    values = list(values)
 
-    clients, width = arrays["key_ids"].shape
-    profile_width = arrays["profile_key_ids"].shape[1]
+    return values + [fill] * (width - len(values))
 
-    # 1. Один и тот же батч.
-    for number in arrays["batch_index"] + arrays["masked_batch_index"]:
-        if number != index:
+
+def _mask(length: int, width: int) -> list[bool]:
+    return [True] * length + [False] * (width - length)
+
+
+def _stack(rows: list[dict], name: str, dtype) -> torch.Tensor:
+    return torch.as_tensor(np.asarray([row[name] for row in rows]), dtype=dtype)
+
+
+def _check_markers(index: int, rows: list[dict], markers: tuple[int, int]) -> None:
+    """
+    У маркера один ID в обоих слотах, и маскер его не трогал.
+    """
+
+    for row in rows:
+
+        keys = np.asarray(row["key_ids"])
+        values = np.asarray(row["visible_value_ids"])
+
+        wrong = np.isin(keys, markers) & (values != keys)
+
+        if wrong.any():
+            position = int(np.argwhere(wrong)[0][0])
             raise InputError(
-                f"батч {index}: в строке записан batch_index {number} — "
-                "файлы разъехались, пересоберите маски"
-            )
-
-    # 2. Один и тот же клиент, в том же порядке.
-    pairs = zip(arrays["client_id"], arrays["masked_client_id"])
-
-    for row, (left, right) in enumerate(pairs):
-        if left != right:
-            raise InputError(
-                f"батч {index}, строка {row}: в батчах клиент {left}, а в масках {right}"
-            )
-
-    # 3. Маскер начинал с ТЕХ ЖЕ значений, что лежат в батче.
-    difference = arrays["source_value_ids"] != arrays["batch_value_ids"]
-
-    if difference.any():
-        row, position = (int(number) for number in np.argwhere(difference)[0])
-        client = arrays["client_id"][row]
-        raise InputError(
-            f"батч {index}, клиент {client}, позиция {position}: "
-            f"value_ids_source {arrays['source_value_ids'][row, position]} не совпадает "
-            f"с value_ids батча {arrays['batch_value_ids'][row, position]} — "
-            "маски сняты с другого батча"
-        )
-
-    # 4. У маркера один ID в обоих слотах, и маскер его не трогал.
-    marker = np.isin(arrays["key_ids"], markers)
-
-    wrong = marker & (arrays["visible_value_ids"] != arrays["key_ids"])
-
-    if wrong.any():
-        row, position = (int(number) for number in np.argwhere(wrong)[0])
-        client = arrays["client_id"][row]
-        raise InputError(
-            f"батч {index}, клиент {client}, позиция {position}: "
-            f"маркер {arrays['key_ids'][row, position]} в слоте ключа, но "
-            f"{arrays['visible_value_ids'][row, position]} в слоте значения"
-        )
-
-    # 5. Заполнитель ровно там, где его обещает маска.
-    _check_padding(
-        index,
-        arrays["client_id"],
-        arrays["n_tokens"],
-        width,
-        pad,
-        "",
-        arrays["key_ids"],
-        arrays["visible_value_ids"],
-        arrays["token_mask"],
-    )
-
-    _check_padding(
-        index,
-        arrays["client_id"],
-        arrays["profile_n_tokens"],
-        profile_width,
-        pad,
-        "анкеты ",
-        arrays["profile_key_ids"],
-        arrays["profile_value_ids"],
-        arrays["profile_token_mask"],
-    )
-
-
-
-def _check_padding(
-    index: int,
-    client_ids: list,
-    lengths: np.ndarray,
-    width: int,
-    pad: int,
-    what: str,
-    key_ids: np.ndarray,
-    value_ids: np.ndarray,
-    token_mask: np.ndarray,
-) -> None:
-    """
-    Маска обязана совпадать с тем, где лежит [PAD].
-
-    Слой зануляет выход по маске, поэтому расхождение маски и
-    заполнителя означало бы ненулевой вектор у пустого места.
-    """
-
-    numbers = np.arange(width, dtype=np.int64)[None, :]
-
-    expected = numbers < lengths[:, None]
-
-    if not np.array_equal(token_mask, expected):
-        row = int(np.argwhere(token_mask != expected)[0][0])
-        raise InputError(
-            f"батч {index}, клиент {client_ids[row]}: маска {what}не совпадает "
-            f"с длиной {int(lengths[row])}"
-        )
-
-    tail = ~expected
-
-    for name, values in (("ключей", key_ids), ("значений", value_ids)):
-
-        if not bool((values[tail] == pad).all()):
-            row = int(np.argwhere(tail & (values != pad))[0][0])
-            raise InputError(
-                f"батч {index}, клиент {client_ids[row]}: в хвосте {what}{name} "
-                "лежит не только [PAD]"
-            )
-
-        if bool((values[expected] == pad).any()):
-            row = int(np.argwhere(expected & (values == pad))[0][0])
-            raise InputError(
-                f"батч {index}, клиент {client_ids[row]}: [PAD] встретился среди "
-                f"настоящих {what}{name}"
+                f"батч {index}, клиент {row['client_id']}, позиция {position}: "
+                f"маркер {keys[position]} в слоте ключа, но {values[position]} в слоте значения"
             )
 
 
 __all__ = [
-    "BATCH_COLUMNS",
     "CALENDAR_COLUMN",
     "CALENDAR_PER_EVENT",
-    "MASKED_COLUMNS",
     "PROFILE_TIME_COLUMN",
+    "SAMPLE_COLUMNS",
     "STRUCTURE_COLUMNS",
     "BatchInput",
     "InputError",

@@ -31,7 +31,7 @@ from tests.test_profile_state import (
 # из прошлого и собран ТАК ЖЕ, как вход обучения. Поэтому:
 #
 #   - на конце окна группы вход в памяти обязан побитно совпасть с
-#     тем, что этапы 04–07 кладут на диск, — второй реализации
+#     тем, что обучение читает из набора 05, — второй реализации
 #     цепочки здесь нет;
 #   - всё, что случилось после T, — события, переезд, продукт, —
 #     вход на T не меняет ни на бит, а анкета откатывается на T;
@@ -52,18 +52,17 @@ FIELDS = (
 
 def chain(stage, tape: list[dict], snapshot: dict, anchor: str | None = None) -> None:
     """
-    Выгрузка → 02 → 04 → 05 → 06 → 07 для train и val: теми же
-    функциями этапов, что и в бою. train нужен ради отбора истории
-    и точки отсчёта времени, на которых «училась модель»
-    (05_dataset/train/meta.json, 06_temporal/train/meta.json).
-    Без anchor этап 06 идёт со своим умолчанием, как в бою.
+    Выгрузка → 02 → 04 → 05 для train и val: теми же функциями
+    этапов, что и в бою. train нужен ради отбора истории и точки
+    отсчёта времени, на которых «училась модель»
+    (05_dataset/train/meta.json). Без anchor набор собирается со
+    своим умолчанием, как в бою.
     """
 
-    from src.batching.build import build_group as build_batches
-    from src.batching.settings import BatchingConfig
+    from dataclasses import replace
+
     from src.dataset.build import build_group as build_dataset
     from src.dataset.settings import DatasetConfig
-    from src.temporal.build import build_group as build_temporal
     from src.tokenization.finalvocab import FrozenArtifacts
     from src.tokenization.settings import TokenizerConfig
     from src.tokenization.transform import encode_group
@@ -72,12 +71,15 @@ def chain(stage, tape: list[dict], snapshot: dict, anchor: str | None = None) ->
 
     artifacts = FrozenArtifacts.load()
 
+    config = DatasetConfig.load(None)
+
+    if anchor is not None:
+        config = replace(config, time_anchor=anchor)
+
     for group in ("train", "val"):
         prepare(stage, tape, snapshot, group=group)
         encode_group(artifacts, group, TokenizerConfig.load(None))
-        build_dataset(artifacts, group, DatasetConfig.load(None))
-        build_temporal(group) if anchor is None else build_temporal(group, anchor=anchor)
-        build_batches(group, BatchingConfig.load(None))
+        build_dataset(artifacts, group, config)
 
 
 def same(left, right) -> None:
@@ -96,11 +98,11 @@ def same(left, right) -> None:
 
 
 @pytest.mark.parametrize("anchor", ["last_event", "cutoff"])
-def test_input_at_the_group_cutoff_is_what_stage_07_stores(stage, anchor: str):
+def test_input_at_the_group_cutoff_is_what_training_reads(stage, anchor: str):
     """
     T = конец окна val: вход в памяти побитно равен клиенту, которого
-    модель читает из 07_batches без масок, — при любой точке отсчёта
-    времени этапа 06.
+    модель читает из набора 05 без масок, — при любой точке отсчёта
+    времени набора.
     """
 
     from src.downstream.at_cutoff import ClientsAtCutoff

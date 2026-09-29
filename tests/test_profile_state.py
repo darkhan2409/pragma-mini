@@ -1214,41 +1214,33 @@ def test_tokenized_of_the_previous_semantics_is_refused(stage):
             TokenizedGroup("val", FrozenArtifacts.load())
 
 
-def test_stage_06_to_08_without_lineage_are_refused(stage):
+def test_model_input_of_the_previous_code_is_refused(stage):
     """
-    Схемы 06-08 от смысла анкеты не зависят: каталог без отметки
-    происхождения отвергается, а не читается молча.
+    Схема набора от смысла анкеты не зависит: набор, чья meta не
+    совпадает с текущей анкетой, отвергают все читатели входа модели,
+    а не читают молча.
     """
 
-    from src.batching.temporal import TemporalError, TemporalGroup
-    from src.batching.settings import BATCHES_FILE, batches_dir
-    from src.dataset.lineage import LINEAGE_FILE
-    from src.masking.batches import BatchesError, BatchesGroup
+    from src.dataset.settings import META_FILE, dataset_dir
+    from src.embedding.inputs import InputError as EmbeddingInputError
+    from src.embedding.inputs import Source as EmbeddingSource
     from src.mlm.inputs import InputError, Source
-    from src.temporal.build import TEMPORAL_SCHEMA
-    from src.temporal.settings import TEMPORAL_FILE, temporal_dir
-
-    temporal = temporal_dir("val")
-    temporal.mkdir(parents=True, exist_ok=True)
-    pq.write_table(TEMPORAL_SCHEMA.empty_table(), temporal / TEMPORAL_FILE)
-
-    with pytest.raises(TemporalError, match="прежним кодом"):
-        TemporalGroup("val")
+    from src.preprocessing.artifacts import read_json, write_json
 
     from tests import world
 
-    # Батчи мира тестов пишутся с отметкой, как у настоящего
-    # этапа: снимаем её.
-    world.write_batches(batches_dir("train") / BATCHES_FILE, [world.population()])
+    world.write_samples("train", [world.population()])
 
-    (batches_dir("train") / LINEAGE_FILE).unlink()
-
-    with pytest.raises(BatchesError, match="прежним кодом"):
-        BatchesGroup("train")
+    path = dataset_dir("train") / META_FILE
+    meta = read_json(path)
+    meta["profile_semantics"] = "state_at_event_cutoff"
+    write_json(path, meta)
 
     with pytest.raises(InputError, match="прежним кодом"):
         Source("train")
 
+    with pytest.raises(EmbeddingInputError, match="прежним кодом"):
+        EmbeddingSource("train")
 
 
 def test_rolled_back_value_keeps_the_type_of_the_field():

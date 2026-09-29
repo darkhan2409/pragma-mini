@@ -8,18 +8,18 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 
-from src.dataset.lineage import write_lineage
-from src.batching.build import BATCHES_SCHEMA
+from src.dataset.build import SAMPLES_SCHEMA
+from src.dataset.lineage import lineage, write_lineage
+from src.dataset.settings import DEFAULT_ANCHOR, META_FILE, SAMPLES_FILE, dataset_dir
 from src.embedding.layer import InputEmbedding
 from src.embedding.settings import EmbeddingConfig
 from src.event.encoder import EventEncoder
 from src.event.settings import EventConfig
 from src.history.encoder import HistoryEncoder
 from src.history.settings import HistoryConfig
-from src.masking.build import MASKED_SCHEMA
 from src.mlm.inputs import IGNORE, Client
 from src.mlm.model import Mlm, Model
-from src.preprocessing.artifacts import TableWriter
+from src.preprocessing.artifacts import TableWriter, write_json
 from src.profile.encoder import ProfileEncoder
 from src.profile.settings import ProfileConfig
 from src.tokenization.specials import SPECIAL_TOKENS_FILE, build_special_tokens
@@ -34,9 +34,12 @@ from src.tokenization.specials import SPECIAL_TOKENS_FILE, build_special_tokens
 # Client это обычный frozen dataclass, и единственное, что его
 # ограничивает, — инварианты pack и VarlenLayout.
 #
-# Те же клиенты умеют лечь в parquet схемами боя. Тогда Source,
-# micro_batches, load_model и настоящий train читают файлы, а не
-# заглушки, и проверяется в том числе чтение.
+# Те же клиенты умеют лечь в набор 05 схемой боя. Тогда Source,
+# micro_batches, load_model и настоящий train читают файл, а не
+# заглушки, и проверяется в том числе чтение. Время и маску при
+# чтении считает сам Source: ручные цели и ручные event_time_log
+# клиента в файл не попадают, в файл ложится только то, из чего
+# их считают.
 #
 # Размеры крошечные намеренно: dim 8 при двух головах даёт
 # head_dim 4, чётный, как требует TimeRoPE. Словарь на 32 номера
@@ -63,6 +66,9 @@ SEED = 7
 KEY_A, KEY_B, KEY_C = 5, 6, 7
 
 EPOCH = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+# Момент, на который собран набор мира: позже всех событий и вех.
+CUTOFF = EPOCH + timedelta(days=7)
 
 
 # ============================================================
@@ -91,9 +97,10 @@ class Made:
     client: Client
     value_ids_source: np.ndarray
 
-    # Разрешено ли маскировать события этого клиента. False даёт
-    # клиента, у которого целей не бывает ни при какой маске.
-    targetable: bool = True
+    # Разрешено ли маскировать события этого клиента: одно решение на
+    # все события или своё у каждого (как target_event_mask набора).
+    # False даёт клиента, у которого целей не бывает ни при какой маске.
+    targetable: bool | tuple[bool, ...] = True
 
 
 def make(
@@ -267,131 +274,84 @@ def clients(prefix: str = "c") -> list[Client]:
 
 
 # ============================================================
-# PARQUET СХЕМАМИ БОЯ
+# НАБОР 05 СХЕМОЙ БОЯ
 # ============================================================
 
 
-def write_batches(path: Path, batches: list[list[Made]]) -> None:
+def write_samples(group: str, batches: list[list[Made]], *, anchor: str = DEFAULT_ANCHOR) -> None:
     """
-    batches.parquet: одна группа строк на батч, ряды выровнены.
+    05_dataset/<group>: одна группа строк на батч, строки без
+    заполнителя, и meta.json с тем, что сверяет читатель набора.
 
-    Ширина группы — максимум по её клиентам, как делает этап 07:
-    настоящие длины лежат в n_tokens, n_events и profile_n_tokens,
-    а хвост закрыт масками.
+    В файл ложатся исходные значения (value_ids_source), время
+    событий и вех и разрешённые цели; маску и временные позиции
+    Source считает сам.
     """
 
-    writer = TableWriter(path, BATCHES_SCHEMA)
+    directory = dataset_dir(group)
+    directory.mkdir(parents=True, exist_ok=True)
+
+    writer = TableWriter(directory / SAMPLES_FILE, SAMPLES_SCHEMA)
 
     try:
-        for index, batch in enumerate(batches):
-            writer.write(_batch_table(index, batch))
+        for batch in batches:
+            writer.write(pa.Table.from_pylist([_sample(made) for made in batch], schema=SAMPLES_SCHEMA))
     finally:
         writer.close()
 
-    # Отметка происхождения, как у настоящего этапа: без неё
-    # читатель каталог отвергнет.
-    write_lineage(path.parent)
+    current = lineage()
+
+    write_json(
+        directory / META_FILE,
+        {
+            "format": current["dataset_format"],
+            "group": group,
+            "events_cutoff": CUTOFF.isoformat(),
+            "profile_semantics": current["profile_semantics"],
+            "profile_lifelong_types": current["profile_lifelong_types"],
+            "window": current["windows"][group],
+            "time_anchor": anchor,
+        },
+    )
 
 
-def write_masked(path: Path, batches: list[list[Made]]) -> None:
+def targets_of(made: Made) -> list[bool]:
     """
-    masked.parquet: те же батчи, те же группы строк.
+    target_event_mask клиента: по событию на каждое.
     """
 
-    writer = TableWriter(path, MASKED_SCHEMA)
+    if isinstance(made.targetable, tuple):
+        return list(made.targetable)
 
-    try:
-        for index, batch in enumerate(batches):
-            writer.write(_masked_table(index, batch))
-    finally:
-        writer.close()
-
-    # Отметка происхождения, как у настоящего этапа: без неё
-    # читатель каталог отвергнет.
-    write_lineage(path.parent)
+    return [made.targetable] * made.client.n_events
 
 
-def _batch_table(index: int, batch: list[Made]) -> pa.Table:
+def _sample(made: Made) -> dict:
 
-    width = max(made.client.n_tokens for made in batch)
-    events = max(made.client.n_events for made in batch)
-    profile = max(made.client.profile_n_tokens for made in batch)
+    client = made.client
 
-    columns: dict[str, list] = {name: [] for name in BATCHES_SCHEMA.names}
+    # Время вехи: у поля с давностью — момент раньше cutoff, у
+    # остальных null, как у Attributes в настоящем наборе.
+    profile_time = [
+        CUTOFF - timedelta(hours=float(age)) if age > 0.0 else None
+        for age in client.profile_time_log.tolist()
+    ]
 
-    for made in batch:
-
-        client = made.client
-
-        columns["batch_index"].append(index)
-        columns["client_id"].append(client.client_id)
-        columns["n_tokens"].append(client.n_tokens)
-        columns["n_events"].append(client.n_events)
-        columns["profile_n_tokens"].append(client.profile_n_tokens)
-
-        columns["key_ids"].append(_pad(client.key_ids, width, PAD))
-        columns["value_ids"].append(_pad(made.value_ids_source, width, PAD))
-        columns["positions"].append(_pad(client.positions, width, 0))
-        columns["token_mask"].append(_flags(client.n_tokens, width))
-
-        columns["event_starts"].append(_pad(client.event_starts, events, 0))
-        columns["event_lengths"].append(_pad(client.event_lengths, events, 0))
-        columns["event_time"].append(
-            list(client.event_time) + [None] * (events - client.n_events)
-        )
-        columns["event_time_log"].append(_pad(client.event_time_log, events, 0.0))
-        columns["calendar"].append(
-            _pad(client.calendar.reshape(-1), events * 6, 0.0)
-        )
-        columns["event_mask"].append(_flags(client.n_events, events))
-        columns["target_event_mask"].append(
-            _flags(client.n_events if made.targetable else 0, events)
-        )
-
-        columns["profile_key_ids"].append(_pad(client.profile_key_ids, profile, PAD))
-        columns["profile_value_ids"].append(
-            _pad(client.profile_value_ids, profile, PAD)
-        )
-        columns["profile_positions"].append(_pad(client.profile_positions, profile, 0))
-        columns["profile_time_log"].append(_pad(client.profile_time_log, profile, 0.0))
-        columns["profile_token_mask"].append(
-            _flags(client.profile_n_tokens, profile)
-        )
-
-    return pa.table(columns, schema=BATCHES_SCHEMA)
-
-
-def _masked_table(index: int, batch: list[Made]) -> pa.Table:
-
-    width = max(made.client.n_tokens for made in batch)
-
-    columns: dict[str, list] = {name: [] for name in MASKED_SCHEMA.names}
-
-    for made in batch:
-
-        client = made.client
-
-        columns["batch_index"].append(index)
-        columns["client_id"].append(client.client_id)
-        columns["value_ids_source"].append(_pad(made.value_ids_source, width, PAD))
-        columns["value_ids"].append(_pad(client.value_ids, width, PAD))
-        columns["labels"].append(_pad(client.labels, width, IGNORE))
-        columns["reason"].append(
-            list(client.reason) + [""] * (width - client.n_tokens)
-        )
-
-    return pa.table(columns, schema=MASKED_SCHEMA)
-
-
-def _pad(values: np.ndarray, width: int, filler) -> list:
-
-    tail = [filler] * (width - int(values.size))
-
-    return list(values.tolist()) + tail
-
-
-def _flags(length: int, width: int) -> list[bool]:
-    return [True] * length + [False] * (width - length)
+    return {
+        "client_id": client.client_id,
+        "key_ids": client.key_ids.tolist(),
+        "value_ids": made.value_ids_source.tolist(),
+        "positions": client.positions.tolist(),
+        "event_starts": client.event_starts.tolist(),
+        "event_lengths": client.event_lengths.tolist(),
+        "event_time": list(client.event_time),
+        "calendar": client.calendar.reshape(-1).tolist(),
+        "target_event_mask": targets_of(made),
+        "profile_key_ids": client.profile_key_ids.tolist(),
+        "profile_value_ids": client.profile_value_ids.tolist(),
+        "profile_positions": client.profile_positions.tolist(),
+        "profile_time": profile_time,
+    }
 
 
 # ============================================================
@@ -438,19 +398,15 @@ def install(
     dropout: float = 0.0,
 ) -> None:
     """
-    Весь мир на диск: батчи, маски, веса этапа 09 и backbone.
+    Весь мир на диск: набор 05, веса этапа 09 и backbone.
 
-    Вызывается ПОСЛЕ подмены каталогов: batches_dir и masked_dir
-    читают свои глобалы в момент вызова.
+    Вызывается ПОСЛЕ подмены каталогов: dataset_dir читает свой
+    глобал в момент вызова.
     """
-
-    from src.batching.settings import BATCHES_FILE, batches_dir
-    from src.masking.settings import MASKED_FILE, masked_dir
 
     for group, batches in groups.items():
 
-        write_batches(batches_dir(group) / BATCHES_FILE, batches)
-        write_masked(masked_dir(group) / MASKED_FILE, batches)
+        write_samples(group, batches)
         write_weights(root, group, dropout=dropout)
 
 
@@ -610,6 +566,6 @@ __all__ = [
     "LAYERS", "MASK", "PAD", "ROPE_BASE", "SEED", "UNK", "USR", "VOCAB",
     "Made", "calendar_of", "clients", "cuda_ready", "embedding",
     "encoder_configs", "flash_ready", "make", "model",
-    "install", "population", "write_batches", "write_masked", "write_vocab",
-    "write_weights",
+    "install", "population", "write_samples", "write_vocab",
+    "write_weights", "CUTOFF",
 ]

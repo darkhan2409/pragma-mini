@@ -456,7 +456,7 @@ def hits(logits: torch.Tensor, targets: torch.Tensor, k: int = 5) -> tuple[int, 
 
 
 # Окна вспомогательной цели [USR], в сутках до точки отсчёта времени
-# (этап 06: cutoff T, а с --anchor last_event — последнее событие).
+# (time_anchor набора: cutoff T, а с last_event — последнее событие).
 RECENT_DAYS = (7, 30, 90)
 
 

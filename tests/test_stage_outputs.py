@@ -63,95 +63,50 @@ def cli(module: str, *args: str) -> int:
 
 
 # ============================================================
-# ЭТАП 08 — МАСКИРОВАНИЕ
+# ВХОД СЛОЯ ЭМБЕДДИНГОВ — ВЫРАВНИВАНИЕ В ПАМЯТИ
 # ============================================================
 
 
-def test_masking_writes_one_row_per_client_in_the_same_batches(stage):
+def test_embedding_input_pads_a_row_group_on_the_right_only(stage):
+    """
+    Набор хранит клиентов без заполнителя; слой считает [B, T] и
+    [B, P]. Группа строк дополняется до самого длинного клиента:
+    настоящее слева, маска — ровно «номер меньше длины», хвост —
+    только [PAD], смещение пустого события — конец последовательности.
+    """
 
-    from src.masking.build import MASKED_SCHEMA, build_group
-    from src.masking.settings import MASKED_FILE, MaskingConfig, masked_dir
-    from src.batching.settings import BATCHES_FILE, batches_dir
+    from src.embedding.inputs import Source
 
     people = settle(stage)
 
-    report = build_group("train", MaskingConfig(seed=4))
+    loaded = Source("train").batch(0)
+    model = loaded.model
+    batch = people[:2]
 
-    path = masked_dir("train") / MASKED_FILE
+    width = max(made.client.n_tokens for made in batch)
+    profile = max(made.client.profile_n_tokens for made in batch)
+    events = max(made.client.n_events for made in batch)
 
-    written = pq.ParquetFile(path)
-    source = pq.ParquetFile(batches_dir("train") / BATCHES_FILE)
+    assert model.key_ids.shape == (2, width)
+    assert model.profile_key_ids.shape == (2, profile)
 
-    assert written.schema_arrow.equals(MASKED_SCHEMA, check_metadata=False)
-    assert written.num_row_groups == source.num_row_groups
-    assert written.metadata.num_rows == len(people)
+    for row, made in enumerate(batch):
 
-    table = pq.read_table(path).to_pylist()
+        client = made.client
+        n, p = client.n_tokens, client.profile_n_tokens
 
-    assert [row["client_id"] for row in table] == [
-        made.client.client_id for made in people
-    ]
-    assert [row["batch_index"] for row in table] == [0, 0, 1]
-    assert report["rows"] == len(people)
+        assert model.token_mask[row].tolist() == [True] * n + [False] * (width - n)
+        assert model.profile_token_mask[row].tolist() == [True] * p + [False] * (profile - p)
 
+        assert model.key_ids[row, :n].tolist() == client.key_ids.tolist()
+        assert model.key_ids[row, n:].tolist() == [world.PAD] * (width - n)
+        assert model.value_ids[row, n:].tolist() == [world.PAD] * (width - n)
+        assert model.profile_value_ids[row, :p].tolist() == client.profile_value_ids.tolist()
 
-def test_masking_never_changes_the_length_of_a_row(stage):
+        structure = loaded.rows[row]
 
-    from src.masking.build import build_group
-    from src.masking.settings import MASKED_FILE, MaskingConfig, masked_dir
-
-    settle(stage)
-
-    build_group("train", MaskingConfig(seed=4, value_probability=1.0))
-
-    for row in pq.read_table(masked_dir("train") / MASKED_FILE).to_pylist():
-
-        width = len(row["value_ids_source"])
-
-        assert len(row["value_ids"]) == width
-        assert len(row["labels"]) == width
-        assert len(row["reason"]) == width
-
-
-def test_masking_repeats_byte_for_byte(stage):
-    """
-    Тот же вход и тот же конфиг дают тот же файл: розыгрыш маски
-    выведен из seed и client_id, а не из порядка чтения.
-    """
-
-    from src.masking.build import build_group
-    from src.masking.settings import MASKED_FILE, MaskingConfig, masked_dir
-
-    settle(stage)
-
-    config = MaskingConfig(seed=4)
-
-    build_group("train", config)
-
-    first = digest(masked_dir("train") / MASKED_FILE)
-
-    build_group("train", config)
-
-    assert digest(masked_dir("train") / MASKED_FILE) == first
-
-
-def test_masking_command_reports_a_missing_input(stage, capsys):
-
-    from src.batching.settings import BATCHES_FILE, batches_dir
-
-    settle(stage)
-
-    (batches_dir("train") / BATCHES_FILE).unlink()
-
-    assert cli("src.masking.run", "train") == EXIT_BLOCKED
-    assert "python -m src.batching.run train" in capsys.readouterr().out
-
-
-def test_masking_command_succeeds(stage):
-
-    settle(stage)
-
-    assert cli("src.masking.run", "train") == EXIT_OK
+        assert structure["event_starts"] == client.event_starts.tolist() + [n] * (events - client.n_events)
+        assert structure["event_mask"] == [True] * client.n_events + [False] * (events - client.n_events)
 
 
 # ============================================================

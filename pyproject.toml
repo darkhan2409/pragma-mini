@@ -25,9 +25,6 @@ mini-pragma-show = "src.generator.report.show:main"
 mini-pragma-preprocess = "src.preprocessing.run:main"
 mini-pragma-tokenize = "src.tokenization.run:main"
 mini-pragma-dataset = "src.dataset.run:main"
-mini-pragma-temporal = "src.temporal.run:main"
-mini-pragma-batches = "src.batching.run:main"
-mini-pragma-mask = "src.masking.run:main"
 mini-pragma-embed = "src.embedding.run:main"
 mini-pragma-events = "src.event.run:main"
 mini-pragma-profiles = "src.profile.run:main"
@@ -55,7 +52,6 @@ packages = [
     "src.tokenization",
     "src.dataset",
     "src.temporal",
-    "src.batching",
     "src.masking",
     "src.embedding",
     "src.event",

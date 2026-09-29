@@ -328,7 +328,7 @@ def test_prohibition_survives_the_context_limit(stage, max_events: int):
 
 
 # ============================================================
-# 06 → 07 → 08 → MICRO-BATCH
+# НАБОР → МАСКА ПРИ ЧТЕНИИ → MICRO-BATCH
 # ============================================================
 
 
@@ -340,31 +340,22 @@ def test_masking_and_micro_batches_never_label_a_source(stage):
     его события не-источники.
     """
 
-    from src.batching.build import build_group as build_batches
-    from src.batching.settings import BatchingConfig
     from src.masking.apply import IGNORE
-    from src.masking.build import build_group as build_masks
     from src.masking.settings import MaskingConfig
     from src.mlm.inputs import Source
     from src.mlm.model import pack
-    from src.temporal.build import build_group as build_temporal
 
     max_events = 12
 
     _, client, _ = encoded(stage, max_events)
 
-    build_temporal("train")
-    build_batches("train", BatchingConfig.load(None))
-
     every_event = MaskingConfig(
         event_probability=1.0, value_probability=0.0, key_probability=0.0, unknown_probability=0.0
     )
 
-    build_masks("train", every_event)
-
     expected = expected_targets(client.events[-max_events:])
 
-    (one,) = list(Source("train").clients())
+    (one,) = list(Source("train", masking=every_event).clients())
 
     labelled = [
         bool((one.labels[start:start + length] != IGNORE).any())
@@ -373,7 +364,8 @@ def test_masking_and_micro_batches_never_label_a_source(stage):
 
     assert labelled == expected
 
-    # Тот же маскер при чтении эпохи train даёт тот же запрет.
+    # Повторное чтение — в том числе в другой эпохе, другим
+    # процессом — даёт ту же маску: розыгрыш ключуется клиентом.
     (drawn,) = list(Source("train", masking=every_event).clients())
 
     assert np.array_equal(drawn.labels, one.labels)

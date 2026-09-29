@@ -1,21 +1,18 @@
 """
-Этап 7: маскирование значений.
+Маскирование значений — не этап, а розыгрыш при чтении.
 
-Одна команда на группу:
+Маска на диске не хранится. Читатель входа модели разыгрывает её для
+каждого клиента: choose решает, что скрыть и что предсказать, apply
+заменяет выбранные значения на [MASK] или [UNK] и ставит метки.
+Розыгрыш ключуется seed, группой и клиентом (choose.py), поэтому
+маска val и test одна и та же при каждом чтении.
 
-    python -m src.masking.run train|val|test
-
-Вход — data/07_batches/<group>/batches.parquet и коды [MASK] и
-[UNK] из словаря. Выход — data/08_masked/<group>/masked.parquet
-и ничего больше.
-
-Этап решает, что скрыть от модели и что она должна предсказать.
-Саму модель и обучение он не содержит.
+Саму модель и обучение пакет не содержит.
 """
 
 from __future__ import annotations
 
-from .version import FORMAT_VERSION, IMPLEMENTATION_VERSION, SCHEMA_VERSION
+from .version import FORMAT_VERSION, IMPLEMENTATION_VERSION
 
 
-__all__ = ["FORMAT_VERSION", "IMPLEMENTATION_VERSION", "SCHEMA_VERSION"]
+__all__ = ["FORMAT_VERSION", "IMPLEMENTATION_VERSION"]

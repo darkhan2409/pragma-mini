@@ -1,24 +1,20 @@
 """
-Этап 6: временные позиции событий и вех анкеты.
+Временные позиции событий и вех анкеты — не этап, а расчёт при чтении.
 
-Одна команда на группу:
-
-    python -m src.temporal.run train|val|test
-
-Вход — data/05_dataset/<group>/samples.parquet, выход —
-data/06_temporal/<group>/temporal.parquet: тот же пример плюс два
-канала в сжатых логарифмом секундах — event_time_log, давность
-события до cutoff (с --anchor last_event — до последнего события),
+На диске их нет: TemporalGroup (samples.py) читает
+data/05_dataset/<group>/samples.parquet по группам строк и считает
+два канала в сжатых логарифмом секундах — event_time_log, давность
+события до cutoff (с time_anchor last_event — до последнего события),
 и profile_time_log, давность вехи анкеты до cutoff (ноль у [USR] и
-Attributes).
+Attributes). Точка отсчёта записана в meta.json набора.
 
-Этап ничего не отбирает, не переставляет и не кодирует: он
-только добавляет к примеру числовые каналы.
+Ничего не отбирается, не переставляется и не кодируется: к примеру
+только добавляются числовые каналы.
 """
 
 from __future__ import annotations
 
-from .version import FORMAT_VERSION, IMPLEMENTATION_VERSION, SCHEMA_VERSION
+from .version import FORMAT_VERSION, IMPLEMENTATION_VERSION
 
 
-__all__ = ["FORMAT_VERSION", "IMPLEMENTATION_VERSION", "SCHEMA_VERSION"]
+__all__ = ["FORMAT_VERSION", "IMPLEMENTATION_VERSION"]

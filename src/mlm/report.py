@@ -223,7 +223,7 @@ def _totals(group: str, counts: dict) -> str:
 так же поступает эталон. Но считать их отдельно нужно, иначе доля угаданного
 завышается — предсказать «неизвестно» легко.</p>
 <p>Замены на <code>[UNK]</code>, которые сделал сам маскер, здесь ни при чём:
-их он исключил из ошибки ещё на этапе 08, оставив метку −100.</p>"""
+их он исключил из ошибки ещё при розыгрыше маски, оставив метку −100.</p>"""
 
 
 def _technical(group, config, implementation, counts, paths) -> str:
@@ -245,9 +245,9 @@ def _technical(group, config, implementation, counts, paths) -> str:
 <td class="mono">{html.escape(counts['by_reason'])}</td></tr>
 <tr><td>результаты по целям</td><td><code>{html.escape(str(paths['targets']))}</code></td></tr>
 <tr><td>веса головы</td><td><code>{html.escape(str(paths['weights']))}</code></td></tr>
-<tr><td>вход: структура</td><td><code>{html.escape(str(paths['batches']))}</code></td></tr>
-<tr><td>вход: видимые значения и метки</td>
-<td><code>{html.escape(str(paths['masked']))}</code></td></tr>
+<tr><td>вход: набор (время и маска — при чтении)</td>
+<td><code>{html.escape(str(paths['samples']))}</code></td></tr>
+<tr><td>маска</td><td class="mono">{html.escape(str(paths['masking']))}</td></tr>
 </table>
 
 <p><b>Сквозной проход.</b> Векторы считаются моделью здесь и сейчас:

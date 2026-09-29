@@ -13,8 +13,8 @@ from pathlib import Path
 # КОНВЕЙЕР ОДНОЙ КОМАНДОЙ
 # ============================================================
 #
-#   python -m src.pipeline                          02 → 09 и init_backbone, все группы
-#   python -m src.pipeline --from encode --to batches --groups val
+#   python -m src.pipeline                          02 → 05, 09 и init_backbone, все группы
+#   python -m src.pipeline --from encode --to dataset --groups val
 #   python -m src.pipeline --args dataset="--config ctx.json"
 #
 # Цепочка этапов записана один раз, здесь. Каждый этап — та же
@@ -22,10 +22,11 @@ from pathlib import Path
 # между этапами возвращается системе, а поведение этапа не
 # отличается от ручного запуска.
 #
-# Строится только то, что читает обучение и оценка. Маска train
-# не строится — обучение разыгрывает её заново каждую эпоху; веса
-# входного слоя нужны только train — модель одна. Генерация (01)
-# и обучение (14) сюда не входят: это долгие запуски отдельной
+# Строится только то, что читает обучение и оценка. Промежуточное
+# после 04 и 05 на диске не хранится: временные позиции и маски
+# считаются при чтении набора (src.temporal.samples, src.masking).
+# Веса входного слоя нужны только train — модель одна. Генерация
+# (01) и обучение (14) сюда не входят: это долгие запуски отдельной
 # командой.
 # ============================================================
 
@@ -39,9 +40,6 @@ STAGES: tuple[tuple[str, tuple[str, ...], tuple[str, ...] | None], ...] = (
     ("fit", ("src.tokenization.run", "fit"), None),
     ("encode", ("src.tokenization.run", "encode", "{group}"), GROUPS),
     ("dataset", ("src.dataset.run", "{group}"), GROUPS),
-    ("temporal", ("src.temporal.run", "{group}"), GROUPS),
-    ("batches", ("src.batching.run", "{group}"), GROUPS),
-    ("masks", ("src.masking.run", "{group}"), ("val", "test")),
     ("embeddings", ("src.embedding.run", "train"), None),
     ("backbone", ("src.mlm.init_backbone",), None),
 )

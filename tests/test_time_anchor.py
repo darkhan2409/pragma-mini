@@ -15,18 +15,19 @@ from tests.test_profile_state import EARLY, QUIET_SNAPSHOT, RAW_CLIENT
 # ИДЕЯ
 # ============================================================
 #
-# Точка отсчёта времени событий — выбор этапа 06 (--anchor):
+# Точка отсчёта времени событий — выбор набора 05 (time_anchor):
 # cutoff T примера (по умолчанию) или последнее событие (прежний
-# отсчёт). Проверяется, что:
+# отсчёт). Позиции считает читатель набора. Проверяется, что:
 #
-#   - без выбора этап и его команда считают от cutoff;
+#   - без выбора набор записывает отсчёт от cutoff;
 #   - от cutoff позиция — ровно сжатая давность до T, и ноль у
 #     последнего события только тогда, когда оно в самом T;
 #   - одна и та же лента на более позднем T отличается ровно
 #     давностью — её модель при таком отсчёте видит;
 #   - усечение старой истории не двигает позиции оставшихся;
-#   - событие позже T и сломанный порядок останавливают этап;
-#   - выбор записан в meta.json 06, и вход на T берёт его оттуда.
+#   - событие позже T и сломанный порядок останавливают чтение;
+#   - выбор записан в meta.json набора, и вход на T и читатель
+#     обучения берут его оттуда; без записи оба отказывают.
 # ============================================================
 
 
@@ -108,28 +109,28 @@ def test_positions_growing_towards_the_end_are_refused():
 
 def test_by_default_time_is_counted_from_the_cutoff(stage):
 
+    from src.dataset.settings import META_FILE, DatasetConfig, dataset_dir
     from src.preprocessing.artifacts import read_json
-    from src.temporal.run import build_parser
-    from src.temporal.settings import META_FILE, temporal_dir
 
-    assert build_parser().parse_args(["train"]).anchor == "cutoff"
+    assert DatasetConfig.load(None).time_anchor == "cutoff"
 
     chain(stage, EARLY, QUIET_SNAPSHOT)
 
-    assert read_json(temporal_dir("train") / META_FILE) == {"time_anchor": "cutoff"}
+    assert read_json(dataset_dir("train") / META_FILE)["time_anchor"] == "cutoff"
 
 
 @pytest.mark.parametrize("anchor", ["last_event", "cutoff"])
 def test_the_stage_records_its_anchor_and_the_input_at_t_follows_it(stage, anchor: str):
 
+    from src.dataset.settings import META_FILE, dataset_dir
     from src.downstream.at_cutoff import ClientsAtCutoff
     from src.downstream.settings import cutoff
     from src.preprocessing.artifacts import read_json
-    from src.temporal.settings import META_FILE, temporal_dir
 
     chain(stage, EARLY, QUIET_SNAPSHOT, anchor)
 
-    assert read_json(temporal_dir("train") / META_FILE) == {"time_anchor": anchor}
+    for group in ("train", "val"):
+        assert read_json(dataset_dir(group) / META_FILE)["time_anchor"] == anchor
 
     moment = cutoff("val")
     client = ClientsAtCutoff("val", moment).client(RAW_CLIENT)
@@ -143,15 +144,25 @@ def test_the_stage_records_its_anchor_and_the_input_at_t_follows_it(stage, ancho
     assert client.event_time_log.tolist() == exact(ages)
 
 
-def test_the_input_at_t_refuses_data_without_a_recorded_anchor(stage):
+def test_the_input_refuses_data_without_a_recorded_anchor(stage):
 
+    from src.dataset.settings import META_FILE, dataset_dir
     from src.downstream.at_cutoff import ClientsAtCutoff, CutoffError
     from src.downstream.settings import cutoff
-    from src.temporal.settings import META_FILE, temporal_dir
+    from src.mlm.inputs import InputError, Source
+    from src.preprocessing.artifacts import read_json, write_json
 
     chain(stage, EARLY, QUIET_SNAPSHOT)
 
-    (temporal_dir("train") / META_FILE).unlink()
+    # Набор, собранный кодом до записи точки отсчёта.
+    for group in ("train", "val"):
+        path = dataset_dir(group) / META_FILE
+        meta = read_json(path)
+        del meta["time_anchor"]
+        write_json(path, meta)
 
     with pytest.raises(CutoffError, match="точка отсчёта"):
         ClientsAtCutoff("val", cutoff("val"))
+
+    with pytest.raises(InputError, match="точка отсчёта времени"):
+        Source("val")

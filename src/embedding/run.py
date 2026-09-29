@@ -18,8 +18,8 @@ from .settings import ConfigError, EmbeddingConfig
 #
 #   python -m src.embedding.run train|val|test
 #
-# Вход: data/07_batches/<group>/batches.parquet и
-# data/08_masked/<group>/masked.parquet, оба сразу.
+# Вход: data/05_dataset/<group>/samples.parquet; время и маска
+# считаются при чтении (src.embedding.inputs).
 # Выход: data/09_embeddings/<group>/ — веса слоя и отметка
 # происхождения. Векторы токенов считает модель в прямом проходе.
 #

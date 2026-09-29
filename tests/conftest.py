@@ -46,9 +46,6 @@ PLACES = (
     ("src.tokenization.finalvocab", "VOCAB_DIR", "03_vocab"),
     ("src.tokenization.settings", "TOKENIZED_DIR", "04_tokenized"),
     ("src.dataset.settings", "DATASET_DIR", "05_dataset"),
-    ("src.temporal.settings", "TEMPORAL_DIR", "06_temporal"),
-    ("src.batching.settings", "BATCHES_DIR", "07_batches"),
-    ("src.masking.settings", "MASKED_DIR", "08_masked"),
     ("src.embedding.settings", "EMBEDDINGS_DIR", "09_embeddings"),
     ("src.mlm.settings", "BACKBONE_DIR", "09_backbone"),
     ("src.event.settings", "EVENTS_DIR", "10_events"),
@@ -100,36 +97,6 @@ def data_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
     yield root
 
     patch.undo()
-
-
-@pytest.fixture(scope="session")
-def groups(data_root: Path) -> dict[str, list[world.Made]]:
-    """
-    Мир на диске: батчи, маски, веса этапа 09 для train и val и
-    backbone train.
-
-    Клиенты разложены по двум батчам, поэтому проверяется и
-    переход между группами строк, и нумерация batch_index.
-    """
-
-    from src.batching.settings import BATCHES_FILE, batches_dir
-    from src.masking.settings import MASKED_FILE, masked_dir
-
-    made: dict[str, list[world.Made]] = {}
-
-    for group, prefix in (("train", "t"), ("val", "v")):
-
-        people = world.population(prefix)
-
-        batches = [people[:3], people[3:]]
-
-        world.write_batches(batches_dir(group) / BATCHES_FILE, batches)
-        world.write_masked(masked_dir(group) / MASKED_FILE, batches)
-        world.write_weights(data_root, group)
-
-        made[group] = people
-
-    return made
 
 
 @pytest.fixture

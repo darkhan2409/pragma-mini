@@ -5,9 +5,9 @@
 
     python -m src.embedding.run train|val|test
 
-Вход — два файла рядом: data/07_batches/<group>/batches.parquet даёт
-ключи, номера кусков, анкету и маски, а data/08_masked/<group>/masked.parquet
-даёт видимые модели значения. Выход — веса общей таблицы
+Вход — data/05_dataset/<group>/samples.parquet: ключи, номера кусков
+и анкета; видимые модели значения разыгрывает маскер при чтении.
+Выход — веса общей таблицы
 data/09_embeddings/<group>/weights.pt и lineage.json.
 
 Вектор токена — сумма трёх слагаемых — считает модель сама, в

@@ -18,8 +18,8 @@ from .settings import ConfigError, EventConfig
 #
 #   python -m src.event.run train|val|test
 #
-# Вход: data/07_batches, data/08_masked и веса входного слоя из
-# data/09_embeddings.
+# Вход: data/05_dataset (маска и время — при чтении) и веса
+# входного слоя из data/09_embeddings.
 # Выход: data/10_events/<group>/ — вектор каждого настоящего
 # события и веса энкодера.
 #

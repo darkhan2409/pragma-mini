@@ -96,17 +96,17 @@ def test_a_source_travels_by_its_paths_not_by_the_settings(stage):
     source = Source("train", masking=every_value())
     packed = pickle.dumps(source)
 
-    import src.batching.settings as batching
+    import src.dataset.settings as dataset
 
-    original = batching.BATCHES_DIR
-    batching.BATCHES_DIR = stage / "elsewhere"
+    original = dataset.DATASET_DIR
+    dataset.DATASET_DIR = stage / "elsewhere"
 
     try:
         restored = pickle.loads(packed)
     finally:
-        batching.BATCHES_DIR = original
+        dataset.DATASET_DIR = original
 
-    assert restored.batches_path == source.batches_path
+    assert restored.directory == source.directory
     assert [client.client_id for client in restored.clients()] == [
         client.client_id for client in source.clients()
     ]

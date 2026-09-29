@@ -14,11 +14,11 @@ from .settings import MaskingConfig
 # Единственное место со случайностью. Словаря здесь нет вовсе:
 # отбор решает ЧТО прятать, а чем именно — решает подстановка.
 #
-# Допустимо только значение настоящего события, у которого стоит
-# target_event_mask. Заполнитель, [EVT], [USR], анкета, время и
-# календарь недопустимы по построению: разбор идёт лишь по окнам
-# событий, прошедших обе маски, и начинается со следующего после
-# маркера токена.
+# Допустимо только значение события, у которого стоит
+# target_event_mask. [EVT], [USR], анкета, время и календарь
+# недопустимы по построению: разбор идёт лишь по окнам таких
+# событий и начинается со следующего после маркера токена.
+# Заполнителя в строке нет: маскер читает пример как есть.
 #
 # Три механизма разыгрываются совместно, и сильнейшая причина
 # побеждает: event > key > value. Так устроен и референс,
@@ -49,6 +49,7 @@ _STREAM_EVENT = 1
 _STREAM_KEY = 2
 _STREAM_VALUE = 3
 _STREAM_UNKNOWN = 4
+_STREAM_CONTEXT = 5
 
 
 @dataclass(frozen=True)
@@ -69,15 +70,15 @@ class Selection:
     Что нашлось у клиента и что из этого выбрано.
 
     Допустимые события и значения возвращаются вместе с выбором,
-    чтобы отчёт не разбирал ту же строку второй раз. hidden —
-    значения вне периода целей, закрытые без метки
-    (key_hides_context).
+    чтобы отчёт не разбирал ту же строку второй раз. corrupted —
+    значения выбранного механизмом key ключа вне целей, испорченные
+    в [UNK] без метки (key_context_corruption_probability).
     """
 
     events: int
     values: list["Value"]
     choices: list["Choice"]
-    hidden: tuple["Value", ...] = ()
+    corrupted: tuple["Value", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -98,8 +99,8 @@ def values_of(row: dict, targets_only: bool = True) -> list[Value]:
     """
     Допустимые значения клиента, в порядке последовательности.
 
-    Событие допустимо, когда оно настоящее И лежит в периоде
-    целей своей группы (targets_only=False — любое настоящее).
+    Событие допустимо, когда оно лежит в периоде целей своей
+    группы (targets_only=False — любое событие).
     Внутри окна значение открывает positions == 0; нулевая позиция
     окна это маркер события, и разбор начинается сразу за ней.
     """
@@ -111,7 +112,7 @@ def values_of(row: dict, targets_only: bool = True) -> list[Value]:
 
     for event, start in enumerate(row["event_starts"]):
 
-        if not row["event_mask"][event] or (targets_only and not row["target_event_mask"][event]):
+        if targets_only and not row["target_event_mask"][event]:
             continue
 
         end = start + row["event_lengths"][event]
@@ -149,7 +150,7 @@ def choose(group: str, row: dict, config: MaskingConfig) -> Selection:
     eligible = [
         event
         for event in range(len(row["event_starts"]))
-        if row["event_mask"][event] and row["target_event_mask"][event]
+        if row["target_event_mask"][event]
     ]
 
     if not values:
@@ -204,20 +205,28 @@ def choose(group: str, row: dict, config: MaskingConfig) -> Selection:
             Choice(value, reason, unknown.chance(config.unknown_probability))
         )
 
-    # Выбранный ключ закрывается и в контексте вне периода целей.
-    # Случайности здесь нет: решение уже принято розыгрышем ключа,
-    # и маска целей от настройки не меняется ни на бит.
-    hidden: tuple[Value, ...] = ()
+    # Выбранный ключ портится и в контексте: каждое его значение вне
+    # целей уходит в [UNK] с вероятностью
+    # key_context_corruption_probability, без метки. Поток свой у
+    # каждой пары (клиент, ключ), и розыгрыш идёт по вхождениям ключа
+    # в порядке ленты: решение не зависит ни от порядка чтения, ни от
+    # других ключей, а цели и их розыгрыш не меняются ни на бит.
+    targets = set(eligible)
+    streams: dict[int, KeyedRandom] = {}
+    corrupted: list[Value] = []
 
-    if config.key_hides_context:
-        targets = set(eligible)
-        hidden = tuple(
-            value
-            for value in values_of(row, targets_only=False)
-            if value.event not in targets and chosen_keys.get(value.key_id, False)
-        )
+    for value in values_of(row, targets_only=False):
 
-    return Selection(len(eligible), values, picked, hidden)
+        if value.event in targets or not chosen_keys.get(value.key_id, False):
+            continue
+
+        if value.key_id not in streams:
+            streams[value.key_id] = KeyedRandom((config.seed, _STREAM_CONTEXT, client, value.key_id))
+
+        if streams[value.key_id].chance(config.key_context_corruption_probability):
+            corrupted.append(value)
+
+    return Selection(len(eligible), values, picked, tuple(corrupted))
 
 
 __all__ = [

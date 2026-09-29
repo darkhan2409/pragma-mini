@@ -240,6 +240,8 @@ def build_group(
         "window": window.as_dict(),
         # Какой отбор истории дал эти примеры и сколько он отнял.
         "context": config.context.as_dict(),
+        # От чего читатель набора считает время событий.
+        "time_anchor": config.time_anchor,
         "truncated_samples": counters.truncated,
         "excluded_events": counters.excluded_events,
         "samples": counters.samples,

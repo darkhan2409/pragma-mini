@@ -1,22 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Iterable, Iterator, NamedTuple
 
 import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
+import pyarrow.compute as pc
 from torch.utils.data import IterableDataset
 
-from src.dataset.lineage import lineage_problem
-from src.batching.build import BATCHES_SCHEMA
-from src.batching.settings import BATCHES_FILE, batches_dir
+from src.dataset.settings import dataset_dir
 from src.embedding.inputs import CALENDAR_PER_EVENT
 from src.masking.apply import apply
-from src.masking.build import MASKED_SCHEMA
 from src.masking.choose import choose
-from src.masking.settings import MASKED_FILE, MaskingConfig, masked_dir
+from src.masking.settings import MaskingConfig
+from src.temporal.position import TemporalError
+from src.temporal.samples import SamplesError, TemporalGroup
 from src.tokenization.specials import MASK, UNK, load_special_tokens
 
 
@@ -24,50 +21,45 @@ from src.tokenization.specials import MASK, UNK, load_special_tokens
 # ВХОД МОДЕЛИ
 # ============================================================
 #
-# Модель читает два файла и только их:
+# На диске у модели один вход — собранная группа:
 #
-#   data/07_batches  — ключи, номера кусков, границы событий,
-#       календарь, временные позиции и анкета;
-#   data/08_masked   — значения, которые модели РАЗРЕШЕНО видеть,
-#       и метки целей.
+#   data/05_dataset/<group>/samples.parquet
+#
+# Остальное считается при чтении, по строке клиента:
+#
+#   временные позиции  — src.temporal.samples.TemporalGroup, по точке
+#       отсчёта из meta.json набора;
+#   маска              — маскер (choose + apply) по конфигу masking:
+#       какие значения модели РАЗРЕШЕНО видеть и какие метки у целей.
+#
+# Розыгрыш маски ключуется seed, группой и клиентом, поэтому val и
+# test с одним конфигом получают одну и ту же маску при каждом
+# чтении, а train каждую эпоху свою (seed эпохи, src.mlm.train).
 #
 # Векторы этапов 10–12 сюда не приходят вовсе: там лежат снимки при
 # начальных весах, а модель обязана считать всё сама.
 #
-# value_ids_source не читается: исходное значение цели уже лежит
-# в labels, и второй его копии не нужно.
-#
-# Заполнитель наружу не выходит: каждый массив клиента обрезан по
-# его настоящей длине. Проход из нескольких клиентов (model.pack)
-# тоже плоский, без [PAD]: клиенты лежат подряд, границы — в
-# cu_seqlens.
+# Заполнителя нет нигде: пример клиента читается как есть. Проход из
+# нескольких клиентов (model.pack) тоже плоский: клиенты лежат
+# подряд, границы — в cu_seqlens.
 #
 # labels и reason в модель НЕ подаются. Первое уходит в потери,
 # второе в отчёт.
 #
-# Обучение train читает маску не из файла, а разыгрывает её на
-# лету тем же маскером этапа 08 (choose + apply) по
-# немаскированным value_ids из 07_batches: так каждая эпоха
-# получает свою маску. val, test и отчёт читают 08_masked.
-#
-# Группа строк 07_batches здесь — только единица хранения и
-# чтения. Сколько клиентов модель считает за один проход, решает
-# не она, а micro_batches: клиенты идут потоком и собираются по
-# бюджету позиций.
+# Группа строк набора здесь — только единица чтения. Сколько
+# клиентов модель считает за один проход, решает не она, а
+# micro_batches: клиенты идут потоком и собираются по бюджету
+# позиций.
 # ============================================================
 
 
-BATCH_COLUMNS = [
-    "batch_index",
+INPUT_COLUMNS = [
     "client_id",
-    "n_tokens",
-    "n_events",
-    "profile_n_tokens",
     "key_ids",
+    "value_ids",
     "positions",
     "event_starts",
     "event_lengths",
-    "event_mask",
     "target_event_mask",
     "calendar",
     "event_time_log",
@@ -77,8 +69,6 @@ BATCH_COLUMNS = [
     "profile_positions",
     "profile_time_log",
 ]
-
-MASKED_COLUMNS = ["batch_index", "client_id", "value_ids", "labels", "reason"]
 
 # Соглашение PyTorch: позиция вне loss.
 IGNORE = -100
@@ -96,6 +86,7 @@ class Client:
     Один клиент целиком, без единого заполнителя.
     """
 
+    # Номер группы строк набора, из которой прочитан клиент.
     batch_index: int
     client_id: str
 
@@ -154,27 +145,25 @@ class Size(NamedTuple):
 
 class Source:
     """
-    Пара файлов группы, открытая один раз.
+    Вход модели одной группы, открытый один раз.
 
-    masking задан — маска не читается из 08_masked, а
-    разыгрывается при чтении батча по этому конфигу. Одинаковый
-    конфиг даёт одинаковую маску.
+    masking — по какому конфигу разыгрывается маска; без него
+    MaskingConfig(). Одинаковый конфиг даёт одинаковую маску.
     """
 
     def __init__(self, group: str, masking: MaskingConfig | None = None):
 
         self.group = group
-        self.masking = masking
+        self.masking = masking if masking is not None else MaskingConfig()
 
-        self.batches_path = batches_dir(group) / BATCHES_FILE
-        self.masked_path = None if masking is not None else masked_dir(group) / MASKED_FILE
+        self.directory = dataset_dir(group)
 
         specials = load_special_tokens()
 
         self.mask_id = specials[MASK]
         self.unknown_id = specials[UNK]
 
-        self._open_files()
+        self._open()
 
         # Порядок групп строк прохода: по умолчанию — порядок файла.
         self.order = list(range(self.count))
@@ -189,74 +178,48 @@ class Source:
 
         self.order = np.random.default_rng(seed).permutation(self.count).tolist()
 
-    def _open_files(self) -> None:
+    def _open(self) -> None:
 
-        self._batches = _open(
-            self.batches_path, BATCHES_SCHEMA, f"python -m src.batching.run {self.group}"
-        )
-
-        if self.masking is not None:
-            return
-
-        self._masked = _open(
-            self.masked_path, MASKED_SCHEMA, f"python -m src.masking.run {self.group}"
-        )
-
-        if self._batches.num_row_groups != self._masked.num_row_groups:
-            raise InputError(
-                f"батчей {self._batches.num_row_groups}, а масок "
-                f"{self._masked.num_row_groups}: файлы собраны в разное время"
-            )
+        try:
+            self._samples = TemporalGroup(self.group, self.directory)
+        except SamplesError as error:
+            raise InputError(str(error)) from error
 
     # Источник переезжает в процесс подготовки данных (Prefetch)
-    # путями и номерами токенов, а не глобалами каталогов: новый
+    # путём и номерами токенов, а не глобалами каталогов: новый
     # процесс импортирует settings заново и о подменённых каталогах
-    # (тесты, --out) не знает. Файлы открываются там же заново.
+    # (тесты, --out) не знает. Файл открывается там же заново.
     def __getstate__(self) -> dict:
         return {
             name: getattr(self, name)
-            for name in (
-                "group", "masking", "batches_path", "masked_path", "mask_id", "unknown_id", "order",
-            )
+            for name in ("group", "masking", "directory", "mask_id", "unknown_id", "order")
         }
 
     def __setstate__(self, state: dict) -> None:
         self.__dict__.update(state)
-        self._open_files()
+        self._open()
 
     @property
     def count(self) -> int:
-        return self._batches.num_row_groups
+        return self._samples.count
 
     def batch(self, index: int) -> list[Client]:
         """
-        Клиенты одного батча, каждый обрезанный по своей длине.
+        Клиенты одной группы строк набора.
         """
 
         if index < 0 or index >= self.count:
             raise InputError(
-                f"батча {index} нет: в группе {self.count} батчей, "
+                f"группы строк {index} нет: в группе {self.group} их {self.count}, "
                 f"номера от 0 до {self.count - 1}"
             )
 
-        if self.masking is not None:
-            batch = self._batches.read_row_group(
-                index, columns=BATCH_COLUMNS + ["value_ids"]
-            ).to_pylist()
-            masked = [self._mask(index, row) for row in batch]
-        else:
-            batch = self._batches.read_row_group(index, columns=BATCH_COLUMNS).to_pylist()
-            masked = self._masked.read_row_group(index, columns=MASKED_COLUMNS).to_pylist()
+        try:
+            rows = self._samples.row_group(index, columns=INPUT_COLUMNS).to_pylist()
+        except TemporalError as error:
+            raise InputError(str(error)) from error
 
-        if len(batch) != len(masked):
-            raise InputError(
-                f"батч {index}: клиентов {len(batch)}, а строк масок {len(masked)}"
-            )
-
-        return [
-            self._client(index, row, here, there)
-            for row, (here, there) in enumerate(zip(batch, masked))
-        ]
+        return [self._client(index, row, self._mask(row)) for row in rows]
 
     def clients(self) -> Iterator[Client]:
         """
@@ -273,79 +236,58 @@ class Source:
         """
         Длины клиентов группы в порядке прохода (order).
 
-        Читаются только три целых колонки 07_batches, без масок:
+        Читаются только три колонки-списка, без времени и масок:
         маскирование значения заменяет, а длины не меняет. Так
         число micro-batch'ей эпохи известно до обучения.
         """
 
-        columns = ["n_tokens", "profile_n_tokens", "n_events"]
+        columns = ["key_ids", "profile_key_ids", "event_starts"]
 
         for index in self.order:
 
-            table = self._batches.read_row_group(index, columns=columns).to_pydict()
+            table = self._samples.row_group(index, columns=columns)
 
-            for tokens, profile, events in zip(*(table[name] for name in columns)):
+            lengths = [pc.list_value_length(table.column(name)).to_pylist() for name in columns]
+
+            for tokens, profile, events in zip(*lengths):
                 yield Size(int(tokens), int(profile), int(events))
 
-    def _mask(self, index: int, row: dict) -> dict:
+    def _mask(self, row: dict) -> dict:
         """
-        Строка масок, разыгранная тем же маскером, что и этап 08.
+        Маска клиента, разыгранная при чтении.
         """
 
         selection = choose(self.group, row, self.masking)
 
-        masked = apply(
+        return apply(
             row["client_id"], row, selection.choices, self.mask_id, self.unknown_id,
-            selection.hidden,
+            selection.corrupted,
         )
-        masked["batch_index"] = index
 
-        return masked
-
-    def _client(self, index: int, row: int, batch: dict, masked: dict) -> Client:
-
-        if batch["client_id"] != masked["client_id"]:
-            raise InputError(
-                f"батч {index}, строка {row}: в батчах клиент {batch['client_id']}, "
-                f"а в масках {masked['client_id']}"
-            )
-
-        for name, value in (("batch_index батчей", batch["batch_index"]),
-                            ("batch_index масок", masked["batch_index"])):
-            if value != index:
-                raise InputError(f"батч {index}, строка {row}: {name} равен {value}")
-
-        n_tokens = int(batch["n_tokens"])
-        n_events = int(batch["n_events"])
-        profile_tokens = int(batch["profile_n_tokens"])
+    def _client(self, index: int, row: dict, masked: dict) -> Client:
 
         client = Client(
             batch_index=index,
-            client_id=batch["client_id"],
-            key_ids=_ints(batch["key_ids"][:n_tokens]),
-            value_ids=_ints(masked["value_ids"][:n_tokens]),
-            positions=_ints(batch["positions"][:n_tokens]),
-            labels=_ints(masked["labels"][:n_tokens]),
-            reason=list(masked["reason"][:n_tokens]),
-            event_starts=_ints(batch["event_starts"][:n_events]),
-            event_lengths=_ints(batch["event_lengths"][:n_events]),
-            event_time_log=np.asarray(
-                batch["event_time_log"][:n_events], dtype=np.float32
-            ),
-            calendar=np.asarray(batch["calendar"], dtype=np.float32).reshape(
+            client_id=row["client_id"],
+            key_ids=_ints(row["key_ids"]),
+            value_ids=_ints(masked["value_ids"]),
+            positions=_ints(row["positions"]),
+            labels=_ints(masked["labels"]),
+            reason=list(masked["reason"]),
+            event_starts=_ints(row["event_starts"]),
+            event_lengths=_ints(row["event_lengths"]),
+            event_time_log=np.asarray(row["event_time_log"], dtype=np.float32),
+            calendar=np.asarray(row["calendar"], dtype=np.float32).reshape(
                 -1, CALENDAR_PER_EVENT
-            )[:n_events],
-            event_time=list(batch["event_time"][:n_events]),
-            profile_key_ids=_ints(batch["profile_key_ids"][:profile_tokens]),
-            profile_value_ids=_ints(batch["profile_value_ids"][:profile_tokens]),
-            profile_positions=_ints(batch["profile_positions"][:profile_tokens]),
-            profile_time_log=np.asarray(
-                batch["profile_time_log"][:profile_tokens], dtype=np.float32
             ),
+            event_time=list(row["event_time"]),
+            profile_key_ids=_ints(row["profile_key_ids"]),
+            profile_value_ids=_ints(row["profile_value_ids"]),
+            profile_positions=_ints(row["profile_positions"]),
+            profile_time_log=np.asarray(row["profile_time_log"], dtype=np.float32),
         )
 
-        _check(client, _bools(batch["event_mask"][:n_events]),
-               _bools(batch["target_event_mask"][:n_events]), self.mask_id)
+        _check(client, _bools(row["target_event_mask"]), self.mask_id)
 
         return client
 
@@ -398,7 +340,8 @@ class Prefetch:
     Клиенты источника, подготовленные заранее в workers отдельных
     процессах; workers=0 — в этом же процессе.
 
-    Без неё группа строк (32 клиента) читалась и маскировалась на
+    Без неё группа строк (32 клиента) читалась, считала время и
+    маскировалась на
     Python в главном потоке, пока GPU стоял: около трети эпохи. В
     отдельном процессе подготовка следующих групп идёт, пока модель
     считает текущие, и GIL обучения она не занимает.
@@ -471,45 +414,15 @@ def _as_is(batch):
     return batch
 
 
-def _open(path: Path, schema: pa.Schema, command: str) -> pq.ParquetFile:
-    """
-    Файл этапа по стандартному пути, со сверкой схемы.
-    """
-
-    if not path.exists():
-        raise InputError(f"нет {path}: выполните {command}")
-
-    handle = pq.ParquetFile(path)
-
-    if not handle.schema_arrow.equals(schema, check_metadata=False):
-        raise InputError(f"{path} собран другой схемой: выполните {command} заново")
-
-    # Схема от смысла анкеты не зависит: происхождение каталога
-    # сверяется отдельно.
-    problem = lineage_problem(path.parent, command)
-
-    if problem is not None:
-        raise InputError(problem)
-
-    return handle
-
-
-def _check(client: Client, event_mask: np.ndarray, target_mask: np.ndarray,
-           mask_id: int) -> None:
+def _check(client: Client, target_mask: np.ndarray, mask_id: int) -> None:
     """
     Инварианты целей.
 
     Проверяется то, на чём стоит весь этап: цель обязана быть
-    настоящим токеном настоящего допустимого события, и на входе
+    токеном допустимого события, и на входе
     вместо неё обязан стоять [MASK]. Иначе модель училась бы
     предсказывать то, что и так видит.
     """
-
-    if not bool(event_mask.all()):
-        raise InputError(
-            f"{client.client_id}: среди первых {client.n_events} событий есть "
-            "заполнитель — маска событий не совпадает с n_events"
-        )
 
     where = np.nonzero(client.labels != IGNORE)[0]
 
@@ -546,9 +459,8 @@ def _bools(values) -> np.ndarray:
 
 
 __all__ = [
-    "BATCH_COLUMNS",
     "IGNORE",
-    "MASKED_COLUMNS",
+    "INPUT_COLUMNS",
     "Prefetch",
     "Client",
     "InputError",

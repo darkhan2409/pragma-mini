@@ -197,8 +197,8 @@ def build_group(
             paths={
                 "targets": targets_path,
                 "weights": weights_path,
-                "batches": source.batches_path,
-                "masked": source.masked_path,
+                "samples": source.directory,
+                "masking": source.masking.as_dict(),
             },
         ),
     )

@@ -24,9 +24,10 @@ from .choose import Choice, NONE, Value
 # key_ids сюда не приходят вовсе, поэтому изменить их нельзя:
 # ключ виден, предсказывается значение.
 #
-# hidden — значения контекста вне периода целей, закрытые ради
-# ключа (key_hides_context): [MASK] во все куски, но labels -100 и
-# без причины — это вход, а не задача.
+# corrupted — значения выбранного механизмом key ключа вне целей,
+# испорченные ради ключа (key_context_corruption_probability):
+# [UNK] во все куски, labels -100 и без причины — это вход, а не
+# задача.
 #
 # Длина последовательности не меняется: ни один токен не
 # добавляется и не выбрасывается.
@@ -45,9 +46,9 @@ class MaskError(ValueError):
 
 
 def apply(client_id: str, row: dict, choices: list[Choice], mask: int,
-          unknown: int, hidden: tuple[Value, ...] = ()) -> dict:
+          unknown: int, corrupted: tuple[Value, ...] = ()) -> dict:
     """
-    Четыре массива по ширине строки батча.
+    Четыре массива по длине строки клиента.
     """
 
     source = list(row["value_ids"])
@@ -61,7 +62,7 @@ def apply(client_id: str, row: dict, choices: list[Choice], mask: int,
     # причина не пишутся, и по ним наложение было бы не видно.
     taken = [False] * width
 
-    closed = [(choice.value, choice) for choice in choices] + [(value, None) for value in hidden]
+    closed = [(choice.value, choice) for choice in choices] + [(value, None) for value in corrupted]
 
     for value, choice in closed:
 
@@ -80,8 +81,9 @@ def apply(client_id: str, row: dict, choices: list[Choice], mask: int,
 
             taken[index] = True
 
+            # Испорченный контекст выбранного ключа: вход, не цель.
             if choice is None:
-                value_ids[index] = mask
+                value_ids[index] = unknown
                 continue
 
             if choice.unknown:

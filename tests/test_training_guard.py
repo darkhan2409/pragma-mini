@@ -196,7 +196,7 @@ def test_weights_of_an_epoch_load_back_into_the_same_model(stage):
 
     assert not model.training
 
-    scores = validate(model, Source("val"), CPU, config.token_budget)
+    scores = validate(model, Source("val", masking=every_value()), CPU, config.token_budget)
 
     assert scores.loss == pytest.approx(state["history"][0]["val"]["loss"], rel=1e-6)
     assert scores.detail == state["history"][0]["val_detail"]
@@ -281,7 +281,7 @@ def test_resume_refuses_changed_data(stage):
     with pytest.raises(CheckpointError, match="данные изменились") as error:
         train(config, epochs=2, max_steps=None, masking=masking, resume=True)
 
-    assert "08_masked/val" in str(error.value)
+    assert "05_dataset/val" in str(error.value)
     assert checkpoint_path().read_bytes() == paused
 
 
@@ -338,11 +338,11 @@ def test_loading_refuses_a_model_of_another_vocabulary(stage):
 
 def test_vectors_are_taken_only_on_the_data_the_model_learned(stage):
     """
-    Вход на T строится из текущих данных. После пересборки 07 под
-    другой эксперимент прежняя модель векторов не даёт.
+    Вход на T строится из текущих данных. После пересборки набора
+    под другой эксперимент прежняя модель векторов не даёт.
     """
 
-    from src.batching.settings import BATCHES_FILE, batches_dir
+    from src.dataset.settings import SAMPLES_FILE, dataset_dir
     from src.downstream.embed import trained_model
 
     settle(stage, train_people=many())
@@ -351,7 +351,7 @@ def test_vectors_are_taken_only_on_the_data_the_model_learned(stage):
 
     trained_model(str(checkpoint_path()), CPU)
 
-    path = batches_dir("train") / BATCHES_FILE
+    path = dataset_dir("train") / SAMPLES_FILE
     path.write_bytes(path.read_bytes() + b"\0")
 
     with pytest.raises(CheckpointError, match="не на текущем"):
@@ -405,14 +405,14 @@ def test_validation_detail_is_the_unsmoothed_loss_split_by_target(stage):
     model = fresh(stage, config)
     model.eval()
 
-    scores = validate(model, Source("val"), CPU, config.token_budget)
+    scores = validate(model, Source("val", masking=every_value()), CPU, config.token_budget)
 
     detail = scores.detail
 
     by_hand, count, first = 0.0, 0, 0
 
     with torch.no_grad():
-        for clients in micro_batches(Source("val").clients(), config.token_budget):
+        for clients in micro_batches(Source("val", masking=every_value()).clients(), config.token_budget):
             out = model(pack(clients, CPU))
             if out.count:
                 by_hand += float(F.cross_entropy(out.logits, out.targets, reduction="sum"))

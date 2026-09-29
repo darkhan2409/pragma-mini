@@ -38,8 +38,9 @@ from .settings import (
 #   python -m src.mlm.train [--epochs N] [--max-steps N] [--config путь]
 #                           [--masking-config путь] [--out каталог] [--resume]
 #
-# Вход: data/07_batches/train, для validation data/07_batches/val
-# и data/08_masked/val; начальные веса — входной слой
+# Вход: data/05_dataset/train и для validation data/05_dataset/val
+# (время и маска считаются при чтении, src.mlm.inputs); начальные
+# веса — входной слой
 # data/09_embeddings/train и backbone data/09_backbone (python -m
 # src.mlm.init_backbone). Этапы 10–13 не нужны: это диагностика.
 # Выход — каталог прогона, по умолчанию data/14_train (--out задаёт
@@ -63,15 +64,15 @@ from .settings import (
 # идёт только через FlashAttention под bf16 autocast: auto здесь
 # значит «строго flash», SDPA — только явным attention_backend=sdpa.
 #
-# Маска train НЕ читается из data/08_masked/train: каждая эпоха
-# разыгрывает её заново тем же маскером этапа 08 по
-# немаскированным value_ids батчей. Seed эпохи выводится из seed
-# маскирования и номера эпохи, поэтому одна и та же эпоха даёт
-# одну и ту же маску, а соседние эпохи — разные.
+# Маска разыгрывается при чтении (src.masking: choose + apply) по
+# --masking-config. У train seed эпохи выводится из seed
+# маскирования и номера эпохи, поэтому одна и та же эпоха даёт одну
+# и ту же маску, а соседние эпохи — разные. У val seed тот же, что в
+# конфиге, и маска одна на все эпохи.
 #
 # Клиенты идут потоком и собираются в micro-batch по бюджету
-# позиций (inputs.micro_batches, token_budget). Группа строк
-# 07_batches — только хранение, а не батч модели. micro-batch
+# позиций (inputs.micro_batches, token_budget). Группа строк набора
+# — только единица чтения, а не батч модели. micro-batch
 # собирается model.pack в плоские массивы без заполнителя.
 #
 #   micro-batch -> ОДИН проход: InputEmbedding -> Event -> Profile
@@ -97,7 +98,7 @@ from .settings import (
 # вызывается без no_grad.
 #
 # После каждой полностью пройденной эпохи та же модель считает
-# потери на val: фиксированная маска data/08_masked/val, eval и
+# потери на val: фиксированная маска val (seed конфига), eval и
 # no_grad, те же micro-batch'и, без backward и шага. Среднее — по
 # всем целям val. По нему обновляется лучший чекпойнт и считается
 # early stopping.
@@ -529,24 +530,41 @@ def file_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
-def data_record() -> dict:
+def data_record(groups: tuple[str, ...] = ("train", "val")) -> dict:
     """
-    Отпечаток данных обучения: sha256 трёх файлов, которые оно читает.
+    Отпечаток данных обучения: sha256 наборов групп и точка отсчёта
+    их времени. Маска val задана конфигом маскирования, а он лежит в
+    чекпойнте сам.
 
     Имя — каталог этапа и группа, а не путь: каталог data/ у тестов
     и у настоящего обучения разный.
     """
 
-    from src.batching.settings import BATCHES_FILE, batches_dir
-    from src.masking.settings import MASKED_FILE, masked_dir
+    from src.dataset.settings import META_FILE, SAMPLES_FILE, dataset_dir
+    from src.preprocessing.artifacts import read_json
 
-    files = {
-        "07_batches/train": batches_dir("train") / BATCHES_FILE,
-        "07_batches/val": batches_dir("val") / BATCHES_FILE,
-        "08_masked/val": masked_dir("val") / MASKED_FILE,
-    }
+    from .inputs import InputError
 
-    return {name: file_digest(path) for name, path in files.items()}
+    record = {}
+
+    for group in groups:
+
+        record[f"05_dataset/{group}"] = file_digest(dataset_dir(group) / SAMPLES_FILE)
+
+        # Время считается при чтении, и от точки отсчёта вход
+        # зависит не меньше, чем от самих примеров.
+        record[f"05_dataset/{group}/time_anchor"] = read_json(
+            dataset_dir(group) / META_FILE
+        ).get("time_anchor")
+
+    anchors = {group: record[f"05_dataset/{group}/time_anchor"] for group in groups}
+
+    if len(set(anchors.values())) > 1:
+        raise InputError(
+            f"время наборов считается от разных точек {anchors}: соберите их с одним time_anchor"
+        )
+
+    return record
 
 
 def backbone_record() -> dict:
@@ -1093,9 +1111,9 @@ def train(
 
     optimizer.zero_grad(set_to_none=True)
 
-    # val с фиксированной маской из 08_masked: открывается сразу,
-    # чтобы нехватка файлов стала видна до первого шага.
-    val_source = Source("val")
+    # val с фиксированной маской конфига: открывается сразу, чтобы
+    # нехватка набора стала видна до первого шага.
+    val_source = Source("val", masking=masking)
 
     # Происхождение прогона. Считается до первой записи: продолжение
     # на другом backbone или других данных отказывает, не тронув ни
@@ -1556,7 +1574,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--masking-config", type=Path, default=None,
-        help="JSON конфига маскирования, тот же, что у python -m src.masking.run",
+        help="JSON конфига маскирования: по нему разыгрываются маски train и val",
     )
     parser.add_argument(
         "--out", type=Path, default=None,
