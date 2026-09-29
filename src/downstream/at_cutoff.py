@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from typing import Iterator
 
 import numpy as np
+import torch
+from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 from src.dataset.sample import build_sample
 from src.dataset.settings import META_FILE, DatasetConfig, dataset_dir
@@ -14,6 +16,7 @@ from src.preprocessing.read import Group
 from src.preprocessing.settings import GroupWindow, PreprocessingConfig
 from src.temporal.position import profile_time_log, time_log
 from src.tokenization.encode import encode_event, encode_profile
+from src.tokenization import finalvocab
 from src.tokenization.finalvocab import FrozenArtifacts
 from src.tokenization.settings import TokenizerConfig
 
@@ -102,6 +105,36 @@ class ClientsAtCutoff:
             )
 
         self._source = Group(group)
+        self._event_type_key = self.artifacts.key_id(EVENT_TYPE_KEY)
+
+        # Где лежит словарь: процесс подготовки получает путь, а не
+        # глобал каталога.
+        self._vocab_dir = finalvocab.VOCAB_DIR
+
+    # Сборщик едет в процесс подготовки (embed) своими путями и уже
+    # проверенным отбором истории: новый процесс импортирует settings
+    # заново и о подменённых каталогах не знает.
+    def __getstate__(self) -> dict:
+        return {
+            "group": self.group,
+            "window": self.window,
+            "cutoff": self.cutoff,
+            "limit": self.limit,
+            "policy": self.policy,
+            "vocab_dir": self._vocab_dir,
+            "events_dir": self._source.directory,
+            "profile_path": self._source.profile_path,
+        }
+
+    def __setstate__(self, state: dict) -> None:
+        self.group = state["group"]
+        self.window = state["window"]
+        self.cutoff = state["cutoff"]
+        self.limit = state["limit"]
+        self.policy = state["policy"]
+        self._vocab_dir = state["vocab_dir"]
+        self.artifacts = FrozenArtifacts.load(self._vocab_dir)
+        self._source = Group(self.group, state["events_dir"], state["profile_path"])
         self._event_type_key = self.artifacts.key_id(EVENT_TYPE_KEY)
 
     @property
@@ -194,4 +227,54 @@ class ClientsAtCutoff:
             yield self.client(client_id)
 
 
-__all__ = ["ClientsAtCutoff", "CutoffError", "window_at"]
+# Клиентов в одной порции процесса сборки.
+CHUNK = 64
+
+
+class _Chunks(IterableDataset):
+    """
+    Порции клиентов сборщика: процесс i берёт порции i, i + n, ….
+    """
+
+    def __init__(self, builder: ClientsAtCutoff, chunks: list[list[str]]):
+        self.builder = builder
+        self.chunks = chunks
+
+    def __iter__(self) -> Iterator[list[Client]]:
+
+        info = get_worker_info()
+
+        first, step = (info.id, info.num_workers) if info is not None else (0, 1)
+
+        for index in range(first, len(self.chunks), step):
+            yield [self.builder.client(client_id) for client_id in self.chunks[index]]
+
+
+def clients_at(builder: ClientsAtCutoff, workers: int) -> Iterator[Client]:
+    """
+    Клиенты сборщика в порядке client_ids; workers процессов собирают
+    порции впрок, 0 — в этом процессе. DataLoader отдаёт порции по
+    кругу, поэтому порядок тот же, что у builder.clients().
+    """
+
+    if workers == 0:
+        yield from builder.clients()
+        return
+
+    ids = builder.client_ids
+    chunks = [ids[start:start + CHUNK] for start in range(0, len(ids), CHUNK)]
+
+    loader = DataLoader(
+        _Chunks(builder, chunks), batch_size=None, num_workers=workers, prefetch_factor=2,
+        collate_fn=_as_is, generator=torch.Generator(),
+    )
+
+    for chunk in loader:
+        yield from chunk
+
+
+def _as_is(batch):
+    return batch
+
+
+__all__ = ["CHUNK", "ClientsAtCutoff", "CutoffError", "clients_at", "window_at"]

@@ -343,6 +343,45 @@ def load_backbone(saved: dict) -> tuple[EventEncoder, ProfileEncoder, HistoryEnc
     return built[0], built[1], built[2]
 
 
+def recorded_backbone(saved: dict, record: dict) -> tuple[EventEncoder, ProfileEncoder, HistoryEncoder]:
+    """
+    Энкодеры по архитектуре, записанной в чекпойнте (его lineage
+    backbone), а не по текущему data/09_backbone.
+
+    Начальные веса здесь не важны — их заменит state_dict обученной
+    модели, — поэтому чекпойнт другой архитектуры (другие глубины,
+    головы, dropout) загружается, даже если 09_backbone с тех пор
+    пересобран под другой эксперимент. Совпасть с текущими обязаны
+    данные и код: формат, lineage набора, словарь, входной слой и
+    версии кода энкодеров — иначе веса легли бы на другие входы.
+    """
+
+    expected = stamp(saved)
+
+    differ = sorted(key for key, value in expected.items() if record.get(key) != value)
+
+    if differ:
+        raise BackboneError(
+            f"модель обучена на других {', '.join(differ)}: входы и код с тех пор изменились"
+        )
+
+    dim = int(saved["dim"])
+
+    built = []
+
+    for name, kind, initial in (
+        ("event", EventConfig, initial_event),
+        ("profile", ProfileConfig, initial_profile),
+        ("history", HistoryConfig, initial_history),
+    ):
+        try:
+            built.append(initial(kind.from_dict(record["encoders"][name]["config"]), dim))
+        except (KeyError, ValueError) as error:
+            raise BackboneError(f"в записи backbone нет конфига энкодера {name}: {error}") from error
+
+    return built[0], built[1], built[2]
+
+
 def _clear(directory: Path) -> None:
     """
     Каталог держит только свои файлы: прежний результат стирается.
@@ -369,5 +408,6 @@ __all__ = [
     "read_embedding",
     "stamp",
     "state_digest",
+    "recorded_backbone",
     "vocabulary_digest",
 ]

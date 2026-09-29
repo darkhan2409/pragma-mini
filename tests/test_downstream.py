@@ -306,3 +306,25 @@ def test_paired_bootstrap_is_zero_for_the_same_scores_and_positive_for_a_better_
 
     assert better["roc_auc"]["low"] > 0.0
     assert better["pr_auc"]["not_better"] == 0.0
+
+
+def test_input_built_in_processes_is_the_same_and_in_order(stage):
+    """
+    Сборка входа на T в двух процессах: те же клиенты, в том же
+    порядке, побитно. Процессы получают сборщик путями, а не
+    глобалами, поэтому читают этот же тестовый каталог.
+    """
+
+    from src.downstream.at_cutoff import ClientsAtCutoff, clients_at
+
+    chain(stage, EARLY, QUIET_SNAPSHOT)
+
+    builder = ClientsAtCutoff("val", cutoff("val"))
+
+    alone = list(clients_at(builder, 0))
+    together = list(clients_at(builder, 2))
+
+    assert [client.client_id for client in alone] == [client.client_id for client in together]
+
+    for left, right in zip(alone, together):
+        same(left, right)

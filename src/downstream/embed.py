@@ -40,6 +40,10 @@ READOUTS = ("usr", "profile", "mean_event", "last_event")
 
 GROUPS = ("train", "val", "test")
 
+# Процессов сборки входа по умолчанию: сборка идёт на CPU, по
+# клиенту, и в одном процессе train занимал около 25 минут.
+WORKERS = 3
+
 
 def schema() -> pa.Schema:
     return pa.schema(
@@ -81,7 +85,9 @@ def trained_model(checkpoint: str, device):
     return model, config, {"checkpoint": str(checkpoint), "epoch": int(state["epoch"])}
 
 
-def embed_group(model, group: str, moment: datetime, device, token_budget: int) -> tuple[pa.Table, dict]:
+def embed_group(
+    model, group: str, moment: datetime, device, token_budget: int, workers: int = WORKERS
+) -> tuple[pa.Table, dict]:
     """
     Векторы всех клиентов группы с событиями до момента.
     """
@@ -92,7 +98,7 @@ def embed_group(model, group: str, moment: datetime, device, token_budget: int) 
     from src.mlm.model import pack
     from src.mlm.varlen import autocast
 
-    from .at_cutoff import ClientsAtCutoff
+    from .at_cutoff import ClientsAtCutoff, clients_at
 
     builder = ClientsAtCutoff(group, moment)
 
@@ -100,7 +106,7 @@ def embed_group(model, group: str, moment: datetime, device, token_budget: int) 
 
     def with_events():
         nonlocal skipped
-        for client in builder.clients():
+        for client in clients_at(builder, workers):
             if client.n_events:
                 yield client
             else:
@@ -167,7 +173,7 @@ def run(args) -> int:
 
     for group in args.groups:
 
-        table, counts = embed_group(model, group, cutoff(group), device, config.token_budget)
+        table, counts = embed_group(model, group, cutoff(group), device, config.token_budget, args.workers)
 
         pq.write_table(table, directory / f"{group}.parquet", compression="zstd")
 
@@ -195,6 +201,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--groups", nargs="+", choices=GROUPS, default=list(GROUPS))
     parser.add_argument("--tag", default=None, help="имя каталога векторов (по умолчанию имя файла)")
+    parser.add_argument(
+        "--workers", type=int, default=WORKERS, help="процессов сборки входа на T; 0 — в этом процессе"
+    )
     parser.set_defaults(handler=run)
 
     return parser

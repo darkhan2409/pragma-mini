@@ -595,9 +595,12 @@ def load_trained(path: Path, device, attention_backend: str | None = None):
     Обученная модель в режиме eval и её чекпойнт — из checkpoint.pt,
     best_checkpoint.pt или весов эпохи.
 
-    Архитектура энкодеров берётся из data/09_backbone, поэтому он
-    обязан совпасть с тем, на котором модель училась: другое число
-    голов или rope_base загрузились бы в те же тензоры молча.
+    Архитектура энкодеров берётся из самого чекпойнта (его lineage
+    backbone), а не из текущего data/09_backbone: иначе другое число
+    голов или rope_base загрузились бы в те же тензоры молча, а
+    модель другой архитектуры не загрузилась бы вовсе после
+    пересборки 09_backbone под следующий эксперимент. Данные, словарь
+    и входной слой обязаны совпасть с текущими (recorded_backbone).
     attention_backend=None — бэкенд из конфига обучения.
     """
 
@@ -617,20 +620,21 @@ def load_trained(path: Path, device, attention_backend: str | None = None):
             f"{path}: нет полей {missing} — это не чекпойнт обученной модели или его формат старый"
         )
 
-    problems = origin_problems(state, backbone_record(), None)
-
-    if problems:
-        raise CheckpointError(f"{path}: {'; '.join(problems)}")
+    from .backbone import BackboneError
 
     config = MlmConfig.from_dict(state["config"])
 
-    model = load_model(
-        seed=config.seed,
-        events_per_chunk=config.events_per_chunk,
-        label_smoothing=config.label_smoothing,
-        device=device,
-        attention_backend=attention_backend or config.attention_backend,
-    )
+    try:
+        model = load_model(
+            seed=config.seed,
+            events_per_chunk=config.events_per_chunk,
+            label_smoothing=config.label_smoothing,
+            device=device,
+            attention_backend=attention_backend or config.attention_backend,
+            backbone=state["backbone"],
+        )
+    except BackboneError as error:
+        raise CheckpointError(f"{path}: {error}") from error
 
     model.load_state_dict(state["model_state_dict"])
 

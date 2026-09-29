@@ -16,7 +16,7 @@ from src.history.encoder import HistoryEncoder
 from src.profile.encoder import ProfileEncoder
 from src.tokenization.specials import EVT, USR, load_special_tokens
 
-from .backbone import load_backbone, read_embedding
+from .backbone import load_backbone, read_embedding, recorded_backbone
 from .inputs import IGNORE, Client
 from .varlen import (
     BackendError,
@@ -826,10 +826,15 @@ def load_model(
     label_smoothing: float,
     device: torch.device,
     attention_backend: str = "auto",
+    backbone: dict | None = None,
 ) -> Model:
     """
     Модель: входной слой этапа 09 (train), начальные веса backbone
     (python -m src.mlm.init_backbone) и свежая голова.
+
+    backbone — lineage backbone из чекпойнта обученной модели:
+    энкодеры тогда строятся по записанной в нём архитектуре
+    (recorded_backbone), а их веса придут из state_dict.
 
     Модель одна: обучение, validation и отчёты по любой группе
     собирают её из одних и тех же весов. Ни одна размерность не
@@ -850,7 +855,9 @@ def load_model(
     )
     embedding.load_state_dict(saved["state_dict"])
 
-    event, profile, history = load_backbone(saved)
+    event, profile, history = (
+        load_backbone(saved) if backbone is None else recorded_backbone(saved, backbone)
+    )
 
     model = Model(
         embedding=embedding,

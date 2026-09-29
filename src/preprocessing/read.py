@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -148,11 +149,16 @@ class Group:
 
     PROFILE_FILE = "profile.parquet"
 
-    def __init__(self, group: str):
+    def __init__(self, group: str, directory: Path | None = None, profile_path: Path | None = None):
 
+        # Явные пути — для процесса, который не видит подменённых
+        # глобалов каталогов (at_cutoff в процессах подготовки).
         self.group = group
-        self.directory = group_dir(group)
-        self.profile_path = raw_group_dir(group) / Group.PROFILE_FILE
+        self.directory = Path(directory) if directory is not None else group_dir(group)
+        self.profile_path = (
+            Path(profile_path) if profile_path is not None
+            else raw_group_dir(group) / Group.PROFILE_FILE
+        )
 
         # Пояс банка нужен ровно для календаря: event_time
         # остаётся в UTC и в UTC же сравнивается с cutoff.

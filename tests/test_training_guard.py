@@ -285,11 +285,14 @@ def test_resume_refuses_changed_data(stage):
     assert checkpoint_path().read_bytes() == paused
 
 
-def test_resume_and_loading_refuse_a_rebuilt_backbone(stage):
+def test_resume_refuses_a_rebuilt_backbone_but_loading_keeps_the_trained_architecture(stage):
     """
     backbone пересобран с другим dropout: те же формы тензоров,
-    другая модель. И продолжение, и загрузка обученных весов
-    обязаны отказать, а не молча подставить новую архитектуру.
+    другая модель. Продолжение обучения обязано отказать: оно
+    продолжило бы другой прогон. Загрузка обученной модели — нет: она
+    строит архитектуру, записанную в чекпойнте, и считает ровно то
+    же, что до пересборки, — иначе после init_backbone под следующий
+    эксперимент прошлые модели стали бы незагружаемыми.
     """
 
     settle(stage, train_people=many())
@@ -299,13 +302,38 @@ def test_resume_and_loading_refuse_a_rebuilt_backbone(stage):
     train(config, epochs=2, max_steps=3, masking=masking)
     train(config, epochs=1, max_steps=None, masking=masking, directory=stage / "done")
 
+    before, _ = load_trained(best_checkpoint_path(stage / "done"), CPU)
+    before_scores = validate(before, Source("val"), CPU, config.token_budget)
+
     settle(stage, train_people=many(), dropout=0.2)
 
     with pytest.raises(CheckpointError, match="09_backbone"):
         train(config, epochs=2, max_steps=None, masking=masking, resume=True)
 
-    with pytest.raises(CheckpointError, match="09_backbone"):
-        load_trained(best_checkpoint_path(stage / "done"), CPU)
+    after, state = load_trained(best_checkpoint_path(stage / "done"), CPU)
+
+    assert state["backbone"]["encoders"]["history"]["config"]["dropout"] == 0.0
+    assert validate(after, Source("val"), CPU, config.token_budget).loss == before_scores.loss
+
+
+def test_loading_refuses_a_model_of_another_vocabulary(stage):
+    """
+    Архитектура берётся из чекпойнта, но словарь и входной слой —
+    текущие: модель, обученная под другой словарь, не загружается.
+    """
+
+    settle(stage, train_people=many())
+
+    train(tiny(token_budget=6), epochs=1, max_steps=None, masking=every_value())
+
+    state = torch.load(checkpoint_path(), map_location="cpu", weights_only=True)
+    state["backbone"]["vocabulary"] = "0" * 64
+
+    alien = stage / "alien.pt"
+    torch.save(state, alien)
+
+    with pytest.raises(CheckpointError, match="vocabulary"):
+        load_trained(alien, CPU)
 
 
 def test_loading_refuses_a_checkpoint_without_its_origin(stage):

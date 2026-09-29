@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,10 +22,18 @@ from .settings import BPE_FILE, BpeConfig, TokenizerConfig, vocab_path
 # counterparty. Новых текстовых полей ради BPE не придумывается,
 # а структурированный код текстом не становится.
 #
-# Алфавит байтовый и полный: 256 байт лежат в словаре с самого
-# начала, поэтому невиданная казахская буква, эмодзи или
-# китайский иероглиф кодируются и раскодируются без потерь и без
-# переобучения.
+# Алфавит полный, два способа (BpeConfig.alphabet):
+#
+#   bytes       256 байт ByteLevel лежат в словаре с самого начала.
+#               Пробел и любая не-ASCII буква видны в кусках
+#               подменёнными символами (Ġ, Ã…).
+#   characters  символы train-текстов, пробел — обычный символ куска
+#               (« Алматы», а не «ĠÐĲÐ»...). Невиданный символ
+#               кодируется своими байтами <0xNN> (byte fallback).
+#
+# В обоих невиданная казахская буква, эмодзи или китайский
+# иероглиф кодируются и раскодируются без потерь и без
+# переобучения, а незнакомое название — кусками знакомых.
 #
 # Нормализация не своя: берётся та же функция, что делает
 # нормализованную копию текста в canonical. Двух правил
@@ -85,10 +94,13 @@ class BpeModel:
     @property
     def merges(self) -> int:
         """
-        Сколько слияний выучено сверх байтового алфавита.
+        Сколько слияний выучено сверх алфавита.
         """
 
-        return max(self.size - 256, 0)
+        if self.tokenizer is None:
+            return 0
+
+        return len(json.loads(self.tokenizer.to_str())["model"]["merges"])
 
     def vocab(self) -> dict[str, int]:
         """
@@ -192,6 +204,9 @@ def train_bpe(stats: FitStatistics, config: BpeConfig, keys: tuple[str, ...]) ->
 
     rows = corpus_rows(stats, keys)
 
+    if config.alphabet == "characters":
+        return _train_characters(rows, config)
+
     model = Tokenizer(models.BPE(unk_token=None))
 
     model.pre_tokenizer = pre_tokenizers.ByteLevel(
@@ -213,6 +228,60 @@ def train_bpe(stats: FitStatistics, config: BpeConfig, keys: tuple[str, ...]) ->
     return BpeModel(tokenizer=model)
 
 
+# Разбиение по словам до слияний — то же, что у ByteLevel с
+# use_regex (регулярное выражение GPT-2), но без подмены байтов:
+# пробел остаётся пробелом в начале слова.
+WORDS = r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+# Куски byte fallback: номер байта в виде <0xNN>.
+BYTES = tuple(f"<0x{value:02X}>" for value in range(256))
+
+
+def _train_characters(rows: list[tuple[str, str, int]], config: BpeConfig) -> BpeModel:
+    """
+    BPE на символах train-текстов с byte fallback.
+
+    Тренер растит куски из символов корпуса; 256 кусков <0xNN>
+    добавляются в словарь модели после обучения и включается
+    byte_fallback: символ, которого в train не было, модель
+    кодирует байтами UTF-8, а ByteFallback собирает их обратно.
+    Байтовые куски — обычные куски словаря, а не специальные
+    токены: литерал «<0x41>» в названии остаётся текстом.
+    """
+
+    from tokenizers import Regex, Tokenizer, decoders, models, pre_tokenizers, trainers
+
+    model = Tokenizer(models.BPE(unk_token=None))
+
+    if config.use_regex:
+        model.pre_tokenizer = pre_tokenizers.Split(Regex(WORDS), behavior="isolated")
+
+    trainer = trainers.BpeTrainer(
+        vocab_size=max(config.vocab_size - len(BYTES), 1),
+        min_frequency=config.min_frequency,
+        special_tokens=[],
+        show_progress=False,
+    )
+
+    model.train_from_iterator(_iterator(rows), trainer=trainer)
+
+    state = json.loads(model.to_str())
+
+    vocab = state["model"]["vocab"]
+
+    for name in BYTES:
+        if name not in vocab:
+            vocab[name] = len(vocab)
+
+    state["model"]["byte_fallback"] = True
+    state["decoder"] = {
+        "type": "Sequence",
+        "decoders": [{"type": "ByteFallback"}, {"type": "Fuse"}],
+    }
+
+    return BpeModel(tokenizer=Tokenizer.from_str(json.dumps(state)))
+
+
 def build_bpe(train: TrainCorpus, key_vocab: dict[str, int], config: TokenizerConfig,
               schema) -> tuple[BpeModel, list[str]]:
     """
@@ -231,7 +300,7 @@ def build_bpe(train: TrainCorpus, key_vocab: dict[str, int], config: TokenizerCo
         raise TextError(
             "разбиение текста не обратимо на "
             + ", ".join(repr(item) for item in broken[:3])
-            + ": байтовый алфавит обязан кодировать любой текст без потерь"
+            + ": алфавит с байтами обязан кодировать любой текст без потерь"
         )
 
     warnings: list[str] = []
