@@ -27,6 +27,12 @@ PRODUCT_TIMELINE_PATH = REFERENCE_DIR / "home_product_timeline.json"
 # его даёт внутренняя категория генератора.
 MERCHANT_REFERENCE_PATH = REFERENCE_DIR / "merchants.json"
 
+# Общенациональные и городские сервисы (такси, связь, авиакомпании,
+# маркетплейсы, коммунальные предприятия…) для категорий, которых
+# в merchants.json нет. Список ручной, у каждой компании источник
+# в самом файле. Формат записей тот же.
+NATIONAL_MERCHANTS_PATH = REFERENCE_DIR / "national_merchants.json"
+
 # Контракт v13: конверт из ЧЕТЫРЁХ колонок — client_id,
 # event_time, source, payload, — а тип события лежит внутри
 # payload под ключом type. Идентификатора записи и причинных
@@ -64,7 +70,7 @@ MERCHANT_REFERENCE_PATH = REFERENCE_DIR / "merchants.json"
 # договора, из которого она получена (null у прихода в банк и
 # приложения). По нему препроцессинг находит в ленте событие-
 # источник вехи.
-GENERATOR_VERSION = "16.0"
+GENERATOR_VERSION = "16.2"
 SCHEMA_VERSION = 19
 
 # Возраст, с которого клиент считается пенсионером в симуляции:
@@ -150,6 +156,14 @@ REGISTRY_START = datetime(2018, 1, 1)
 # была, а не размазывается по лишним годам.
 PLANNING_END = datetime(2026, 9, 1)
 
+# ПОСЛЕДНИЙ ПРИХОД В БАНК — до какой даты персонаж, приходящий в
+# банк внутри окна, может зарегистрироваться. Ставится вместе с
+# окном (activate_horizon), у группы — её registration_end в
+# DATASETS. Без него дата прихода раскладывается до PLANNING_END,
+# и персонаж, чей приход выпал после конца выгрузки, в неё не
+# попадает вовсе: клиентов в выгрузке меньше, чем объявлено.
+REGISTRATION_END = PLANNING_END
+
 
 # ============================================================
 # ИСТОЧНИКИ
@@ -195,12 +209,15 @@ _apply_horizon()
 SOURCES = tuple(SOURCE_LAUNCH)
 
 
-def activate_horizon(start: datetime, end: datetime) -> None:
+def activate_horizon(start: datetime, end: datetime, registration_end: datetime | None = None) -> None:
     """
-    Ставит окно наблюдения перед генерацией группы.
+    Ставит окно наблюдения перед генерацией группы и последнюю дату
+    прихода в банк внутри окна (None — PLANNING_END).
     """
 
-    global HISTORY_START, HISTORY_END
+    global HISTORY_START, HISTORY_END, REGISTRATION_END
+
+    registration_end = PLANNING_END if registration_end is None else registration_end
 
     if start >= end:
         raise ValueError(f"горизонт пуст: начало {start} не раньше конца {end}")
@@ -216,8 +233,15 @@ def activate_horizon(start: datetime, end: datetime) -> None:
             "поднимите PLANNING_END, иначе планы кончатся раньше выгрузки"
         )
 
+    if not start < registration_end <= PLANNING_END:
+        raise ValueError(
+            f"последний приход в банк {registration_end} вне ({start}, {PLANNING_END}]: "
+            "приходить некуда или планы кончаются раньше"
+        )
+
     HISTORY_START = start
     HISTORY_END = end
+    REGISTRATION_END = registration_end
 
     _apply_horizon()
 
@@ -814,31 +838,42 @@ WORLD_SEED = 42
 class DatasetGroup:
     """
     Группа датасета: сколько клиентов, какое окно, какой seed.
+
+    registration_end — до какой даты персонаж, приходящий в банк
+    внутри окна, успевает прийти. Равен концу окна: иначе часть
+    персонажей приходит после границы, в выгрузку не попадает, и
+    клиентов в ней меньше clients. Приход не позже, чем за
+    registration_margin_days до этой даты (параметры популяции),
+    поэтому у каждого есть хотя бы месяц истории.
     """
 
     clients: int
     history_start: datetime
     history_end: datetime
     seed: int
+    registration_end: datetime
 
 
 DATASETS: dict[str, DatasetGroup] = {
     "train": DatasetGroup(
-        clients=10000,
+        clients=10,
         history_start=datetime(2024, 1, 1),
         history_end=datetime(2026, 1, 1),
-        seed=707,
+        seed=666,
+        registration_end=datetime(2026, 1, 1),
     ),
     "val": DatasetGroup(
-        clients=1500,
+        clients=150,
         history_start=datetime(2024, 1, 1),
         history_end=datetime(2026, 4, 1),
-        seed=808,
+        seed=809,
+        registration_end=datetime(2026, 4, 1),
     ),
     "test": DatasetGroup(
-        clients=1500,
+        clients=150,
         history_start=datetime(2024, 1, 1),
         history_end=datetime(2026, 8, 1),
-        seed=909,
+        seed=905,
+        registration_end=datetime(2026, 8, 1),
     ),
 }

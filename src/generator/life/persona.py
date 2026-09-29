@@ -306,7 +306,10 @@ def draw_persona(client_ordinal: int) -> Persona:
     registered_in_window = bool(rng.random() < population.registration_in_window_share)
 
     if registered_in_window:
-        span = (config.PLANNING_END - config.HISTORY_START).days - population.registration_margin_days
+        # До последнего прихода группы (config.REGISTRATION_END), а не
+        # до горизонта планирования: пришедший позже конца выгрузки
+        # в неё не попал бы вовсе.
+        span = (config.REGISTRATION_END - config.HISTORY_START).days - population.registration_margin_days
         offset = int(rng.integers(1, max(2, span)))
         relationship_start = config.HISTORY_START + timedelta(days=offset)
     else:

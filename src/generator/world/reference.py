@@ -5,7 +5,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
 
-from ..config import MERCHANT_REFERENCE_PATH
+from ..config import MERCHANT_REFERENCE_PATH, NATIONAL_MERCHANTS_PATH
 
 
 # ============================================================
@@ -29,11 +29,22 @@ from ..config import MERCHANT_REFERENCE_PATH
 # ни источника, ни его идентификатора нет — генератору нужно
 # само название, а не ссылка на карточку в чужой базе.
 #
-# Справочник отвечает ровно на один вопрос: какие названия
-# ПОДТВЕРЖДЕНЫ в этом городе. Ни масштаба сети, ни популярности,
-# ни доли рынка из него не выводится: число записей с одним
-# названием — это результат выборочного поиска, а не факт о
-# компании. Запись без города не подтверждает присутствие нигде.
+# Справочник отвечает на вопрос: какие названия ПОДТВЕРЖДЕНЫ в
+# этом городе. Ни масштаба сети, ни популярности, ни доли рынка
+# из него не выводится: число записей с одним названием — это
+# результат выборочного поиска, а не факт о компании.
+#
+# Запись без города (64% merchants.json) города не подтверждает и
+# служит общенациональным списком своей категории: им названы
+# точки там, где ни город, ни его область подтверждённых названий
+# этой категории не дали (world.merchants.brands_for). Запись,
+# чей город в географии генератора не назван, не годится ни туда,
+# ни туда: присутствие подтверждено, но в другом месте.
+#
+# reference/national_merchants.json — второй вход того же формата:
+# сервисы для категорий, которых в 2ГИС и OSM нет (такси, связь,
+# авиакомпании, маркетплейсы, коммунальные…), собранные вручную с
+# источником на каждую компанию.
 # ============================================================
 
 
@@ -60,6 +71,17 @@ _CITY_ALIASES: dict[str, str] = {
     "Петропавловск": "Petropavl",
     "Рудный": "Rudny",
     "Аральск": "Aral",
+    "Усть-Каменогорск": "Oskemen",
+    "Сатпаев": "Satpayev",
+    "Байконур": "Baikonur",
+    "Тайынша": "Taiynsha",
+    "Алтай": "Altai",
+    "Аксай": "Aksai",
+    # Города, которые генератор отличает от одноимённой области
+    # или села словом town.
+    "Абай": "Abai town",
+    "Аксу": "Aksu town",
+    "Есиль": "Esil town",
 }
 
 
@@ -74,6 +96,8 @@ class ReferenceName:
     # Поселение генератора; None, если города у записи нет или
     # он не назван в географии генератора.
     settlement: str | None
+    # Города у записи нет вовсе: название общенациональное.
+    national: bool = False
 
 
 def _transliterate(text: str) -> str:
@@ -123,28 +147,31 @@ def entries() -> tuple[ReferenceName, ...]:
     Справочник целиком. Читается один раз на процесс.
     """
 
-    if not MERCHANT_REFERENCE_PATH.exists():
-        return ()
-
-    payload = json.loads(MERCHANT_REFERENCE_PATH.read_text(encoding="utf-8"))
-
     items: list[ReferenceName] = []
 
-    for row in payload.get("merchants", ()):
+    for path in (MERCHANT_REFERENCE_PATH, NATIONAL_MERCHANTS_PATH):
 
-        name = row.get("name") or ""
-        category = row.get("mapped_category")
-
-        if not name or not category:
+        if not path.exists():
             continue
 
-        items.append(
-            ReferenceName(
-                name=name,
-                category=category,
-                settlement=_settlement_of(row.get("city")),
+        payload = json.loads(path.read_text(encoding="utf-8"))
+
+        for row in payload.get("merchants", ()):
+
+            name = row.get("name") or ""
+            category = row.get("mapped_category")
+
+            if not name or not category:
+                continue
+
+            items.append(
+                ReferenceName(
+                    name=name,
+                    category=category,
+                    settlement=_settlement_of(row.get("city")),
+                    national=not row.get("city"),
+                )
             )
-        )
 
     return tuple(items)
 
@@ -168,12 +195,35 @@ def _names_by_place() -> dict[tuple[str, str], tuple[str, ...]]:
     return {place: tuple(sorted(found)) for place, found in names.items()}
 
 
+@lru_cache(maxsize=1)
+def _national_names() -> dict[str, tuple[str, ...]]:
+    """
+    Категория -> названия записей без города.
+    """
+
+    names: dict[str, set[str]] = defaultdict(set)
+
+    for item in entries():
+        if item.national:
+            names[item.category].add(item.name)
+
+    return {category: tuple(sorted(found)) for category, found in names.items()}
+
+
+def national_names(category: str) -> tuple[str, ...]:
+    """
+    Общенациональные названия категории: записи без города.
+    """
+
+    return _national_names().get(category, ())
+
+
 def names_in(settlement: str, category: str) -> tuple[str, ...]:
     """
     Названия категории, ПОДТВЕРЖДЁННЫЕ в этом поселении.
 
-    Пустой ответ значит, что подтверждения нет: точка останется
-    безымянной, а не получит название из другого города.
+    Пустой ответ значит, что подтверждения здесь нет; куда идти
+    дальше, решает world.merchants.brands_for.
     """
 
     return _names_by_place().get((settlement, category), ())
@@ -183,4 +233,5 @@ __all__ = [
     "ReferenceName",
     "entries",
     "names_in",
+    "national_names",
 ]

@@ -25,13 +25,20 @@ from .dictionaries import CATEGORY_BY_NAME, CATEGORY_NAMES
 # номер филиала, город, префикс агрегатора, — но название в ней
 # всегда принадлежит существующей точке.
 #
-# Название берётся ТОЛЬКО из тех, что справочник подтвердил в
-# этом самом поселении. Подтверждения нет — точка остаётся
-# БЕЗЫМЯННОЙ: merchant_id и merchant_name пусты, а категория,
-# MCC, город и цена на месте. Операция при этом происходит: банк
-# видел трату, но имени продавца в этой ленте нет. То же самое,
-# когда для внутренней категории нет соответствия в справочнике:
-# он покрывает 19 категорий из 49.
+# Название берётся из ближайшего места, где справочник его
+# подтвердил (brands_for):
+#
+#   1. само поселение;
+#   2. крупнейший город его области, где названия этой категории
+#      подтверждены: сельская корзина и малый город покупают у сетей
+#      областного центра;
+#   3. общенациональный список категории — записи справочника без
+#      города и сервисы reference/national_merchants.json.
+#
+# Ни на одном уровне ничего нет — точка остаётся БЕЗЫМЯННОЙ:
+# merchant_id и merchant_name пусты, а категория, MCC, город и
+# цена на месте. Так остаются категории без соответствия в
+# справочнике (REFERENCE_CATEGORY = None) и покупки за границей.
 #
 # ЧТО ЗДЕСЬ НЕ ИЗ ИСТОЧНИКА. Ценовой сегмент, популярность,
 # распределение точек, часы работы, доля онлайна и шум
@@ -70,16 +77,16 @@ REFERENCE_CATEGORY: dict[str, str | None] = {
     # --- транспорт ---
     "fuel": "fuel",
     "car_service": "car_service",
-    "parking": None,                # парковка не автосервис, и в справочнике её нет
-    "taxi": None,                   # перевозка это не ремонт машин
-    "transit": None,                # проезд продаёт перевозчик, а не магазин
-    "car_rental": None,             # аренда машины это не мастерская
-    "micromobility": None,          # самокаты это не спортивный магазин
+    "parking": "parking",           # городской оператор парковок (national_merchants)
+    "taxi": "taxi",                 # агрегаторы такси (national_merchants)
+    "transit": "transit",           # транспортная карта города (national_merchants)
+    "car_rental": "car_rental",     # прокат и каршеринг (national_merchants)
+    "micromobility": "micromobility",  # кикшеринг (national_merchants)
     # --- путешествия ---
-    "airline": None,
-    "railway": None,
+    "airline": "airline",           # авиакомпании (national_merchants)
+    "railway": "railway",           # национальный перевозчик (national_merchants)
     "hotel": "hotel",
-    "travel": None,                 # турагентство это не гостиница
+    "travel": "travel",             # туроператоры (national_merchants)
     # --- товары ---
     "clothing": "clothing",
     "shoes": "clothing",            # обувь продают те же сети одежды
@@ -88,34 +95,34 @@ REFERENCE_CATEGORY: dict[str, str | None] = {
     "electronics": "electronics",
     "appliances": "electronics",    # бытовую технику продают те же сети
     # --- услуги ---
-    "telecom": None,                # оператор связи это не магазин техники
-    "internet": None,               # провайдер это не магазин техники
-    "subscription": None,           # подписка на сервис это не розница
-    "utilities": None,              # коммунальные платежи принимает не магазин
+    "telecom": "telecom",           # мобильные операторы (national_merchants)
+    "internet": "internet",         # провайдер домашнего интернета (national_merchants)
+    "subscription": "subscription",  # стриминг (national_merchants)
+    "utilities": "utilities",       # коммунальные предприятия городов (national_merchants)
     # --- образование ---
     "education": "education",
-    "kids": None,                   # детские товары это не книжный
+    "kids": "kids",                 # сеть детских товаров (national_merchants)
     "books": "books",
     # --- досуг ---
-    "entertainment": None,          # парк или боулинг это не кинотеатр
+    "entertainment": "entertainment",  # развлекательные сети и продажа билетов
     "cinema": "cinema",
     "sports": "sports",
     "beauty": "beauty",
     "cosmetics": "beauty",          # магазины косметики справочник относит сюда
     # --- онлайн ---
-    "marketplace": None,            # маркетплейс это не магазин техники
-    "ecom": None,                   # интернет-магазин своей категории не имеет
+    "marketplace": "marketplace",   # маркетплейсы (national_merchants)
+    "ecom": "ecom",                 # интернет-магазины и доставка (national_merchants)
     # --- государство ---
-    "government": None,
-    "fines": None,
-    "taxes": None,
+    "government": "government",     # портал госуслуг (national_merchants)
+    "fines": None,                  # штраф платят в бюджет, а не сети
+    "taxes": None,                  # налог платят в бюджет, а не сети
     # --- финансы ---
-    "financial": None,
-    "charity": None,                # благотворительность это не финансовая сеть
+    "financial": "financial",       # страховые, МФО, переводы и терминалы оплаты
+    "charity": "charity",           # благотворительные фонды (national_merchants)
     # --- прочее ---
     "pets": "pets",
     "tobacco": "convenience",       # табачный киоск это тот же киоск
-    "gambling": None,
+    "gambling": None,               # лицензии букмекеров не проверялись
 }
 
 assert set(REFERENCE_CATEGORY) == set(CATEGORY_NAMES), (
@@ -179,17 +186,39 @@ def _zipf_weights(count: int, alpha: float) -> tuple:
     return tuple(1.0 / ((index + 1) ** alpha) for index in range(count))
 
 
+def _regional_names(settlement: geography.Settlement, source: str) -> tuple[str, ...]:
+    """
+    Названия категории крупнейшего города области, где они
+    подтверждены. Сельская корзина городом не считается.
+    """
+
+    cities = sorted(
+        (
+            item for item in geography.settlements()
+            if item.region == settlement.region and not item.is_rural and item.name != settlement.name
+        ),
+        key=lambda item: (-item.population_weight, item.name),
+    )
+
+    for city in cities:
+        names = reference.names_in(city.name, source)
+        if names:
+            return names
+
+    return ()
+
+
 @state_cache
 def brands_for(category_name: str, settlement_name: str) -> tuple:
     """
-    Сети, доступные в поселении: по одной на каждое название,
-    подтверждённое справочником ИМЕННО ЗДЕСЬ.
+    Сети, доступные в поселении: по одной на каждое название из
+    ближайшего места, где справочник его подтвердил, — само
+    поселение, крупнейший город области, общенациональный список
+    (см. шапку файла). Уровни не смешиваются: берётся первый
+    непустой.
 
-    Ни национальных, ни региональных сетей здесь нет. Справочник
-    не знает, какая сеть крупнее: он знает только, что такое имя
-    в этом городе встречено. Название из другого города сюда не
-    попадает, и списка «на случай если ничего не нашлось» нет —
-    пустой ответ значит безымянные точки.
+    Справочник не знает, какая сеть крупнее: он знает только, что
+    такое имя там встречено. Пустой ответ значит безымянные точки.
 
     Порядок сетей задаёт ключ генератора, а не алфавит
     справочника и не число записей в нём: иначе место в
@@ -201,14 +230,19 @@ def brands_for(category_name: str, settlement_name: str) -> tuple:
     if source is None:
         return ()
 
-    names = reference.names_in(settlement_name, source)
+    settlement = geography.by_name(settlement_name)
+
+    names = (
+        reference.names_in(settlement_name, source)
+        or _regional_names(settlement, source)
+        or reference.national_names(source)
+    )
 
     if not names:
         return ()
 
     settings = params_module.active().merchants
     category = CATEGORY_BY_NAME[category_name]
-    settlement = geography.by_name(settlement_name)
 
     order = sorted(
         names,
@@ -375,9 +409,18 @@ def outlet(settlement_name: str, category_name: str, index: int) -> Outlet:
     brand: Brand | None = None
 
     if pool:
+
+        # Сеть запасного уровня (область, вся страна) разыгрывается
+        # своим потоком: розыгрыш из общего сдвинул бы район, часы,
+        # онлайн и MCC точки, которая раньше была безымянной.
+        source = REFERENCE_CATEGORY[category_name]
+        picker = rng if reference.names_in(settlement_name, source) else keyed_rng(
+            NS_MERCHANT, stable_hash("outlet_brand", settlement_name, category_name, index) % (2 ** 31)
+        )
+
         total = sum(item.popularity for item in pool)
         brand = pool[
-            int(rng.choice(len(pool), p=[item.popularity / total for item in pool]))
+            int(picker.choice(len(pool), p=[item.popularity / total for item in pool]))
         ]
 
     district = settlement.districts[rng.integers(0, len(settlement.districts))]

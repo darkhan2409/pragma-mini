@@ -147,7 +147,7 @@ def _worker_init(seed: int, params_path: str | None, catalog_scale: float | None
     # Дочерний процесс импортирует config заново и о горизонте
     # группы ничего не знает: его надо поставить здесь.
     if horizon is not None:
-        config.activate_horizon(datetime.fromisoformat(horizon[0]), datetime.fromisoformat(horizon[1]))
+        config.activate_horizon(*(datetime.fromisoformat(moment) for moment in horizon))
 
     settings = _build_params(params_path, catalog_scale, community_size)
 
@@ -351,6 +351,7 @@ def _run_card(
         "community_size": community_size,
         "history_start": config.HISTORY_START.isoformat(),
         "history_end": config.HISTORY_END.isoformat(),
+        "registration_end": config.REGISTRATION_END.isoformat(),
         "generation_config_sha256": settings.fingerprint(),
     }
 
@@ -374,17 +375,23 @@ def generate_dataset(
     community_size: int | None = None,
     resume: bool = False,
     quiet: bool = False,
+    registration_end: datetime | None = None,
 ) -> dict:
 
     out = Path(out_dir) if out_dir is not None else RAW_DIR / f"clients_{total_clients}"
 
-    if history_start is not None or history_end is not None:
+    if history_start is not None or history_end is not None or registration_end is not None:
         config.activate_horizon(
             history_start if history_start is not None else config.HISTORY_START,
             history_end if history_end is not None else config.HISTORY_END,
+            registration_end,
         )
 
-    horizon = (config.HISTORY_START.isoformat(), config.HISTORY_END.isoformat())
+    horizon = (
+        config.HISTORY_START.isoformat(),
+        config.HISTORY_END.isoformat(),
+        config.REGISTRATION_END.isoformat(),
+    )
 
     settings = _build_params(params_path, catalog_scale, community_size)
 
@@ -533,6 +540,7 @@ def generate_dataset(
         "timezone": config.TIMEZONE_NAME,
         "period_start": config.event_time_text(config.HISTORY_START),
         "period_end": config.event_time_text(config.HISTORY_END),
+        "registration_end": config.event_time_text(config.REGISTRATION_END),
         "seed": seed,
         "world_seed": rng_module.current_world_seed(),
         "total_clients": total_clients,
@@ -543,6 +551,7 @@ def generate_dataset(
         "generation_config_sha256": settings.fingerprint(),
         "reference_sha256": {
             "merchants": _file_sha256(config.MERCHANT_REFERENCE_PATH),
+            "national_merchants": _file_sha256(config.NATIONAL_MERCHANTS_PATH),
             "product_timeline": _file_sha256(config.PRODUCT_TIMELINE_PATH),
         },
         "events_rows": counts["events"],
@@ -656,6 +665,7 @@ def generate_group(
         world_seed=WORLD_SEED,
         history_start=settings.history_start,
         history_end=settings.history_end,
+        registration_end=settings.registration_end,
         workers=workers,
         chunk_clients=chunk_clients,
         params_path=params_path,
