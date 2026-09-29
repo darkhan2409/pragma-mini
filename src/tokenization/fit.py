@@ -7,7 +7,7 @@ from src.preprocessing.read import Group, ReadError
 from src.preprocessing.settings import PreprocessingConfig
 
 from .scan import FitStatistics, scan
-from .schema import SemanticSchema
+from .schema import WEIGHT_PER_EVENT, SemanticSchema
 from .settings import METHOD_UNFITTED, TokenizerConfig
 
 
@@ -87,6 +87,9 @@ def read_train(config: TokenizerConfig, schema: SemanticSchema) -> TrainCorpus:
         schema,
         sample_k=config.quantile_sample_k,
         distinct_cap=config.distinct_cap,
+        splits={
+            key: spec.split_by for key, spec in config.numeric_encoders.items() if spec.split_by
+        },
     )
 
     _check_scan(statistics, source, schema)
@@ -124,6 +127,19 @@ def _check_config(config: TokenizerConfig, schema: SemanticSchema) -> None:
         raise FitError(
             "кодировщики объявлены для ключей, которых нет среди числовых: " + ", ".join(extra)
         )
+
+    # Шкала делится по ключу того же события: ключ-условие обязан
+    # быть категорией, а число — событийным, не анкетным.
+    for key, spec in sorted(config.numeric_encoders.items()):
+
+        if spec.split_by is None:
+            continue
+
+        if spec.split_by not in schema.categorical_keys:
+            raise FitError(f"{key}: split_by {spec.split_by!r} не категориальный ключ реестра")
+
+        if schema.keys[key].weight_rule != WEIGHT_PER_EVENT:
+            raise FitError(f"{key}: split_by делит шкалы событий, а ключ из анкеты")
 
     unknown_overrides = sorted(set(config.text_keys_as_categorical) - set(schema.text_keys))
 

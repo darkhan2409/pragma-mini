@@ -73,7 +73,7 @@ class Client:
 
     profile: np.ndarray    # [d] вектор анкеты
     events: np.ndarray     # [n, d] векторы событий после календаря
-    positions: np.ndarray  # [n] float32, log-секунды до последнего события
+    positions: np.ndarray  # [n] float32, log-секунды до точки отсчёта (06: --anchor)
 
     @property
     def n_events(self) -> int:
@@ -190,11 +190,10 @@ class Source:
 
             positions = np.asarray(here["event_time_log"], dtype=np.float32)[:n_events]
 
-            if n_events and float(positions[-1]) != 0.0:
+            if n_events and bool((positions[1:] > positions[:-1]).any()):
                 raise InputError(
-                    f"батч {index}, клиент {here['client_id']}: у последнего события "
-                    f"позиция {positions[-1]!r}, а не ноль — временные позиции не "
-                    "соответствуют событиям"
+                    f"батч {index}, клиент {here['client_id']}: временные позиции растут "
+                    "к концу ленты и не соответствуют событиям"
                 )
 
             clients.append(

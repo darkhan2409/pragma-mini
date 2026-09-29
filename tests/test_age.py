@@ -63,8 +63,10 @@ def test_age_is_a_category_with_a_unit_not_a_number():
 
 def test_age_has_no_bucket_edges_and_the_other_numbers_keep_theirs():
     """
-    Шкалы объявлены ровно у прежних числовых ключей, кроме
-    возраста. Доход по-прежнему режется по train квантилями.
+    Шкалы объявлены ровно у числовых ключей, которые доходят до
+    модели: не у возраста и не у полей, исключённых из анкеты
+    (лимит, его использование, стаж отношений). Доход
+    по-прежнему режется по train квантилями.
     """
 
     from src.tokenization.settings import METHOD_QUANTILE, default_numeric_encoders
@@ -77,8 +79,7 @@ def test_age_has_no_bucket_edges_and_the_other_numbers_keep_theirs():
         "transaction_amount", "amount_or_limit", "amount_due", "amount_paid",
         "principal_outstanding", "requested_amount", "approved_amount", "balance_after",
         "profile_declared_income", "profile_declared_income_old", "profile_declared_income_new",
-        "profile_credit_limit", "days_past_due", "profile_relationship_months",
-        "profile_credit_utilization", "rate", "original_amount",
+        "days_past_due", "rate", "original_amount",
     }
 
     assert encoders["profile_declared_income"].method == METHOD_QUANTILE

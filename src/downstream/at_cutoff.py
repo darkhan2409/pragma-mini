@@ -15,6 +15,7 @@ from src.preprocessing.artifacts import read_json
 from src.preprocessing.read import Group
 from src.preprocessing.settings import GroupWindow, PreprocessingConfig
 from src.temporal.position import profile_time_log, time_log
+from src.temporal.settings import META_FILE as TEMPORAL_META, TIME_ANCHORS, temporal_dir
 from src.tokenization.encode import encode_event, encode_profile
 from src.tokenization import finalvocab
 from src.tokenization.finalvocab import FrozenArtifacts
@@ -31,7 +32,7 @@ from src.tokenization.settings import TokenizerConfig
 #   02 + анкета 01 -> Group.history(клиент, T)    события < T, анкета на T
 #   -> encode_event / encode_profile (словарь 03)  как этап 04
 #   -> build_sample с окном, кончающимся в T       как этап 05
-#   -> time_log / profile_time_log от T             как этап 06
+#   -> time_log / profile_time_log                   как этап 06, с его отсчётом
 #   -> Client без масок                              как 07 при чтении
 #
 # Обрезать готовые 07_batches по T нельзя: анкета, вехи и
@@ -40,7 +41,8 @@ from src.tokenization.settings import TokenizerConfig
 #
 # Маски нет: метки -100, значения видимы — это вход для вектора
 # клиента, а не для MLM. Контекст — тот же отбор истории, на
-# котором модель училась (05_dataset/train/meta.json).
+# котором модель училась (05_dataset/train/meta.json), точка
+# отсчёта времени — та же, что у 06_temporal/train (meta.json).
 # ============================================================
 
 
@@ -104,6 +106,21 @@ class ClientsAtCutoff:
                 f"05_dataset/train ({trained})"
             )
 
+        # Точка отсчёта времени — та, с которой собраны данные
+        # обучения: время от другой точки модель не видела.
+        path = temporal_dir("train") / TEMPORAL_META
+
+        if not path.exists():
+            raise CutoffError(
+                f"нет {path}: точка отсчёта времени данных обучения неизвестна — "
+                "выполните python -m src.temporal.run train заново"
+            )
+
+        self.anchor = read_json(path).get("time_anchor")
+
+        if self.anchor not in TIME_ANCHORS:
+            raise CutoffError(f"{path}: точка отсчёта {self.anchor!r} не из {TIME_ANCHORS}")
+
         self._source = Group(group)
         self._event_type_key = self.artifacts.key_id(EVENT_TYPE_KEY)
 
@@ -121,6 +138,7 @@ class ClientsAtCutoff:
             "cutoff": self.cutoff,
             "limit": self.limit,
             "policy": self.policy,
+            "anchor": self.anchor,
             "vocab_dir": self._vocab_dir,
             "events_dir": self._source.directory,
             "profile_path": self._source.profile_path,
@@ -132,6 +150,7 @@ class ClientsAtCutoff:
         self.cutoff = state["cutoff"]
         self.limit = state["limit"]
         self.policy = state["policy"]
+        self.anchor = state["anchor"]
         self._vocab_dir = state["vocab_dir"]
         self.artifacts = FrozenArtifacts.load(self._vocab_dir)
         self._source = Group(self.group, state["events_dir"], state["profile_path"])
@@ -206,7 +225,10 @@ class ClientsAtCutoff:
             reason=[""] * n_tokens,
             event_starts=sample.event_starts.astype(np.int64),
             event_lengths=sample.event_lengths.astype(np.int64),
-            event_time_log=np.asarray(time_log(client_id, moments), dtype=np.float32),
+            event_time_log=np.asarray(
+                time_log(client_id, moments, self.cutoff if self.anchor == "cutoff" else None),
+                dtype=np.float32,
+            ),
             calendar=sample.calendar.reshape(-1, 6),
             event_time=[moment.replace(tzinfo=timezone.utc) for moment in moments],
             profile_key_ids=sample.profile_key_ids.astype(np.int64),

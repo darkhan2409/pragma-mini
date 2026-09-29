@@ -197,9 +197,10 @@ def _text_value_ids(artifacts: FrozenArtifacts, key: str, value: object,
 
 
 def _value_ids(artifacts: FrozenArtifacts, key: str, value: object,
-               limit: int) -> list[int] | None:
+               limit: int, record: dict | None = None) -> list[int] | None:
     """
-    Значение одного ключа в общем пространстве ID.
+    Значение одного ключа в общем пространстве ID. record — все
+    значения записи: шкала числа может зависеть от соседнего ключа.
 
     None означает, что пары у этого ключа не будет.
     """
@@ -216,7 +217,7 @@ def _value_ids(artifacts: FrozenArtifacts, key: str, value: object,
         return [artifacts.special(UNK) if found is None else found]
 
     try:
-        found = artifacts.bucket_id(key, value)
+        found = artifacts.bucket_id(key, value, record)
     except (BucketsError, TypeError, ValueError) as error:
         raise EncodeError(f"ключ {key}: {error}") from error
 
@@ -259,7 +260,7 @@ def encode_values(
 
     for key_id, key, value in sorted(emit, key=lambda item: item[0]):
 
-        ids = _value_ids(artifacts, key, value, limit)
+        ids = _value_ids(artifacts, key, value, limit, values)
 
         if ids is None:
             continue

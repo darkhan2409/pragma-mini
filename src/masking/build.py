@@ -107,7 +107,7 @@ def build_group(
                 _count(counters, selection)
 
                 masked = apply(
-                    row["client_id"], row, selection.choices, mask, unknown
+                    row["client_id"], row, selection.choices, mask, unknown, selection.hidden
                 )
                 masked["batch_index"] = row["batch_index"]
 

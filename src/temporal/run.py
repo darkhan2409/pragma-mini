@@ -9,6 +9,7 @@ from src.preprocessing.settings import GROUPS, normalize_group
 from .build import build_group
 from .position import TemporalError
 from .samples import SamplesError
+from .settings import DEFAULT_ANCHOR, TIME_ANCHORS
 
 
 # ============================================================
@@ -17,7 +18,7 @@ from .samples import SamplesError
 #
 # Одна команда на группу, один видимый файл:
 #
-#   python -m src.temporal.run train|val|test
+#   python -m src.temporal.run train|val|test [--anchor last_event|cutoff]
 #
 # Вход: data/05_dataset/<group>/samples.parquet.
 # Выход: data/06_temporal/<group>/temporal.parquet и ничего
@@ -36,7 +37,7 @@ def run_group(args) -> int:
     group = normalize_group(args.group)
 
     try:
-        report = build_group(group)
+        report = build_group(group, anchor=args.anchor)
 
     except FAILURES as error:
         print(f"[temporal] группа {group}: {error}")
@@ -44,7 +45,7 @@ def run_group(args) -> int:
 
     counts = report["counts"]
 
-    print(f"[temporal] группа {group} → {report['file']}")
+    print(f"[temporal] группа {group}, отсчёт от {report['time_anchor']} → {report['file']}")
     print(
         f"    клиентов {counts['clients']}, событий {counts['events']}; "
         f"молчащих {counts['silent_clients']}"
@@ -61,9 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(prog="python -m src.temporal.run")
 
-    # Настроек у этапа нет, поэтому нет и --config: переопределять
-    # тут нечего.
     parser.add_argument("group", choices=GROUPS, help="группа: train, val или test")
+    parser.add_argument(
+        "--anchor", choices=TIME_ANCHORS, default=DEFAULT_ANCHOR,
+        help="точка отсчёта времени событий: последнее событие или cutoff примера",
+    )
 
     parser.set_defaults(handler=run_group)
 

@@ -82,6 +82,33 @@ def test_dropped_candidates_are_not_attributes():
     assert not set(INCLUDED_FIELDS) & set(EXCLUDED_FIELDS)
 
 
+def test_fields_left_out_of_the_profile_have_no_tokens():
+    """
+    Ключ анкеты в реестре есть ровно у полей, которые модельная
+    анкета несёт. У исключённых (лимит, договоры, стаж отношений)
+    нет ни ключа, ни шкалы: иначе в словаре лежали бы токены поля,
+    которого модель никогда не видит, а у числа — шкала,
+    «выученная» на нуле наблюдений.
+    """
+
+    from src.preprocessing.keys import PROFILE_LIFELONG_KEY
+    from src.tokenization.keyvocab import build_key_vocab
+    from src.tokenization.schema import ORIGIN_PROFILE, SemanticSchema
+    from src.tokenization.settings import default_numeric_encoders
+    from src.tokenization.specials import build_special_tokens
+
+    schema = SemanticSchema.open()
+
+    profile = {info.key for info in schema.keys.values() if info.origin == ORIGIN_PROFILE}
+
+    assert profile == {PROFILE_KEYS[name].key for name in INCLUDED_FIELDS} | {PROFILE_LIFELONG_KEY.key}
+
+    dead = {PROFILE_KEYS[name].key for name in EXCLUDED_FIELDS}
+
+    assert not dead & set(build_key_vocab(build_special_tokens(), schema))
+    assert not dead & set(default_numeric_encoders())
+
+
 # ============================================================
 # СТАЖ ПОЛУГОДИЯМИ
 # ============================================================

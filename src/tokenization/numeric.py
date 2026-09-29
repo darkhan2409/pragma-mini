@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +19,7 @@ from .settings import (
     METHOD_UNFITTED,
     NEGATIVE_INVALID,
     ZERO_SEPARATE,
+    NumericEncoder,
     TokenizerConfig,
     vocab_path,
 )
@@ -58,6 +59,20 @@ from .settings import (
 # Имя диапазона это его читаемое название в словаре:
 # amount_due_bucket_3 ни с чем не спутаешь, и чужие номера по
 # порядковому номеру не склеиваются.
+#
+# Две настройки кодировщика (эксперимент волны 4, по умолчанию
+# выключены):
+#
+#   negative_bins  минус учится отдельной шкалой с границей в
+#                  нуле: долг не делит диапазон с малым остатком;
+#   split_by       своя шкала на каждое значение категориального
+#                  ключа того же события (transaction_amount по
+#                  direction): transaction_amount_debit_bucket_3.
+#                  У такого диапазона в файле есть split_by и when
+#                  (значение условия; null — события без него), и
+#                  при кодировании число ищется только среди
+#                  диапазонов своего условия. Условие, которого
+#                  train не видел, даёт [UNK].
 # ============================================================
 
 
@@ -90,6 +105,10 @@ class Bucket:
     minimum: float | None
     maximum: float | None
     token_id: int = -1
+    # Шкала ключа делится по значениям split_by; when — значение
+    # условия этого диапазона (None — события без условия).
+    split_by: str | None = None
+    when: str | None = None
 
     @property
     def zero(self) -> bool:
@@ -109,7 +128,13 @@ class Bucket:
         return True
 
     def as_dict(self) -> dict:
-        return {"id": self.token_id, "min": self.minimum, "max": self.maximum}
+
+        out = {"id": self.token_id, "min": self.minimum, "max": self.maximum}
+
+        if self.split_by is not None:
+            out.update(split_by=self.split_by, when=self.when)
+
+        return out
 
 
 def bucket_name(key: str, number: int) -> str:
@@ -220,6 +245,111 @@ def _counts(buckets: list[Bucket], values: list[float]) -> dict[str, int]:
     return counts
 
 
+def _quantile_scale(usable: list[float], spec: NumericEncoder, config: TokenizerConfig) -> tuple[float, ...]:
+    """
+    Квантильные границы шкалы; с negative_bins — отдельно у минуса
+    и у остального, с границей в нуле.
+    """
+
+    if spec.negative_bins is None:
+        return quantile_boundaries(usable, spec.bins, config.quantile_algorithm)
+
+    negatives = [value for value in usable if value < 0.0]
+    rest = [value for value in usable if value >= 0.0]
+
+    edges = set(quantile_boundaries(rest, spec.bins, config.quantile_algorithm))
+
+    # Граница в нуле — только когда train видел обе стороны: иначе
+    # одна из них осталась бы пустым диапазоном. Квантили минуса —
+    # только когда его хватает на шкалу, иначе минус один диапазон.
+    if negatives and rest:
+
+        edges.add(0.0)
+
+        if len(negatives) >= config.numeric_min_values:
+            edges.update(quantile_boundaries(negatives, spec.negative_bins, config.quantile_algorithm))
+
+    return tuple(sorted(edges))
+
+
+def _scale(
+    label: str,
+    spec: NumericEncoder,
+    values: list[float],
+    clients: int,
+    config: TokenizerConfig,
+    warnings: list[str],
+) -> list[Bucket]:
+    """
+    Диапазоны одной шкалы без номеров: ключа целиком или его доли
+    при split_by. label — имя шкалы в именах диапазонов.
+    """
+
+    # Значения, по которым учатся границы: ноль исключается, если
+    # он отдельный диапазон, а невозможный минус не участвует в
+    # шкале никогда.
+    usable = [
+        value
+        for value in values
+        if not (spec.zero_policy == ZERO_SEPARATE and value == 0.0)
+        and not (spec.negative_policy == NEGATIVE_INVALID and value < 0.0)
+    ]
+
+    boundaries: tuple[float, ...] = ()
+    method = spec.method
+    source = SOURCE_NONE
+
+    if spec.method == METHOD_FIXED:
+        boundaries = tuple(float(value) for value in spec.boundaries)
+        source = SOURCE_CONFIG
+
+    elif spec.method == METHOD_QUANTILE:
+
+        enough = len(usable) >= config.numeric_min_values and clients >= config.numeric_min_clients
+
+        if enough:
+            boundaries = _quantile_scale(usable, spec, config)
+            source = SOURCE_TRAIN
+
+        if not boundaries:
+
+            if spec.fallback:
+                boundaries = tuple(float(value) for value in spec.fallback)
+                method = METHOD_FIXED
+                source = SOURCE_FALLBACK
+                warnings.append(
+                    f"{label}: объявленная шкала вместо квантилей (наблюдений {len(usable)} "
+                    f"у {clients} клиентов, порог {config.numeric_min_values}/"
+                    f"{config.numeric_min_clients})"
+                )
+            else:
+                method = METHOD_UNFITTED
+                warnings.append(f"{label}: шкалы нет, значения станут [UNK]")
+
+    if method == METHOD_UNFITTED:
+        return []
+
+    buckets = build_bucket_list(label, boundaries, spec.zero_policy)
+
+    # Пустых диапазонов после квантилей быть не может, и это
+    # проверяется на тех значениях, по которым границы и
+    # считались. Объявленный нулевой диапазон в проверку не
+    # входит: он существует по решению о смысле нуля.
+    if source == SOURCE_TRAIN:
+
+        counted = _counts(buckets, usable)
+
+        empty = [bucket.name for bucket in buckets if not bucket.zero and counted[bucket.name] == 0]
+
+        if empty:
+            raise BucketsError(
+                f"шкала {label}: квантильные границы оставили пустой диапазон {empty}: "
+                "такого быть не может, проверьте алгоритм квантилей"
+            )
+
+    return buckets
+
+
 def build_buckets(
     train: TrainCorpus,
     value_vocab: dict,
@@ -246,82 +376,34 @@ def build_buckets(
 
         spec = config.numeric_encoders[key]
 
-        source_key = spec.fit_source or key
-        measured = summary.get(source_key, {})
-
-        clients = measured.get("clients", 0)
-
-        # Значения, по которым учатся границы: ноль исключается,
-        # если он отдельный диапазон, а невозможный минус не
-        # участвует в шкале никогда.
-        usable = [
-            value
-            for value in samples.get(source_key, [])
-            if not (spec.zero_policy == ZERO_SEPARATE and value == 0.0)
-            and not (spec.negative_policy == NEGATIVE_INVALID and value < 0.0)
-        ]
-
-        boundaries: tuple[float, ...] = ()
-        method = spec.method
-        source = SOURCE_NONE
-
-        if spec.method == METHOD_FIXED:
-            boundaries = tuple(float(value) for value in spec.boundaries)
-            source = SOURCE_CONFIG
-
-        elif spec.method == METHOD_QUANTILE:
-
-            enough = (
-                len(usable) >= config.numeric_min_values
-                and clients >= config.numeric_min_clients
+        if spec.split_by is None:
+            source_key = spec.fit_source or key
+            prepared[key] = _scale(
+                key, spec, samples.get(source_key, []),
+                summary.get(source_key, {}).get("clients", 0), config, warnings,
             )
-
-            if enough:
-                boundaries = quantile_boundaries(usable, spec.bins, config.quantile_algorithm)
-                source = SOURCE_TRAIN
-
-            if not boundaries:
-
-                if spec.fallback:
-                    boundaries = tuple(float(value) for value in spec.fallback)
-                    method = METHOD_FIXED
-                    source = SOURCE_FALLBACK
-                    warnings.append(
-                        f"{key}: объявленная шкала вместо квантилей (наблюдений {len(usable)} "
-                        f"у {clients} клиентов, порог {config.numeric_min_values}/"
-                        f"{config.numeric_min_clients})"
-                    )
-                else:
-                    method = METHOD_UNFITTED
-                    warnings.append(f"{key}: шкалы нет, значения станут [UNK]")
-
-        if method == METHOD_UNFITTED:
-            prepared[key] = []
             continue
 
-        buckets = build_bucket_list(key, boundaries, spec.zero_policy)
+        # Условия — в порядке имени, события без условия последними.
+        conditions = sorted(
+            (condition for name, condition in stats.split_numeric if name == key),
+            key=lambda condition: (condition is None, condition or ""),
+        )
 
-        # Пустых диапазонов после квантилей быть не может, и это
-        # проверяется на тех значениях, по которым границы и
-        # считались. Объявленный нулевой диапазон в проверку не
-        # входит: он существует по решению о смысле нуля.
-        if source == SOURCE_TRAIN:
+        prepared[key] = []
 
-            counted = _counts(buckets, usable)
+        for condition in conditions:
 
-            empty = [
-                bucket.name
-                for bucket in buckets
-                if not bucket.zero and counted[bucket.name] == 0
-            ]
+            sketch = stats.split_numeric[(key, condition)]
 
-            if empty:
-                raise BucketsError(
-                    f"ключ {key}: квантильные границы оставили пустой диапазон {empty}: "
-                    "такого быть не может, проверьте алгоритм квантилей"
+            label = f"{key}_{condition}" if condition is not None else f"{key}_no_{spec.split_by}"
+
+            prepared[key].extend(
+                replace(bucket, split_by=spec.split_by, when=condition)
+                for bucket in _scale(
+                    label, spec, sketch.values(), sketch.summary()["clients"], config, warnings
                 )
-
-        prepared[key] = buckets
+            )
 
     # --- номера ---
     #
@@ -337,7 +419,7 @@ def build_buckets(
         entries: dict[str, dict] = {}
 
         for bucket in prepared[key]:
-            entries[bucket.name] = Bucket(bucket.name, bucket.minimum, bucket.maximum, number).as_dict()
+            entries[bucket.name] = replace(bucket, token_id=number).as_dict()
             number += 1
 
         out[key] = entries
@@ -373,11 +455,23 @@ def read_buckets(data: dict[str, dict[str, dict]]) -> dict[str, tuple[Bucket, ..
                 minimum=None if item["min"] is None else float(item["min"]),
                 maximum=None if item["max"] is None else float(item["max"]),
                 token_id=int(item["id"]),
+                split_by=item.get("split_by"),
+                when=item.get("when"),
             )
             for name, item in entries.items()
         ]
 
-        _check_order(key, buckets)
+        if len({bucket.split_by for bucket in buckets}) > 1:
+            raise BucketsError(f"ключ {key}: у диапазонов разные split_by")
+
+        # Шкала каждого условия обязана быть сплошной сама по себе.
+        scales: dict[str | None, list[Bucket]] = {}
+
+        for bucket in buckets:
+            scales.setdefault(bucket.when, []).append(bucket)
+
+        for when, scale in scales.items():
+            _check_order(key if when is None else f"{key} ({when})", scale)
 
         out[key] = tuple(buckets)
 

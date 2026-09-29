@@ -636,9 +636,72 @@ def load_trained(path: Path, device, attention_backend: str | None = None):
     except BackboneError as error:
         raise CheckpointError(f"{path}: {error}") from error
 
+    if config.usr_aux_weight > 0.0:
+        attach_recent(model, config)
+
     model.load_state_dict(state["model_state_dict"])
 
+    if config.restricted_softmax:
+        restrict(model)
+
+    if config.hide_event_keys:
+        hide_keys(model)
+
     return model.eval(), state
+
+
+def attach_recent(model, config: MlmConfig) -> None:
+    """
+    Вспомогательная цель [USR] под текущий словарь. Свой seed —
+    seed головы плюс один: веса MLM-головы от неё не зависят.
+    """
+
+    from src.tokenization.finalvocab import FrozenArtifacts
+
+    from .model import recent_types
+
+    model.attach_recent(recent_types(FrozenArtifacts.load(), int(model.embedding.dim), config.seed + 1))
+
+
+def hide_keys(model) -> None:
+    """
+    Ключи событий под маской event закрываются тем же [MASK], что и
+    их значения.
+    """
+
+    from src.tokenization.specials import MASK, load_special_tokens
+
+    model.hide_event_keys(load_special_tokens()[MASK])
+
+
+def restrict(model) -> None:
+    """
+    Кандидаты значения по ключу из текущего словаря — тем же, под
+    который модель собрана (его отпечаток сверен при загрузке).
+    """
+
+    from src.tokenization.finalvocab import FrozenArtifacts
+
+    from .model import candidate_table
+
+    model.restrict(*candidate_table(FrozenArtifacts.load()))
+
+
+def train_source(config: MlmConfig, masking: MaskingConfig, epoch: int):
+    """
+    Источник train эпохи: её маска и, с shuffle_row_groups, её
+    перестановка групп строк. Одна и та же эпоха даёт тот же
+    поток — на этом стоят resume и горизонт cosine.
+    """
+
+    from .inputs import Source
+
+    source = Source("train", masking=for_epoch(masking, epoch))
+
+    if config.shuffle_row_groups:
+        source.shuffle(stable_hash("order", config.seed, epoch) % (2 ** 31))
+
+    return source
 
 
 def for_epoch(masking: MaskingConfig, epoch: int) -> MaskingConfig:
@@ -685,16 +748,22 @@ def horizon(config: MlmConfig, masking: MaskingConfig, epochs: int) -> int:
 
     Число micro-batch'ей эпохи считается по длинам клиентов, без
     масок и модели: разбиение от маски не зависит. Окно без целей
-    шага не делает, поэтому это верхняя оценка.
+    шага не делает, поэтому это верхняя оценка. С перестановкой
+    групп строк упаковка у каждой эпохи своя, и эпохи считаются
+    по одной.
     """
 
-    from .inputs import Source, micro_batches
+    from .inputs import micro_batches
 
-    count = sum(
-        1 for _ in micro_batches(Source("train", masking=masking).sizes(), config.token_budget)
-    )
+    def steps(epoch: int) -> int:
+        sizes = train_source(config, masking, epoch).sizes()
+        count = sum(1 for _ in micro_batches(sizes, config.token_budget))
+        return math.ceil(count / config.grad_accum_steps)
 
-    return math.ceil(count / config.grad_accum_steps) * epochs
+    if not config.shuffle_row_groups:
+        return steps(1) * epochs
+
+    return sum(steps(epoch) for epoch in range(1, epochs + 1))
 
 
 def resumed_horizon(state: dict, path: Path) -> tuple[int, int]:
@@ -896,6 +965,15 @@ def train(
             f"{error}. Обучение на CUDA идёт через FlashAttention; SDPA — только явным "
             "attention_backend=sdpa"
         ) from error
+
+    if config.restricted_softmax:
+        restrict(model)
+
+    if config.hide_event_keys:
+        hide_keys(model)
+
+    if config.usr_aux_weight > 0.0:
+        attach_recent(model, config)
 
     # Модель целиком на устройстве и учится целиком: таблица
     # эмбеддингов, три энкодера и голова.
@@ -1178,10 +1256,10 @@ def train(
             torch.cuda.reset_peak_memory_stats(device)
 
         started = time.perf_counter()
-        epoch_wait, norms = 0.0, []
+        epoch_wait, norms, epoch_aux = 0.0, [], []
         window_wait, window_started = 0.0, started
 
-        source = Prefetch(Source("train", masking=for_epoch(masking, epoch)), config.loader_workers)
+        source = Prefetch(train_source(config, masking, epoch), config.loader_workers)
 
         stopped = False
 
@@ -1220,7 +1298,11 @@ def train(
             done += 1
 
             if out.count > 0:
-                (out.loss * out.count).backward()
+                objective = out.loss
+                if out.aux is not None:
+                    objective = objective + config.usr_aux_weight * out.aux
+                    epoch_aux.append(float(out.aux.detach()))
+                (objective * out.count).backward()
                 window_targets += out.count
                 window_loss += out.loss.item() * out.count
 
@@ -1306,6 +1388,7 @@ def train(
             "cuda_peak_allocated_gib": (
                 torch.cuda.max_memory_allocated(device) / 2**30 if device.type == "cuda" else None
             ),
+            "usr_aux_mean": float(np.mean(epoch_aux)) if epoch_aux else None,
             "cuda_peak_reserved_gib": (
                 torch.cuda.max_memory_reserved(device) / 2**30 if device.type == "cuda" else None
             ),
@@ -1526,6 +1609,8 @@ __all__ = [
     "lr_factor",
     "main",
     "origin_problems",
+    "attach_recent",
+    "restrict",
     "resumed_horizon",
     "run_training",
     "save_checkpoint",

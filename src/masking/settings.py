@@ -69,6 +69,14 @@ class MaskingConfig:
     # ни награды, ни штрафа.
     unknown_probability: float = 0.10
 
+    # Выбранный механизмом key ключ закрывается и в событиях вне
+    # периода целей — как контекст, без метки. Без этого на val
+    # (цели — последние 3 месяца) скрытое значение почти всегда
+    # видно в более ранних событиях клиента, и key проверяет
+    # копирование, а не восстановление. На train период целей —
+    # весь контекст, и маска почти не меняется.
+    key_hides_context: bool = False
+
     def validate(self) -> None:
 
         for name in (
@@ -89,6 +97,7 @@ class MaskingConfig:
             "event_probability": self.event_probability,
             "key_probability": self.key_probability,
             "unknown_probability": self.unknown_probability,
+            "key_hides_context": self.key_hides_context,
         }
 
     @staticmethod
@@ -110,6 +119,7 @@ class MaskingConfig:
             unknown_probability=float(
                 data.get("unknown_probability", base.unknown_probability)
             ),
+            key_hides_context=bool(data.get("key_hides_context", base.key_hides_context)),
         )
 
         config.validate()

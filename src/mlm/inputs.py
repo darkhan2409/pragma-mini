@@ -176,6 +176,19 @@ class Source:
 
         self._open_files()
 
+        # Порядок групп строк прохода: по умолчанию — порядок файла.
+        self.order = list(range(self.count))
+
+    def shuffle(self, seed: int) -> None:
+        """
+        Проход по группам строк в перестановке, заданной seed.
+
+        Клиенты внутри группы и их маска не меняются: маска
+        разыгрывается по строке, а не по месту в проходе.
+        """
+
+        self.order = np.random.default_rng(seed).permutation(self.count).tolist()
+
     def _open_files(self) -> None:
 
         self._batches = _open(
@@ -202,7 +215,9 @@ class Source:
     def __getstate__(self) -> dict:
         return {
             name: getattr(self, name)
-            for name in ("group", "masking", "batches_path", "masked_path", "mask_id", "unknown_id")
+            for name in (
+                "group", "masking", "batches_path", "masked_path", "mask_id", "unknown_id", "order",
+            )
         }
 
     def __setstate__(self, state: dict) -> None:
@@ -245,18 +260,18 @@ class Source:
 
     def clients(self) -> Iterator[Client]:
         """
-        Клиенты группы по одному, в порядке файла.
+        Клиенты группы по одному, в порядке прохода (order).
 
         В памяти держится одна группа строк: файл читается по мере
         прохода, а не целиком.
         """
 
-        for index in range(self.count):
+        for index in self.order:
             yield from self.batch(index)
 
     def sizes(self) -> Iterator[Size]:
         """
-        Длины клиентов группы в порядке файла.
+        Длины клиентов группы в порядке прохода (order).
 
         Читаются только три целых колонки 07_batches, без масок:
         маскирование значения заменяет, а длины не меняет. Так
@@ -265,7 +280,7 @@ class Source:
 
         columns = ["n_tokens", "profile_n_tokens", "n_events"]
 
-        for index in range(self.count):
+        for index in self.order:
 
             table = self._batches.read_row_group(index, columns=columns).to_pydict()
 
@@ -280,7 +295,8 @@ class Source:
         selection = choose(self.group, row, self.masking)
 
         masked = apply(
-            row["client_id"], row, selection.choices, self.mask_id, self.unknown_id
+            row["client_id"], row, selection.choices, self.mask_id, self.unknown_id,
+            selection.hidden,
         )
         masked["batch_index"] = index
 
@@ -388,7 +404,8 @@ class Prefetch:
     считает текущие, и GIL обучения она не занимает.
 
     Порядок клиентов тот же, что у source.clients(): процесс i берёт
-    группы строк i, i + n, …, а DataLoader отдаёт их по кругу.
+    группы строк order[i], order[i + n], …, а DataLoader отдаёт их по
+    кругу.
     Маска разыгрывается тем же кодом из той же строки, поэтому она
     побитно та же.
     """
@@ -441,7 +458,7 @@ class _RowGroups(IterableDataset):
 
         first, step = (info.id, info.num_workers) if info is not None else (0, 1)
 
-        for index in range(first, self.source.count, step):
+        for index in self.source.order[first::step]:
             yield self.source.batch(index)
 
 

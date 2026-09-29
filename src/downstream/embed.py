@@ -64,9 +64,10 @@ def trained_model(checkpoint: str, device):
     без обучения: контроль, что вектор даёт обучение, а не вход.
     """
 
+    from src.batching.settings import BATCHES_FILE, batches_dir
     from src.mlm.model import load_model
     from src.mlm.settings import MlmConfig
-    from src.mlm.train import load_trained
+    from src.mlm.train import CheckpointError, file_digest, load_trained
 
     if checkpoint == "init":
         config = MlmConfig()
@@ -79,6 +80,17 @@ def trained_model(checkpoint: str, device):
         return model, config, {"checkpoint": "init", "epoch": 0}
 
     model, state = load_trained(Path(checkpoint), device)
+
+    # Вход на T строится из текущих данных: модель, обученная на
+    # других (03–07 пересобраны под следующий эксперимент — другой
+    # BPE, другая точка отсчёта времени), получила бы чужой вход.
+    path = batches_dir("train") / BATCHES_FILE
+
+    if (state.get("data") or {}).get("07_batches/train") != file_digest(path):
+        raise CheckpointError(
+            f"{checkpoint} обучен не на текущем {path}: соберите данные, на которых он "
+            "учился, или возьмите модель этих данных"
+        )
 
     config = MlmConfig.from_dict(state["config"])
 

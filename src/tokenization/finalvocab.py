@@ -10,7 +10,8 @@ from src.preprocessing.artifacts import read_json
 
 from .categorical import load_value_vocab
 from .keyvocab import load_key_vocab
-from .numeric import Bucket, FOUND_BUCKET, load_buckets, locate, read_buckets
+from .numeric import Bucket, BucketsError, FOUND_BUCKET, load_buckets, locate, read_buckets
+from .scan import value_text
 from .settings import BPE_FILE, FINAL_VOCAB_FILE, VOCAB_DIR, vocab_path
 from .specials import SPECIAL_TOKENS, load_special_tokens
 from .text import BpeModel, load_bpe
@@ -235,13 +236,30 @@ class FrozenArtifacts:
     def categorical_id(self, key: str, value: str) -> int | None:
         return self.values.get(key, {}).get(value)
 
-    def bucket_id(self, key: str, value: float) -> int | None:
+    def bucket_id(self, key: str, value: float, record: dict | None = None) -> int | None:
         """
         Номер диапазона, в который попало число, или None, если
         шкалы у ключа нет.
+
+        record — все значения записи: у шкалы со split_by диапазон
+        ищется среди диапазонов значения условия в этой записи.
         """
 
-        found, bucket = locate(self.buckets.get(key, ()), value)
+        buckets = self.buckets.get(key, ())
+
+        split = buckets[0].split_by if buckets else None
+
+        if split is not None:
+
+            if record is None:
+                raise BucketsError(f"ключ {key}: шкала делится по {split}, а записи нет")
+
+            condition = record.get(split)
+            condition = None if condition is None else value_text(condition)
+
+            buckets = tuple(bucket for bucket in buckets if bucket.when == condition)
+
+        found, bucket = locate(buckets, value)
 
         return bucket.token_id if found == FOUND_BUCKET and bucket is not None else None
 

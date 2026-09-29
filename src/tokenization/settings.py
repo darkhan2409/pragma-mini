@@ -106,6 +106,15 @@ class NumericEncoder:
     # с самим полем: иначе один доход получил бы три разные сетки.
     fit_source: str | None = None
     reason: str = ""
+    # Минус отдельно (только при negative_policy=allowed): свои
+    # negative_bins квантилей у отрицательных, граница в нуле, и
+    # долг не делит диапазон с маленьким остатком.
+    negative_bins: int | None = None
+    # Своя шкала на каждое значение категориального ключа того же
+    # события (например, direction): у зарплаты и покупки разные
+    # порядки величин, и общая шкала сводит доходы в верхний
+    # диапазон. Событие без этого ключа получает свою шкалу.
+    split_by: str | None = None
 
     def __post_init__(self) -> None:
         # Границы хранятся дробными всегда, даже когда записаны
@@ -146,6 +155,20 @@ class NumericEncoder:
             if values and list(values) != sorted(set(values)):
                 raise ConfigError(f"ключ {key}: {name} обязаны строго возрастать без повторов")
 
+        if self.negative_bins is not None:
+            if self.method != METHOD_QUANTILE or self.negative_policy != NEGATIVE_ALLOWED:
+                raise ConfigError(
+                    f"ключ {key}: negative_bins — только у квантильной шкалы с разрешённым минусом"
+                )
+            if self.negative_bins < 1:
+                raise ConfigError(f"ключ {key}: negative_bins обязан быть положительным")
+
+        if self.split_by is not None:
+            if self.method != METHOD_QUANTILE:
+                raise ConfigError(f"ключ {key}: split_by — только у шкалы, которую учит train")
+            if self.fit_source is not None:
+                raise ConfigError(f"ключ {key}: split_by и fit_source вместе не задаются")
+
     def as_dict(self) -> dict:
         return {
             "method": self.method,
@@ -156,6 +179,8 @@ class NumericEncoder:
             "negative_policy": self.negative_policy,
             "fit_source": self.fit_source,
             "reason": self.reason,
+            "negative_bins": self.negative_bins,
+            "split_by": self.split_by,
         }
 
     @staticmethod
@@ -175,6 +200,8 @@ class NumericEncoder:
             negative_policy=str(data.get("negative_policy", NEGATIVE_INVALID)),
             fit_source=data.get("fit_source"),
             reason=str(data.get("reason", "")),
+            negative_bins=None if data.get("negative_bins") is None else int(data["negative_bins"]),
+            split_by=data.get("split_by"),
         )
 
 
@@ -216,8 +243,12 @@ def default_numeric_encoders() -> dict[str, NumericEncoder]:
     Кодировщик каждого числового ключа смыслового реестра.
 
     Деньги режутся по train: их разброс свойство популяции.
-    Ставка, доли и длительность отношений заданы бизнесом: их
-    границы известны заранее и от выборки зависеть не должны.
+    Ставка и дни просрочки заданы бизнесом: их границы известны
+    заранее и от выборки зависеть не должны.
+
+    Кодировщика нет у полей, которых модельная анкета не несёт
+    (лимит и его использование, стаж отношений — производные
+    истории, profile_state.EXCLUDED_FIELDS): реестр их не объявляет.
 
     Сроков, счётчиков и возраста здесь нет вовсе: у них важно
     точное значение, а не порядок величины, поэтому реестр объявил
@@ -252,23 +283,12 @@ def default_numeric_encoders() -> dict[str, NumericEncoder]:
             "новый доход делит шкалу с самим доходом",
             fit_source="profile_declared_income",
         ),
-        "profile_credit_limit": _quantile(12, FALLBACK_KZT, money),
         # --- время в днях: шкалы бизнеса ---
         # Граница 1 здесь была бы лишней: ноль уже отдельный
         # диапазон, а между нулём и единицей целых дней нет.
         "days_past_due": _fixed(
             (30, 60, 90, 120, 180),
             "полосы просрочки банка: ноль это отдельное состояние «просрочки нет»",
-            zero=ZERO_SEPARATE,
-        ),
-        # --- сроки ---
-        "profile_relationship_months": _fixed(
-            (6, 12, 24, 36, 60, 120), "длительность отношений с банком в месяцах"
-        ),
-        # --- доли ---
-        "profile_credit_utilization": _fixed(
-            (0.1, 0.3, 0.5, 0.7, 0.9, 1.0),
-            "использование лимита долей: ноль это отдельное состояние «лимитом не пользуются»",
             zero=ZERO_SEPARATE,
         ),
         # Ставки объявлены каталогом продуктов и лежат в [0.06, 0.24],

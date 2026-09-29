@@ -336,6 +336,28 @@ def test_loading_refuses_a_model_of_another_vocabulary(stage):
         load_trained(alien, CPU)
 
 
+def test_vectors_are_taken_only_on_the_data_the_model_learned(stage):
+    """
+    Вход на T строится из текущих данных. После пересборки 07 под
+    другой эксперимент прежняя модель векторов не даёт.
+    """
+
+    from src.batching.settings import BATCHES_FILE, batches_dir
+    from src.downstream.embed import trained_model
+
+    settle(stage, train_people=many())
+
+    train(tiny(token_budget=6), epochs=1, max_steps=None, masking=every_value())
+
+    trained_model(str(checkpoint_path()), CPU)
+
+    path = batches_dir("train") / BATCHES_FILE
+    path.write_bytes(path.read_bytes() + b"\0")
+
+    with pytest.raises(CheckpointError, match="не на текущем"):
+        trained_model(str(checkpoint_path()), CPU)
+
+
 def test_loading_refuses_a_checkpoint_without_its_origin(stage):
     """
     Чекпойнт без отметки backbone (старый формат) не загружается:

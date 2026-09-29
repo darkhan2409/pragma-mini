@@ -145,6 +145,24 @@ class MlmConfig:
     # влияет: порядок и маски те же.
     loader_workers: int = 1
 
+    # Softmax головы только по значениям ключа цели (candidate_table)
+    # вместо всего словаря; сглаживание меток — внутри них же.
+    restricted_softmax: bool = False
+
+    # Вес вспомогательной цели [USR] (model.RecentTypes): доли типов
+    # событий за 7/30/90 дней. 0 — цели нет.
+    usr_aux_weight: float = 0.0
+
+    # Новая перестановка групп строк train на каждую эпоху (seed из
+    # seed и номера эпохи). Без неё каждая эпоха — одна и та же
+    # «пила» от коротких клиентов окна к длинным.
+    shuffle_row_groups: bool = False
+
+    # У значений события под маской event ключ во входе закрыт
+    # ([MASK]), а голова получает ключ цели запросом
+    # (Model.hide_event_keys): видимые ключи выдают тип события.
+    hide_event_keys: bool = False
+
     def validate(self) -> None:
 
         if not 0.0 <= self.label_smoothing < 1.0:
@@ -176,6 +194,11 @@ class MlmConfig:
         if self.max_grad_norm <= 0.0:
             raise ConfigError(
                 f"max_grad_norm обязан быть положительным, получено {self.max_grad_norm}"
+            )
+
+        if self.usr_aux_weight < 0.0:
+            raise ConfigError(
+                f"usr_aux_weight не может быть отрицательным, получено {self.usr_aux_weight}"
             )
 
         if self.loader_workers < 0:
@@ -228,6 +251,10 @@ class MlmConfig:
             "early_stopping_patience": self.early_stopping_patience,
             "early_stopping_min_delta": self.early_stopping_min_delta,
             "loader_workers": self.loader_workers,
+            "restricted_softmax": self.restricted_softmax,
+            "usr_aux_weight": self.usr_aux_weight,
+            "shuffle_row_groups": self.shuffle_row_groups,
+            "hide_event_keys": self.hide_event_keys,
         }
 
     @staticmethod
@@ -262,6 +289,10 @@ class MlmConfig:
                 data.get("early_stopping_min_delta", base.early_stopping_min_delta)
             ),
             loader_workers=int(data.get("loader_workers", base.loader_workers)),
+            restricted_softmax=bool(data.get("restricted_softmax", base.restricted_softmax)),
+            usr_aux_weight=float(data.get("usr_aux_weight", base.usr_aux_weight)),
+            shuffle_row_groups=bool(data.get("shuffle_row_groups", base.shuffle_row_groups)),
+            hide_event_keys=bool(data.get("hide_event_keys", base.hide_event_keys)),
         )
 
         config.validate()

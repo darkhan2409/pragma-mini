@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .choose import Choice, NONE
+from .choose import Choice, NONE, Value
 
 
 # ============================================================
@@ -24,6 +24,10 @@ from .choose import Choice, NONE
 # key_ids сюда не приходят вовсе, поэтому изменить их нельзя:
 # ключ виден, предсказывается значение.
 #
+# hidden — значения контекста вне периода целей, закрытые ради
+# ключа (key_hides_context): [MASK] во все куски, но labels -100 и
+# без причины — это вход, а не задача.
+#
 # Длина последовательности не меняется: ни один токен не
 # добавляется и не выбрасывается.
 # ============================================================
@@ -41,7 +45,7 @@ class MaskError(ValueError):
 
 
 def apply(client_id: str, row: dict, choices: list[Choice], mask: int,
-          unknown: int) -> dict:
+          unknown: int, hidden: tuple[Value, ...] = ()) -> dict:
     """
     Четыре массива по ширине строки батча.
     """
@@ -57,9 +61,9 @@ def apply(client_id: str, row: dict, choices: list[Choice], mask: int,
     # причина не пишутся, и по ним наложение было бы не видно.
     taken = [False] * width
 
-    for choice in choices:
+    closed = [(choice.value, choice) for choice in choices] + [(value, None) for value in hidden]
 
-        value = choice.value
+    for value, choice in closed:
 
         if value.start < 0 or value.start + value.length > width:
             raise MaskError(
@@ -75,6 +79,10 @@ def apply(client_id: str, row: dict, choices: list[Choice], mask: int,
                 )
 
             taken[index] = True
+
+            if choice is None:
+                value_ids[index] = mask
+                continue
 
             if choice.unknown:
                 value_ids[index] = unknown

@@ -18,6 +18,11 @@ import numpy as np
 # У последнего события позиция ровно 0, у более старых она тем
 # больше, чем они древнее. Пустая история даёт пустой массив.
 #
+# Второй вариант точки отсчёта (эксперимент, settings.TIME_ANCHORS)
+# — cutoff T примера: delta_i = T - t_i. У последнего события
+# позиция тогда — его давность до T, и [USR] (ноль, то есть T)
+# лежит на одной оси с событиями и вехами анкеты.
+#
 # Масштаб 8 секунд взят из статьи вслед за референсом
 # pragmatiq/data/tokenizer.py. При малых промежутках
 # 8*log1p(x/8) почти равно x, поэтому секунды сохраняются
@@ -80,9 +85,10 @@ def _utc_naive(moments: list[datetime]) -> np.ndarray:
     return np.asarray([moment.replace(tzinfo=None) for moment in moments], dtype="datetime64[us]")
 
 
-def time_log(client_id: str, event_time: list[datetime]) -> list[float]:
+def time_log(client_id: str, event_time: list[datetime], cutoff: datetime | None = None) -> list[float]:
     """
-    Временные позиции всех событий примера.
+    Временные позиции всех событий примера: давность до последнего
+    события, а с cutoff — до него.
     """
 
     if not event_time:
@@ -90,15 +96,19 @@ def time_log(client_id: str, event_time: list[datetime]) -> list[float]:
 
     moments = _utc_naive(event_time)
 
-    delta = (moments[-1] - moments).astype("timedelta64[us]").astype(np.int64)
+    # Сломанный порядок и событие позже cutoff — ошибки данных, а
+    # не повод их сгладить: референс здесь клампит, но молчаливо
+    # исправленная ошибка страшнее остановленного этапа.
+    if moments.size > 1 and bool((moments[1:] < moments[:-1]).any()):
+        raise TemporalError(f"{client_id}: события идут не по возрастанию времени")
 
-    # Отрицательное расстояние это сломанный порядок событий, а
-    # не повод его сгладить: референс здесь клампит, но молчаливо
-    # исправленная ошибка данных страшнее остановленного этапа.
+    anchor = moments[-1] if cutoff is None else _utc_naive([cutoff])[0]
+
+    delta = (anchor - moments).astype("timedelta64[us]").astype(np.int64)
+
     if int(delta.min()) < 0:
         raise TemporalError(
-            f"{client_id}: события идут не по возрастанию времени, и расстояние "
-            "до последнего получилось отрицательным"
+            f"{client_id}: событие позже cutoff {cutoff.isoformat()} — пример знал бы будущее"
         )
 
     return log_age(delta).astype(np.float32).tolist()
@@ -137,9 +147,9 @@ def profile_time_log(
     return out.tolist()
 
 
-def check(client_id: str, event_time_log: list[float], n_events: int) -> None:
+def check(client_id: str, event_time_log: list[float], n_events: int, anchor: str = "last_event") -> None:
     """
-    Инварианты временных позиций.
+    Инварианты временных позиций при точке отсчёта anchor.
     """
 
     if len(event_time_log) != n_events:
@@ -155,10 +165,15 @@ def check(client_id: str, event_time_log: list[float], n_events: int) -> None:
         if position < 0.0:
             raise TemporalError(f"{client_id}: позиция {index} отрицательна: {position!r}")
 
-    # Последнее событие это точка отсчёта, и ноль у него не
-    # случайность, а определение. Если он уехал, значит отсчёт
-    # вёлся не от того события.
-    if n_events and event_time_log[-1] != 0.0:
+    # События идут по времени, а отсчёт — от точки не раньше
+    # последнего, поэтому к концу ленты позиции не растут.
+    if any(later > earlier for earlier, later in zip(event_time_log, event_time_log[1:])):
+        raise TemporalError(f"{client_id}: позиции растут к концу ленты")
+
+    # При отсчёте от последнего события ноль у него не случайность,
+    # а определение. Если он уехал, значит отсчёт вёлся не от того
+    # события.
+    if anchor == "last_event" and n_events and event_time_log[-1] != 0.0:
         raise TemporalError(
             f"{client_id}: у последнего события позиция {event_time_log[-1]!r}, а не ноль"
         )

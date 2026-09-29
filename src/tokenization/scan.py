@@ -234,6 +234,9 @@ class FitStatistics:
 
     categorical: dict[tuple[str, str, str], CategoryEntry] = field(default_factory=dict)
     numeric: dict[str, NumericSketch] = field(default_factory=dict)
+    # Выборки ключей со split_by: (ключ, значение соседнего ключа
+    # или None, если его в событии нет).
+    split_numeric: dict[tuple[str, str | None], NumericSketch] = field(default_factory=dict)
     text: dict[str, dict[str, TextEntry]] = field(default_factory=dict)
     text_empty: dict[str, int] = field(default_factory=dict)
 
@@ -330,13 +333,18 @@ def _add_numeric(stats: FitStatistics, key: str, value: object, unit: str, clien
     if kind not in (TYPE_INT, TYPE_FLOAT):
         raise ScanError(f"ключ {key} объявлен числом, а значение пришло как {kind}: {value!r}")
 
-    sketch = stats.numeric.get(key)
+    _sketch(stats.numeric, key, sample_k, distinct_cap).add(float(value), unit, client_id)
+
+
+def _sketch(sketches: dict, name, sample_k: int, distinct_cap: int) -> NumericSketch:
+
+    sketch = sketches.get(name)
 
     if sketch is None:
         sketch = NumericSketch(sample_k, distinct_cap)
-        stats.numeric[key] = sketch
+        sketches[name] = sketch
 
-    sketch.add(float(value), unit, client_id)
+    return sketch
 
 
 def scan(
@@ -344,13 +352,19 @@ def scan(
     schema: SemanticSchema,
     sample_k: int,
     distinct_cap: int,
+    splits: dict[str, str] | None = None,
 ) -> FitStatistics:
     """
     Один проход по историям корпуса.
 
+    splits — числовой ключ события -> ключ, по значениям которого
+    его шкала делится (NumericEncoder.split_by).
+
     Историй в памяти не накапливается: на выходе только счётчики
     и выборки.
     """
+
+    splits = splits or {}
 
     stats = FitStatistics()
 
@@ -393,6 +407,12 @@ def scan(
 
                 if info.value_kind == NUMERIC:
                     _add_numeric(stats, key, value, unit_prefix + key, client_id, sample_k, distinct_cap)
+                    if key in splits:
+                        condition = values.get(splits[key])
+                        name = (key, None if condition is None else value_text(condition))
+                        _sketch(stats.split_numeric, name, sample_k, distinct_cap).add(
+                            float(value), unit_prefix + key, client_id
+                        )
                 elif info.value_kind == CATEGORICAL:
                     _add_categorical(stats, key, value, client_id)
                 elif info.value_kind == TEXT:

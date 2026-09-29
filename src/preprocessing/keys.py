@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Iterable
 
 from .projection import EVENT_TYPE_FIELD, SEMANTIC_PAYLOAD_FIELDS, validate_projection
 
@@ -34,7 +35,7 @@ from .projection import EVENT_TYPE_FIELD, SEMANTIC_PAYLOAD_FIELDS, validate_proj
 # ============================================================
 
 
-KEYS_VERSION = "15.0.0"
+KEYS_VERSION = "16.0.0"
 
 
 # ------------------------------------------------------------
@@ -543,9 +544,15 @@ def _all_declared_keys() -> list[SemanticKey]:
     return out
 
 
-def keys_registry(catalogue: dict) -> dict:
+def keys_registry(catalogue: dict, profile_fields: Iterable[str]) -> dict:
     """
     Реестр смыслов: что во что превращается и почему.
+
+    profile_fields — поля, которые модельная анкета несёт
+    (profile_state.INCLUDED_FIELDS). Остальные поля PROFILE_KEYS
+    модели не отдаются, и их ключ в реестре был бы обещанием поля,
+    которого она никогда не увидит: мёртвый токен словаря, а у числа
+    ещё и шкала «по данным», выученная на нуле наблюдений.
     """
 
     validate_keys(catalogue)
@@ -569,7 +576,8 @@ def keys_registry(catalogue: dict) -> dict:
             row = rows.setdefault(key.key, {**key.as_dict(), "physical_fields": []})
             row["physical_fields"].append(f"{event_type}.{name}")
 
-    for name, key in PROFILE_KEYS.items():
+    for name in profile_fields:
+        key = PROFILE_KEYS[name]
         rows.setdefault(key.key, {**key.as_dict(), "physical_fields": [f"profile.{name}"]})
 
     rows.setdefault(

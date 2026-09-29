@@ -8,6 +8,15 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+# sklearn — на уровне модуля: threadpool_limits в run ограничивает
+# только уже загруженные библиотеки потоков.
+from sklearn.linear_model import LogisticRegressionCV
+from sklearn.metrics import average_precision_score, roc_auc_score
+from sklearn.model_selection import StratifiedKFold
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from threadpoolctl import threadpool_limits
+
 from src.preprocessing.run import EXIT_BLOCKED, EXIT_OK
 
 from .settings import EMBEDDINGS_META, REPORT_FILE, downstream_dir
@@ -21,7 +30,7 @@ from .settings import EMBEDDINGS_META, REPORT_FILE, downstream_dir
 #
 # Над векторами клиентов на момент T учится простая голова —
 # логистическая регрессия со стандартизацией, сила регуляризации
-# выбирается 5-кратной кросс-валидацией на train по log-loss.
+# выбирается 3-кратной кросс-валидацией на train по log-loss.
 # Train учит, val и test только оцениваются. Главные метрики —
 # ROC-AUC и PR-AUC, без порога.
 #
@@ -47,11 +56,25 @@ from .settings import EMBEDDINGS_META, REPORT_FILE, downstream_dir
 
 TASKS = ("churn", "ndq", "a1")
 
+# Наборы, по которым модели сравниваются друг с другом (--baseline):
+# вектор с давностью, все векторы с давностью и гибрид с агрегатами.
+COMPARED = ("usr+recency", "readouts+recency", "counts+usr")
+
+PREDICTIONS_FILE = "predictions.parquet"
+
 REFERENCE = {"churn": "catboost", "ndq": "counts", "a1": "counts"}
 
 GROUPS = ("train", "val", "test")
 
-CS = np.logspace(-4, 2, 13)
+# Сетка силы регуляризации по декадам и 3 фолда: пробы идут после
+# каждого эксперимента.
+CS = np.logspace(-4, 2, 7)
+
+FOLDS = 3
+
+# Потоков BLAS: пробы идут рядом с обучением, и 12 потоков OpenBLAS,
+# деля ядра с ним, замедляли lbfgs в 7–10 раз против 4.
+BLAS_THREADS = 4
 
 
 def load_embeddings(tag: str) -> dict[str, pd.DataFrame]:
@@ -87,13 +110,15 @@ def recency(frame: pd.DataFrame) -> np.ndarray:
     ])
 
 
-def features(name: str, rows: pd.DataFrame, vectors: dict[str, pd.DataFrame], counts: list[str]) -> np.ndarray:
+def features(
+    name: str, group: str, rows: pd.DataFrame, vectors: dict[str, dict[str, pd.DataFrame]], counts: list[str]
+) -> np.ndarray:
     """
-    Матрица набора name для строк rows (индекс — client_id).
+    Матрица набора name для строк rows группы group (индекс — client_id).
     """
 
     def vector(tag: str, column: str) -> np.ndarray:
-        return stacked(vectors[tag].loc[rows.index], column)
+        return stacked(vectors[tag][group].loc[rows.index], column)
 
     def readouts(tag: str) -> np.ndarray:
         return np.hstack([vector(tag, column) for column in ("usr", "profile", "mean_event", "last_event")])
@@ -118,32 +143,25 @@ def features(name: str, rows: pd.DataFrame, vectors: dict[str, pd.DataFrame], co
 
 def fit_predict(train_x: np.ndarray, train_y: np.ndarray, others: list[np.ndarray], seed: int):
     """
-    Логистическая регрессия: C — 5-кратной CV на train по log-loss.
+    Логистическая регрессия: C — 3-кратной CV на train по log-loss.
     """
-
-    from sklearn.linear_model import LogisticRegressionCV
-    from sklearn.model_selection import StratifiedKFold
-    from sklearn.pipeline import make_pipeline
-    from sklearn.preprocessing import StandardScaler
 
     model = make_pipeline(
         StandardScaler(),
         LogisticRegressionCV(
-            Cs=CS, cv=StratifiedKFold(5, shuffle=True, random_state=seed),
-            scoring="neg_log_loss", max_iter=5000,
+            Cs=CS, cv=StratifiedKFold(FOLDS, shuffle=True, random_state=seed),
+            scoring="neg_log_loss", max_iter=5000, l1_ratios=(0.0,), use_legacy_attributes=False,
         ),
     )
 
     model.fit(train_x, train_y)
 
-    chosen = float(model[-1].C_[0])
+    chosen = float(np.ravel(model[-1].C_)[0])
 
     return [model.predict_proba(x)[:, 1] for x in others], chosen
 
 
 def metrics(y: np.ndarray, score: np.ndarray) -> dict:
-
-    from sklearn.metrics import average_precision_score, roc_auc_score
 
     return {
         "rows": int(len(y)),
@@ -159,8 +177,6 @@ def paired(y: np.ndarray, score: np.ndarray, reference: np.ndarray, draws: int, 
     выборках клиентов: среднее, 95% интервал и доля выборок, где
     набор не лучше эталона.
     """
-
-    from sklearn.metrics import average_precision_score, roc_auc_score
 
     rng = np.random.default_rng(seed)
 
@@ -202,7 +218,12 @@ def task_rows(task: str, tables: dict[str, pd.DataFrame], churn: dict[str, pd.Da
 
         if task == "churn":
             base = churn[group]
-            frame = table.loc[base.index].assign(y=base["churn"].astype(int), catboost=base["score"])
+            frame = pd.concat(
+                [table.loc[base.index], pd.DataFrame(
+                    {"y": base["churn"].astype(int), "catboost": base["score"]}, index=base.index
+                )],
+                axis=1,
+            )
         elif task == "ndq":
             frame = table[table["ndq_population"]].assign(y=lambda part: part["ndq"].astype(int))
         else:
@@ -213,7 +234,7 @@ def task_rows(task: str, tables: dict[str, pd.DataFrame], churn: dict[str, pd.Da
     return rows
 
 
-def run_probe(tag: str, control: str | None, draws: int, seed: int) -> dict:
+def run_probe(tag: str, control: str | None, draws: int, seed: int, baseline: str | None = None) -> dict:
 
     from .tasks import COUNT_WINDOWS, churn_rows, table
 
@@ -239,7 +260,14 @@ def run_probe(tag: str, control: str | None, draws: int, seed: int) -> dict:
     if control:
         names += [f"{control}:usr", f"{control}:readouts+recency"]
 
-    report: dict = {"tag": tag, "control": control, "draws": draws, "tasks": {}}
+    report: dict = {"tag": tag, "control": control, "baseline": baseline, "draws": draws, "tasks": {}}
+
+    # Прогнозы по строкам: по ним сравниваются модели между собой.
+    predictions: list[pd.DataFrame] = []
+
+    before = (
+        pd.read_parquet(downstream_dir(baseline) / PREDICTIONS_FILE) if baseline else None
+    )
 
     for task in TASKS:
 
@@ -264,7 +292,7 @@ def run_probe(tag: str, control: str | None, draws: int, seed: int) -> dict:
         for name in names:
 
             matrices = {
-                group: features(name if ":" in name else f"model:{name}", rows[group], vectors, counts)
+                group: features(name if ":" in name else f"model:{name}", group, rows[group], vectors, counts)
                 for group in GROUPS
             }
 
@@ -276,6 +304,13 @@ def run_probe(tag: str, control: str | None, draws: int, seed: int) -> dict:
 
         if task == "churn":
             scores["catboost"] = {group: rows[group]["catboost"].to_numpy() for group in ("val", "test")}
+
+        for name, by_group in scores.items():
+            for group in ("val", "test"):
+                predictions.append(pd.DataFrame({
+                    "task": task, "set": name, "group": group, "client_id": rows[group].index,
+                    "y": y[group], "score": by_group[group],
+                }))
 
         reference = REFERENCE[task]
 
@@ -291,6 +326,12 @@ def run_probe(tag: str, control: str | None, draws: int, seed: int) -> dict:
                 results[name]["vs_reference_test"] = paired(
                     y["test"], by_group["test"], scores[reference]["test"], draws, seed
                 )
+            if before is not None and name in COMPARED:
+                results[name]["vs_baseline"] = {
+                    group: vs_baseline(before, task, name, group, rows[group].index, y[group],
+                                       by_group[group], draws, seed)
+                    for group in ("val", "test")
+                }
 
         report["tasks"][task] = {
             "reference": reference,
@@ -299,7 +340,26 @@ def run_probe(tag: str, control: str | None, draws: int, seed: int) -> dict:
             "results": results,
         }
 
+    directory = downstream_dir(tag)
+    pd.concat(predictions, ignore_index=True).to_parquet(directory / PREDICTIONS_FILE)
+
     return report
+
+
+def vs_baseline(before: pd.DataFrame, task: str, name: str, group: str, index: pd.Index,
+                y: np.ndarray, score: np.ndarray, draws: int, seed: int) -> dict:
+    """
+    Разница с прогнозом другой модели на тех же клиентах и той же
+    метке — парный bootstrap.
+    """
+
+    old = before[(before["task"] == task) & (before["set"] == name) & (before["group"] == group)]
+    old = old.set_index("client_id").reindex(index)
+
+    if old["score"].isna().any() or not np.array_equal(old["y"].to_numpy(), y):
+        raise ValueError(f"{task}/{name}/{group}: строки или метки базовой модели другие")
+
+    return paired(y, score, old["score"].to_numpy(), draws, seed)
 
 
 def show(report: dict) -> str:
@@ -323,6 +383,14 @@ def show(report: dict) -> str:
                 if delta else "эталон"
             )
 
+            versus = result.get("vs_baseline")
+            if versus:
+                shown += (
+                    f"   Δ к {report['baseline']}: val PR {versus['val']['pr_auc']['mean']:+.3f} "
+                    f"[{versus['val']['pr_auc']['low']:+.3f}, {versus['val']['pr_auc']['high']:+.3f}], "
+                    f"val ROC {versus['val']['roc_auc']['mean']:+.3f}"
+                )
+
             lines.append(
                 f"  {name:<24} {result['val']['roc_auc']:8.3f} {result['val']['pr_auc']:7.3f} "
                 f"{result['test']['roc_auc']:9.3f} {result['test']['pr_auc']:8.3f}   {shown}"
@@ -334,7 +402,8 @@ def show(report: dict) -> str:
 def run(args) -> int:
 
     try:
-        report = run_probe(args.tag, args.control, args.draws, args.seed)
+        with threadpool_limits(BLAS_THREADS):
+            report = run_probe(args.tag, args.control, args.draws, args.seed, args.baseline)
     except (FileNotFoundError, ValueError) as error:
         print(f"[probe] {error}")
         return EXIT_BLOCKED
@@ -353,7 +422,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m src.downstream.probe")
     parser.add_argument("--tag", required=True, help="каталог векторов в data/15_downstream")
     parser.add_argument("--control", default=None, help="тег векторов-контроля, например init")
-    parser.add_argument("--draws", type=int, default=2000, help="bootstrap-выборок")
+    parser.add_argument("--baseline", default=None, help="тег модели для парного сравнения")
+    parser.add_argument("--draws", type=int, default=1000, help="bootstrap-выборок")
     parser.add_argument("--seed", type=int, default=0)
     parser.set_defaults(handler=run)
 
@@ -374,4 +444,5 @@ if __name__ == "__main__":
     main()
 
 
-__all__ = ["REFERENCE", "TASKS", "features", "fit_predict", "metrics", "paired", "run_probe", "show"]
+__all__ = ["COMPARED", "REFERENCE", "TASKS", "features", "fit_predict", "metrics", "paired", "run_probe",
+           "show", "vs_baseline"]

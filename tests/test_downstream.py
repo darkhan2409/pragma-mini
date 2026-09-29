@@ -50,11 +50,12 @@ FIELDS = (
 )
 
 
-def chain(stage, tape: list[dict], snapshot: dict) -> None:
+def chain(stage, tape: list[dict], snapshot: dict, anchor: str = "last_event") -> None:
     """
     Выгрузка → 02 → 04 → 05 → 06 → 07 для train и val: теми же
-    функциями этапов, что и в бою. train нужен ради отбора истории,
-    на котором «училась модель» (05_dataset/train/meta.json).
+    функциями этапов, что и в бою. train нужен ради отбора истории
+    и точки отсчёта времени, на которых «училась модель»
+    (05_dataset/train/meta.json, 06_temporal/train/meta.json).
     """
 
     from src.batching.build import build_group as build_batches
@@ -74,7 +75,7 @@ def chain(stage, tape: list[dict], snapshot: dict) -> None:
         prepare(stage, tape, snapshot, group=group)
         encode_group(artifacts, group, TokenizerConfig.load(None))
         build_dataset(artifacts, group, DatasetConfig.load(None))
-        build_temporal(group)
+        build_temporal(group, anchor=anchor)
         build_batches(group, BatchingConfig.load(None))
 
 
@@ -93,10 +94,12 @@ def same(left, right) -> None:
 # ============================================================
 
 
-def test_input_at_the_group_cutoff_is_what_stage_07_stores(stage):
+@pytest.mark.parametrize("anchor", ["last_event", "cutoff"])
+def test_input_at_the_group_cutoff_is_what_stage_07_stores(stage, anchor: str):
     """
     T = конец окна val: вход в памяти побитно равен клиенту, которого
-    модель читает из 07_batches без масок.
+    модель читает из 07_batches без масок, — при любой точке отсчёта
+    времени этапа 06.
     """
 
     from src.downstream.at_cutoff import ClientsAtCutoff
@@ -104,7 +107,7 @@ def test_input_at_the_group_cutoff_is_what_stage_07_stores(stage):
     from src.mlm.inputs import Source
     from src.preprocessing.settings import PreprocessingConfig
 
-    chain(stage, EARLY, QUIET_SNAPSHOT)
+    chain(stage, EARLY, QUIET_SNAPSHOT, anchor)
 
     (stored,) = list(Source("val", masking=MaskingConfig(**NOTHING)).clients())
 

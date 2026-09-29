@@ -13,6 +13,7 @@ from src.preprocessing.keys import (
     key_for,
     keys_registry,
 )
+from src.preprocessing.profile_state import INCLUDED_FIELDS
 from src.preprocessing.projection import PROJECTION_VERSION, EVENT_TYPE_FIELD, model_role
 
 
@@ -115,7 +116,7 @@ class SemanticSchema:
 
     def __init__(self, registry: dict | None = None):
 
-        registry = registry or keys_registry(key_catalogue())
+        registry = registry or keys_registry(key_catalogue(), INCLUDED_FIELDS)
 
         if not registry.get("keys"):
             raise SchemaError("реестр смыслов пуст: каталог ключей не дал ни одного ключа")

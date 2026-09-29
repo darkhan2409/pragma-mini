@@ -69,12 +69,15 @@ class Selection:
     Что нашлось у клиента и что из этого выбрано.
 
     Допустимые события и значения возвращаются вместе с выбором,
-    чтобы отчёт не разбирал ту же строку второй раз.
+    чтобы отчёт не разбирал ту же строку второй раз. hidden —
+    значения вне периода целей, закрытые без метки
+    (key_hides_context).
     """
 
     events: int
     values: list["Value"]
     choices: list["Choice"]
+    hidden: tuple["Value", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -91,14 +94,14 @@ class Choice:
     unknown: bool
 
 
-def values_of(row: dict) -> list[Value]:
+def values_of(row: dict, targets_only: bool = True) -> list[Value]:
     """
     Допустимые значения клиента, в порядке последовательности.
 
     Событие допустимо, когда оно настоящее И лежит в периоде
-    целей своей группы. Внутри окна значение открывает
-    positions == 0; нулевая позиция окна это маркер события, и
-    разбор начинается сразу за ней.
+    целей своей группы (targets_only=False — любое настоящее).
+    Внутри окна значение открывает positions == 0; нулевая позиция
+    окна это маркер события, и разбор начинается сразу за ней.
     """
 
     key_ids = row["key_ids"]
@@ -108,7 +111,7 @@ def values_of(row: dict) -> list[Value]:
 
     for event, start in enumerate(row["event_starts"]):
 
-        if not row["event_mask"][event] or not row["target_event_mask"][event]:
+        if not row["event_mask"][event] or (targets_only and not row["target_event_mask"][event]):
             continue
 
         end = start + row["event_lengths"][event]
@@ -201,7 +204,20 @@ def choose(group: str, row: dict, config: MaskingConfig) -> Selection:
             Choice(value, reason, unknown.chance(config.unknown_probability))
         )
 
-    return Selection(len(eligible), values, picked)
+    # Выбранный ключ закрывается и в контексте вне периода целей.
+    # Случайности здесь нет: решение уже принято розыгрышем ключа,
+    # и маска целей от настройки не меняется ни на бит.
+    hidden: tuple[Value, ...] = ()
+
+    if config.key_hides_context:
+        targets = set(eligible)
+        hidden = tuple(
+            value
+            for value in values_of(row, targets_only=False)
+            if value.event not in targets and chosen_keys.get(value.key_id, False)
+        )
+
+    return Selection(len(eligible), values, picked, hidden)
 
 
 __all__ = [

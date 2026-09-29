@@ -1,0 +1,23 @@
+{
+  "numeric_encoders": {
+    "transaction_amount": {
+      "method": "quantile",
+      "bins": 16,
+      "boundaries": [],
+      "fallback": [
+        1000.0,
+        5000.0,
+        20000.0,
+        50000.0,
+        200000.0,
+        1000000.0
+      ],
+      "zero_policy": "separate",
+      "negative_policy": "invalid",
+      "fit_source": null,
+      "reason": "сумма в тенге своей шкалой на каждое направление: у зарплаты и покупки разные порядки величин",
+      "negative_bins": null,
+      "split_by": "direction"
+    }
+  }
+}

@@ -103,6 +103,7 @@ class PackedBatch:
     value_ids: torch.Tensor
     positions: torch.Tensor
     labels: torch.Tensor
+    event_masked: torch.Tensor    # [T] bool: значение события, закрытого механизмом event
     events: VarlenLayout          # cu_seqlens_event [E + 1]
     event_of_token: torch.Tensor  # [T]
 
@@ -154,6 +155,10 @@ class Predicted:
     # (угадано первым, попало в первые 5) — у прохода без логитов;
     # с логитами их считает вызывающий по logits.
     hits: tuple[int, int] | None = None
+
+    # Вспомогательная потеря [USR] (RecentTypes), связанная с графом;
+    # None — цели нет.
+    aux: torch.Tensor | None = None
 
     @property
     def count(self) -> int:
@@ -241,6 +246,9 @@ def pack(clients: list[Client], device: torch.device) -> PackedBatch:
         value_ids=tensor(join("value_ids", np.int64)),
         positions=tensor(join("positions", np.int64)),
         labels=tensor(labels),
+        event_masked=tensor(np.concatenate(
+            [np.asarray(client.reason, dtype=object) == "event" for client in clients]
+        ).astype(bool)),
         events=events,
         event_of_token=tensor(event_of_token),
         event_time_log=tensor(event_time_log),
@@ -314,6 +322,8 @@ def mlm_loss(
     weight: torch.Tensor,
     targets: torch.Tensor,
     smoothing: float,
+    allowed: torch.Tensor | None = None,
+    rows: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Кросс-энтропия по размеченным позициям: среднее по целям.
@@ -329,6 +339,10 @@ def mlm_loss(
     же среднее с тем же сглаживанием меток: torch сам считает
     (1 − ε)·nll + ε/V·Σ по строкам с меткой.
 
+    allowed [ключи, словарь] и rows [M] — множества кандидатов по
+    ключу цели (Model.restrict): softmax и сглаживание меток тогда
+    идут только по значениям своего ключа.
+
     Ноль на пустом наборе возвращается СВЯЗАННЫМ С ГРАФОМ:
     torch.tensor(0.0) оборвал бы цепочку, и backward на клиенте
     без целей упал бы. Приём взят из эталона дословно.
@@ -339,10 +353,15 @@ def mlm_loss(
     if count == 0:
         return head(token, event, client, weight).sum() * 0.0
 
-    pieces = zip(*(part.split(TARGETS_PER_CHUNK) for part in (token, event, client, targets)))
+    parts = [token, event, client, targets] + ([rows] if allowed is not None else [])
+
+    pieces = zip(*(part.split(TARGETS_PER_CHUNK) for part in parts))
 
     total = sum(
-        checkpoint(_piece_loss, head, *piece, weight, smoothing, use_reentrant=False)
+        checkpoint(
+            _piece_loss, head, *piece[:4], weight, smoothing,
+            allowed, piece[4] if allowed is not None else None, use_reentrant=False,
+        )
         for piece in pieces
     )
 
@@ -357,12 +376,29 @@ def _piece_loss(
     targets: torch.Tensor,
     weight: torch.Tensor,
     smoothing: float,
+    allowed: torch.Tensor | None = None,
+    rows: torch.Tensor | None = None,
 ) -> torch.Tensor:
 
-    return F.cross_entropy(
-        head(token, event, client, weight), targets,
-        ignore_index=IGNORE, label_smoothing=smoothing, reduction="sum",
-    )
+    logits = head(token, event, client, weight)
+
+    if allowed is None:
+        return F.cross_entropy(
+            logits, targets, ignore_index=IGNORE, label_smoothing=smoothing, reduction="sum",
+        )
+
+    # Softmax по кандидатам своего ключа; сглаживание — среднее по
+    # тем же кандидатам, а не по всему словарю: иначе масса ε ушла бы
+    # на значения, которых у этого ключа не бывает.
+    mask = allowed[rows]
+    logp = logits.float().masked_fill(~mask, float("-inf")).log_softmax(dim=-1)
+    nll = -logp.gather(1, targets[:, None]).squeeze(1)
+
+    if smoothing:
+        spread = -logp.masked_fill(~mask, 0.0).sum(dim=-1) / mask.sum(dim=-1)
+        nll = (1.0 - smoothing) * nll + smoothing * spread
+
+    return nll.sum()
 
 
 def hits_in_pieces(
@@ -373,6 +409,8 @@ def hits_in_pieces(
     weight: torch.Tensor,
     targets: torch.Tensor,
     k: int = 5,
+    allowed: torch.Tensor | None = None,
+    rows: torch.Tensor | None = None,
 ) -> tuple[int, int]:
     """
     То же, что hits по полным логитам, но кусками по
@@ -385,10 +423,13 @@ def hits_in_pieces(
 
     with torch.no_grad():
 
-        for piece_token, piece_event, piece_client, labels in zip(
-            *(part.split(TARGETS_PER_CHUNK) for part in (token, event, client, targets))
-        ):
-            logits = head(piece_token, piece_event, piece_client, weight)
+        parts = [token, event, client, targets] + ([rows] if allowed is not None else [])
+
+        for piece in zip(*(part.split(TARGETS_PER_CHUNK) for part in parts)):
+            logits = head(piece[0], piece[1], piece[2], weight)
+            if allowed is not None:
+                logits = logits.masked_fill(~allowed[piece[4]], float("-inf"))
+            labels = piece[3]
             top = logits.topk(min(k, logits.shape[-1]), dim=-1).indices
             first = first + (top[:, 0] == labels).sum()
             five = five + (top == labels[:, None]).any(dim=-1).sum()
@@ -412,6 +453,79 @@ def hits(logits: torch.Tensor, targets: torch.Tensor, k: int = 5) -> tuple[int, 
     top = logits.detach().topk(min(k, logits.shape[-1]), dim=-1).indices
 
     return int((top[:, 0] == targets).sum()), int((top == targets[:, None]).any(dim=-1).sum())
+
+
+# Окна вспомогательной цели [USR], в сутках до последнего события.
+RECENT_DAYS = (7, 30, 90)
+
+
+class RecentTypes(nn.Module):
+    """
+    Вспомогательная цель вектора клиента: по [USR] предсказать, из
+    каких типов событий состоят последние 7, 30 и 90 дней истории.
+
+    [USR] у MLM своей цели не имеет — он лишь третий вектор в голове
+    каждой цели, — и вырождается в кодировку анкеты. Здесь он
+    обязан помнить недавнее прошлое клиента (как в NPPR: «вспомнить
+    прошлое» — самое полезное для задач уровня клиента).
+
+    Цель — доля каждого типа среди событий окна; тип закрытого
+    маской события берётся из его метки. Потеря — кросс-энтропия
+    с этой долей, среднее по (клиент, окно) с событиями.
+    """
+
+    def __init__(self, dim: int, type_of_value: torch.Tensor, event_type_key: int, seed: int):
+
+        super().__init__()
+
+        self.types = int(type_of_value.max()) + 1
+        self.event_type_key = int(event_type_key)
+
+        self.register_buffer("type_of_value", type_of_value, persistent=False)
+
+        with _seeded(seed):
+            self.proj = nn.Linear(dim, self.types * len(RECENT_DAYS))
+
+    def forward(self, data: "PackedBatch", usr: torch.Tensor) -> torch.Tensor:
+
+        from src.temporal.position import TIME_SCALE
+
+        # Исходное значение каждого токена: у закрытого маской — метка.
+        original = torch.where(data.labels != IGNORE, data.labels, data.value_ids)
+
+        typed = torch.nonzero(
+            (data.key_ids == self.event_type_key) & (data.positions == 0), as_tuple=True
+        )[0]
+
+        kind = torch.full((data.events.segments,), -1, dtype=torch.long, device=usr.device)
+        kind[data.event_of_token[typed]] = self.type_of_value[original[typed]]
+
+        # Давность до последнего события клиента — из той же шкалы,
+        # что видит энкодер истории: seconds = 8·expm1(позиция / 8).
+        days = TIME_SCALE * torch.expm1(data.event_time_log.float() / TIME_SCALE) / 86_400.0
+
+        known = kind >= 0
+        windows = torch.tensor(RECENT_DAYS, dtype=days.dtype, device=days.device)
+        inside = (days[:, None] <= windows[None, :]) & known[:, None]          # [E, W]
+
+        counts = usr.new_zeros(data.clients, len(RECENT_DAYS), self.types, dtype=torch.float32)
+        event, window = torch.nonzero(inside, as_tuple=True)
+        counts.index_put_(
+            (data.user_of_event[event], window, kind[event]),
+            torch.ones_like(event, dtype=torch.float32), accumulate=True,
+        )
+
+        totals = counts.sum(dim=-1)
+        present = totals > 0
+
+        if not bool(present.any()):
+            return (usr.sum() * 0.0).float()
+
+        share = counts / totals.clamp(min=1.0).unsqueeze(-1)
+
+        logq = self.proj(usr).float().view(data.clients, len(RECENT_DAYS), self.types).log_softmax(-1)
+
+        return -(share * logq).sum(dim=-1)[present].mean()
 
 
 class Model(nn.Module):
@@ -448,6 +562,54 @@ class Model(nn.Module):
         self.attention = attention
         self.strict = bool(strict)
 
+        # Кандидаты по ключу цели (restrict); None — softmax по всему
+        # словарю. Буферы, а не веса: в state_dict не входят.
+        self.register_buffer("key_row", None, persistent=False)
+        self.register_buffer("allowed", None, persistent=False)
+
+        # Вспомогательная цель [USR] (attach_recent); None — её нет.
+        self.recent: RecentTypes | None = None
+
+        # Чем закрыт ключ у значений события под маской event
+        # (hide_event_keys); None — ключи видны.
+        self.hidden_key: int | None = None
+
+    def attach_recent(self, recent: RecentTypes) -> None:
+        self.recent = recent.to(self.embedding.weight.device)
+
+    def hide_event_keys(self, hidden: int) -> None:
+        """
+        У значений события под маской event ключ во входе заменяется
+        на hidden: иначе набор видимых ключей выдаёт тип события и
+        схему полей, и событие угадывается без истории. Какой ключ
+        предсказывать, голова узнаёт из запроса — эмбеддинга ключа
+        цели, прибавленного к вектору её токена.
+        """
+
+        self.hidden_key = int(hidden)
+
+    def _event_keys(self, data: PackedBatch) -> torch.Tensor:
+        """
+        Ключи токенов событий во входе энкодера события.
+        """
+
+        if self.hidden_key is None:
+            return data.key_ids
+
+        return data.key_ids.masked_fill(data.event_masked, self.hidden_key)
+
+    def restrict(self, key_row: torch.Tensor, allowed: torch.Tensor) -> None:
+        """
+        Предсказывать значение только среди кандидатов своего ключа:
+        key_row [словарь] — строка ключа в allowed или -1, allowed
+        [ключи, словарь] — кто бывает значением ключа.
+        """
+
+        device = self.embedding.weight.device
+
+        self.key_row = key_row.to(device)
+        self.allowed = allowed.to(device)
+
     def forward(self, data: PackedBatch, logits: bool = True) -> Predicted:
         """
         Micro-batch от токенов до потерь, одним проходом.
@@ -464,10 +626,19 @@ class Model(nn.Module):
             # связным, иначе backward на таком batch оборвётся.
             token_vectors = client_vectors[:0]
 
+        # Запрос головы: ключ цели. Во входе он мог быть закрыт.
+        if self.hidden_key is not None:
+            keys = data.key_ids[data.target_token]
+            token_vectors = token_vectors + (
+                self.embedding.table(keys) * self.embedding.scale
+            ).to(token_vectors.dtype)
+
         event_rows = event_vectors[data.target_event]
         client_rows = client_vectors[data.target_client]
 
         targets = data.labels[data.target_token]
+
+        rows = self.key_row[data.key_ids[data.target_token]] if self.allowed is not None else None
 
         # Логиты целиком — для точности, отчёта и разбора по целям;
         # потери считает mlm_loss кусками, по тем же входам головы.
@@ -476,17 +647,23 @@ class Model(nn.Module):
             if logits else None
         )
 
+        if full is not None and rows is not None:
+            full = full.masked_fill(~self.allowed[rows], float("-inf"))
+
         scored = None if logits else hits_in_pieces(
-            self.head, token_vectors, event_rows, client_rows, self.embedding.weight, targets
+            self.head, token_vectors, event_rows, client_rows, self.embedding.weight, targets,
+            allowed=self.allowed, rows=rows,
         )
 
         return Predicted(
             logits=full,
             hits=scored,
+            aux=self.recent(data, client_vectors) if self.recent is not None else None,
             targets=targets,
             loss=mlm_loss(
                 self.head, token_vectors, event_rows, client_rows,
                 self.embedding.weight, targets, self.label_smoothing,
+                allowed=self.allowed, rows=rows,
             ),
             place=data.target_place,
             event=data.target_local,
@@ -599,7 +776,7 @@ class Model(nn.Module):
         encoder = self.event
 
         x = self.embedding.embed(
-            data.key_ids, data.value_ids, data.positions,
+            self._event_keys(data), data.value_ids, data.positions,
             torch.ones_like(data.key_ids, dtype=torch.bool),
         )
 
@@ -683,6 +860,8 @@ class Model(nn.Module):
         [M, d] в порядке целей (None, если целей нет).
         """
 
+        keys = self._event_keys(data)
+
         dated_parts: list[torch.Tensor] = []
         dated_index: list[torch.Tensor] = []
 
@@ -701,7 +880,7 @@ class Model(nn.Module):
 
                 piece = self.event(
                     self.embedding.embed(
-                        data.key_ids[index],
+                        keys[index],
                         data.value_ids[index],
                         data.positions[index],
                         mask,
@@ -876,6 +1055,63 @@ def load_model(
     return model.to(device)
 
 
+def recent_types(artifacts, dim: int, seed: int) -> RecentTypes:
+    """
+    Голова RecentTypes под словарь: номер типа у каждого значения
+    ключа event_type, -1 у остальных токенов.
+    """
+
+    from src.dataset.tokenized import EVENT_TYPE_KEY
+
+    key = artifacts.key_id(EVENT_TYPE_KEY)
+
+    if key is None:
+        raise ValueError("в словаре нет ключа event_type: вспомогательной цели не из чего строиться")
+
+    type_of_value = torch.full((artifacts.size,), -1, dtype=torch.long)
+
+    for number, token_id in enumerate(sorted(artifacts.values[EVENT_TYPE_KEY].values())):
+        type_of_value[token_id] = number
+
+    return RecentTypes(dim, type_of_value, key, seed)
+
+
+def candidate_table(artifacts) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Кандидаты значения по ключу — из словаря, а не из данных:
+    категории ключа, его корзины, куски BPE у текстового ключа и
+    [UNK]. Так любая метка, даже невиданная в train, остаётся внутри
+    своего множества, и бесконечной потери не бывает.
+    """
+
+    from src.tokenization.specials import UNK
+
+    keys = sorted(artifacts.keys.items(), key=lambda item: item[1])
+
+    key_row = torch.full((artifacts.size,), -1, dtype=torch.long)
+    allowed = torch.zeros((len(keys), artifacts.size), dtype=torch.bool)
+
+    unknown = artifacts.special(UNK)
+
+    for row, (key, token_id) in enumerate(keys):
+
+        key_row[token_id] = row
+
+        kind = artifacts.kind(key)
+
+        if kind == "categorical":
+            ids = list(artifacts.values[key].values())
+        elif kind == "numeric":
+            ids = [bucket.token_id for bucket in artifacts.buckets[key]]
+        else:
+            ids = list(artifacts.bpe_ids)
+
+        allowed[row, ids] = True
+        allowed[row, unknown] = True
+
+    return key_row, allowed
+
+
 @contextmanager
 def _seeded(seed: int):
     """
@@ -897,6 +1133,10 @@ __all__ = [
     "PackedBatch",
     "Predicted",
     "TARGETS_PER_CHUNK",
+    "RECENT_DAYS",
+    "RecentTypes",
+    "candidate_table",
+    "recent_types",
     "hits",
     "hits_in_pieces",
     "load_model",

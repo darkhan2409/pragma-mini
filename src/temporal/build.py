@@ -7,11 +7,11 @@ import pyarrow as pa
 
 from src.dataset.lineage import write_lineage
 from src.dataset.build import SAMPLES_SCHEMA
-from src.preprocessing.artifacts import TableWriter
+from src.preprocessing.artifacts import TableWriter, write_json
 
-from .position import check, check_profile, profile_time_log, time_log
+from .position import TemporalError, check, check_profile, profile_time_log, time_log
 from .samples import SamplesGroup
-from .settings import TEMPORAL_FILE, temporal_dir
+from .settings import DEFAULT_ANCHOR, META_FILE, TEMPORAL_FILE, TIME_ANCHORS, temporal_dir
 
 
 # ============================================================
@@ -22,7 +22,8 @@ from .settings import TEMPORAL_FILE, temporal_dir
 #
 #   data/06_temporal/<group>/temporal.parquet
 #
-#   event_time_log    давность события до последнего события;
+#   event_time_log    давность события до последнего события
+#                     (--anchor cutoff: до cutoff примера);
 #   profile_time_log  давность вехи анкеты до cutoff примера, ноль
 #                     у [USR] и Attributes.
 #
@@ -72,10 +73,13 @@ class Counters:
     max_seconds: int = 0
 
 
-def build_group(group: str, directory: Path | None = None) -> dict:
+def build_group(group: str, directory: Path | None = None, anchor: str = DEFAULT_ANCHOR) -> dict:
     """
-    Временные позиции одной группы.
+    Временные позиции одной группы с точкой отсчёта anchor.
     """
+
+    if anchor not in TIME_ANCHORS:
+        raise TemporalError(f"точка отсчёта {anchor!r} не из {TIME_ANCHORS}")
 
     source = SamplesGroup(group)
 
@@ -94,9 +98,11 @@ def build_group(group: str, directory: Path | None = None) -> dict:
 
             for row in rows:
 
-                positions = time_log(row["client_id"], row["event_time"])
+                positions = time_log(
+                    row["client_id"], row["event_time"], source.cutoff if anchor == "cutoff" else None
+                )
 
-                check(row["client_id"], positions, len(row["event_time"]))
+                check(row["client_id"], positions, len(row["event_time"]), anchor)
 
                 row["event_time_log"] = positions
 
@@ -113,6 +119,8 @@ def build_group(group: str, directory: Path | None = None) -> dict:
     finally:
         rows_written = writer.close()
 
+    write_json(directory / META_FILE, {"time_anchor": anchor})
+
     # Только после полной записи: прерванная сборка отметки не
     # получает, и читатель её отвергнет.
     write_lineage(directory)
@@ -120,6 +128,7 @@ def build_group(group: str, directory: Path | None = None) -> dict:
     return {
         "group": group,
         "file": str(directory / TEMPORAL_FILE),
+        "time_anchor": anchor,
         "rows": rows_written,
         "counts": {
             "clients": counters.clients,
@@ -142,8 +151,7 @@ def _count(counters: Counters, row: dict) -> None:
         counters.silent += 1
         return
 
-    # Первое событие самое дальнее: позиции считаются до
-    # последнего, а события упорядочены по времени.
+    # Первое событие самое дальнее: события упорядочены по времени.
     counters.max_position = max(counters.max_position, row["event_time_log"][0])
 
     seconds = int((moments[-1] - moments[0]).total_seconds())
@@ -153,7 +161,7 @@ def _count(counters: Counters, row: dict) -> None:
 
 def _clear(directory: Path) -> None:
     """
-    Каталог группы держит только файл позиций: прежний результат
+    Каталог группы держит только свои файлы: прежний результат
     стирается целиком.
     """
 
