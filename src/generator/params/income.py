@@ -93,10 +93,10 @@ class IncomeParams:
     # Исходы конкретной выплаты.
     payout_outcome: dict = field(
         default_factory=lambda: {
-            "on_time": 0.70,
+            "on_time": 0.73,
             "early": 0.08,
             "late": 0.15,
-            "partial": 0.05,
+            "partial": 0.02,
             "skipped": 0.02,
         }
     )

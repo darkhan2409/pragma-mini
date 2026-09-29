@@ -107,7 +107,7 @@ class StressParams:
     discretionary_cut: float = 0.55
     grocery_cut: float = 0.12
     utilization_rise: float = 0.65
-    missed_payment_boost: float = 0.55
+    missed_payment_boost: float = 0.05
     support_contact_boost: float = 2.6
     refinance_interest_boost: float = 3.2
     loan_interest_boost: float = 2.1

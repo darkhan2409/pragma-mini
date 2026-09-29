@@ -53,10 +53,10 @@ class ProductParams:
     approval_base: dict = field(
         default_factory=lambda: {
             "debit_card": 0.98,
-            "credit_card": 0.52,
-            "cash_loan": 0.44,
-            "refinance": 0.40,
-            "installment": 0.58,
+            "credit_card": 0.44,
+            "cash_loan": 0.37,
+            "refinance": 0.34,
+            "installment": 0.50,
             "deposit": 0.99,
             "deposit_certificate": 0.99,
             "bonds": 0.99,
@@ -127,10 +127,10 @@ class ProductParams:
     # причиной нереального уровня просрочки.
     loan_amount_income_multiple: dict = field(
         default_factory=lambda: {
-            "cash_loan": (1.0, 4.0),
-            "refinance": (1.0, 4.0),
-            "installment": (0.15, 1.2),
-            "credit_card": (0.8, 2.5),
+            "cash_loan": (1.2, 4.5),
+            "refinance": (1.2, 4.5),
+            "installment": (0.3, 1.5),
+            "credit_card": (1.0, 3.0),
         }
     )
 
@@ -152,9 +152,9 @@ class ProductParams:
     # Вероятность заплатить вовремя по полосам дисциплины.
     on_time_payment_probability: dict = field(
         default_factory=lambda: {
-            "low": 0.935,
-            "mid": 0.985,
-            "high": 0.998,
+            "low": 0.985,
+            "mid": 0.995,
+            "high": 0.999,
         }
     )
     discipline_bands: tuple = (0.33, 0.66)
@@ -164,7 +164,7 @@ class ProductParams:
     partial_payment_min_share: float = 0.20
 
     # Клиент подтягивает деньги из другого банка к сроку.
-    loan_topup_from_other_bank_share: float = 0.86
+    loan_topup_from_other_bank_share: float = 0.99
 
     # Автоплатёж повторяет попытку внутри льготных дней.
     autopay_retry_days: int = 3
@@ -174,8 +174,8 @@ class ProductParams:
 
     cure_probability_per_day: dict = field(
         default_factory=lambda: {
-            "low": 0.025,
-            "mid": 0.075,
+            "low": 0.035,
+            "mid": 0.085,
             "high": 0.17,
         }
     )

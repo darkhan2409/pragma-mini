@@ -54,7 +54,7 @@ class Contact:
 
 
 def daily_rate(persona: Persona, ts: datetime, consented: bool, fatigue: int,
-               state_factor: float = 1.0) -> float:
+               state_factor: float = 1.0, silent: bool = False) -> float:
     """
     Банк пишет клиенту заметно реже, чем клиент заходит в
     приложение. Усталость от коммуникаций гасит частоту.
@@ -73,11 +73,25 @@ def daily_rate(persona: Persona, ts: datetime, consented: bool, fatigue: int,
     # Клиент и так получит больше сообщений — просто потому, что
     # у него станет больше договоров и платежей, на которые банк
     # отвечает сервисными уведомлениями.
-    rate = params_module.active().activity.communications_base_per_month / 30.0
+    activity = params_module.active().activity
+
+    rate = activity.communications_base_per_month / 30.0
 
     # Молчащему клиенту банк пишет заметно реже: остаются
     # только сервисные сообщения и возврат в игру.
     rate *= max(0.05, state_factor)
+
+    # Кампании нацелены на тех, кто откликается: спящему клиенту
+    # банк пишет редко, и у него бывают месяцы совсем без событий.
+    # Среднее по всем клиентам остаётся у якоря отчёта банка.
+    rate *= activity.communications_mode_factor.get(persona.activity_mode, 1.0)
+
+    # Клиенту, который замолчал (банк не видит его действий дольше
+    # lifecycle.winback_after_silence_days), кампании почти не шлют.
+    # Вес предложений в _campaign_weights меняет лишь состав
+    # отправок; без этого множителя их число оставалось прежним.
+    if silent:
+        rate *= activity.communications_silent_factor
 
     rate *= 0.75 + 0.5 * persona.trait("digital_affinity", ts)
 
@@ -334,7 +348,7 @@ def contacts_for_day(
     Отправки банка за день.
     """
 
-    rate = daily_rate(persona, day, consented, fatigue, state_factor)
+    rate = daily_rate(persona, day, consented, fatigue, state_factor, silent)
 
     if rate <= 0.0:
         return ()

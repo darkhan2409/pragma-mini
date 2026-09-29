@@ -23,28 +23,26 @@ class ActivityParams:
     # заметно меньше.
     purchases_per_day: dict = field(
         default_factory=lambda: {
-            "silent": 0.10,
-            "rare": 1.20,
-            "regular": 4.60,
-            "high": 8.00,
+            "silent": 0.01,
+            "rare": 0.90,
+            "regular": 5.60,
+            "high": 9.00,
             "extreme": 15.00,
         }
     )
 
     # Сессий приложения в день.
     #
-    # Прежние значения давали «регулярному» клиенту 1,4 сессии в
-    # месяц: приложение стояло почти у всех, а следов в данных
-    # почти не было. Теперь после onboarding клиент заходит в
-    # него регулярно — от раза в две недели у молчунов до
-    # нескольких раз в день у самых активных.
+    # После onboarding клиент заходит в приложение регулярно: от
+    # пары раз в год у молчуна до раза в день у самых активных. В
+    # среднем на месяц с приложением выходит 6–20 сессий.
     sessions_per_day: dict = field(
         default_factory=lambda: {
-            "silent": 0.04,
-            "rare": 0.15,
-            "regular": 0.55,
-            "high": 1.30,
-            "extreme": 3.20,
+            "silent": 0.005,
+            "rare": 0.05,
+            "regular": 0.40,
+            "high": 0.55,
+            "extreme": 1.10,
         }
     )
 
@@ -70,14 +68,17 @@ class ActivityParams:
         }
     )
 
-    # Множитель по роли банка: видимая доля оборота.
+    # Множитель частоты покупок и сессий по роли банка. Покупки
+    # дополнительно режет видимая доля оборота (visible_share),
+    # поэтому роль здесь задаёт прежде всего заходы в приложение:
+    # клиент с одним кредитом тоже смотрит график и платит.
     role_factor: dict = field(
         default_factory=lambda: {
             "primary": 1.30,
-            "secondary": 0.85,
-            "credit_only": 0.45,
-            "deposit_only": 0.35,
-            "episodic": 0.40,
+            "secondary": 1.15,
+            "credit_only": 1.15,
+            "deposit_only": 1.00,
+            "episodic": 1.00,
         }
     )
 
@@ -119,7 +120,22 @@ class ActivityParams:
     # Значение пришпилено к измеренному якорю отчёта банка
     # (communications_per_client_month = 3.8): после затуханий
     # наблюдаемая частота выходит примерно на него.
-    communications_base_per_month: float = 7.4
+    communications_base_per_month: float = 11.5
+
+    # Множитель частоты рассылок по режиму активности клиента.
+    communications_mode_factor: dict = field(
+        default_factory=lambda: {
+            "silent": 0.05,
+            "rare": 0.35,
+            "regular": 1.05,
+            "high": 1.30,
+            "extreme": 1.40,
+        }
+    )
+
+    # Множитель частоты рассылок клиенту, замолчавшему в глазах
+    # банка: остаются сервисные сообщения и попытки вернуть.
+    communications_silent_factor: float = 0.3
 
     # Оплата по QR: в Казахстане это основной способ платить в
     # рознице, и раздел приложения для неё уже существовал.
@@ -127,22 +143,39 @@ class ActivityParams:
     qr_min_digital_affinity: float = 0.25
 
     # Сколько экранов сверх обязательного пути смотрят в
-    # сессии. Раньше сессия всегда была ровно три-четыре
-    # экрана.
+    # сессии, по цели сессии (behaviour/sessions.GOAL_*). Раньше
+    # сессия всегда была ровно три-четыре экрана.
     session_extra_screens: dict = field(
         default_factory=lambda: {
-            "balance": 1.4,
-            "payment": 0.8,
-            "transfer": 0.9,
-            "cards": 1.1,
-            "explore": 1.6,
-            "loan": 1.0,
-            "deposit": 1.0,
-            "market": 1.5,
-            "profile": 0.6,
-            "support": 0.7,
+            "balance_check": 5.0,
+            "payment": 5.0,
+            "transfer": 5.0,
+            "card_management": 5.5,
+            "product_explore": 7.0,
+            "loan_service": 5.5,
+            "deposit_service": 5.5,
+            "market": 7.0,
+            "profile_settings": 4.0,
+            "support": 4.5,
         }
     )
+
+    # Доля регулярных списаний — счетов (коммуналка, связь,
+    # интернет…) и подписок, — которые клиент проводит через этот
+    # банк, по режиму активности.
+    recurring_in_bank_share: dict = field(
+        default_factory=lambda: {
+            "silent": 0.05,
+            "rare": 0.40,
+            "regular": 1.0,
+            "high": 1.0,
+            "extreme": 1.0,
+        }
+    )
+
+    # Вес цели «перевод» у сессии клиента, подключившего переводы
+    # (у «баланса» — 3.0).
+    transfer_goal_weight: float = 0.6
 
     weekend_factor_purchases: float = 1.10
     weekend_factor_sessions: float = 0.92
@@ -182,7 +215,7 @@ class ActivityParams:
     # Внешние переводы и наличные.
     transfers_per_month: dict = field(
         default_factory=lambda: {
-            "silent": 0.2,
+            "silent": 0.1,
             "rare": 1.0,
             "regular": 4.0,
             "high": 8.0,
@@ -195,7 +228,7 @@ class ActivityParams:
 
     cash_withdrawals_per_month: dict = field(
         default_factory=lambda: {
-            "silent": 0.4,
+            "silent": 0.15,
             "rare": 1.0,
             "regular": 2.2,
             "high": 3.0,

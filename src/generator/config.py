@@ -70,7 +70,7 @@ NATIONAL_MERCHANTS_PATH = REFERENCE_DIR / "national_merchants.json"
 # договора, из которого она получена (null у прихода в банк и
 # приложения). По нему препроцессинг находит в ленте событие-
 # источник вехи.
-GENERATOR_VERSION = "16.2"
+GENERATOR_VERSION = "16.3"
 SCHEMA_VERSION = 19
 
 # Возраст, с которого клиент считается пенсионером в симуляции:

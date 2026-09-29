@@ -98,6 +98,9 @@ class ReferenceName:
     settlement: str | None
     # Города у записи нет вовсе: название общенациональное.
     national: bool = False
+    # Запись из national_merchants.json: сервис (такси, связь,
+    # подписка…), а не точка из 2ГИС или OSM.
+    service: bool = False
 
 
 def _transliterate(text: str) -> str:
@@ -170,6 +173,7 @@ def entries() -> tuple[ReferenceName, ...]:
                     category=category,
                     settlement=_settlement_of(row.get("city")),
                     national=not row.get("city"),
+                    service=path == NATIONAL_MERCHANTS_PATH,
                 )
             )
 
@@ -195,27 +199,38 @@ def _names_by_place() -> dict[tuple[str, str], tuple[str, ...]]:
     return {place: tuple(sorted(found)) for place, found in names.items()}
 
 
-@lru_cache(maxsize=1)
-def _national_names() -> dict[str, tuple[str, ...]]:
+@lru_cache(maxsize=None)
+def _national_names(service: bool) -> dict[str, tuple[str, ...]]:
     """
-    Категория -> названия записей без города.
+    Категория -> названия записей без города: сервисов или точек.
     """
 
     names: dict[str, set[str]] = defaultdict(set)
 
     for item in entries():
-        if item.national:
+        if item.national and item.service == service:
             names[item.category].add(item.name)
 
     return {category: tuple(sorted(found)) for category, found in names.items()}
 
 
-def national_names(category: str) -> tuple[str, ...]:
+def cityless_names(category: str) -> tuple[str, ...]:
     """
-    Общенациональные названия категории: записи без города.
+    Точки 2ГИС и OSM без города: запасной уровень названий там, где
+    ни поселение, ни его область подтверждённых названий не дали.
     """
 
-    return _national_names().get(category, ())
+    return _national_names(False).get(category, ())
+
+
+def service_names(category: str) -> tuple[str, ...]:
+    """
+    Общенациональные сервисы категории (national_merchants.json без
+    города): такси-агрегатор или стриминг есть в любом городе, в том
+    числе там, где подтверждены и местные названия.
+    """
+
+    return _national_names(True).get(category, ())
 
 
 def names_in(settlement: str, category: str) -> tuple[str, ...]:
@@ -232,6 +247,7 @@ def names_in(settlement: str, category: str) -> tuple[str, ...]:
 __all__ = [
     "ReferenceName",
     "entries",
+    "cityless_names",
     "names_in",
-    "national_names",
+    "service_names",
 ]

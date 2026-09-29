@@ -344,7 +344,18 @@ def _amount_at(
 
     indexation = rng.uniform(*settings.annual_indexation)
 
-    amount = stream.base_amount * ((1.0 + indexation) ** (months / 12.0))
+    # Индексация — ступенька раз в год, в месяц индексации, а не
+    # непрерывный рост: иначе выплата росла на доли процента каждый
+    # месяц, чего в жизни не бывает.
+    month = _indexation_month(stream)
+
+    steps = sum(
+        1
+        for index in range(cal.month_index(anchor) + 1, cal.month_index(ts) + 1)
+        if (index - 1) % 12 + 1 == month
+    )
+
+    amount = stream.base_amount * ((1.0 + indexation) ** steps)
 
     # Повышение и понижение дохода из жизненного события.
     for moment, factor in income_shifts:
@@ -363,6 +374,20 @@ def _amount_at(
             amount *= year_rng.uniform(*settings.cut_factor)
 
     return int(round(amount / 100) * 100)
+
+
+def _indexation_month(stream: IncomeStream) -> int:
+    """
+    Месяц годовой индексации выплаты. Зарплату индексирует
+    работодатель — месяц общий у всех его сотрудников, чаще январь;
+    пенсии, пособия и прочие выплаты — с января.
+    """
+
+    if stream.kind == "salary" and str(stream.payer or "").startswith("emp_"):
+        rng = keyed_rng(NS_INCOME, stable_hash(stream.payer) % (2 ** 31), 11)
+        return 1 if rng.random() < 0.5 else int(rng.integers(1, 13))
+
+    return 1
 
 
 def _shift_for_calendar(planned: datetime) -> datetime:

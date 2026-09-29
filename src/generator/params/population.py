@@ -123,6 +123,11 @@ class PopulationParams:
         }
     )
 
+    # С этого возраста «живёт с родителями» почти не встречается:
+    # вес варианта умножается на множитель.
+    with_parents_until_age: int = 50
+    with_parents_after_age_factor: float = 0.1
+
     income_type_by_stage: dict = field(
         default_factory=lambda: {
             "young_adult": {"employed": 0.44, "student": 0.24, "self_employed": 0.13, "state_employee": 0.08, "unemployed": 0.08, "business_owner": 0.03, "pensioner": 0.00},

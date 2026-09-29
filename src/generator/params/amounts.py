@@ -162,6 +162,10 @@ class AmountParams:
     # Подписки: регулярные списания, которых у клиента может не
     # быть вовсе, а может быть с десяток.
     subscription_count: tuple = (1, 9)
+
+    # Доля подписок, продлеваемых ночью (0–5 ч): ночное окно
+    # биллинга сервиса. Остальные — в час оформления, днём.
+    subscription_night_share: float = 0.30
     subscription_median: int = 2_500
     subscription_sigma: float = 0.50
     subscription_stop_share: float = 0.30

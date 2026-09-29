@@ -199,7 +199,14 @@ def draw_persona(client_ordinal: int) -> Persona:
     # --- образование и жильё ---
 
     education = _weighted(rng, population.education_by_settlement_type[settlement.settlement_type])
-    housing_type = _weighted(rng, population.housing_by_settlement_type[settlement.settlement_type])
+    # С родителями живут молодые: с with_parents_until_age вес этого
+    # варианта почти обнуляется. Розыгрыш тот же, меняются веса.
+    housing_weights = dict(population.housing_by_settlement_type[settlement.settlement_type])
+
+    if age >= population.with_parents_until_age:
+        housing_weights["with_parents"] *= population.with_parents_after_age_factor
+
+    housing_type = _weighted(rng, housing_weights)
 
     # --- занятость ---
 
@@ -408,11 +415,14 @@ def app_adoption(client_ordinal: int) -> datetime | None:
     # раньше того дня, когда человек стал клиентом.
     start = max(config.HISTORY_START, persona.relationship_start)
 
-    # Половина окна на то, чтобы установить: у большинства это
-    # случается вскоре после начала отношений с банком.
+    # Восьмая часть окна на то, чтобы установить: у большинства
+    # это случается вскоре после начала отношений с банком. При
+    # половине окна давний клиент в среднем полгода жил без
+    # приложения, и начало ленты было тоньше из-за этой даты, а не
+    # из-за поведения.
     span_days = max(1, (config.PLANNING_END - start).days)
 
-    offset = int(rng.integers(0, max(1, span_days // 2)))
+    offset = int(rng.integers(0, max(1, span_days // 8)))
 
     adopted = start + timedelta(days=offset)
 

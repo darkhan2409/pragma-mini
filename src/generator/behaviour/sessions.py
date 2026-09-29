@@ -257,9 +257,12 @@ def _goal_weights(persona: Persona, ts: datetime, context: SessionContext, adopt
 
     digital = persona.trait("digital_affinity", ts)
 
+    # Платёж без выставленного счёта — заход посмотреть раздел.
+    # При 0.25 раздел платежей попадал в 38% месяцев приложения
+    # против 30% в отчёте банка.
     weights = {
         GOAL_BALANCE: 3.0,
-        GOAL_PAYMENT: 0.25,
+        GOAL_PAYMENT: 0.15,
         GOAL_TRANSFER: 0.0,
         GOAL_CARDS: 0.0,
         GOAL_EXPLORE: 0.52,
@@ -274,7 +277,7 @@ def _goal_weights(persona: Persona, ts: datetime, context: SessionContext, adopt
         weights[GOAL_PAYMENT] = 0.04 + 0.15 * min(3, len(context.due_bills))
 
     if "transfers" in adopted:
-        weights[GOAL_TRANSFER] = 2.3
+        weights[GOAL_TRANSFER] = params_module.active().activity.transfer_goal_weight
 
     if "cards" in adopted and context.has_card:
         weights[GOAL_CARDS] = 1.7
@@ -525,8 +528,10 @@ def _build_steps(
     # сессия всегда была ровно три-четыре экрана.
     extra_rng = event_rng(NS_SESSION_DEPTH, persona.client_ordinal, session_index, 0, COMPONENT_COUNT)
 
+    # Строго по цели: запасное значение прятало расхождение ключей
+    # параметра с именами целей.
     extra = extra_rng.poisson(
-        params_module.active().activity.session_extra_screens.get(goal, 0.8)
+        params_module.active().activity.session_extra_screens[goal]
     )
 
     limit = params_module.active().activity.max_screens_per_session

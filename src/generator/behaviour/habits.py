@@ -71,6 +71,9 @@ class Subscription:
     start_month: int
     end_month: int | None
     change_month: int | None
+    # Час продления: у сервиса он свой и держится месяцами — время
+    # оформления или ночное окно биллинга сервиса.
+    hour: int = 3
 
 
 @dataclass(frozen=True)
@@ -205,7 +208,10 @@ def _habit_categories(persona: Persona) -> tuple:
 
     optional = [name for name in CATEGORY_NAMES if not CATEGORY_BY_NAME[name].essential]
 
-    chosen = list(essential[: min(len(essential), 4)])
+    # Обязательные любимые — только еда: аптека и клиника нужны не
+    # каждую неделю, а статус любимой категории (вес ×2.4) делал
+    # аптеку десятой частью всех покупок у каждого клиента.
+    chosen = [name for name in essential if CATEGORY_BY_NAME[name].need == "food"]
 
     for _ in range(max(0, count - len(chosen))):
         pick = optional[rng.integers(0, len(optional))]
@@ -261,6 +267,16 @@ def _bills(persona: Persona, events: tuple) -> tuple:
         if event.kind == "child_birth" and rng.random() < 0.35:
             add("kindergarten", "kids", 1.0, event.ts + timedelta(days=int(rng.integers(120, 540))))
 
+    # Через этот банк клиент платит не все счета: тихий клиент,
+    # для которого банк не основной, платит их в другом месте.
+    # Отбор своим потоком — прежние розыгрыши счетов не сдвигаются.
+    share = params_module.active().activity.recurring_in_bank_share.get(persona.activity_mode, 1.0)
+
+    bills = [
+        bill for index, bill in enumerate(bills)
+        if keyed_rng(NS_HABITS, persona.client_ordinal, 5, index).random() < share
+    ]
+
     return tuple(bills)
 
 
@@ -286,11 +302,25 @@ def _subscriptions(persona: Persona, settlement: str) -> tuple:
     first_month = cal.month_index(config.HISTORY_START)
     last_month = cal.month_index(config.PLANNING_END)
 
+    # Сервис подписки выбирается без повторов: одна и та же подписка
+    # дважды — это два списания «Spotify» в месяц с разными суммами.
+    # Сервис — сеть точки, у безымянной точки — сама точка.
+    taken: set[str] = set()
+
     for index in range(count):
 
         item_rng = keyed_rng(NS_HABITS, persona.client_ordinal, 4, index)
 
-        outlet = pool[int(item_rng.choice(len(pool), p=[item.popularity for item in pool]))]
+        free = [item for item in pool if (item.merchant_id or item.outlet_id) not in taken]
+
+        if not free:
+            break
+
+        total = sum(item.popularity for item in free)
+
+        outlet = free[int(item_rng.choice(len(free), p=[item.popularity / total for item in free]))]
+
+        taken.add(outlet.merchant_id or outlet.outlet_id)
 
         amount = int(
             settings.subscription_median * item_rng.lognormal(0.0, settings.subscription_sigma)
@@ -318,11 +348,19 @@ def _subscriptions(persona: Persona, settlement: str) -> tuple:
             )
             amount_after = max(500, int(round(amount_after / 50) * 50))
 
+        day_of_month = int(item_rng.integers(1, 28))
+
+        # Розыгрыши часа — последними: прежние атрибуты подписки
+        # не сдвигаются.
+        night = item_rng.random() < settings.subscription_night_share
+        hour = int(item_rng.integers(0, 6)) if night else int(item_rng.integers(7, 24))
+
         result.append(
             Subscription(
                 category="subscription",
                 outlet_id=outlet.outlet_id,
-                day_of_month=int(item_rng.integers(1, 28)),
+                hour=hour,
+                day_of_month=day_of_month,
                 amount=amount,
                 amount_after=amount_after,
                 start_month=start_month,
@@ -331,7 +369,14 @@ def _subscriptions(persona: Persona, settlement: str) -> tuple:
             )
         )
 
-    return tuple(result)
+    # Подписку, как и счёт, тихий клиент держит на карте другого
+    # банка. Отбор своим потоком, как у счетов.
+    share = params_module.active().activity.recurring_in_bank_share.get(persona.activity_mode, 1.0)
+
+    return tuple(
+        item for index, item in enumerate(result)
+        if keyed_rng(NS_HABITS, persona.client_ordinal, 6, index).random() < share
+    )
 
 
 def build_habits(persona: Persona, events: tuple) -> Habits:

@@ -227,8 +227,17 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
             # Счёт никуда не делся, но оплачен мимо этого банка.
             continue
 
+        # Автоплатёж банк проводит утром, в своё окно обработки;
+        # счёт без автоплатежа здесь только выставляется, а платит
+        # клиент позже сам. Час и минута свои у каждого счёта и
+        # месяца: раньше время было формулой от номера счёта, и три
+        # четверти платежей шли ровно в 09:00, 10:07 и 11:14.
+        rng = event_rng(NS_LEDGER, state.ordinal, day.toordinal(), index, COMPONENT_TIME)
+
+        hour = int(rng.integers(6, 12)) if bill.autopay else int(rng.integers(9, 21))
+
         add(
-            day.replace(hour=int(9 + index % 10), minute=int((index * 7) % 60)),
+            day.replace(hour=hour, minute=int(rng.integers(0, 60))),
             "bill",
             {"bill": bill, "index": index},
         )
@@ -246,8 +255,13 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
         if cal.day_in_month(day, subscription.day_of_month).date() != day.date():
             continue
 
+        # Час у подписки свой (Subscription.hour), минута — своя в
+        # каждом месяце. Раньше время было формулой от номера
+        # подписки: все продления шли с двух до шести утра.
+        rng = event_rng(NS_LEDGER, state.ordinal, day.toordinal(), 100 + index, COMPONENT_TIME)
+
         add(
-            day.replace(hour=int(2 + index % 5), minute=int((index * 13) % 60)),
+            day.replace(hour=subscription.hour, minute=int(rng.integers(0, 60))),
             "subscription",
             {"subscription": subscription, "index": index},
         )
@@ -325,10 +339,19 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
     # Внутрибанковские приходы порождает исходящий план другого
     # клиента. Здесь только внешние отправители: родня, друзья,
     # постоянные контрагенты.
+    #
+    # Деньги шлют туда, где у человека основной счёт: чем меньше
+    # его денег идёт через этот банк, тем реже приход попадает
+    # сюда. Множитель тот же, что у исходящих переводов. Без него
+    # молчун, у которого банк лишь для кредита, получал переводы
+    # наравне с основным клиентом.
+    # В паузе, где молчат переводы, клиент живёт через другой счёт,
+    # и приходы идут туда же.
+    inbound_share = 0.0 if "transfers" in silenced else persona.visible_share * 1.4
 
     for index, relation in enumerate(sim.graph.active(state.ordinal, day)):
 
-        if relation.inbound_frequency <= 0.0:
+        if relation.inbound_frequency * inbound_share <= 0.0:
             continue
 
         if relation.counterpart.client_ordinal is not None:
@@ -336,7 +359,7 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
 
         rng = event_rng(NS_INBOUND, state.ordinal, day.toordinal(), index, COMPONENT_TIME)
 
-        if rng.random() >= relation.inbound_frequency / 30.0:
+        if rng.random() >= relation.inbound_frequency * inbound_share / 30.0:
             continue
 
         moment = day.replace(

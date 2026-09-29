@@ -32,8 +32,17 @@ from .dictionaries import CATEGORY_BY_NAME, CATEGORY_NAMES
 #   2. крупнейший город его области, где названия этой категории
 #      подтверждены: сельская корзина и малый город покупают у сетей
 #      областного центра;
-#   3. общенациональный список категории — записи справочника без
-#      города и сервисы reference/national_merchants.json.
+#   3. точки справочника без города.
+#
+# Уровни 1–3 не смешиваются: берётся первый непустой. Общенациональные
+# сервисы (reference/national_merchants.json без города: такси-агрегатор,
+# связь, стриминг…) добавляются к нему всегда — Yandex Go есть и там,
+# где подтверждено местное такси. Где пул состоит из одних сервисов,
+# каждая точка поселения — свой сервис: иначе у клиента было бы
+# несколько разных подписок под одним «Spotify».
+#
+# У онлайн-точки города нет ни в поле merchant_city, ни в
+# терминальной строке: онлайн-оплата города покупателя не называет.
 #
 # Ни на одном уровне ничего нет — точка остаётся БЕЗЫМЯННОЙ:
 # merchant_id и merchant_name пусты, а категория, MCC, город и
@@ -208,14 +217,26 @@ def _regional_names(settlement: geography.Settlement, source: str) -> tuple[str,
     return ()
 
 
+def _place_names(settlement: geography.Settlement, source: str) -> tuple[str, ...]:
+    """
+    Названия первого непустого уровня: поселение, крупнейший город
+    области, точки без города.
+    """
+
+    return (
+        reference.names_in(settlement.name, source)
+        or _regional_names(settlement, source)
+        or reference.cityless_names(source)
+    )
+
+
 @state_cache
 def brands_for(category_name: str, settlement_name: str) -> tuple:
     """
     Сети, доступные в поселении: по одной на каждое название из
     ближайшего места, где справочник его подтвердил, — само
-    поселение, крупнейший город области, общенациональный список
-    (см. шапку файла). Уровни не смешиваются: берётся первый
-    непустой.
+    поселение, крупнейший город области, точки без города, — и
+    общенациональные сервисы категории (см. шапку файла).
 
     Справочник не знает, какая сеть крупнее: он знает только, что
     такое имя там встречено. Пустой ответ значит безымянные точки.
@@ -232,11 +253,7 @@ def brands_for(category_name: str, settlement_name: str) -> tuple:
 
     settlement = geography.by_name(settlement_name)
 
-    names = (
-        reference.names_in(settlement_name, source)
-        or _regional_names(settlement, source)
-        or reference.national_names(source)
-    )
+    names = tuple(sorted(set(_place_names(settlement, source)) | set(reference.service_names(source))))
 
     if not names:
         return ()
@@ -320,11 +337,15 @@ def outlet_count(settlement_name: str, category_name: str) -> int:
     return scaled
 
 
-def _terminal_name(brand: Brand, settlement: geography.Settlement, index: int, rng) -> str:
+def _terminal_name(brand: Brand, settlement: geography.Settlement, index: int, rng,
+                   online: bool = False) -> str:
     """
     Имя в терминальной строке: регистр, транслитерация, номер
     филиала, город, префикс агрегатора. Шум воспроизводим и
     привязан к сети.
+
+    У онлайн-точки нет ни номера филиала, ни города: розыгрыши те
+    же, но их вариант не применяется.
 
     Оформляется ТОЛЬКО существующее название справочника: новых
     брендов здесь не появляется.
@@ -346,12 +367,12 @@ def _terminal_name(brand: Brand, settlement: geography.Settlement, index: int, r
     elif variant == "translit":
         text = base.upper().replace("Z", "J").replace("KH", "H")
     elif variant == "with_branch":
-        text = f"{base.upper()} #{index + 1}"
+        text = base.upper() if online else f"{base.upper()} #{index + 1}"
     else:
         facilitator = settings.facilitators[rng.integers(0, len(settings.facilitators))]
         text = f"{facilitator}*{base.upper()}"
 
-    if rng.random() < settings.branch_number_share and variant != "with_branch":
+    if rng.random() < settings.branch_number_share and variant != "with_branch" and not online:
         text = f"{text} {settlement.name.upper()[:6]}"
 
     if rng.random() < settings.terminal_noise_share:
@@ -410,18 +431,27 @@ def outlet(settlement_name: str, category_name: str, index: int) -> Outlet:
 
     if pool:
 
-        # Сеть запасного уровня (область, вся страна) разыгрывается
-        # своим потоком: розыгрыш из общего сдвинул бы район, часы,
-        # онлайн и MCC точки, которая раньше была безымянной.
         source = REFERENCE_CATEGORY[category_name]
-        picker = rng if reference.names_in(settlement_name, source) else keyed_rng(
-            NS_MERCHANT, stable_hash("outlet_brand", settlement_name, category_name, index) % (2 ** 31)
-        )
 
-        total = sum(item.popularity for item in pool)
-        brand = pool[
-            int(picker.choice(len(pool), p=[item.popularity / total for item in pool]))
-        ]
+        if not _place_names(settlement, source):
+
+            # Одни общенациональные сервисы: у каждой точки свой, по
+            # порядку сетей поселения, без розыгрыша.
+            brand = pool[index % len(pool)]
+
+        else:
+
+            # Сеть не из самого поселения разыгрывается своим потоком:
+            # розыгрыш из общего сдвинул бы район, часы, онлайн и MCC
+            # точки, которая раньше была безымянной.
+            picker = rng if reference.names_in(settlement_name, source) else keyed_rng(
+                NS_MERCHANT, stable_hash("outlet_brand", settlement_name, category_name, index) % (2 ** 31)
+            )
+
+            total = sum(item.popularity for item in pool)
+            brand = pool[
+                int(picker.choice(len(pool), p=[item.popularity / total for item in pool]))
+            ]
 
     district = settlement.districts[rng.integers(0, len(settlement.districts))]
 
@@ -450,7 +480,7 @@ def outlet(settlement_name: str, category_name: str, index: int) -> Outlet:
     return Outlet(
         outlet_id=f"ot_{stable_hash('outlet', settlement_name, category_name, index) % 10 ** 12:012d}",
         merchant_id=brand.merchant_id if brand is not None else None,
-        merchant_name=_terminal_name(brand, settlement, index, rng) if brand is not None else None,
+        merchant_name=_terminal_name(brand, settlement, index, rng, is_online) if brand is not None else None,
         category=category_name,
         subcategory=subcategory,
         mcc=mcc,
@@ -573,7 +603,8 @@ def payload_fields(item: Outlet | None) -> dict:
 
 def _public_city(item: Outlet) -> str | None:
 
-    if not item.settlement or item.settlement_type == "rural":
+    # Онлайн-оплата города покупателя не называет.
+    if item.is_online or not item.settlement or item.settlement_type == "rural":
         return None
 
     return item.settlement

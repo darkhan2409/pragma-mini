@@ -29,7 +29,7 @@ class FraudParams:
     kinds: tuple = EPISODE_KINDS
 
     # Базовая интенсивность эпизода в год на клиента.
-    base_rate_per_year: float = 0.030
+    base_rate_per_year: float = 0.07
 
     kind_weights: dict = field(
         default_factory=lambda: {
