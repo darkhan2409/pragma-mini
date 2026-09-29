@@ -16,9 +16,10 @@ from tests.test_profile_state import EARLY, QUIET_SNAPSHOT, RAW_CLIENT
 # ============================================================
 #
 # Точка отсчёта времени событий — выбор этапа 06 (--anchor):
-# последнее событие (как было) или cutoff T примера. Проверяется,
-# что:
+# cutoff T примера (по умолчанию) или последнее событие (прежний
+# отсчёт). Проверяется, что:
 #
+#   - без выбора этап и его команда считают от cutoff;
 #   - от cutoff позиция — ровно сжатая давность до T, и ноль у
 #     последнего события только тогда, когда оно в самом T;
 #   - одна и та же лента на более позднем T отличается ровно
@@ -48,7 +49,7 @@ def test_from_the_last_event_nothing_changes():
 
     assert got == exact(np.array([47, 4, 0], dtype=np.int64) * HOUR_US)
 
-    check("c", got, 3)
+    check("c", got, 3, "last_event")
 
 
 def test_from_the_cutoff_the_position_is_the_compressed_age_at_t():
@@ -103,6 +104,19 @@ def test_positions_growing_towards_the_end_are_refused():
 
     with pytest.raises(TemporalError, match="растут"):
         check("c", [3.0, 5.0], 2, "cutoff")
+
+
+def test_by_default_time_is_counted_from_the_cutoff(stage):
+
+    from src.preprocessing.artifacts import read_json
+    from src.temporal.run import build_parser
+    from src.temporal.settings import META_FILE, temporal_dir
+
+    assert build_parser().parse_args(["train"]).anchor == "cutoff"
+
+    chain(stage, EARLY, QUIET_SNAPSHOT)
+
+    assert read_json(temporal_dir("train") / META_FILE) == {"time_anchor": "cutoff"}
 
 
 @pytest.mark.parametrize("anchor", ["last_event", "cutoff"])

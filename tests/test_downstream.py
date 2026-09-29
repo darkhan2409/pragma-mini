@@ -50,12 +50,13 @@ FIELDS = (
 )
 
 
-def chain(stage, tape: list[dict], snapshot: dict, anchor: str = "last_event") -> None:
+def chain(stage, tape: list[dict], snapshot: dict, anchor: str | None = None) -> None:
     """
     Выгрузка → 02 → 04 → 05 → 06 → 07 для train и val: теми же
     функциями этапов, что и в бою. train нужен ради отбора истории
     и точки отсчёта времени, на которых «училась модель»
     (05_dataset/train/meta.json, 06_temporal/train/meta.json).
+    Без anchor этап 06 идёт со своим умолчанием, как в бою.
     """
 
     from src.batching.build import build_group as build_batches
@@ -75,7 +76,7 @@ def chain(stage, tape: list[dict], snapshot: dict, anchor: str = "last_event") -
         prepare(stage, tape, snapshot, group=group)
         encode_group(artifacts, group, TokenizerConfig.load(None))
         build_dataset(artifacts, group, DatasetConfig.load(None))
-        build_temporal(group, anchor=anchor)
+        build_temporal(group) if anchor is None else build_temporal(group, anchor=anchor)
         build_batches(group, BatchingConfig.load(None))
 
 
@@ -119,7 +120,8 @@ def test_input_at_the_group_cutoff_is_what_stage_07_stores(stage, anchor: str):
     same(built, stored)
 
 
-def test_the_future_after_the_cutoff_does_not_change_the_input(stage):
+@pytest.mark.parametrize("anchor", ["last_event", "cutoff"])
+def test_the_future_after_the_cutoff_does_not_change_the_input(stage, anchor: str):
     """
     Две выгрузки с общим прошлым до T: во второй после T ещё продукт
     и переезд, и снимок анкеты уже знает о переезде. Вход на T у них
@@ -127,13 +129,14 @@ def test_the_future_after_the_cutoff_does_not_change_the_input(stage):
     """
 
     from src.downstream.at_cutoff import ClientsAtCutoff
+    from src.temporal.position import log_age
 
     moment = cutoff("val")
 
-    chain(stage, EARLY, QUIET_SNAPSHOT)
+    chain(stage, EARLY, QUIET_SNAPSHOT, anchor)
     quiet = ClientsAtCutoff("val", moment).client(RAW_CLIENT)
 
-    chain(stage, EARLY + AFTER, BUSY_SNAPSHOT)
+    chain(stage, EARLY + AFTER, BUSY_SNAPSHOT, anchor)
     busy = ClientsAtCutoff("val", moment).client(RAW_CLIENT)
 
     same(quiet, busy)
@@ -142,7 +145,11 @@ def test_the_future_after_the_cutoff_does_not_change_the_input(stage):
     # ленту на T не попадают.
     assert quiet.n_events == 2
     assert all(event_time < moment for event_time in quiet.event_time)
-    assert quiet.event_time_log[-1] == 0.0
+
+    # Последнее событие стоит в точке отсчёта или на своей давности
+    # до T — а не до события после T, которого во входе нет.
+    age = 0 if anchor == "last_event" else int((moment - quiet.event_time[-1]) / timedelta(microseconds=1))
+    assert quiet.event_time_log[-1] == np.float32(log_age(np.array([age], dtype=np.int64))[0])
 
 
 def test_the_input_at_an_earlier_cutoff_differs_from_the_end_of_the_window(stage):

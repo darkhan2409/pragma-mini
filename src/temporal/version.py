@@ -8,8 +8,8 @@ from __future__ import annotations
 # Три разные версии, и путать их нельзя.
 #
 # FORMAT_VERSION — контракт временных позиций: формула, точка
-# отсчёта (последнее событие, а с --anchor cutoff — cutoff
-# примера; выбор в meta.json) и правило «у последнего события
+# отсчёта (cutoff примера, а с --anchor last_event — последнее
+# событие; выбор в meta.json) и правило «у последнего события
 # ноль» при отсчёте от него. Его читает TimeRoPE, и его смена
 # означает, что прежние позиции ему больше не подходят.
 #
@@ -22,7 +22,7 @@ from __future__ import annotations
 
 FORMAT_VERSION = "2.1.0"
 
-IMPLEMENTATION_VERSION = "2.1.0"
+IMPLEMENTATION_VERSION = "2.1.1"
 
 SCHEMA_VERSION = 2
 

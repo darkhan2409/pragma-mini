@@ -18,7 +18,7 @@ from .settings import DEFAULT_ANCHOR, TIME_ANCHORS
 #
 # Одна команда на группу, один видимый файл:
 #
-#   python -m src.temporal.run train|val|test [--anchor last_event|cutoff]
+#   python -m src.temporal.run train|val|test [--anchor cutoff|last_event]
 #
 # Вход: data/05_dataset/<group>/samples.parquet.
 # Выход: data/06_temporal/<group>/temporal.parquet и ничего
@@ -65,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("group", choices=GROUPS, help="группа: train, val или test")
     parser.add_argument(
         "--anchor", choices=TIME_ANCHORS, default=DEFAULT_ANCHOR,
-        help="точка отсчёта времени событий: последнее событие или cutoff примера",
+        help="точка отсчёта времени событий: cutoff примера (по умолчанию) или последнее событие",
     )
 
     parser.set_defaults(handler=run_group)

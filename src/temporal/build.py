@@ -22,8 +22,8 @@ from .settings import DEFAULT_ANCHOR, META_FILE, TEMPORAL_FILE, TIME_ANCHORS, te
 #
 #   data/06_temporal/<group>/temporal.parquet
 #
-#   event_time_log    давность события до последнего события
-#                     (--anchor cutoff: до cutoff примера);
+#   event_time_log    давность события до cutoff примера
+#                     (--anchor last_event: до последнего события);
 #   profile_time_log  давность вехи анкеты до cutoff примера, ноль
 #                     у [USR] и Attributes.
 #

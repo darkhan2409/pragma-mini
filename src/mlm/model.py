@@ -455,7 +455,8 @@ def hits(logits: torch.Tensor, targets: torch.Tensor, k: int = 5) -> tuple[int, 
     return int((top[:, 0] == targets).sum()), int((top == targets[:, None]).any(dim=-1).sum())
 
 
-# Окна вспомогательной цели [USR], в сутках до последнего события.
+# Окна вспомогательной цели [USR], в сутках до точки отсчёта времени
+# (этап 06: cutoff T, а с --anchor last_event — последнее событие).
 RECENT_DAYS = (7, 30, 90)
 
 
@@ -500,8 +501,8 @@ class RecentTypes(nn.Module):
         kind = torch.full((data.events.segments,), -1, dtype=torch.long, device=usr.device)
         kind[data.event_of_token[typed]] = self.type_of_value[original[typed]]
 
-        # Давность до последнего события клиента — из той же шкалы,
-        # что видит энкодер истории: seconds = 8·expm1(позиция / 8).
+        # Давность до точки отсчёта — из той же шкалы, что видит
+        # энкодер истории: seconds = 8·expm1(позиция / 8).
         days = TIME_SCALE * torch.expm1(data.event_time_log.float() / TIME_SCALE) / 86_400.0
 
         known = kind >= 0

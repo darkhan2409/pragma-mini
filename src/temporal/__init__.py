@@ -7,9 +7,10 @@
 
 Вход — data/05_dataset/<group>/samples.parquet, выход —
 data/06_temporal/<group>/temporal.parquet: тот же пример плюс два
-канала в сжатых логарифмом секундах — event_time_log, расстояние
-до последнего события, и profile_time_log, давность вехи анкеты
-до cutoff (ноль у [USR] и Attributes).
+канала в сжатых логарифмом секундах — event_time_log, давность
+события до cutoff (с --anchor last_event — до последнего события),
+и profile_time_log, давность вехи анкеты до cutoff (ноль у [USR] и
+Attributes).
 
 Этап ничего не отбирает, не переставляет и не кодирует: он
 только добавляет к примеру числовые каналы.
