@@ -9,6 +9,7 @@ from src.dataset.settings import dataset_dir
 from src.masking.apply import apply
 from src.masking.choose import choose
 from src.masking.settings import MaskingConfig
+from src.masking.weights import WeightsError, load_value_weights
 from src.temporal.position import TemporalError
 from src.temporal.samples import SamplesError, TemporalGroup
 from src.tokenization.specials import EVT, MASK, PAD, UNK, USR, load_special_tokens
@@ -184,6 +185,14 @@ class Source:
 
         self._specials = load_special_tokens()
 
+        self._weights = None
+
+        if self.masking.informativeness_weighted_masking:
+            try:
+                self._weights = load_value_weights()
+            except WeightsError as error:
+                raise InputError(str(error)) from error
+
     @property
     def count(self) -> int:
         return self._samples.count
@@ -253,7 +262,7 @@ class Source:
         Значения клиента, которые модели разрешено видеть.
         """
 
-        selection = choose(self.group, row, self.masking)
+        selection = choose(self.group, row, self.masking, self._weights)
 
         masked = apply(
             row["client_id"], row, selection.choices,

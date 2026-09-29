@@ -871,6 +871,10 @@ def write_profile_vocab(
 
     bpe.save(directory / BPE_FILE)
 
+    from tests import world
+
+    world.write_value_weights(directory, keys, values, buckets)
+
 
 def test_profile_change_is_context_not_a_target(stage):
     """

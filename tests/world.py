@@ -478,13 +478,15 @@ def write_weights(
 
 def write_vocab(root: Path) -> None:
     """
-    Настоящий словарь из шести файлов, только крошечный.
+    Настоящий словарь из шести файлов и весов value-маскирования,
+    только крошечный.
 
     Модель читает из него лишь специальные токены, но этап 09
     берёт размер словаря через FrozenArtifacts, а тот сверяет все
     шесть файлов между собой. Поэтому словарь собирается тем же
     build_final_vocab, что и в бою: номера идут подряд, специальные
-    занимают 0-4, куски BPE замыкают пространство.
+    занимают 0-4, куски BPE замыкают пространство. Веса нужны маске
+    при чтении: взвешивание включено по умолчанию.
     """
 
     from tokenizers import Tokenizer, models
@@ -534,6 +536,37 @@ def write_vocab(root: Path) -> None:
 
     bpe.save(directory / BPE_FILE)
 
+    write_value_weights(directory, keys, values, {})
+
+
+def write_value_weights(directory: Path, keys: dict, values: dict, buckets: dict) -> None:
+    """
+    Веса value-маскирования крошечного словаря: каждое значение и
+    каждый диапазон ключа встречены в «train» по разу. Распределение
+    равномерное, поэтому у значения из домена ровно value_probability,
+    а у пары вне домена (мир ею пользуется) — как у невиданного.
+    """
+
+    from src.masking.weights import build
+    from src.tokenization.finalvocab import vocabulary_digest
+    from src.tokenization.settings import VALUE_WEIGHTS_FILE
+
+    counts: dict[str, dict[tuple[int, ...], float]] = {}
+
+    for key, items in values.items():
+        if items:
+            counts[key] = {(token,): 1.0 for token in items.values()}
+
+    for key, items in buckets.items():
+        if items:
+            counts[key] = {(item["id"],): 1.0 for item in items.values()}
+
+    payload = build(counts, keys, {}, vocabulary_digest(directory))
+
+    (directory / VALUE_WEIGHTS_FILE).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
 
 # ============================================================
 # СРЕДА
@@ -566,6 +599,6 @@ __all__ = [
     "LAYERS", "MASK", "PAD", "ROPE_BASE", "SEED", "UNK", "USR", "VOCAB",
     "Made", "calendar_of", "clients", "cuda_ready", "embedding",
     "encoder_configs", "flash_ready", "make", "model",
-    "install", "population", "write_samples", "write_vocab",
+    "install", "population", "write_samples", "write_value_weights", "write_vocab",
     "write_weights", "CUTOFF",
 ]

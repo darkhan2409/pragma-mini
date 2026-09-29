@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from src.generator.rng import KeyedRandom, stable_hash
 
 from .settings import MaskingConfig
+from .weights import ValueWeights, WeightsError
 
 
 # ============================================================
@@ -137,12 +138,36 @@ def values_of(row: dict, targets_only: bool = True) -> list[Value]:
     return found
 
 
-def choose(group: str, row: dict, config: MaskingConfig) -> Selection:
+def value_chance(value: Value, row: dict, config: MaskingConfig,
+                 weights: ValueWeights | None) -> float:
+    """
+    Вероятность цели механизма value для одного значения.
+
+    Без взвешивания — ровно value_probability, как прежде; со
+    взвешиванием — по весам train для его ключа и токенов.
+    """
+
+    if not config.informativeness_weighted_masking:
+        return config.value_probability
+
+    if weights is None:
+        raise WeightsError(
+            "взвешенное value-маскирование требует весов train (value_weights.json словаря)"
+        )
+
+    tokens = tuple(row["value_ids"][value.start:value.start + value.length])
+
+    return weights.probability(value.key_id, tokens, config)
+
+
+def choose(group: str, row: dict, config: MaskingConfig,
+           weights: ValueWeights | None = None) -> Selection:
     """
     Что спрятать у одного клиента.
 
     Клиент без допустимых целей даёт пустой выбор: это рабочий
-    случай, а не ошибка.
+    случай, а не ошибка. weights нужны при
+    informativeness_weighted_masking.
     """
 
     values = values_of(row)
@@ -182,9 +207,13 @@ def choose(group: str, row: dict, config: MaskingConfig) -> Selection:
         for key_id in sorted({value.key_id for value in values})
     }
 
+    # Один розыгрыш на значение, как и без взвешивания: веса меняют
+    # только вероятность, а не число и порядок розыгрышей.
     singles = stream(_STREAM_VALUE)
 
-    chosen_values = [singles.chance(config.value_probability) for _ in values]
+    chosen_values = [
+        singles.chance(value_chance(value, row, config, weights)) for value in values
+    ]
 
     unknown = stream(_STREAM_UNKNOWN)
 
@@ -238,5 +267,6 @@ __all__ = [
     "Selection",
     "Value",
     "choose",
+    "value_chance",
     "values_of",
 ]

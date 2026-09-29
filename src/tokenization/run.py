@@ -4,12 +4,14 @@ import argparse
 import sys
 from pathlib import Path
 
+from src.masking.settings import MaskingConfig
+from src.masking.weights import WeightsError, build
 from src.preprocessing.artifacts import write_json
 from src.preprocessing.run import EXIT_BLOCKED, EXIT_OK
 from src.preprocessing.settings import GROUPS, normalize_group
 
 from .categorical import ValuesError, build_value_vocab, load_value_vocab
-from .finalvocab import FrozenArtifacts, VocabError, build_final_vocab
+from .finalvocab import FrozenArtifacts, VocabError, build_final_vocab, vocabulary_digest
 from .fit import FitError, TrainCorpus, read_train, unit_warnings
 from .keyvocab import KeyVocabError, build_key_vocab, load_key_vocab
 from .numeric import BucketsError, build_buckets, load_buckets
@@ -23,6 +25,7 @@ from .settings import (
     SPECIAL_TOKENS_FILE,
     VOCAB_DIR,
     VALUE_VOCAB_FILE,
+    VALUE_WEIGHTS_FILE,
     ConfigError,
     TokenizerConfig,
     vocab_path,
@@ -30,6 +33,7 @@ from .settings import (
 from .specials import SpecialsError, build_special_tokens, load_special_tokens
 from .text import TextError, build_bpe, load_bpe
 from .transform import TransformError, encode_group
+from .valuestats import value_counts
 
 
 # ============================================================
@@ -46,13 +50,14 @@ from .transform import TransformError, encode_group
 #   buckets         data/03_vocab/buckets.json         диапазоны чисел
 #   bpe             data/03_vocab/bpe.json             разбиение текста
 #   final-vocab     data/03_vocab/final_vocab.json     имя токена -> ID
+#   value-weights   data/03_vocab/value_weights.json   веса value-маскирования
 #   encode <group>  data/04_tokenized/<group>/         два файла группы
 #
-# Для прода есть fit: он вызывает те же шесть функций подряд и
+# Для прода есть fit: он вызывает те же семь функций подряд и
 # останавливается на первой же ошибке, называя этап.
 #
-# Учатся только value-vocab, buckets и bpe, и только на
-# data/02_preprocessed/train вместе с data/01_raw/train/profile.parquet.
+# Учатся только value-vocab, buckets, bpe и value-weights, и только
+# на data/02_preprocessed/train вместе с data/01_raw/train/profile.parquet.
 # Кодирование применяет готовый словарь и не меняет его.
 # ============================================================
 
@@ -257,6 +262,57 @@ def run_final_vocab(args) -> int:
     return EXIT_OK
 
 
+def run_value_weights(args, train: TrainCorpus | None = None) -> int:
+
+    try:
+        config = _config(args)
+        schema = SemanticSchema.open()
+        artifacts = FrozenArtifacts.load()
+        train = train if train is not None else read_train(config, schema)
+        found = value_counts(train, artifacts, schema)
+        payload = build(
+            found.counts, found.key_ids, found.labels, vocabulary_digest(), frozenset(found.estimated)
+        )
+    except (*FAILURES, WeightsError) as error:
+        print(f"[value-weights] {error}")
+        return EXIT_BLOCKED
+
+    path = _write(VALUE_WEIGHTS_FILE, payload)
+
+    keys = payload["keys"]
+    values = sum(item["distinct"] for item in keys.values())
+
+    print(f"[value-weights] веса value-маскирования по train → {path}")
+    print(
+        f"    ключей событий {len(keys)}, значений {values}, вхождений {payload['occurrences']}; "
+        f"масштаб {payload['scale']:.3f}"
+    )
+
+    # Вероятность самого частого значения при конфиге маски по
+    # умолчанию: так видно, какие поля почти не станут целями.
+    masking = MaskingConfig()
+    scale = payload["scale"]
+
+    def top_probability(item: dict) -> float:
+        raw = masking.value_probability * scale * item["key_weight"] * item["values"][0]["value_weight"]
+        return min(masking.max_value_probability, max(masking.min_value_probability, raw))
+
+    quiet = sorted(keys.items(), key=lambda pair: (pair[1]["key_weight"], pair[0]))[:5]
+
+    print(
+        "    наименее информативные: "
+        + ", ".join(
+            f"{key} (энтропия {item['normalized_entropy']:.2f}, P частого {top_probability(item):.3f})"
+            for key, item in quiet
+        )
+    )
+
+    if found.estimated:
+        print(f"    по выборке fit: {', '.join(sorted(found.estimated))}")
+
+    return EXIT_OK
+
+
 def run_encode(args) -> int:
 
     group = normalize_group(args.group)
@@ -302,11 +358,12 @@ FIT_STAGES: tuple[tuple[str, object], ...] = (
     ("buckets", run_buckets),
     ("bpe", run_bpe),
     ("final-vocab", run_final_vocab),
+    ("value-weights", run_value_weights),
 )
 
 
 # Этапы, которые учатся на корпусе train: fit читает его один раз.
-CORPUS_STAGES = ("value-vocab", "buckets", "bpe")
+CORPUS_STAGES = ("value-vocab", "buckets", "bpe", "value-weights")
 
 
 def run_fit(args) -> int:
@@ -316,20 +373,22 @@ def run_fit(args) -> int:
     Собственной логики здесь нет: вызываются те же функции, что
     и у отдельных команд, поэтому поэтапный запуск и fit дают
     один и тот же результат. Одно отличие — train читается один
-    раз: словарь значений, диапазоны и BPE учатся на одном и том
-    же корпусе (fit.read_train), и три одинаковых прохода по
-    группе отнимали две трети времени fit.
+    раз: словарь значений, диапазоны, BPE и веса значений учатся на
+    одном и том же корпусе (fit.read_train), а отдельные проходы по
+    группе отнимали бы большую часть времени fit.
 
-    Готовый словарь убирается ДО первого этапа: если цепочка
-    оборвётся, рядом не останется final_vocab.json от прежней
-    сборки, который выглядел бы собранным из уже пересчитанных
-    частей.
+    Готовый словарь и веса убираются ДО первого этапа: если цепочка
+    оборвётся, рядом не останется final_vocab.json или
+    value_weights.json от прежней сборки, которые выглядели бы
+    собранными из уже пересчитанных частей.
     """
 
-    stale = vocab_path(FINAL_VOCAB_FILE)
+    for name in (FINAL_VOCAB_FILE, VALUE_WEIGHTS_FILE):
 
-    if stale.exists():
-        stale.unlink()
+        stale = vocab_path(name)
+
+        if stale.exists():
+            stale.unlink()
 
     train: TrainCorpus | None = None
 
@@ -389,6 +448,7 @@ def build_parser() -> argparse.ArgumentParser:
     add("buckets", "числовые диапазоны и их токены", run_buckets)
     add("bpe", "разбиение текста на train", run_bpe)
     add("final-vocab", "имя токена → глобальный ID: final_vocab.json", run_final_vocab)
+    add("value-weights", "веса value-маскирования по train: value_weights.json", run_value_weights)
 
     encode = add("encode", "кодирование группы готовым словарём", run_encode)
     encode.add_argument("group", choices=GROUPS, help="группа: train, val или test")

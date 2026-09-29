@@ -32,6 +32,8 @@ from src.generator.config import DATA_DIR
 # Пути стандартны и в командах не задаются.
 #
 #   data/03_vocab/               чем кодируются данные: шесть файлов словаря
+#                                и value_weights.json — статистика train для
+#                                взвешенного value-маскирования (src.masking.weights)
 #   data/04_tokenized/<group>/   результат кодирования, два файла
 #
 # Словарь один на весь конвейер и учится только на train,
@@ -45,6 +47,7 @@ VALUE_VOCAB_FILE = "value_vocab.json"
 BUCKETS_FILE = "buckets.json"
 BPE_FILE = "bpe.json"
 FINAL_VOCAB_FILE = "final_vocab.json"
+VALUE_WEIGHTS_FILE = "value_weights.json"
 
 
 # ------------------------------------------------------------
@@ -533,6 +536,7 @@ __all__ = [
     "VOCAB_DIR",
     "FINAL_VOCAB_FILE",
     "VALUE_VOCAB_FILE",
+    "VALUE_WEIGHTS_FILE",
     "BpeConfig",
     "ConfigError",
     "METHOD_FIXED",

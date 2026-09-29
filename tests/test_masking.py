@@ -72,12 +72,15 @@ def sample() -> world.Made:
 
 def rates(**overrides) -> MaskingConfig:
 
+    # Равномерный механизм value: здесь проверяются правила выбора, а
+    # взвешивание по статистике train — в test_value_weights.
     base = dict(
         seed=11,
         value_probability=0.0,
         event_probability=0.0,
         key_probability=0.0,
         unknown_probability=0.0,
+        informativeness_weighted_masking=False,
     )
 
     base.update(overrides)

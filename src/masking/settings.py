@@ -45,7 +45,9 @@ class MaskingConfig:
     # (src.mlm.train.for_epoch).
     seed: int = 42
 
-    # Отдельное значение целиком, со всеми его кусками BPE.
+    # Отдельное значение целиком, со всеми его кусками BPE. При
+    # informativeness_weighted_masking — средняя вероятность по train:
+    # у каждого значения своя (src.masking.weights).
     value_probability: float = 0.15
 
     # Событие целиком, со всеми его значениями.
@@ -73,6 +75,16 @@ class MaskingConfig:
     # портить там нечего.
     key_context_corruption_probability: float = 0.5
 
+    # Взвешивать ли механизм value по информативности: вероятность
+    # цели значения зависит от энтропии его ключа и частоты самого
+    # значения в train (value_weights.json словаря) и лежит в
+    # [min_value_probability, max_value_probability]. Механизмы event
+    # и key, [UNK] и порча контекста от этого не меняются. Выключено —
+    # у всех значений ровно value_probability, как прежде.
+    informativeness_weighted_masking: bool = True
+    min_value_probability: float = 0.05
+    max_value_probability: float = 0.35
+
     def validate(self) -> None:
 
         for name in (
@@ -81,11 +93,19 @@ class MaskingConfig:
             "key_probability",
             "unknown_probability",
             "key_context_corruption_probability",
+            "min_value_probability",
+            "max_value_probability",
         ):
             probability = getattr(self, name)
 
             if not 0.0 <= probability <= 1.0:
                 raise ConfigError(f"{name} обязан лежать в [0, 1], получено {probability}")
+
+        if self.min_value_probability > self.max_value_probability:
+            raise ConfigError(
+                f"min_value_probability {self.min_value_probability} больше "
+                f"max_value_probability {self.max_value_probability}"
+            )
 
     def as_dict(self) -> dict:
         return {
@@ -95,6 +115,9 @@ class MaskingConfig:
             "key_probability": self.key_probability,
             "unknown_probability": self.unknown_probability,
             "key_context_corruption_probability": self.key_context_corruption_probability,
+            "informativeness_weighted_masking": self.informativeness_weighted_masking,
+            "min_value_probability": self.min_value_probability,
+            "max_value_probability": self.max_value_probability,
         }
 
     @staticmethod
@@ -119,6 +142,11 @@ class MaskingConfig:
             key_context_corruption_probability=float(
                 data.get("key_context_corruption_probability", base.key_context_corruption_probability)
             ),
+            informativeness_weighted_masking=bool(
+                data.get("informativeness_weighted_masking", base.informativeness_weighted_masking)
+            ),
+            min_value_probability=float(data.get("min_value_probability", base.min_value_probability)),
+            max_value_probability=float(data.get("max_value_probability", base.max_value_probability)),
         )
 
         config.validate()

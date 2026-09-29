@@ -12,6 +12,7 @@ from src.embedding.inputs import CALENDAR_PER_EVENT
 from src.masking.apply import apply
 from src.masking.choose import choose
 from src.masking.settings import MaskingConfig
+from src.masking.weights import ValueWeights, WeightsError, load_value_weights
 from src.temporal.position import TemporalError
 from src.temporal.samples import SamplesError, TemporalGroup
 from src.tokenization.specials import MASK, UNK, load_special_tokens
@@ -163,6 +164,8 @@ class Source:
         self.mask_id = specials[MASK]
         self.unknown_id = specials[UNK]
 
+        self.weights = _weights(self.masking)
+
         self._open()
 
         # Порядок групп строк прохода: по умолчанию — порядок файла.
@@ -186,13 +189,14 @@ class Source:
             raise InputError(str(error)) from error
 
     # Источник переезжает в процесс подготовки данных (Prefetch)
-    # путём и номерами токенов, а не глобалами каталогов: новый
-    # процесс импортирует settings заново и о подменённых каталогах
-    # (тесты, --out) не знает. Файл открывается там же заново.
+    # путём, номерами токенов и готовыми весами маски, а не
+    # глобалами каталогов: новый процесс импортирует settings заново
+    # и о подменённых каталогах (тесты, --out) не знает. Файл набора
+    # открывается там же заново.
     def __getstate__(self) -> dict:
         return {
             name: getattr(self, name)
-            for name in ("group", "masking", "directory", "mask_id", "unknown_id", "order")
+            for name in ("group", "masking", "weights", "directory", "mask_id", "unknown_id", "order")
         }
 
     def __setstate__(self, state: dict) -> None:
@@ -257,7 +261,7 @@ class Source:
         Маска клиента, разыгранная при чтении.
         """
 
-        selection = choose(self.group, row, self.masking)
+        selection = choose(self.group, row, self.masking, self.weights)
 
         return apply(
             row["client_id"], row, selection.choices, self.mask_id, self.unknown_id,
@@ -290,6 +294,23 @@ class Source:
         _check(client, _bools(row["target_event_mask"]), self.mask_id)
 
         return client
+
+
+def _weights(masking: MaskingConfig) -> ValueWeights | None:
+    """
+    Веса value-маскирования словаря, если маска их просит.
+
+    Грузятся один раз на источник и едут в процессы подготовки
+    вместе с ним: процесс не знает подменённых каталогов словаря.
+    """
+
+    if not masking.informativeness_weighted_masking:
+        return None
+
+    try:
+        return load_value_weights()
+    except WeightsError as error:
+        raise InputError(str(error)) from error
 
 
 def cost(client: Client) -> int:

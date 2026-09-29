@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from src.mlm import varlen
+from src.mlm.settings import MlmConfig
 from src.mlm.varlen import FLASH_PAD, FLASH_ROWS, VarlenLayout, assemble
 
 
@@ -397,8 +398,10 @@ def test_the_largest_client_needs_few_calls_and_the_history_stays_whole():
 
     # Один сегмент — всегда одна группа; важно, что и этот вызов
     # укладывается в предел, как и история micro-batch из 52
-    # клиентов на 16 384 события.
-    for history in (layout([12001]), layout([16384 // 52 + 1] * 52)):
+    # клиентов на весь бюджет token_budget.
+    budget = MlmConfig().token_budget
+
+    for history in (layout([12001]), layout([budget // 52 + 1] * 52)):
 
         [group] = history.groups
 

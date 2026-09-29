@@ -530,11 +530,16 @@ def file_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
-def data_record(groups: tuple[str, ...] = ("train", "val")) -> dict:
+def data_record(
+    groups: tuple[str, ...] = ("train", "val"),
+    masking: MaskingConfig | None = None,
+) -> dict:
     """
     Отпечаток данных обучения: sha256 наборов групп и точка отсчёта
     их времени. Маска val задана конфигом маскирования, а он лежит в
-    чекпойнте сам.
+    чекпойнте сам; при взвешенном value-маскировании к нему добавлен
+    sha256 весов value_weights.json словаря — перефит без переобучения
+    дал бы другие цели.
 
     Имя — каталог этапа и группа, а не путь: каталог data/ у тестов
     и у настоящего обучения разный.
@@ -563,6 +568,12 @@ def data_record(groups: tuple[str, ...] = ("train", "val")) -> dict:
         raise InputError(
             f"время наборов считается от разных точек {anchors}: соберите их с одним time_anchor"
         )
+
+    if masking is not None and masking.informativeness_weighted_masking:
+
+        from src.tokenization.settings import VALUE_WEIGHTS_FILE, vocab_path
+
+        record["03_vocab/value_weights"] = file_digest(vocab_path(VALUE_WEIGHTS_FILE))
 
     return record
 
@@ -1119,7 +1130,7 @@ def train(
     # на другом backbone или других данных отказывает, не тронув ни
     # одного файла.
     backbone = backbone_record()
-    data = data_record()
+    data = data_record(masking=masking)
 
     if state is not None:
 

@@ -45,6 +45,7 @@ def every_value(seed: int = 5) -> MaskingConfig:
         event_probability=0.0,
         key_probability=0.0,
         unknown_probability=0.0,
+        informativeness_weighted_masking=False,
     )
 
 
