@@ -259,17 +259,30 @@ def default_numeric_encoders() -> dict[str, NumericEncoder]:
 
     encoders: dict[str, NumericEncoder] = {
         # --- деньги события ---
-        "transaction_amount": _quantile(16, FALLBACK_KZT, money),
+        # Своя шкала на направление: у зарплаты и покупки разные
+        # порядки величин, и общая шкала сводила 87–95% зарплат в
+        # верхний диапазон покупок. У операций приложения direction
+        # нет, и они получают свою шкалу.
+        "transaction_amount": replace(
+            _quantile(16, FALLBACK_KZT, money + "; своя шкала на каждое direction"),
+            split_by="direction",
+        ),
         "amount_or_limit": _quantile(12, FALLBACK_KZT, money),
         "amount_due": _quantile(12, FALLBACK_KZT, money),
         "amount_paid": _quantile(12, FALLBACK_KZT, money),
         "principal_outstanding": _quantile(12, FALLBACK_KZT, money),
         "requested_amount": _quantile(12, FALLBACK_KZT, money),
         "approved_amount": _quantile(12, FALLBACK_KZT, money),
-        "balance_after": _quantile(
-            16, FALLBACK_KZT,
-            "остаток счёта: минус законен, это долг по карте или овердрафт",
-            negative=NEGATIVE_ALLOWED,
+        # Минус — своими квантилями с границей в нуле: иначе долг до
+        # −2 млн делил диапазон с остатком 0…359.
+        "balance_after": replace(
+            _quantile(
+                16, FALLBACK_KZT,
+                "остаток счёта: минус законен, это долг по карте или овердрафт; "
+                "у минуса своя шкала",
+                negative=NEGATIVE_ALLOWED,
+            ),
+            negative_bins=4,
         ),
         # --- деньги профиля ---
         "profile_declared_income": _quantile(12, FALLBACK_KZT, money),
@@ -328,12 +341,14 @@ class BpeConfig:
     BPE текстовых полей, обучение только на разрешённых train-текстах.
 
     alphabet — из чего растут куски:
-      bytes       256 байт (ByteLevel): пробел и не-ASCII выглядят
-                  в кусках как Ġ и Ã…;
       characters  символы train-текстов, пробел — обычный символ;
                   невиданный символ кодируется своими байтами
                   (byte fallback, 256 кусков <0xNN>), поэтому любое
-                  название по-прежнему разбивается без потерь.
+                  название по-прежнему разбивается без потерь;
+      bytes       прежний вариант, 256 байт (ByteLevel): пробел и
+                  не-ASCII выглядят в кусках как Ġ и Ã…. Офлайн
+                  (волна 4) границы кусков у них совпадают на 99.5%
+                  вхождений merchant_name и на 100% counterparty.
     vocab_size — всего кусков, включая алфавит и байты.
     """
 
@@ -345,7 +360,7 @@ class BpeConfig:
     # Разбиение по словам до слияний: без него куски склеиваются
     # через пробел и перестают быть частями слова.
     use_regex: bool = True
-    alphabet: str = "bytes"
+    alphabet: str = "characters"
 
     def as_dict(self) -> dict:
         return {

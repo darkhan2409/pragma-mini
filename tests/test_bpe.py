@@ -64,9 +64,10 @@ def test_character_pieces_keep_plain_text_and_fall_back_to_bytes():
     assert "<0x41>" not in [model.piece(index) for index in model.pieces("<0x41>")]
 
 
-def test_bytes_alphabet_is_the_default_and_unknown_alphabets_are_refused():
+def test_characters_alphabet_is_the_default_and_unknown_alphabets_are_refused():
 
-    assert BpeConfig().alphabet == "bytes"
+    assert BpeConfig().alphabet == "characters"
+    assert BpeConfig.from_dict({"alphabet": "bytes"}).alphabet == "bytes"
 
     with pytest.raises(ConfigError, match="alphabet"):
         BpeConfig.from_dict({"alphabet": "words"})

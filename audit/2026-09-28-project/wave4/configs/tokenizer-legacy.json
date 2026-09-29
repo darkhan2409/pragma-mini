@@ -1,4 +1,7 @@
 {
+  "bpe": {
+    "alphabet": "bytes"
+  },
   "numeric_encoders": {
     "transaction_amount": {
       "method": "quantile",
@@ -15,9 +18,9 @@
       "zero_policy": "separate",
       "negative_policy": "invalid",
       "fit_source": null,
-      "reason": "сумма в тенге своей шкалой на каждое направление: у зарплаты и покупки разные порядки величин",
+      "reason": "сумма в тенге: разброс свойство популяции, границы считает train",
       "negative_bins": null,
-      "split_by": "direction"
+      "split_by": null
     },
     "balance_after": {
       "method": "quantile",
@@ -34,8 +37,8 @@
       "zero_policy": "separate",
       "negative_policy": "allowed",
       "fit_source": null,
-      "reason": "остаток: минус (долг) — своими квантилями с границей в нуле",
-      "negative_bins": 4,
+      "reason": "остаток счёта: минус законен, это долг по карте или овердрафт",
+      "negative_bins": null,
       "split_by": null
     }
   }

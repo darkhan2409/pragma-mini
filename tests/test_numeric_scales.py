@@ -13,8 +13,9 @@ from tests.test_profile_state import QUIET_SNAPSHOT, RAW_CLIENT, prepare, raw_ev
 # ИДЕЯ
 # ============================================================
 #
-# Две настройки кодировщика числа (эксперимент волны 4, по
-# умолчанию выключены — словарь прежний):
+# Две настройки кодировщика числа. По умолчанию они включены ровно
+# у двух ключей: сумма операции делится по direction, у остатка
+# минус — своей шкалой; у остальных ключей их нет.
 #
 #   split_by       своя шкала на каждое значение ключа того же
 #                  события: сумма зарплаты ищется среди диапазонов
@@ -104,13 +105,19 @@ def lookup(buckets: dict):
     return lambda key, value, record=None: FrozenArtifacts.bucket_id(artifacts, key, value, record)
 
 
-def test_by_default_nothing_is_split_and_the_file_keeps_its_format():
+def test_by_default_only_the_amount_is_split_and_only_the_balance_has_a_debt_scale():
 
     from src.tokenization.numeric import Bucket
 
     encoders = TokenizerConfig.load(None).numeric_encoders
 
-    assert all(spec.split_by is None and spec.negative_bins is None for spec in encoders.values())
+    assert {key for key, spec in encoders.items() if spec.split_by} == {"transaction_amount"}
+    assert encoders["transaction_amount"].split_by == "direction"
+
+    assert {key for key, spec in encoders.items() if spec.negative_bins} == {"balance_after"}
+    assert encoders["balance_after"].negative_bins == 4
+
+    # У неделимых шкал запись в файле прежняя: три поля.
     assert Bucket("amount_due_bucket_2", 0.0, 10.0, 7).as_dict() == {"id": 7, "min": 0.0, "max": 10.0}
 
 
