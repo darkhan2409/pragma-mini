@@ -37,7 +37,7 @@ from .rng import (
     stable_hash,
 )
 from .simulate import ClientState, CommunityResult
-from .world.dictionaries import MCC_TRANSFER
+from .world.dictionaries import MCC_CASH, MCC_TRANSFER
 
 
 # ============================================================
@@ -296,6 +296,14 @@ def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_ev
         if _topup_before_payment(state, day.replace(hour=22), payment, rng):
             sources = own_sources(payment)
 
+    # Своего счёта в банке у клиента нет — есть только карта. Тогда
+    # выписку гасят прямо на счёт карты: переводом из другого банка
+    # или наличными через банкомат. Раньше подтяжка шла только на
+    # дебетовый счёт, и у такого клиента выписка не проходила
+    # никогда.
+    if not sources and state.primary_card_account(moment) is None:
+        return _pay_card_from_outside(state, day, moment, credit, contract_id, minimum, month_index)
+
     # Денег не хватило на весь минимальный платёж: платят
     # сколько могут, как и по обычному кредиту. Иначе карта
     # уходит в просрочку с первого же тесного месяца.
@@ -380,6 +388,70 @@ def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_ev
         post=False,
     )
 
+    _card_paid(state, day, moment, credit, contract_id, payment, month_index)
+
+    return True
+
+
+def _pay_card_from_outside(state: ClientState, day, moment, credit, contract_id, minimum, month_index) -> bool:
+    """
+    Выписка по карте без своего счёта в банке: деньги приходят на
+    счёт карты из другого банка или наличными. Не хватает на
+    минимальный платёж — платят сколько есть, но не меньше доли
+    partial_payment_min_share.
+    """
+
+    settings = params_module.active().products
+
+    payment = minimum
+
+    sources = state.ledger.hidden_sources(payment)
+
+    if not sources:
+
+        fullest = max(
+            (state.ledger.accounts[state.ledger.cash_id], state.ledger.accounts[state.ledger.other_bank_id]),
+            key=lambda account: account.balance,
+        )
+
+        if fullest.balance <= 0 or fullest.balance < settings.partial_payment_min_share * minimum:
+            return False
+
+        payment = int(fullest.balance)
+        sources = [fullest]
+
+    hidden = sources[0]
+
+    from_cash = hidden.account_id == state.ledger.cash_id
+
+    _emit_money(
+        state,
+        moment,
+        "cash_deposit" if from_cash else "transfer_in",
+        credit.account_id,
+        payment,
+        "credit",
+        hidden.account_id,
+        {
+            "channel": "atm" if from_cash else "system",
+            "contract_id": contract_id,
+            "counterparty": "Own account",
+            "reason": "card_statement",
+            "mcc": MCC_CASH if from_cash else MCC_TRANSFER,
+            "merchant_country": "KZ",
+        },
+    )
+
+    _card_paid(state, day, moment, credit, contract_id, payment, month_index)
+
+    return True
+
+
+def _card_paid(state: ClientState, day, moment, credit, contract_id, payment, month_index) -> None:
+    """
+    Деньги легли на счёт карты: долг гасится, исполнение записано.
+    """
+
     applied = card_rules.apply_card_payment(credit, payment, month_index)
 
     state.emit(
@@ -398,8 +470,6 @@ def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_ev
             },
         )
     )
-
-    return True
 
 
 def _card_missed(state: ClientState, day, credit, contract_id, payment, due_event) -> None:

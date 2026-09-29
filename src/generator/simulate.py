@@ -11,6 +11,7 @@ from .config import (
     CONTRACT_TERMS_KEYS,
     REGISTRY_START,
 )
+from .finance import cards as card_rules
 from .finance import deposits as deposit_rules
 from .finance import loans as loan_rules
 from .finance.entities import (
@@ -861,6 +862,24 @@ class CommunitySimulation:
                 contract.renewals += 1
 
             state.deposits[contract.contract_id] = deposit
+
+        # Кредитная карта предыстории живёт так же, как открытая в
+        # окне: покупки встают в рассрочку, наличные копят проценты,
+        # каждый месяц есть выписка с минимальным платежом. Без
+        # состояния долг по ней копился без выписок, процентов и
+        # просрочки. Долга на начало окна нет: прошлые проводки не
+        # выдумываются, и остаток карты здесь не отрицательный.
+        for contract in state.contracts.values():
+
+            if contract.product_family != "credit_card" or contract.account_id is None:
+                continue
+
+            if not contract.is_open_at(config.HISTORY_START):
+                continue
+
+            state.card_credits[contract.contract_id] = card_rules.open_credit(
+                contract, contract.terms or {}
+            )
 
         # Остаток, с которым клиент вошёл в окно: он не результат
         # наблюдавшихся проводок, а начальное условие ленты.
