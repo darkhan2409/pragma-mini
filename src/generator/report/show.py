@@ -7,6 +7,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from ..config import RAW_DIR, TIMEZONE
@@ -28,8 +29,36 @@ from ..config import RAW_DIR, TIMEZONE
 MONEY_FIELDS = ("amount", "balance_after")
 
 
-def _read(path: Path) -> list:
-    return pq.read_table(path).to_pylist() if path.exists() else []
+def _read(path: Path, client_id: str) -> list:
+    """
+    Строки одного клиента. Фильтр читает файл по частям и отдаёт
+    только совпавшие строки: лента train целиком в Python-словарях
+    заняла бы больше десяти гигабайт.
+    """
+
+    if not path.exists():
+        return []
+
+    return pq.read_table(path, filters=[("client_id", "==", client_id)]).to_pylist()
+
+
+def _busiest(path: Path) -> str | None:
+    """
+    Клиент с самой длинной лентой — по одной колонке client_id.
+    """
+
+    if not path.exists():
+        return None
+
+    column = pq.read_table(path, columns=["client_id"], read_dictionary=["client_id"])["client_id"]
+    counts = pc.value_counts(column)
+
+    if not len(counts):
+        return None
+
+    best = counts[pc.index(counts.field("counts"), pc.max(counts.field("counts"))).as_py()]
+
+    return best["values"].as_py()
 
 
 def load(raw_dir: Path, client_id: str | None) -> dict:
@@ -38,12 +67,11 @@ def load(raw_dir: Path, client_id: str | None) -> dict:
     """
 
     if client_id is None:
-        events = _read(raw_dir / "events.parquet")
-        if not events:
+        client_id = _busiest(raw_dir / "events.parquet")
+        if client_id is None:
             raise SystemExit("в наборе нет событий")
-        client_id = Counter(row["client_id"] for row in events).most_common(1)[0][0]
 
-    events = [row for row in _read(raw_dir / "events.parquet") if row["client_id"] == client_id]
+    events = _read(raw_dir / "events.parquet", client_id)
 
     for row in events:
         # Тип события лежит в payload: отдельной колонки у него
@@ -62,9 +90,7 @@ def load(raw_dir: Path, client_id: str | None) -> dict:
     return {
         "client_id": client_id,
         "events": events,
-        "profile": [
-            row for row in _read(raw_dir / "profile.parquet") if row["client_id"] == client_id
-        ],
+        "profile": _read(raw_dir / "profile.parquet", client_id),
     }
 
 

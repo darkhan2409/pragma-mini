@@ -10,7 +10,7 @@ from src.preprocessing.settings import GROUPS, normalize_group
 
 from .categorical import ValuesError, build_value_vocab, load_value_vocab
 from .finalvocab import FrozenArtifacts, VocabError, build_final_vocab
-from .fit import FitError, read_train, unit_warnings
+from .fit import FitError, TrainCorpus, read_train, unit_warnings
 from .keyvocab import KeyVocabError, build_key_vocab, load_key_vocab
 from .numeric import BucketsError, build_buckets, load_buckets
 from .scan import ScanError
@@ -145,13 +145,13 @@ def run_key_vocab(args) -> int:
     return EXIT_OK
 
 
-def run_value_vocab(args) -> int:
+def run_value_vocab(args, train: TrainCorpus | None = None) -> int:
 
     try:
         config = _config(args)
         schema = SemanticSchema.open()
         key_vocab = load_key_vocab()
-        train = read_train(config, schema)
+        train = train if train is not None else read_train(config, schema)
         vocab = build_value_vocab(train, key_vocab, config, schema)
     except FAILURES as error:
         print(f"[value-vocab] {error}")
@@ -169,13 +169,13 @@ def run_value_vocab(args) -> int:
     return EXIT_OK
 
 
-def run_buckets(args) -> int:
+def run_buckets(args, train: TrainCorpus | None = None) -> int:
 
     try:
         config = _config(args)
         schema = SemanticSchema.open()
         value_vocab = load_value_vocab()
-        train = read_train(config, schema)
+        train = train if train is not None else read_train(config, schema)
         buckets, warnings = build_buckets(train, value_vocab, config, schema)
     except FAILURES as error:
         print(f"[buckets] {error}")
@@ -197,13 +197,13 @@ def run_buckets(args) -> int:
     return EXIT_OK
 
 
-def run_bpe(args) -> int:
+def run_bpe(args, train: TrainCorpus | None = None) -> int:
 
     try:
         config = _config(args)
         schema = SemanticSchema.open()
         key_vocab = load_key_vocab()
-        train = read_train(config, schema)
+        train = train if train is not None else read_train(config, schema)
         model, warnings = build_bpe(train, key_vocab, config, schema)
     except FAILURES as error:
         print(f"[bpe] {error}")
@@ -305,13 +305,20 @@ FIT_STAGES: tuple[tuple[str, object], ...] = (
 )
 
 
+# Этапы, которые учатся на корпусе train: fit читает его один раз.
+CORPUS_STAGES = ("value-vocab", "buckets", "bpe")
+
+
 def run_fit(args) -> int:
     """
     Все этапы обучения подряд, одной командой.
 
     Собственной логики здесь нет: вызываются те же функции, что
     и у отдельных команд, поэтому поэтапный запуск и fit дают
-    один и тот же результат.
+    один и тот же результат. Одно отличие — train читается один
+    раз: словарь значений, диапазоны и BPE учатся на одном и том
+    же корпусе (fit.read_train), и три одинаковых прохода по
+    группе отнимали две трети времени fit.
 
     Готовый словарь убирается ДО первого этапа: если цепочка
     оборвётся, рядом не останется final_vocab.json от прежней
@@ -324,11 +331,25 @@ def run_fit(args) -> int:
     if stale.exists():
         stale.unlink()
 
+    train: TrainCorpus | None = None
+
     for number, (name, handler) in enumerate(FIT_STAGES, start=1):
 
         print(f"[fit] этап {number}/{len(FIT_STAGES)}: {name}")
 
-        code = handler(args)
+        if name in CORPUS_STAGES:
+
+            if train is None:
+                try:
+                    train = read_train(_config(args), SemanticSchema.open())
+                except FAILURES as error:
+                    print(f"[fit] train не прочитан: {error}")
+                    return EXIT_BLOCKED
+
+            code = handler(args, train)
+
+        else:
+            code = handler(args)
 
         if code != EXIT_OK:
             print(f"[fit] остановлено на этапе {name}: словарь не собран")

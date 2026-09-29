@@ -140,6 +140,11 @@ class MlmConfig:
     early_stopping_patience: int = 3
     early_stopping_min_delta: float = 0.0
 
+    # Процессов, которые читают и маскируют группы строк впрок
+    # (inputs.Prefetch); 0 — в процессе обучения. На результат не
+    # влияет: порядок и маски те же.
+    loader_workers: int = 1
+
     def validate(self) -> None:
 
         if not 0.0 <= self.label_smoothing < 1.0:
@@ -171,6 +176,11 @@ class MlmConfig:
         if self.max_grad_norm <= 0.0:
             raise ConfigError(
                 f"max_grad_norm обязан быть положительным, получено {self.max_grad_norm}"
+            )
+
+        if self.loader_workers < 0:
+            raise ConfigError(
+                f"loader_workers не может быть отрицательным, получено {self.loader_workers}"
             )
 
         if self.early_stopping_min_delta < 0.0:
@@ -217,6 +227,7 @@ class MlmConfig:
             "max_grad_norm": self.max_grad_norm,
             "early_stopping_patience": self.early_stopping_patience,
             "early_stopping_min_delta": self.early_stopping_min_delta,
+            "loader_workers": self.loader_workers,
         }
 
     @staticmethod
@@ -250,6 +261,7 @@ class MlmConfig:
             early_stopping_min_delta=float(
                 data.get("early_stopping_min_delta", base.early_stopping_min_delta)
             ),
+            loader_workers=int(data.get("loader_workers", base.loader_workers)),
         )
 
         config.validate()

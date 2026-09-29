@@ -19,7 +19,7 @@ from src.preprocessing.read import Group, ReadError
 from src.preprocessing.settings import PreprocessingConfig
 
 from .encode import EncodeError, encode_event, encode_profile
-from .finalvocab import FrozenArtifacts
+from .finalvocab import FrozenArtifacts, vocabulary_digest
 from .schema import SemanticSchema
 from .settings import TokenizerConfig, tokenized_dir
 from .specials import UNK
@@ -297,6 +297,8 @@ def encode_group(
         "profile_fields_excluded": dict(EXCLUDED_FIELDS),
         "profile_lifelong_types": list(LIFELONG_TYPES),
         "profile_lifelong_time": {"anchor": "cutoff", "transform": TIME_TRANSFORM},
+        # Под какой словарь закодированы номера: этап 05 сверяет.
+        "vocabulary": vocabulary_digest(),
         "clients": counters.clients,
         "clients_with_profile": counters.profiles,
         "clients_with_empty_profile": counters.empty_profiles,

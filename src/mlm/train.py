@@ -154,6 +154,14 @@ EVENT_BINS = (100, 300, 1000, 3000)
 # Сколько байт читать за раз при подсчёте sha256 файла данных.
 DIGEST_CHUNK = 8 << 20
 
+# Сколько свободной памяти карты оставить сверх лимита процесса:
+# драйверу, дисплею, соседям.
+MEMORY_MARGIN = 256 << 20
+
+# При какой доле лимита аллокатор начинает отдавать свои свободные
+# блоки, не дожидаясь нехватки.
+MEMORY_GC_THRESHOLD = 0.8
+
 
 class CheckpointError(ValueError):
     """
@@ -194,6 +202,42 @@ def training_device(name: str):
         )
 
     return torch.device("cuda")
+
+
+def limit_cuda_memory(device) -> float:
+    """
+    Кэш аллокатора CUDA не растёт больше свободной памяти карты;
+    возвращает лимит в ГиБ.
+
+    Проходы бывают от десятков до 70 тысяч позиций, и кэш
+    кусков разного размера рос за эпохи до 4.4 ГиБ при 3.2 ГиБ
+    свободных. Под WSL драйвер молча переносит перерасход в
+    системную память, и шаги идут в разы медленнее — без ошибки,
+    видно только по времени. С лимитом аллокатор у порога сперва
+    отдаёт свои свободные блоки, а настоящая нехватка становится
+    OOM, а не тихим переносом. Явный PYTORCH_CUDA_ALLOC_CONF
+    пользователя не трогается.
+    """
+
+    import torch
+
+    # Лимит ставится на карту по номеру: «cuda» без номера — текущая.
+    index = device.index if device.index is not None else torch.cuda.current_device()
+
+    free, total = torch.cuda.mem_get_info(index)
+
+    fraction = max(0.1, min(1.0, (free - MEMORY_MARGIN) / total))
+
+    torch.cuda.set_per_process_memory_fraction(fraction, index)
+
+    if not any(name in os.environ for name in ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_ALLOC_CONF")):
+        # Переменная окружения читается при первом выделении, а CUDA к
+        # этому моменту уже поднята — настройка ставится вызовом.
+        setting = f"garbage_collection_threshold:{MEMORY_GC_THRESHOLD}"
+        apply = getattr(torch._C, "_accelerator_setAllocatorSettings", None)
+        apply(setting) if apply is not None else torch.cuda.memory._set_allocator_settings(setting)
+
+    return fraction * total / 2**30
 
 
 def describe_model(model, device) -> dict:
@@ -265,7 +309,7 @@ class Scores:
         if out.count == 0:
             return
 
-        first, five = hits(out.logits, out.targets, 5)
+        first, five = out.hits if out.hits is not None else hits(out.logits, out.targets, 5)
 
         self.loss_sum += out.loss.item() * out.count
         self.targets += out.count
@@ -802,7 +846,7 @@ def train(
     # обязана сказать, что поставить, а не упасть на импорте.
     import torch
 
-    from .inputs import Source, micro_batches
+    from .inputs import Prefetch, Source, micro_batches
     from .model import load_model, pack
     from .varlen import BackendError, autocast
 
@@ -830,6 +874,10 @@ def train(
 
     if device.type == "cuda" and backend == "flash" and not torch.cuda.is_bf16_supported():
         raise DeviceError("FlashAttention считает в bf16, а эта CUDA bf16 не поддерживает")
+
+    if device.type == "cuda":
+        limit = limit_cuda_memory(device)
+        print(f"[train] лимит памяти CUDA {limit:.2f} ГиБ: свободная на старте минус запас")
 
     try:
         model = load_model(
@@ -875,10 +923,13 @@ def train(
 
     # Параметры всей модели: общая таблица эмбеддингов, энкодеры
     # события, анкеты и истории и проекция головы.
+    # fused на CUDA: один проход ядра по всем параметрам вместо
+    # цепочки поэлементных.
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
+        fused=device.type == "cuda",
     )
 
     if state is None:
@@ -1043,9 +1094,10 @@ def train(
 
         if window_targets > 0:
 
-            for parameter in model.parameters():
-                if parameter.grad is not None:
-                    parameter.grad.div_(window_targets)
+            torch._foreach_div_(
+                [parameter.grad for parameter in model.parameters() if parameter.grad is not None],
+                window_targets,
+            )
 
             # Норма ДО клипа: по ней видно, как часто и насколько клип
             # режет шаг.
@@ -1125,7 +1177,7 @@ def train(
         epoch_wait, norms = 0.0, []
         window_wait, window_started = 0.0, started
 
-        source = Source("train", masking=for_epoch(masking, epoch))
+        source = Prefetch(Source("train", masking=for_epoch(masking, epoch)), config.loader_workers)
 
         stopped = False
 
@@ -1156,8 +1208,9 @@ def train(
             # Один проход модели на весь micro-batch. На CUDA — под
             # bf16 autocast; backward ниже идёт уже вне него, а веса и
             # AdamW остаются fp32.
+            # Без полных логитов: счёт top-1/top-5 приходит кусками.
             with autocast(device):
-                out = model(pack(clients, device))
+                out = model(pack(clients, device), logits=False)
 
             window_batches += 1
             done += 1
@@ -1196,7 +1249,9 @@ def train(
 
         train_seconds = time.perf_counter() - started
 
-        val_scores = validate(model, val_source, device, config.token_budget)
+        val_scores = validate(
+            model, Prefetch(val_source, config.loader_workers), device, config.token_budget
+        )
 
         val_seconds = time.perf_counter() - started - train_seconds
 
@@ -1459,6 +1514,7 @@ __all__ = [
     "describe_model",
     "events_bin",
     "file_digest",
+    "limit_cuda_memory",
     "for_epoch",
     "horizon",
     "load_checkpoint",

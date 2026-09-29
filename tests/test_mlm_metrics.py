@@ -77,7 +77,7 @@ def test_no_targets_is_no_share_not_zero_or_division():
 
     scores = Scores()
 
-    scores.add(SimpleNamespace(count=0, logits=LOGITS[:0], targets=torch.tensor([], dtype=torch.long),
+    scores.add(SimpleNamespace(count=0, logits=LOGITS[:0], hits=None, targets=torch.tensor([], dtype=torch.long),
                                loss=torch.tensor(0.0)))
 
     assert scores.targets == 0
@@ -92,8 +92,8 @@ def test_epoch_share_is_over_all_targets_not_a_mean_of_batches():
 
     scores = Scores()
 
-    scores.add(SimpleNamespace(count=1, logits=LOGITS[:1], targets=torch.tensor([3]), loss=torch.tensor(0.5)))
-    scores.add(SimpleNamespace(count=3, logits=LOGITS[1:], targets=torch.tensor([0, 6, 5]), loss=torch.tensor(2.0)))
+    scores.add(SimpleNamespace(count=1, logits=LOGITS[:1], hits=None, targets=torch.tensor([3]), loss=torch.tensor(0.5)))
+    scores.add(SimpleNamespace(count=3, logits=LOGITS[1:], hits=None, targets=torch.tensor([0, 6, 5]), loss=torch.tensor(2.0)))
 
     assert scores.targets == 4
     assert scores.top1_accuracy == pytest.approx(0.25)

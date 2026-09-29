@@ -66,6 +66,9 @@ def tiny(**overrides) -> MlmConfig:
         grad_accum_steps=1,
         attention_backend="sdpa",
         label_smoothing=0.0,
+        # Без процесса подготовки: он стоил бы секунд на каждую
+        # эпоху каждого теста. Путь с ним проверяется отдельно.
+        loader_workers=0,
     )
 
     base.update(overrides)
@@ -651,14 +654,16 @@ def test_training_starts_from_stage_09_weights_and_moves_the_table(stage):
 # ============================================================
 
 
-def test_logits_of_a_micro_batch_are_gone_before_the_next_pass(stage, monkeypatch):
+def test_training_builds_no_full_logits_and_validation_releases_them(stage, monkeypatch):
     """
-    Логиты [M, словарь] нужны только счёту точности. К следующему
-    проходу модели цикл обучения уже отпустил выход прошлого — и
-    тензор его логитов освобождён: иначе они лежали бы в памяти
-    поверх логитов нового прохода. Проверка не пустая: перед
-    следующими проходами ссылки на прошлые логиты обязаны быть
-    записаны.
+    Логиты [M, словарь] нужны только счёту точности. Проход
+    обучения их не строит вовсе: счёт top-1/top-5 приходит кусками
+    (Predicted.hits), и граф полных логитов не живёт весь backward.
+    validation логиты строит — по ним разбор целей, — но к
+    следующему проходу выход прошлого уже отпущен и тензор его
+    логитов освобождён. Проверка не пустая: проходы обоих видов
+    обязаны случиться, а ссылки на логиты validation — быть
+    записаны до следующих проходов.
 
     Следится сам тензор из выхода модели, а не его память: копию
     или view, сохранённые где-то ещё, этот тест не увидит. Память
@@ -668,29 +673,33 @@ def test_logits_of_a_micro_batch_are_gone_before_the_next_pass(stage, monkeypatc
     import weakref
 
     from src.mlm.model import Model
-    from src.mlm.train import Scores
 
     settle(stage, train_people=uneven(stage))
 
     kept: list = []
     seen: list[int] = []
-
-    add = Scores.add
-
-    def remember(self, out):
-        kept.append(weakref.ref(out.logits))
-        add(self, out)
+    passes: list[tuple[bool, bool]] = []
 
     forward = Model.forward
 
-    def look(self, data):
+    def look(self, data, logits=True):
         seen.append(len(kept))
         assert all(ref() is None for ref in kept), "логиты прошлого прохода ещё живы"
-        return forward(self, data)
+        out = forward(self, data, logits=logits)
+        passes.append((self.training, out.logits is not None))
+        if out.logits is not None:
+            kept.append(weakref.ref(out.logits))
+        else:
+            assert out.hits is not None, "проход без логитов обязан нести счёт"
+        return out
 
-    monkeypatch.setattr(Scores, "add", remember)
     monkeypatch.setattr(Model, "forward", look)
 
     train(tiny(token_budget=12), epochs=1, max_steps=None, masking=every_value())
 
+    training = [with_logits for in_training, with_logits in passes if in_training]
+    evaluation = [with_logits for in_training, with_logits in passes if not in_training]
+
+    assert training and not any(training), "проход обучения построил полные логиты"
+    assert evaluation and all(evaluation)
     assert max(seen) >= 2

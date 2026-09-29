@@ -7,7 +7,7 @@ from typing import Iterator
 
 import pyarrow.parquet as pq
 
-from src.tokenization.finalvocab import FrozenArtifacts, VALUE_PREFIX
+from src.tokenization.finalvocab import FrozenArtifacts, VALUE_PREFIX, vocabulary_digest
 from src.tokenization.settings import tokenized_dir
 from src.preprocessing.artifacts import read_json
 from src.tokenization.transform import (
@@ -107,6 +107,43 @@ class TokenizedClient:
         return len(self.profile_key_ids)
 
 
+def event_type_of(artifacts: FrozenArtifacts, row: dict, event_type_key: int | None) -> str | None:
+    """
+    Тип события из его же пар ключ/значение.
+
+    Имя токена в финальном словаре это `value:<ключ>=<значение>`,
+    поэтому тип читается без второй колонки рядом с данными.
+    event_type_key — номер ключа типа (artifacts.key_id), None —
+    словарь его не знает.
+
+    Строка это одно событие, значит её нулевая позиция это
+    маркер [EVT]. Разбор начинается со следующей: значение
+    открывает positions == 0, а 1, 2, … это куски того же
+    значения, и на них смотреть незачем.
+    """
+
+    if event_type_key is None:
+        return None
+
+    positions = row["positions"]
+
+    for index in range(1, len(positions)):
+
+        if positions[index] != 0:
+            continue
+
+        if row["key_ids"][index] != event_type_key:
+            continue
+
+        name = artifacts.describe(row["value_ids"][index])
+
+        prefix = f"{VALUE_PREFIX}{EVENT_TYPE_KEY}="
+
+        return name[len(prefix):] if name.startswith(prefix) else None
+
+    return None
+
+
 class TokenizedGroup:
     """
     Закодированная группа по стандартному пути.
@@ -143,6 +180,14 @@ class TokenizedGroup:
                 f"{self.directory / META_FILE}: формат, смысл анкеты и вехи {found!r}, а нужны "
                 f"{needed!r}. Каталог собран прежним кодом — выполните "
                 f"python -m src.tokenization.run encode {group} заново"
+            )
+
+        # Номера значений принадлежат словарю, под который группа
+        # закодирована: другой словарь прочёл бы их как другие токены.
+        if self.meta.get("vocabulary") != vocabulary_digest():
+            raise TokenizedError(
+                f"{self.directory / META_FILE}: группа закодирована не под текущий словарь "
+                f"data/03_vocab — выполните python -m src.tokenization.run encode {group} заново"
             )
 
         self._events = pq.ParquetFile(self.directory / EVENTS_FILE)
@@ -215,38 +260,7 @@ class TokenizedGroup:
             yield current, buffer
 
     def _event_type(self, row: dict) -> str | None:
-        """
-        Тип события из его же пар ключ/значение.
-
-        Имя токена в финальном словаре это `value:<ключ>=<значение>`,
-        поэтому тип читается без второй колонки рядом с данными.
-
-        Строка это одно событие, значит её нулевая позиция это
-        маркер [EVT]. Разбор начинается со следующей: значение
-        открывает positions == 0, а 1, 2, … это куски того же
-        значения, и на них смотреть незачем.
-        """
-
-        if self._event_type_key is None:
-            return None
-
-        positions = row["positions"]
-
-        for index in range(1, len(positions)):
-
-            if positions[index] != 0:
-                continue
-
-            if row["key_ids"][index] != self._event_type_key:
-                continue
-
-            name = self.artifacts.describe(row["value_ids"][index])
-
-            prefix = f"{VALUE_PREFIX}{EVENT_TYPE_KEY}="
-
-            return name[len(prefix):] if name.startswith(prefix) else None
-
-        return None
+        return event_type_of(self.artifacts, row, self._event_type_key)
 
     def _client(self, client_id: str, rows: list[dict]) -> TokenizedClient:
 
@@ -292,4 +306,5 @@ __all__ = [
     "TokenizedError",
     "TokenizedEvent",
     "TokenizedGroup",
+    "event_type_of",
 ]

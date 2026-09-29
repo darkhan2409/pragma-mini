@@ -23,6 +23,7 @@ data/11_profiles/
 data/12_history/
 data/13_mlm/
 data/14_train/
+data/15_downstream/
 data/runs/
 
 *.pt

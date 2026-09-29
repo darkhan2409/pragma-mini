@@ -6,8 +6,9 @@ import json
 import os
 import shutil
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime
-from multiprocessing import Pool
 from pathlib import Path
 
 import pyarrow as pa
@@ -184,33 +185,50 @@ def _run_batch(job: tuple) -> tuple:
 
     from .engine import run_community
 
-    rows: dict[str, list] = {name: [] for name in TABLES}
-
-    for community_id in community_ids:
-
-        members = communities.members(community_id, total_clients)
-
-        if not members:
-            continue
-
-        result = run_community(community_id, members)
-
-        rows["events"].extend(result.events)
-        rows["profile"].extend(result.profile_rows)
-
     out = Path(out_dir)
 
-    counts: dict[str, int] = {}
-    digests: dict[str, str] = {}
+    parts = {name: out / PARTS_DIR / f"{name}-{batch_index:05d}.parquet" for name in TABLES}
 
-    for name, (_, schema) in TABLES.items():
-        part = out / PARTS_DIR / f"{name}-{batch_index:05d}.parquet"
-        counts[name] = len(rows[name])
-        _write(part, rows[name], schema)
-        # Число строк не описывает содержимое: подменённая часть
-        # прежней длины прошла бы в итог незамеченной. Маркер
-        # подписывает сам файл.
-        digests[name] = _file_sha256(part)
+    parts["events"].parent.mkdir(parents=True, exist_ok=True)
+
+    # Строки пишутся по сообществу, как только оно досчитано: в
+    # памяти воркера живут строки одного сообщества, а не всей
+    # пачки. Пачка в сотни тысяч строк Python-словарями плюс её
+    # копия в Arrow — это и было «почти вся память WSL» при многих
+    # воркерах. Раскладка итоговой таблицы от этого не меняется:
+    # склейка сводит часть в одну группу строк (_merge_parts).
+    writers = {
+        name: pq.ParquetWriter(parts[name], schema, compression="zstd")
+        for name, (_, schema) in TABLES.items()
+    }
+
+    counts: dict[str, int] = {name: 0 for name in TABLES}
+
+    try:
+        for community_id in community_ids:
+
+            members = communities.members(community_id, total_clients)
+
+            if not members:
+                continue
+
+            result = run_community(community_id, members)
+
+            for name, rows in (("events", result.events), ("profile", result.profile_rows)):
+                if rows:
+                    writers[name].write_table(pa.Table.from_pylist(rows, schema=TABLES[name][1]))
+                    counts[name] += len(rows)
+
+            del result
+
+    finally:
+        for writer in writers.values():
+            writer.close()
+
+    # Число строк не описывает содержимое: подменённая часть
+    # прежней длины прошла бы в итог незамеченной. Маркер
+    # подписывает сам файл.
+    digests = {name: _file_sha256(path) for name, path in parts.items()}
 
     # Маркер пишется ПОСЛЕДНИМ и целиком: пачка готова только
     # тогда, когда все её part-файлы на месте. Итоговые суммы
@@ -278,7 +296,10 @@ def _merge_parts(out: Path, name: str, batches: int, digests: dict[int, str]) ->
                 "маркера — черновик повреждён, прогон нужно начать заново"
             )
 
-        table = pq.read_table(part)
+        # Одна группа строк на часть, как при записи пачки целиком:
+        # части пишутся по сообществам, а итоговая раскладка — и с
+        # ней sha256 выгрузки — от этого зависеть не должна.
+        table = pq.read_table(part).combine_chunks()
 
         if writer is None:
             writer = pq.ParquetWriter(temporary, table.schema, compression="zstd")
@@ -435,13 +456,23 @@ def generate_dataset(
         for job in jobs:
             report(_run_batch(job))
     else:
-        with Pool(
-            processes=min(workers, len(jobs)),
+        # ProcessPoolExecutor, а не multiprocessing.Pool: у Pool
+        # воркер, убитый нехваткой памяти, заменяется новым, а его
+        # пачка не завершается никогда — прогон висит без вывода
+        # (CPython gh-66587). Executor сообщает о гибели воркера.
+        with ProcessPoolExecutor(
+            max_workers=min(workers, len(jobs)),
             initializer=_worker_init,
             initargs=(seed, params_path, catalog_scale, community_size, world_seed, horizon),
         ) as pool:
-            for result in pool.imap_unordered(_run_batch, jobs):
-                report(result)
+            try:
+                for future in as_completed([pool.submit(_run_batch, job) for job in jobs]):
+                    report(future.result())
+            except BrokenProcessPool as error:
+                raise GenerationError(
+                    "воркер генератора погиб, скорее всего от нехватки памяти. Готовые пачки "
+                    "сохранены маркерами: продолжите с --resume и меньшим --workers"
+                ) from error
 
     # Итог собирается из маркеров ВСЕХ пачек, а не из того, что
     # посчитал текущий прогон: продолженная сборка обязана дать
@@ -542,8 +573,47 @@ def generate_dataset(
 # ============================================================
 
 
+# Сколько памяти держит один воркер на пике: состояние сообщества и
+# его строки до записи. Замер (VmHWM) — пачка из 256 клиентов на
+# самом длинном горизонте, test (31 месяц): 0.35–0.39 ГиБ. С запасом.
+WORKER_MEMORY = 512 << 20
+
+# Сколько памяти оставить остальному: главный процесс, склейка
+# частей, система.
+MEMORY_RESERVE = 1 << 30
+
+
+def available_memory() -> int | None:
+    """
+    MemAvailable из /proc/meminfo в байтах; None, если его нет.
+    """
+
+    try:
+        with open("/proc/meminfo", encoding="ascii") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        return None
+
+    return None
+
+
 def default_workers() -> int:
-    return max(1, (os.cpu_count() or 2) - 1)
+    """
+    Воркеров по умолчанию: ядра минус одно, но не больше, чем
+    помещается в свободную память. Одиннадцать воркеров на 7 ГБ
+    WSL вытесняли систему в своп.
+    """
+
+    cpus = max(1, (os.cpu_count() or 2) - 1)
+
+    available = available_memory()
+
+    if available is None:
+        return cpus
+
+    return max(1, min(cpus, (available - MEMORY_RESERVE) // WORKER_MEMORY))
 
 
 def generate_group(
@@ -611,12 +681,24 @@ def main() -> None:
     # данных не меняет.
     parser.add_argument("group", choices=sorted(config.DATASETS),
                         help="какую группу генерировать; соседние не трогаются")
-    parser.add_argument("--workers", type=int, default=default_workers())
+    parser.add_argument(
+        "--workers", type=int, default=None,
+        help="процессов; по умолчанию — по ядрам и свободной памяти",
+    )
     parser.add_argument("--chunk-clients", type=int, default=256)
     parser.add_argument("--params", type=str, default=None)
     parser.add_argument("--resume", action="store_true")
 
     args = parser.parse_args()
+
+    if args.workers is None:
+        args.workers = default_workers()
+        available = available_memory()
+        print(
+            f"[emit] воркеров {args.workers}: ядер {os.cpu_count()}, свободно "
+            f"{available / 2**30 if available else float('nan'):.1f} ГиБ, на воркер "
+            f"{WORKER_MEMORY / 2**30:.2f} ГиБ"
+        )
 
     counts = generate_group(
         args.group,

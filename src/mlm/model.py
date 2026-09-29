@@ -144,12 +144,16 @@ class Predicted:
     событие внутри клиента и номер клиента в micro-batch.
     """
 
-    logits: torch.Tensor    # [M, словарь]
+    logits: torch.Tensor | None  # [M, словарь]; None, если проход просили без них
     targets: torch.Tensor   # [M]
     loss: torch.Tensor      # скаляр, связанный с графом: среднее по M целям
     place: torch.Tensor     # [M] номер токена у клиента
     event: torch.Tensor     # [M] номер его события у клиента
     client: torch.Tensor    # [M] номер клиента в micro-batch
+
+    # (угадано первым, попало в первые 5) — у прохода без логитов;
+    # с логитами их считает вызывающий по logits.
+    hits: tuple[int, int] | None = None
 
     @property
     def count(self) -> int:
@@ -361,6 +365,37 @@ def _piece_loss(
     )
 
 
+def hits_in_pieces(
+    head: Mlm,
+    token: torch.Tensor,
+    event: torch.Tensor,
+    client: torch.Tensor,
+    weight: torch.Tensor,
+    targets: torch.Tensor,
+    k: int = 5,
+) -> tuple[int, int]:
+    """
+    То же, что hits по полным логитам, но кусками по
+    TARGETS_PER_CHUNK и без графа: логиты [M, словарь] целиком не
+    живут ни одного мгновения. Счёт копится на устройстве, и
+    синхронизация одна.
+    """
+
+    first = five = targets.new_zeros(())
+
+    with torch.no_grad():
+
+        for piece_token, piece_event, piece_client, labels in zip(
+            *(part.split(TARGETS_PER_CHUNK) for part in (token, event, client, targets))
+        ):
+            logits = head(piece_token, piece_event, piece_client, weight)
+            top = logits.topk(min(k, logits.shape[-1]), dim=-1).indices
+            first = first + (top[:, 0] == labels).sum()
+            five = five + (top == labels[:, None]).any(dim=-1).sum()
+
+    return int(first), int(five)
+
+
 def hits(logits: torch.Tensor, targets: torch.Tensor, k: int = 5) -> tuple[int, int]:
     """
     Сколько целей угадано первым ответом и сколько попало в первые k.
@@ -413,9 +448,13 @@ class Model(nn.Module):
         self.attention = attention
         self.strict = bool(strict)
 
-    def forward(self, data: PackedBatch) -> Predicted:
+    def forward(self, data: PackedBatch, logits: bool = True) -> Predicted:
         """
         Micro-batch от токенов до потерь, одним проходом.
+
+        logits=False — без полных логитов [M, словарь]: их граф жил бы
+        весь backward ради одного счёта top-1/top-5. Обучение просит
+        так; счёт тогда приходит в Predicted.hits.
         """
 
         token_vectors, event_vectors, client_vectors = self._encode(data)
@@ -428,14 +467,22 @@ class Model(nn.Module):
         event_rows = event_vectors[data.target_event]
         client_rows = client_vectors[data.target_client]
 
-        # Логиты целиком — для точности и отчёта; потери считает
-        # mlm_loss кусками, по тем же входам головы.
-        logits = self.head(token_vectors, event_rows, client_rows, self.embedding.weight)
-
         targets = data.labels[data.target_token]
 
+        # Логиты целиком — для точности, отчёта и разбора по целям;
+        # потери считает mlm_loss кусками, по тем же входам головы.
+        full = (
+            self.head(token_vectors, event_rows, client_rows, self.embedding.weight)
+            if logits else None
+        )
+
+        scored = None if logits else hits_in_pieces(
+            self.head, token_vectors, event_rows, client_rows, self.embedding.weight, targets
+        )
+
         return Predicted(
-            logits=logits,
+            logits=full,
+            hits=scored,
             targets=targets,
             loss=mlm_loss(
                 self.head, token_vectors, event_rows, client_rows,
@@ -458,6 +505,44 @@ class Model(nn.Module):
         """
 
         return self._encode(data)[2]
+
+    def readouts(self, data: PackedBatch) -> dict[str, torch.Tensor]:
+        """
+        Векторы клиента для оценки на задачах, [B, d] каждый, из
+        одного прохода:
+
+          usr         [USR] после истории — то же, что client_embeddings;
+          profile     выход энкодера анкеты, до истории;
+          mean_event  среднее векторов событий клиента после истории;
+          last_event  вектор его последнего события после истории.
+
+        У клиента без событий mean_event и last_event нулевые.
+        """
+
+        if self._flash():
+            dated, _ = self._events_flash(data)
+            profile = self._profiles_flash(data)
+            usr, events = self._history_flash(data, profile, dated)
+        else:
+            dated, _ = self._events(data)
+            profile = self._profiles(data)
+            usr, events = self._history(data, profile, dated)
+
+        events = events.float()
+
+        counts = torch.bincount(data.user_of_event, minlength=data.clients)
+
+        mean = events.new_zeros(data.clients, events.shape[-1]).index_add_(
+            0, data.user_of_event, events
+        ) / counts.clamp(min=1).unsqueeze(-1)
+
+        # События клиента лежат подряд и по времени: последнее —
+        # перед началом следующего клиента.
+        last = events.new_zeros(data.clients, events.shape[-1])
+        present = counts > 0
+        last[present] = events[(torch.cumsum(counts, 0) - 1)[present]]
+
+        return {"usr": usr.float(), "profile": profile.float(), "mean_event": mean, "last_event": last}
 
     def _encode(self, data: PackedBatch) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
         """
@@ -806,6 +891,7 @@ __all__ = [
     "Predicted",
     "TARGETS_PER_CHUNK",
     "hits",
+    "hits_in_pieces",
     "load_model",
     "mlm_loss",
     "pack",

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import time
 from pathlib import Path
 
@@ -21,6 +20,7 @@ from src.preprocessing.artifacts import read_json, write_json
 from src.profile.encoder import ProfileEncoder
 from src.profile.settings import ProfileConfig
 from src.profile.version import IMPLEMENTATION_VERSION as PROFILE_VERSION
+from src.tokenization import finalvocab
 from src.tokenization.finalvocab import VocabError, load_final_vocab
 
 from .settings import BACKBONE_FILES, backbone_dir
@@ -151,13 +151,9 @@ def vocabulary_digest() -> str:
     """
 
     try:
-        vocab = load_final_vocab()
+        return finalvocab.vocabulary_digest()
     except VocabError as error:
         raise BackboneError(str(error)) from error
-
-    text = json.dumps(vocab, sort_keys=True, ensure_ascii=False)
-
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def read_embedding() -> dict:

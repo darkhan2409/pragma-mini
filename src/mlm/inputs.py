@@ -7,6 +7,7 @@ from typing import Iterable, Iterator, NamedTuple
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+from torch.utils.data import IterableDataset
 
 from src.dataset.lineage import lineage_problem
 from src.batching.build import BATCHES_SCHEMA
@@ -168,20 +169,24 @@ class Source:
         self.batches_path = batches_dir(group) / BATCHES_FILE
         self.masked_path = None if masking is not None else masked_dir(group) / MASKED_FILE
 
-        self._batches = _open(
-            self.batches_path, BATCHES_SCHEMA, f"python -m src.batching.run {group}"
-        )
-
         specials = load_special_tokens()
 
         self.mask_id = specials[MASK]
         self.unknown_id = specials[UNK]
 
-        if masking is not None:
+        self._open_files()
+
+    def _open_files(self) -> None:
+
+        self._batches = _open(
+            self.batches_path, BATCHES_SCHEMA, f"python -m src.batching.run {self.group}"
+        )
+
+        if self.masking is not None:
             return
 
         self._masked = _open(
-            self.masked_path, MASKED_SCHEMA, f"python -m src.masking.run {group}"
+            self.masked_path, MASKED_SCHEMA, f"python -m src.masking.run {self.group}"
         )
 
         if self._batches.num_row_groups != self._masked.num_row_groups:
@@ -189,6 +194,20 @@ class Source:
                 f"батчей {self._batches.num_row_groups}, а масок "
                 f"{self._masked.num_row_groups}: файлы собраны в разное время"
             )
+
+    # Источник переезжает в процесс подготовки данных (Prefetch)
+    # путями и номерами токенов, а не глобалами каталогов: новый
+    # процесс импортирует settings заново и о подменённых каталогах
+    # (тесты, --out) не знает. Файлы открываются там же заново.
+    def __getstate__(self) -> dict:
+        return {
+            name: getattr(self, name)
+            for name in ("group", "masking", "batches_path", "masked_path", "mask_id", "unknown_id")
+        }
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        self._open_files()
 
     @property
     def count(self) -> int:
@@ -358,6 +377,83 @@ def micro_batches(clients: Iterable[Client], token_budget: int) -> Iterator[list
         yield batch
 
 
+class Prefetch:
+    """
+    Клиенты источника, подготовленные заранее в workers отдельных
+    процессах; workers=0 — в этом же процессе.
+
+    Без неё группа строк (32 клиента) читалась и маскировалась на
+    Python в главном потоке, пока GPU стоял: около трети эпохи. В
+    отдельном процессе подготовка следующих групп идёт, пока модель
+    считает текущие, и GIL обучения она не занимает.
+
+    Порядок клиентов тот же, что у source.clients(): процесс i берёт
+    группы строк i, i + n, …, а DataLoader отдаёт их по кругу.
+    Маска разыгрывается тем же кодом из той же строки, поэтому она
+    побитно та же.
+    """
+
+    # Сколько групп строк на процесс готовится впрок.
+    AHEAD = 2
+
+    def __init__(self, source: Source, workers: int):
+        self.source = source
+        self.workers = workers
+
+    def clients(self) -> Iterator[Client]:
+
+        if self.workers == 0:
+            yield from self.source.clients()
+            return
+
+        import torch
+        from torch.utils.data import DataLoader
+
+        # Свой генератор: иначе DataLoader взял бы seed процессов из
+        # глобального и сдвинул поток dropout обучения — прогон с
+        # подготовкой впрок разошёлся бы с прогоном без неё.
+        loader = DataLoader(
+            _RowGroups(self.source),
+            batch_size=None,
+            num_workers=self.workers,
+            prefetch_factor=self.AHEAD,
+            collate_fn=_as_is,
+            generator=torch.Generator(),
+        )
+
+        for batch in loader:
+            yield from batch
+
+
+class _RowGroups(IterableDataset):
+    """
+    Группы строк источника: одна группа — список её клиентов.
+    """
+
+    def __init__(self, source: Source):
+        self.source = source
+
+    def __iter__(self) -> Iterator[list[Client]]:
+
+        from torch.utils.data import get_worker_info
+
+        info = get_worker_info()
+
+        first, step = (info.id, info.num_workers) if info is not None else (0, 1)
+
+        for index in range(first, self.source.count, step):
+            yield self.source.batch(index)
+
+
+def _as_is(batch):
+    """
+    Группа строк без переделки: клиенты едут как есть, без
+    превращения массивов в тензоры.
+    """
+
+    return batch
+
+
 def _open(path: Path, schema: pa.Schema, command: str) -> pq.ParquetFile:
     """
     Файл этапа по стандартному пути, со сверкой схемы.
@@ -436,6 +532,7 @@ __all__ = [
     "BATCH_COLUMNS",
     "IGNORE",
     "MASKED_COLUMNS",
+    "Prefetch",
     "Client",
     "InputError",
     "Size",

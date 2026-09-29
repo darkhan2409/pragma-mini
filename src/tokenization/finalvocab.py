@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -160,6 +163,20 @@ def load_final_vocab(directory: Path | None = None) -> dict[str, int]:
         raise VocabError(f"нет {path}: выполните python -m src.tokenization.run final-vocab")
 
     return read_json(path)
+
+
+def vocabulary_digest(directory: Path | None = None) -> str:
+    """
+    Отпечаток финального словаря: sha256 его канонического JSON.
+
+    По содержимому, а не по файлу: пересохранение того же словаря
+    отпечаток не меняет. Им связаны этапы, кодирующие номерами
+    словаря: кодирование под другим словарём ловится сверкой.
+    """
+
+    text = json.dumps(load_final_vocab(directory), sort_keys=True, ensure_ascii=False)
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 # ------------------------------------------------------------
