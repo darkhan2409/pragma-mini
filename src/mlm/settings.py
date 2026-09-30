@@ -132,7 +132,7 @@ class MlmConfig:
     # оптимизатора до learning_rate, затем cosine до
     # min_learning_rate.
     warmup_steps: int = 100
-    min_learning_rate: float = 1e-5
+    min_learning_rate: float = 3e-5
 
     # Предел общей нормы градиента перед шагом.
     max_grad_norm: float = 1.0

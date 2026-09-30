@@ -1171,9 +1171,9 @@ predicted_id, correct, loss                        итог по этой цел
 ## 12. Обучение
 
 ```bash
-python -m src.mlm.train                  # до 10 эпох по всем клиентам train, early stopping
+python -m src.mlm.train                  # до 5 эпох по всем клиентам train, early stopping
 python -m src.mlm.train --epochs 3
-python -m src.mlm.train --max-steps 100   # план cosine на 10 эпох, прогон до 100 шагов
+python -m src.mlm.train --max-steps 100   # план cosine на 5 эпох, прогон до 100 шагов
 python -m src.mlm.train --epochs 10 --resume   # продолжить до 10 эпох всего
 python -m src.mlm.train --out data/runs/имя      # прогон в своём каталоге
 ```
@@ -1372,7 +1372,7 @@ stopping она не влияет.
 будет понятная ошибка. `--resume --out каталог` продолжает прогон этого каталога.
 
 `learning_rate` (3e-4), `weight_decay` (0.01), `token_budget` (48 000), `grad_accum_steps` (1),
-`warmup_steps` (100), `min_learning_rate` (1e-5), `max_grad_norm` (1.0),
+`warmup_steps` (100), `min_learning_rate` (3e-5), `max_grad_norm` (1.0),
 `early_stopping_patience` (3) и `early_stopping_min_delta` (0.0) задаются тем же JSON,
 что и конфиг головы: `--config`.
 

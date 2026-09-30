@@ -1565,9 +1565,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m src.mlm.train")
 
     parser.add_argument(
-        "--epochs", type=_positive, default=10,
+        "--epochs", type=_positive, default=5,
         help=(
-            "сколько эпох всего, считая от начала обучения (по умолчанию 10, "
+            "сколько эпох всего, считая от начала обучения (по умолчанию 5, "
             "early stopping может остановить раньше); первый запуск ими же задаёт "
             "горизонт cosine"
         ),
