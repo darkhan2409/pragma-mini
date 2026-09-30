@@ -12,6 +12,8 @@
 - минус `balance_after` своими квантилями (`negative_bins` 4);
 - время событий от cutoff T, а не от последнего события (`time_anchor` набора 05).
 
+2026-09-30 владелец также включил в эталон E10: `product_id` категорией.
+
 Прежний словарь — `configs/tokenizer-legacy.json`, прежний отсчёт времени —
 `configs/dataset-last-event.json`, если понадобится сравнение.
 
@@ -57,11 +59,13 @@
 | E4 | dropout 0 | `init_backbone` с `configs/*-dropout0.json` | 07_backbone |
 | E5 | перестановка групп строк по эпохам | `--config configs/train-shuffle.json` | — |
 | E6 | закрыть ключи события под маской event | `--config configs/train-hide-event-keys.json` | — |
-| E10 | `product_id` категорией | `git apply product-keys.patch`, затем `src.pipeline` (от 02) | 02–07 |
 | L | прежний словарь (ByteLevel, общая шкала суммы, минус вместе с малым остатком) | `src.pipeline --from fit --args fit="--config configs/tokenizer-legacy.json"` | 03–07 |
 | LT | прежний отсчёт времени: от последнего события | `src.pipeline --from dataset --to dataset --args dataset="--config configs/dataset-last-event.json"` | 05 |
 
-E7 (время от T), E8 (BPE `characters`) и E9 (шкалы денег) стали эталоном.
+E7 (время от T), E8 (BPE `characters`) и E9 (шкалы денег) стали эталоном. С 2026-09-30
+эталон и E10: `product_id` и `previous_product_id` — категории `product` и
+`previous_product` (`KEYS_VERSION` 17.0.0, `PROJECTION_VERSION` 9.0.0); патч
+`product-keys.patch` применён и удалён, данные пересобираются от 02.
 
 Конфиги `--config` у одного обучения объединяются в один JSON: у обучения только один
 `--config`.
@@ -71,7 +75,7 @@ E7 (время от T), E8 (BPE `characters`) и E9 (шкалы денег) ст
 - **E2, E4.** До эксперимента: `cp -a data/07_backbone data/runs/07_backbone-default`.
   После: `python -m src.mlm.init_backbone` без конфигов. Веса разыгрываются из seed,
   поэтому каталог восстанавливается тем же.
-- **E10, L, LT.** До эксперимента: `cp -a data/0[2-7]_* data/runs/data-default/`.
+- **L, LT.** До эксперимента: `cp -a data/0[2-7]_* data/runs/data-default/`.
   После — вернуть копию. Можно и пересобрать конвейер без конфигов: вход тот же, выход
   побайтно тот же.
 - **Проверка перед снятием векторов.** `embed` отказывает, если чекпойнт обучен не на

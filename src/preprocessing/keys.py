@@ -35,7 +35,7 @@ from .projection import EVENT_TYPE_FIELD, SEMANTIC_PAYLOAD_FIELDS, validate_proj
 # ============================================================
 
 
-KEYS_VERSION = "16.0.0"
+KEYS_VERSION = "17.0.0"
 
 
 # ------------------------------------------------------------
@@ -199,6 +199,14 @@ DIRECT_KEYS: dict[str, SemanticKey] = {
     "operation": _k("operation", CATEGORICAL, "операция в приложении"),
     "error_code": _k("error_code", CATEGORICAL, "код ошибки в приложении"),
     "device_new": _k("device_new", CATEGORICAL, "действие с нового устройства"),
+    # --- продукт ---
+    #
+    # Один ключ во всех источниках: значения — коды одного
+    # каталога, а роль продукта (открыт, запрошен, предложен,
+    # показан) называет тип события. Продукт, которого train не
+    # видел, кодируется [UNK].
+    "product_id": _k("product", CATEGORICAL, "продукт каталога банка"),
+    "previous_product_id": _k("previous_product", CATEGORICAL, "продукт, с которого перешёл клиент"),
     # --- обращения ---
     "topic": _k("topic", CATEGORICAL, "тема обращения"),
     # --- профиль как событие ---
@@ -412,6 +420,8 @@ ALLOWED_SHARING: tuple[tuple[str, tuple[str, ...], str], ...] = (
      "код одной и той же маркетинговой кампании"),
     ("app_domain", ("app_screens", "app_operations"),
      "раздел приложения, названный экраном или операцией"),
+    ("product", ("product_events", "applications", "communications", "banners", "app_screens"),
+     "код продукта одного каталога: роль продукта называет тип события"),
 )
 
 
