@@ -25,8 +25,8 @@ from tests.test_profile_state import (
 #
 #   группа  контекст                   маскирование
 #   train   [2024-01-01, 2026-01-01)   [2024-01-01, 2026-01-01)
-#   val     [2024-01-01, 2026-04-01)   [2026-01-01, 2026-04-01)
-#   test    [2024-01-01, 2026-08-01)   [2026-05-01, 2026-08-01)
+#   val     [2024-01-01, 2026-05-01)   [2026-01-01, 2026-05-01)
+#   test    [2024-01-01, 2026-09-01)   [2026-05-01, 2026-09-01)
 #
 # Проверяется:
 #
@@ -53,8 +53,8 @@ def local(year: int, month: int, day: int) -> datetime:
 
 EXPECTED = {
     "train": ((local(2024, 1, 1), local(2026, 1, 1)), (local(2024, 1, 1), local(2026, 1, 1))),
-    "val": ((local(2024, 1, 1), local(2026, 4, 1)), (local(2026, 1, 1), local(2026, 4, 1))),
-    "test": ((local(2024, 1, 1), local(2026, 8, 1)), (local(2026, 5, 1), local(2026, 8, 1))),
+    "val": ((local(2024, 1, 1), local(2026, 5, 1)), (local(2026, 1, 1), local(2026, 5, 1))),
+    "test": ((local(2024, 1, 1), local(2026, 9, 1)), (local(2026, 5, 1), local(2026, 9, 1))),
 }
 
 GROUPS = tuple(EXPECTED)
@@ -222,15 +222,15 @@ def test_validation_labels_only_inside_its_window_and_repeat(stage):
         return raw_event(RAW_CLIENT, moment, {
             "type": "purchase", "amount": 700, "direction": "debit", "status": "approved"})
 
-    # Окно val в UTC: [2025-12-31 19:00, 2026-03-31 19:00).
+    # Окно val в UTC: [2025-12-31 19:00, 2026-04-30 19:00).
     tape = [
         purchase("2024-03-01T09:00:00"),
         purchase("2025-12-31T18:59:59"),
         purchase("2025-12-31T19:00:00"),
         raw_event(RAW_CLIENT, "2025-12-31T19:00:00", {
             "type": "card_activated", "product_id": "prd_card", "card_id": "crd_1"}),
-        purchase("2026-03-31T18:59:59"),
-        purchase("2026-03-31T19:00:00"),
+        purchase("2026-04-30T18:59:59"),
+        purchase("2026-04-30T19:00:00"),
     ]
 
     milestones = [
@@ -308,8 +308,8 @@ def test_samples_without_their_window_are_refused(stage):
         "events_cutoff": window("val").final_cutoff.isoformat(),
     }
 
-    stale = dict(window("val").as_dict(), final_cutoff=local(2026, 5, 1).isoformat(),
-                 target_end=local(2026, 5, 1).isoformat())
+    stale = dict(window("val").as_dict(), final_cutoff=local(2026, 4, 1).isoformat(),
+                 target_end=local(2026, 4, 1).isoformat())
 
     for broken in (meta, dict(meta, window=stale), dict(meta, window=window("test").as_dict())):
 
@@ -340,7 +340,7 @@ def test_stamp_without_windows_is_refused(stage):
     without = {key: value for key, value in current.items() if key != "windows"}
 
     moved = dict(current, windows=dict(current["windows"], val=dict(
-        current["windows"]["val"], target_end=local(2026, 5, 1).isoformat())))
+        current["windows"]["val"], target_end=local(2026, 4, 1).isoformat())))
 
     for stamp in (without, moved):
 

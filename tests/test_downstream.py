@@ -143,7 +143,7 @@ def test_the_future_after_the_cutoff_does_not_change_the_input(stage, anchor: st
 
     same(quiet, busy)
 
-    # T раньше конца окна: переезд 1 февраля и продукт 1 марта в
+    # T раньше конца окна: переезд 10 марта и продукт 20 марта в
     # ленту на T не попадают.
     assert quiet.n_events == 2
     assert all(event_time < moment for event_time in quiet.event_time)

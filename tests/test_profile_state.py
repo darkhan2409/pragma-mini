@@ -649,7 +649,9 @@ def val_cutoff() -> datetime:
     return PreprocessingConfig.load(None).windows["val"].final_cutoff
 
 
-# cutoff val — полночь 1 апреля 2026 у банка (19:00 UTC 31 марта).
+# cutoff val — полночь 1 мая 2026 у банка (19:00 UTC 30 апреля); T
+# проб val — на 60 дней раньше, 2 марта. События 2026 года лежат
+# после T и больше чем за 30 дней до cutoff.
 
 EARLY = [
     raw_event(RAW_CLIENT, "2024-03-01T09:00:00", {
@@ -658,10 +660,10 @@ EARLY = [
         "type": "profile_change", "field_name": "city", "old_value": "Almaty",
         "new_value": "Astana", "change_source": "client", "confirmed": True}),
     # Период целей, но всё ещё раньше cutoff: в анкету входит.
-    raw_event(RAW_CLIENT, "2026-02-01T10:00:00", {
+    raw_event(RAW_CLIENT, "2026-03-10T10:00:00", {
         "type": "profile_change", "field_name": "city", "old_value": "Astana",
         "new_value": "Shymkent", "change_source": "client", "confirmed": True}),
-    raw_event(RAW_CLIENT, "2026-03-01T10:00:00", {
+    raw_event(RAW_CLIENT, "2026-03-20T10:00:00", {
         "type": "product_opened", "product_id": "prd_test", "reason": "application_approved"}),
 ]
 

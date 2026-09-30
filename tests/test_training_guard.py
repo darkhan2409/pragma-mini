@@ -251,9 +251,11 @@ def test_a_fresh_run_clears_the_weights_and_telemetry_of_the_last_one(stage):
     assert not epoch_weights_path(2).exists()
     assert not epoch_weights_path(3).exists()
 
-    lines = (train_dir() / TELEMETRY_FILE).read_text().splitlines()
+    rows = [json.loads(line) for line in (train_dir() / TELEMETRY_FILE).read_text().splitlines()]
 
-    assert [json.loads(line)["epoch"] for line in lines] == [1]
+    assert [row["epoch"] for row in rows if row["kind"] == "epoch"] == [1]
+    assert [row["resumed"] for row in rows if row["kind"] == "run"] == [False]
+    assert {row["epoch"] for row in rows if row["kind"] == "step"} == {1}
 
 
 # ============================================================
@@ -446,7 +448,49 @@ def test_telemetry_is_written_per_epoch_and_appended_on_resume(stage, capsys):
     """
     Строка телеметрии на каждую полную эпоху: число шагов совпадает
     с шагами эпохи, нормы градиента положительны, время не
-    отрицательно. Продолжение дописывает, а не переписывает.
+    отрицательно, потери те же, что в истории чекпойнта.
+    Продолжение дописывает, а не переписывает.
+    """
+
+    settle(stage, train_people=many())
+
+    config, masking = tiny(token_budget=6, early_stopping_patience=10), every_value()
+
+    first = train(config, epochs=1, max_steps=None, masking=masking)
+    second = train(config, epochs=2, max_steps=None, masking=masking, resume=True)
+
+    rows = [json.loads(line) for line in (train_dir() / TELEMETRY_FILE).read_text().splitlines()]
+    epochs = [row for row in rows if row["kind"] == "epoch"]
+
+    assert [row["epoch"] for row in epochs] == [1, 2]
+    assert epochs[0]["steps"] == first["step"]
+    assert epochs[1]["steps"] == second["step"] - first["step"]
+
+    for row in epochs:
+        assert 0.0 < row["grad_norm_mean"] <= row["grad_norm_max"]
+        assert 0.0 <= row["clipped_share"] <= 1.0
+        assert row["train_seconds"] >= row["data_wait_seconds"] >= 0.0
+        assert row["cuda_peak_allocated_gib"] is None
+
+    history = torch.load(checkpoint_path(), map_location="cpu", weights_only=True)["history"]
+
+    for row, item in zip(epochs, history, strict=True):
+        assert row["train_loss"] == item["train"]["loss"]
+        assert row["val_loss"] == item["val"]["loss"]
+        assert row["learning_rate"] == item["learning_rate"]
+
+    printed = capsys.readouterr().out
+
+    assert "grad_norm=" in printed and "wait=" in printed
+    assert "val nll" in printed
+
+
+def test_telemetry_has_the_plan_and_every_optimizer_step(stage, capsys):
+    """
+    Строка run называет план прогона, строка step — каждый шаг
+    оптимизатора теми же числами, что печатает обучение. Шаги идут
+    подряд через продолжение, токены шага — токены событий и анкет
+    его micro-batch'ей.
     """
 
     settle(stage, train_people=many())
@@ -458,20 +502,37 @@ def test_telemetry_is_written_per_epoch_and_appended_on_resume(stage, capsys):
 
     rows = [json.loads(line) for line in (train_dir() / TELEMETRY_FILE).read_text().splitlines()]
 
-    assert [row["epoch"] for row in rows] == [1, 2]
-    assert rows[0]["steps"] == first["step"]
-    assert rows[1]["steps"] == second["step"] - first["step"]
+    runs = [row for row in rows if row["kind"] == "run"]
+    steps = [row for row in rows if row["kind"] == "step"]
 
-    for row in rows:
-        assert 0.0 < row["grad_norm_mean"] <= row["grad_norm_max"]
-        assert 0.0 <= row["clipped_share"] <= 1.0
-        assert row["train_seconds"] >= row["data_wait_seconds"] >= 0.0
-        assert row["cuda_peak_allocated_gib"] is None
+    assert [(row["resumed"], row["epoch"], row["step"]) for row in runs] == [
+        (False, 1, 0), (True, 2, first["step"]),
+    ]
+    assert all(row["planned_epochs"] == 1 and row["max_steps"] is None for row in runs)
+    assert [row["epochs"] for row in runs] == [1, 2]
+    assert runs[0]["total_steps"] == first["step"]
+    assert runs[0]["max_grad_norm"] == config.max_grad_norm
 
-    printed = capsys.readouterr().out
+    assert [row["step"] for row in steps] == list(range(1, second["step"] + 1))
 
-    assert "grad_norm=" in printed and "wait=" in printed
-    assert "val nll" in printed
+    printed = [line for line in capsys.readouterr().out.splitlines() if " step=" in line]
+
+    assert len(printed) == len(steps)
+
+    for row, line in zip(steps, printed):
+        assert line.startswith(f"epoch={row['epoch']} step={row['step']} loss={row['loss']:.4f} ")
+        assert f"lr={row['lr']:.2e} grad_norm={row['grad_norm']:.3f} " in line
+        assert row["tokens"] > 0 and row["targets"] > 0 and row["seconds"] >= row["wait_seconds"] >= 0.0
+
+    # Шаги первой эпохи — ровно её micro-batch'и: tiny копит по
+    # одному micro-batch на шаг, и цели есть в каждом.
+    tokens = [
+        sum(size.n_tokens + size.profile_n_tokens for size in batch)
+        for batch in micro_batches(Source("train").sizes(), config.token_budget)
+    ]
+
+    assert config.grad_accum_steps == 1 and first["step"] == len(tokens)
+    assert [row["tokens"] for row in steps if row["epoch"] == 1] == tokens
 
 
 def test_history_in_the_checkpoint_stays_free_of_wall_time(stage):

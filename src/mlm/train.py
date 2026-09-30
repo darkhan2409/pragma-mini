@@ -473,6 +473,22 @@ class Detail:
         }
 
 
+def append_telemetry(path: Path, record: dict) -> None:
+    """
+    Строка телеметрии прогона.
+
+    Строка пишется одним write вместе с переводом строки и файл
+    сразу закрывается: читатель во время обучения (src.dashboard)
+    видит либо целую строку, либо её хвост без перевода строки и
+    такой хвост не берёт.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
+
+
 def describe_epoch(epoch: int, telemetry: dict, detail: dict | None) -> str:
     """
     Строки эпохи о времени, градиенте и памяти и о разбивке val.
@@ -1163,6 +1179,22 @@ def train(
 
         telemetry_path.unlink(missing_ok=True)
 
+    # План прогона: в строках шагов его нет, а читателю нужны
+    # эпохи и шаги всего. Продолжение пишет свою строку, и с её
+    # шага читатель отбрасывает строки оборванного прогона.
+    append_telemetry(telemetry_path, {
+        "kind": "run",
+        "epoch": first_epoch,
+        "step": step,
+        "epochs": epochs,
+        "planned_epochs": planned_epochs,
+        "total_steps": total,
+        "max_steps": max_steps,
+        "max_grad_norm": config.max_grad_norm,
+        "resumed": state is not None,
+        "time": time.time(),
+    })
+
     epoch = first_epoch
     reason = "epochs"
 
@@ -1171,6 +1203,9 @@ def train(
     window_batches = 0
     window_targets = 0
     window_loss = 0.0
+
+    # Токены событий и анкет окна — для скорости в телеметрии.
+    window_tokens = 0
 
     # Телеметрия окна и эпохи: сколько цикл ждал данных, когда окно
     # открылось, нормы градиента до клипа.
@@ -1200,7 +1235,7 @@ def train(
         веса и состояние AdamW, а следующий чекпойнт сохранил бы их.
         """
 
-        nonlocal step, window_batches, window_targets, window_loss, last_lr
+        nonlocal step, window_batches, window_targets, window_loss, window_tokens, last_lr
         nonlocal window_wait, window_started, epoch_wait
 
         if window_targets > 0:
@@ -1231,16 +1266,33 @@ def train(
             step += 1
             norms.append(norm)
 
+            elapsed = time.perf_counter() - window_started
+
             print(
                 f"epoch={epoch} step={step} loss={loss:.4f} "
                 f"targets={window_targets} micro_batches={window_batches} lr={lr:.2e} "
                 f"grad_norm={norm:.3f} wait={window_wait:.2f}s "
-                f"time={time.perf_counter() - window_started:.2f}s"
+                f"time={elapsed:.2f}s"
             )
+
+            append_telemetry(telemetry_path, {
+                "kind": "step",
+                "epoch": epoch,
+                "step": step,
+                "loss": loss,
+                "targets": window_targets,
+                "micro_batches": window_batches,
+                "tokens": window_tokens,
+                "lr": lr,
+                "grad_norm": norm,
+                "wait_seconds": window_wait,
+                "seconds": elapsed,
+                "time": time.time(),
+            })
 
         optimizer.zero_grad(set_to_none=True)
 
-        window_batches, window_targets, window_loss = 0, 0, 0.0
+        window_batches, window_targets, window_loss, window_tokens = 0, 0, 0.0, 0
 
         epoch_wait += window_wait
         window_wait, window_started = 0.0, time.perf_counter()
@@ -1324,6 +1376,7 @@ def train(
                 out = model(pack(clients, device), logits=False)
 
             window_batches += 1
+            window_tokens += sum(client.n_tokens + client.profile_n_tokens for client in clients)
             done += 1
 
             if out.count > 0:
@@ -1428,11 +1481,19 @@ def train(
         # Телеметрия — строкой в свой файл, а не в историю чекпойнта:
         # время стены не результат, и продолжение обязано дать тот же
         # чекпойнт, что непрерывный прогон. У эпохи, продолженной
-        # посередине, она описывает только часть после продолжения.
-        telemetry_path.parent.mkdir(parents=True, exist_ok=True)
-
-        with open(telemetry_path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"epoch": epoch, "step": step, **telemetry}) + "\n")
+        # посередине, время и нормы описывают только часть после
+        # продолжения. Потери здесь повторяют историю чекпойнта,
+        # чтобы читатель во время обучения не открывал чекпойнт.
+        append_telemetry(telemetry_path, {
+            "kind": "epoch",
+            "epoch": epoch,
+            "step": step,
+            "train_loss": epoch_scores.loss,
+            "val_loss": val_loss,
+            "learning_rate": last_lr,
+            **telemetry,
+            "time": time.time(),
+        })
 
         history.append({
             "epoch": epoch,
