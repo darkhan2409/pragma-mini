@@ -46,13 +46,13 @@ PLACES = (
     ("src.tokenization.finalvocab", "VOCAB_DIR", "03_vocab"),
     ("src.tokenization.settings", "TOKENIZED_DIR", "04_tokenized"),
     ("src.dataset.settings", "DATASET_DIR", "05_dataset"),
-    ("src.embedding.settings", "EMBEDDINGS_DIR", "09_embeddings"),
-    ("src.mlm.settings", "BACKBONE_DIR", "09_backbone"),
-    ("src.event.settings", "EVENTS_DIR", "10_events"),
-    ("src.profile.settings", "PROFILES_DIR", "11_profiles"),
-    ("src.history.settings", "HISTORY_DIR", "12_history"),
-    ("src.mlm.settings", "MLM_DIR", "13_mlm"),
-    ("src.mlm.settings", "TRAIN_DIR", "14_train"),
+    ("src.embedding.settings", "EMBEDDINGS_DIR", "06_embeddings"),
+    ("src.mlm.settings", "BACKBONE_DIR", "07_backbone"),
+    ("src.event.settings", "EVENTS_DIR", "08_events"),
+    ("src.profile.settings", "PROFILES_DIR", "09_profiles"),
+    ("src.history.settings", "HISTORY_DIR", "10_history"),
+    ("src.mlm.settings", "MLM_DIR", "11_mlm"),
+    ("src.mlm.settings", "TRAIN_DIR", "12_train"),
 )
 
 

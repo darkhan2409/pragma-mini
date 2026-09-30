@@ -19,21 +19,21 @@ from tests.test_training_math import every_value, settle, tiny
 # ИДЕЯ
 # ============================================================
 #
-# Подготовка к обучению: 07 -> 08 -> 09 -> init_backbone -> 14.
+# Подготовка к обучению: 05 -> 06 -> 07 (init_backbone) -> 12.
 #
 #   init_backbone   веса трёх энкодеров без прохода по данным: ни
 #                   батчей, ни прохода энкодеров, ни parquet — только
 #                   три файла весов и lineage.json;
-#   те же веса      что у диагностических этапов 10–12 при том же
+#   те же веса      что у диагностических этапов 08–10 при том же
 #                   конфиге, что у прежнего кода (прямой вызов
 #                   конструкторов) и — для итоговой архитектуры — те
 #                   же отпечатки, что снял код коммита 60afd4f;
-#   обучение        собирает модель только из 09 и backbone, этапы
-#                   10–13 ему не нужны, val считается той же моделью,
+#   обучение        собирает модель только из 06 и backbone, этапы
+#                   08–11 ему не нужны, val считается той же моделью,
 #                   что учится;
 #   градиент        доходит до таблицы, трёх энкодеров и головы, и
 #                   шаг AdamW двигает каждую часть;
-#   старое          backbone не под текущие словарь, веса 09, набор
+#   старое          backbone не под текущие словарь, веса 06, набор
 #                   или код отвергается;
 #   устройство      обучение не откатывается молча ни на CPU, ни на
 #                   SDPA.
@@ -52,7 +52,7 @@ GOLDEN = {
     "history": "a4d9c59081a6c6c82e34bc83dde27f2be975c4a8a671f71bde92ca4f9a83ee17",
 }
 
-DIAGNOSTIC_DIRS = ("10_events", "11_profiles", "12_history", "13_mlm")
+DIAGNOSTIC_DIRS = ("08_events", "09_profiles", "10_history", "11_mlm")
 
 
 def files(root: Path) -> set[Path]:
@@ -79,7 +79,7 @@ def same_state(left: dict, right: dict) -> None:
 def test_init_reads_no_data_and_runs_no_forward(stage, monkeypatch):
     """
     Батчей нет вовсе, и любой проход энкодера или чтение группы
-    упали бы: init_backbone обходится весами 09 и словарём.
+    упали бы: init_backbone обходится весами 06 и словарём.
     """
 
     world.write_weights(stage, "train", backbone=False)
@@ -115,7 +115,7 @@ def test_init_reads_no_data_and_runs_no_forward(stage, monkeypatch):
 
 def test_initial_weights_are_those_of_the_diagnostic_stages_and_the_old_code(stage):
     """
-    Этапы 10–12 с тем же конфигом пишут те же веса, что init_backbone,
+    Этапы 08–10 с тем же конфигом пишут те же веса, что init_backbone,
     бит в бит. И те же, что прямой вызов конструкторов — так начальные
     веса создавал код до init_backbone.
     """
@@ -209,14 +209,14 @@ def test_default_configs_give_blocks_1_5_2(stage):
 
 
 # ============================================================
-# ОБУЧЕНИЕ БЕЗ ЭТАПОВ 10–13
+# ОБУЧЕНИЕ БЕЗ ЭТАПОВ 08–11
 # ============================================================
 
 
 def test_training_needs_no_diagnostic_stage(stage, monkeypatch):
     """
-    Этапов 10–13 нет, их команды запрещены, а на месте отчёта 13
-    лежит мусор: обучение читает только 07, 08, 09 и backbone.
+    Этапов 08–11 нет, их команды запрещены, а на месте отчёта 11
+    лежит мусор: обучение читает только 05, 06 и 07.
     """
 
     from src.mlm.train import train
@@ -232,7 +232,7 @@ def test_training_needs_no_diagnostic_stage(stage, monkeypatch):
                    "src.history.build.build_group", "src.mlm.build.build_group"):
         monkeypatch.setattr(target, forbidden)
 
-    report = stage / "13_mlm" / "train"
+    report = stage / "11_mlm" / "train"
     report.mkdir(parents=True)
 
     for name in ("weights.pt", "targets.parquet"):
@@ -295,7 +295,7 @@ PARTS = ("embedding", "event", "profile", "history", "head")
 
 def test_one_step_trains_every_part_of_the_model(stage):
     """
-    Сквозной проход модели этапа 14: градиент у каждого параметра
+    Сквозной проход модели этапа 12: градиент у каждого параметра
     таблицы, трёх энкодеров и головы, конечный, и шаг AdamW двигает
     каждую часть.
     """
@@ -384,7 +384,7 @@ def test_backbone_of_another_vocabulary_dataset_or_code_is_refused(stage, monkey
 
 def test_backbone_of_other_embedding_weights_is_refused(stage):
     """
-    Этап 09 пересобран другим seed после init_backbone: начальные
+    Этап 06 пересобран другим seed после init_backbone: начальные
     веса собраны под другой входной слой.
     """
 
@@ -418,7 +418,7 @@ def test_file_from_another_run_is_refused(stage):
 
 def test_old_stage_weights_are_not_a_backbone(stage):
     """
-    Веса прежних этапов 10–12 лежат на месте, а backbone нет: модель
+    Веса прежних этапов 08–10 лежат на месте, а backbone нет: модель
     их не подбирает, а называет команду init_backbone.
     """
 

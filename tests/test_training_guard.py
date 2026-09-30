@@ -307,7 +307,7 @@ def test_resume_refuses_a_rebuilt_backbone_but_loading_keeps_the_trained_archite
 
     settle(stage, train_people=many(), dropout=0.2)
 
-    with pytest.raises(CheckpointError, match="09_backbone"):
+    with pytest.raises(CheckpointError, match="07_backbone"):
         train(config, epochs=2, max_steps=None, masking=masking, resume=True)
 
     after, state = load_trained(best_checkpoint_path(stage / "done"), CPU)

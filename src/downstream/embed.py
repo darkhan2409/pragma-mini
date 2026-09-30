@@ -19,7 +19,7 @@ from .settings import EMBEDDINGS_META, cutoff, downstream_dir
 # ВЕКТОРЫ КЛИЕНТОВ НА МОМЕНТ T
 # ============================================================
 #
-#   python -m src.downstream.embed --checkpoint data/14_train/best_checkpoint.pt
+#   python -m src.downstream.embed --checkpoint data/12_train/best_checkpoint.pt
 #   python -m src.downstream.embed --checkpoint init    # начальные веса, контроль
 #
 # Для каждой группы — клиенты на её момент T (settings.cutoff),

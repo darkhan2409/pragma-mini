@@ -15,8 +15,8 @@ from src.generator.config import DATA_DIR
 # Всё, что решает человек: глубина и ширина энкодера, основание
 # лестницы частот RoPE, seed и устройство счёта.
 #
-# Длины вектора d здесь нет: она приходит из векторов этапов 10
-# и 11 и сверяется между ними.
+# Длины вектора d здесь нет: она приходит из векторов этапов 08
+# и 09 и сверяется между ними.
 #
 # Капа на длину истории здесь тоже НЕТ, и это решение. Замерено:
 # самая длинная история группы — 23 319 событий, и полное точное
@@ -26,9 +26,9 @@ from src.generator.config import DATA_DIR
 
 # Один каталог на группу и два файла в нём.
 #
-#   data/12_history/<group>/history.parquet
-#   data/12_history/<group>/weights.pt
-HISTORY_DIR = DATA_DIR / "12_history"
+#   data/10_history/<group>/history.parquet
+#   data/10_history/<group>/weights.pt
+HISTORY_DIR = DATA_DIR / "10_history"
 
 HISTORY_FILE = "history.parquet"
 
@@ -95,7 +95,7 @@ class HistoryConfig:
 
     def check_dim(self, dim: int) -> None:
         """
-        Сверка с длиной вектора, пришедшей из векторов этапов 10 и 11.
+        Сверка с длиной вектора, пришедшей из векторов этапов 08 и 09.
         """
 
         if dim % self.heads:

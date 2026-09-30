@@ -17,7 +17,7 @@ from src.generator.config import DATA_DIR
 # параметры оптимизатора обучения.
 #
 # Размерности, глубины и seed'ы четырёх энкодеров сюда НЕ
-# входят: они приходят из весов входного слоя (этап 09) и
+# входят: они приходят из весов входного слоя (этап 06) и
 # начальных весов backbone (init_backbone) вместе с их
 # конфигурациями. Двум числам про одно и то же негде разойтись.
 # ============================================================
@@ -26,23 +26,23 @@ from src.generator.config import DATA_DIR
 # Начальные веса backbone — энкодеров события, анкеты и истории.
 # Один каталог на модель: учится одна модель, на train, и val,
 # test и отчёты считаются ею же. Пишет его python -m
-# src.mlm.init_backbone: по весам этапа 09, без прохода по данным.
+# src.mlm.init_backbone: по весам этапа 06, без прохода по данным.
 #
-#   data/09_backbone/event.pt      энкодер события
-#   data/09_backbone/profile.pt    энкодер анкеты
-#   data/09_backbone/history.pt    энкодер истории
-#   data/09_backbone/lineage.json  из чего и каким кодом собран
-BACKBONE_DIR = DATA_DIR / "09_backbone"
+#   data/07_backbone/event.pt      энкодер события
+#   data/07_backbone/profile.pt    энкодер анкеты
+#   data/07_backbone/history.pt    энкодер истории
+#   data/07_backbone/lineage.json  из чего и каким кодом собран
+BACKBONE_DIR = DATA_DIR / "07_backbone"
 
 BACKBONE_FILES = {"event": "event.pt", "profile": "profile.pt", "history": "history.pt"}
 
-# Один каталог на группу и три файла в нём — отчёт этапа 13.
+# Один каталог на группу и три файла в нём — отчёт этапа 11.
 # Обучению он не нужен.
 #
-#   data/13_mlm/<group>/targets.parquet
-#   data/13_mlm/<group>/preview.html
-#   data/13_mlm/<group>/weights.pt
-MLM_DIR = DATA_DIR / "13_mlm"
+#   data/11_mlm/<group>/targets.parquet
+#   data/11_mlm/<group>/preview.html
+#   data/11_mlm/<group>/weights.pt
+MLM_DIR = DATA_DIR / "11_mlm"
 
 TARGETS_FILE = "targets.parquet"
 
@@ -56,23 +56,23 @@ DEVICES = ("auto", "cpu", "cuda")
 # иначе корзины SDPA. Совпадает с varlen.BACKENDS: здесь без torch.
 ATTENTION_BACKENDS = ("auto", "flash", "sdpa")
 
-# Чекпойнт обучения лежит отдельно от 13_mlm: отчёт очищает свой
+# Чекпойнт обучения лежит отдельно от 11_mlm: отчёт очищает свой
 # каталог целиком и стёр бы его.
 #
-#   data/14_train/checkpoint.pt
-TRAIN_DIR = DATA_DIR / "14_train"
+#   data/12_train/checkpoint.pt
+TRAIN_DIR = DATA_DIR / "12_train"
 
 CHECKPOINT_FILE = "checkpoint.pt"
 
 # Лучший по val_loss чекпойнт того же формата.
 #
-#   data/14_train/best_checkpoint.pt
+#   data/12_train/best_checkpoint.pt
 BEST_CHECKPOINT_FILE = "best_checkpoint.pt"
 
 # Веса после каждой полной эпохи: без них нельзя выбрать эпоху по
 # downstream-метрике, а best и last хранят одну-две.
 #
-#   data/14_train/epochs/epoch_03.pt
+#   data/12_train/epochs/epoch_03.pt
 EPOCHS_DIR = "epochs"
 
 # Телеметрия эпох — время, ожидание данных, нормы градиента,
@@ -80,7 +80,7 @@ EPOCHS_DIR = "epochs"
 # стены не результат обучения, и продолжение обязано давать тот же
 # чекпойнт, что непрерывный прогон.
 #
-#   data/14_train/telemetry.jsonl
+#   data/12_train/telemetry.jsonl
 TELEMETRY_FILE = "telemetry.jsonl"
 
 
@@ -330,7 +330,7 @@ def mlm_dir(group: str) -> Path:
 
 def train_dir(directory: Path | None = None) -> Path:
     """
-    Каталог прогона: заданный --out или data/14_train.
+    Каталог прогона: заданный --out или data/12_train.
     """
 
     return Path(directory) if directory is not None else TRAIN_DIR

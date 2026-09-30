@@ -618,9 +618,9 @@ def test_extremely_short_and_long_values_stay_finite(stage, pieces: int):
         assert bool(torch.isfinite(value).all()), name
 
 
-def test_training_starts_from_stage_09_weights_and_moves_the_table(stage):
+def test_training_starts_from_stage_06_weights_and_moves_the_table(stage):
     """
-    Снимка векторов у этапа 09 нет: модель считает вход по номерам
+    Снимка векторов у этапа 06 нет: модель считает вход по номерам
     токенов и его weights.pt. Обучение начинает ровно с этой
     таблицы и двигает её градиентом, а сам файл этапа не трогает.
     """

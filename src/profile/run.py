@@ -19,8 +19,8 @@ from .settings import ConfigError, ProfileConfig
 #   python -m src.profile.run train|val|test
 #
 # Вход: анкета из data/05_dataset и веса входного слоя из
-# data/09_embeddings.
-# Выход: data/11_profiles/<group>/ — вектор на клиента и веса
+# data/06_embeddings.
+# Выход: data/09_profiles/<group>/ — вектор на клиента и веса
 # энкодера.
 #
 # Этап сворачивает анкету клиента в один вектор. History Encoder

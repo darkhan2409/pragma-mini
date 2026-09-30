@@ -420,7 +420,7 @@ def run(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(prog="python -m src.downstream.probe")
-    parser.add_argument("--tag", required=True, help="каталог векторов в data/15_downstream")
+    parser.add_argument("--tag", required=True, help="каталог векторов в data/13_downstream")
     parser.add_argument("--control", default=None, help="тег векторов-контроля, например init")
     parser.add_argument("--baseline", default=None, help="тег модели для парного сравнения")
     parser.add_argument("--draws", type=int, default=1000, help="bootstrap-выборок")

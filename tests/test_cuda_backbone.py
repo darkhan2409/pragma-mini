@@ -19,10 +19,10 @@ from tests.test_training_math import every_value, settle, tiny
 #
 # Настоящая CUDA, без подмен ядра:
 #
-#   этапы 10–12   считают на карте, веса — те же, что на CPU (они
+#   этапы 08–10   считают на карте, веса — те же, что на CPU (они
 #                 разыграны на CPU), векторы совпадают с CPU в
 #                 пределах fp32;
-#   этап 13       на карте идёт через настоящий flash-attn;
+#   этап 11       на карте идёт через настоящий flash-attn;
 #   шаг модели    параметры и все тензоры батча на карте, внимание
 #                 через flash_attn_varlen_func (bf16, cu_seqlens
 #                 int32, causal=False), параметры, градиенты и
@@ -89,7 +89,7 @@ def test_diagnostic_stages_run_on_cuda_and_agree_with_the_cpu(stage, tmp_path):
 
 
 @flash_only
-def test_stage_13_on_cuda_goes_through_flash(stage, tmp_path, monkeypatch):
+def test_stage_11_on_cuda_goes_through_flash(stage, tmp_path, monkeypatch):
 
     import flash_attn
 
@@ -149,7 +149,7 @@ def tensors_of(data) -> dict[str, torch.Tensor]:
 @flash_only
 def test_full_model_step_on_cuda(stage, monkeypatch):
     """
-    Модель этапа 14 — load_model — целиком на карте: проход через
+    Модель этапа 12 — load_model — целиком на карте: проход через
     flash-attn в bf16, backward и шаг AdamW в fp32.
     """
 

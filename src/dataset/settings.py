@@ -200,7 +200,7 @@ class DatasetConfig:
     context: ContextPolicy = field(default_factory=ContextPolicy)
 
     # Сколько примеров лежит в одной группе строк parquet. Группа
-    # строк — единица чтения: её читают обучение и этапы 09–13.
+    # строк — единица чтения: её читают обучение и этапы 06 и 08–11.
     row_group_samples: int = 32
 
     time_anchor: str = DEFAULT_ANCHOR

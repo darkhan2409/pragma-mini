@@ -19,8 +19,8 @@ from .settings import ConfigError, EventConfig
 #   python -m src.event.run train|val|test
 #
 # Вход: data/05_dataset (маска и время — при чтении) и веса
-# входного слоя из data/09_embeddings.
-# Выход: data/10_events/<group>/ — вектор каждого настоящего
+# входного слоя из data/06_embeddings.
+# Выход: data/08_events/<group>/ — вектор каждого настоящего
 # события и веса энкодера.
 #
 # Этап сворачивает токены события в вектор события. History

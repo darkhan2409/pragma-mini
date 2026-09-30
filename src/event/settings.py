@@ -18,16 +18,16 @@ from src.generator.config import DATA_DIR
 # за раз.
 #
 # Длины вектора d здесь НЕТ: она приходит из весов входного слоя
-# (data/09_embeddings/<group>/weights.pt). Два числа про одно и
+# (data/06_embeddings/<group>/weights.pt). Два числа про одно и
 # то же молча разошлись бы.
 # ============================================================
 
 
 # Один каталог на группу и два файла в нём.
 #
-#   data/10_events/<group>/events.parquet
-#   data/10_events/<group>/weights.pt
-EVENTS_DIR = DATA_DIR / "10_events"
+#   data/08_events/<group>/events.parquet
+#   data/08_events/<group>/weights.pt
+EVENTS_DIR = DATA_DIR / "08_events"
 
 EVENTS_FILE = "events.parquet"
 
@@ -71,7 +71,7 @@ class EventConfig:
     # память: весь батч сразу это сотни мегабайт заполнителя.
     events_per_chunk: int = 1024
 
-    # Где считать диагностический проход этапа 10. auto берёт CUDA,
+    # Где считать диагностический проход этапа 08. auto берёт CUDA,
     # если она есть. Веса от устройства не зависят: они разыграны
     # на CPU и только потом переезжают.
     device: str = "auto"
@@ -96,7 +96,7 @@ class EventConfig:
 
     def check_dim(self, dim: int) -> None:
         """
-        Сверка с длиной вектора, пришедшей из весов этапа 09.
+        Сверка с длиной вектора, пришедшей из весов этапа 06.
         """
 
         if dim % self.heads:

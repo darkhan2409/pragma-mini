@@ -19,8 +19,8 @@ from .settings import ConfigError, HistoryConfig
 #   python -m src.history.run train|val|test
 #
 # Вход: временные позиции из data/05_dataset (при чтении), векторы событий из
-# data/10_events и вектор анкеты из data/11_profiles.
-# Выход: data/12_history/<group>/ — итоговый вектор клиента и
+# data/08_events и вектор анкеты из data/09_profiles.
+# Выход: data/10_history/<group>/ — итоговый вектор клиента и
 # веса энкодера. Векторы событий после истории остаются в памяти
 # для MLM-головы и на диск не пишутся.
 #

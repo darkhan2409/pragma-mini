@@ -37,7 +37,7 @@ from .version import IMPLEMENTATION_VERSION
 #       Полного массива логитов нет — только top-k;
 #   preview.html    — один пример, показанный человеку;
 #   weights.pt      — веса головы. Веса входного слоя и энкодеров
-#       лежат в data/09_embeddings и data/09_backbone и здесь не
+#       лежат в data/06_embeddings и data/07_backbone и здесь не
 #       дублируются.
 #
 # Сам проход дифференцируемый и живёт в model.py. Здесь он
@@ -360,7 +360,7 @@ def _save(model: Model, config: MlmConfig, path: Path) -> None:
     Веса головы.
 
     Входной слой и энкодеры сюда не копируются: их веса лежат в
-    data/09_embeddings и data/09_backbone, и второй их копии быть
+    data/06_embeddings и data/07_backbone, и второй их копии быть
     не должно.
     """
 

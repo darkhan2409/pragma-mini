@@ -24,9 +24,9 @@ from src.generator.config import DATA_DIR
 
 # Один каталог на группу: веса слоя и отметка происхождения.
 #
-#   data/09_embeddings/<group>/weights.pt
-#   data/09_embeddings/<group>/lineage.json
-EMBEDDINGS_DIR = DATA_DIR / "09_embeddings"
+#   data/06_embeddings/<group>/weights.pt
+#   data/06_embeddings/<group>/lineage.json
+EMBEDDINGS_DIR = DATA_DIR / "06_embeddings"
 
 WEIGHTS_FILE = "weights.pt"
 

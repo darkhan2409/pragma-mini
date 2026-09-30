@@ -19,13 +19,13 @@ from src.generator.config import DATA_DIR
 # выгрузки. Это ровно T churn_baseline: сравнение идёт на одних и
 # тех же клиентах, с одним и тем же моментом и одной меткой.
 #
-#   data/15_downstream/<тег>/<group>.parquet   векторы на T
-#   data/15_downstream/<тег>/meta.json         из чего посчитаны
-#   data/15_downstream/<тег>/report.json       пробы и сравнение
+#   data/13_downstream/<тег>/<group>.parquet   векторы на T
+#   data/13_downstream/<тег>/meta.json         из чего посчитаны
+#   data/13_downstream/<тег>/report.json       пробы и сравнение
 # ============================================================
 
 
-DOWNSTREAM_DIR = DATA_DIR / "15_downstream"
+DOWNSTREAM_DIR = DATA_DIR / "13_downstream"
 
 # Окно метки после T, в сутках.
 HORIZON_DAYS = 60

@@ -224,7 +224,7 @@ def test_on_train_the_whole_context_is_the_target_period_and_nothing_is_corrupte
 
 def test_train_val_and_test_read_the_context_through_one_implementation(stage):
     """
-    Вход обучения и слой эмбеддингов этапов 09–11 портят контекст
+    Вход обучения и слой эмбеддингов этапов 06, 08 и 09 портят контекст
     одним и тем же кодом для всех трёх групп.
     """
 

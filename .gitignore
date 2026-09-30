@@ -13,17 +13,14 @@ data/02_preprocessed/
 data/03_vocab/
 data/04_tokenized/
 data/05_dataset/
-data/06_temporal/
-data/07_batches/
-data/08_masked/
-data/09_embeddings/
-data/09_backbone/
-data/10_events/
-data/11_profiles/
-data/12_history/
-data/13_mlm/
-data/14_train/
-data/15_downstream/
+data/06_embeddings/
+data/07_backbone/
+data/08_events/
+data/09_profiles/
+data/10_history/
+data/11_mlm/
+data/12_train/
+data/13_downstream/
 data/runs/
 
 *.pt

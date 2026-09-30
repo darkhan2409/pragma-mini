@@ -398,7 +398,7 @@ def install(
     dropout: float = 0.0,
 ) -> None:
     """
-    Весь мир на диск: набор 05, веса этапа 09 и backbone.
+    Весь мир на диск: набор 05, веса этапа 06 и backbone.
 
     Вызывается ПОСЛЕ подмены каталогов: dataset_dir читает свой
     глобал в момент вызова.
@@ -445,17 +445,17 @@ def write_weights(
 ) -> None:
     """
     Начальные веса модели так, как их готовит конвейер: входной слой
-    этапа 09 группы и — для train — backbone настоящим init_backbone.
-    backbone=False оставляет только этап 09.
+    этапа 06 группы и — для train — backbone настоящим init_backbone.
+    backbone=False оставляет только этап 06.
 
-    Этапы 10–12 весов модели не дают: они диагностика.
+    Этапы 08–10 весов модели не дают: они диагностика.
     """
 
     import torch
 
     from src.mlm.backbone import init_backbone
 
-    directory = root / "09_embeddings" / group
+    directory = root / "06_embeddings" / group
     directory.mkdir(parents=True, exist_ok=True)
 
     torch.save(
@@ -468,7 +468,7 @@ def write_weights(
         directory / "weights.pt",
     )
 
-    # Отметка происхождения там же, где её пишет настоящий этап 09:
+    # Отметка происхождения там же, где её пишет настоящий этап 06:
     # без неё веса не примут ни init_backbone, ни load_model.
     write_lineage(directory)
 
@@ -481,7 +481,7 @@ def write_vocab(root: Path) -> None:
     Настоящий словарь из шести файлов и весов value-маскирования,
     только крошечный.
 
-    Модель читает из него лишь специальные токены, но этап 09
+    Модель читает из него лишь специальные токены, но этап 06
     берёт размер словаря через FrozenArtifacts, а тот сверяет все
     шесть файлов между собой. Поэтому словарь собирается тем же
     build_final_vocab, что и в бою: номера идут подряд, специальные

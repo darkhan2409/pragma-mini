@@ -19,6 +19,10 @@
 временные позиции и маски считаются при чтении набора, этапов 06–08 нет. Маска val
 разыгрывается тем же `--masking-config`, что и train.
 
+С 2026-09-30 этапы после 05 перенумерованы подряд: `06_embeddings`, `07_backbone`,
+`08_events`, `09_profiles`, `10_history`, `11_mlm`, `12_train`, `13_downstream`.
+Отчёты аудита до этой даты пишут прежние номера 09–15.
+
 ## Протокол
 
 - **Уровень T2.** 100% данных, 3 эпохи, `--out data/runs/w4-<имя>`. Один прогон
@@ -48,13 +52,13 @@
 | B0 | эталон | без конфигов | — |
 | N | шумовой пол | `--config configs/train-seed43.json` | — |
 | E1 | цель `[USR]`: доли типов событий за 7/30/90 дней | `--config configs/train-usr-aux.json` | — |
-| E2 | глубина: событие 2, история 5 | `init_backbone --event-config configs/event-layers2.json --history-config configs/history-layers5.json` | 09_backbone |
+| E2 | глубина: событие 2, история 5 | `init_backbone --event-config configs/event-layers2.json --history-config configs/history-layers5.json` | 07_backbone |
 | E3 | softmax по кандидатам ключа | `--config configs/train-restricted-softmax.json` | — |
-| E4 | dropout 0 | `init_backbone` с `configs/*-dropout0.json` | 09_backbone |
+| E4 | dropout 0 | `init_backbone` с `configs/*-dropout0.json` | 07_backbone |
 | E5 | перестановка групп строк по эпохам | `--config configs/train-shuffle.json` | — |
 | E6 | закрыть ключи события под маской event | `--config configs/train-hide-event-keys.json` | — |
-| E10 | `product_id` категорией | `git apply product-keys.patch`, затем `src.pipeline` (от 02) | 02–09 |
-| L | прежний словарь (ByteLevel, общая шкала суммы, минус вместе с малым остатком) | `src.pipeline --from fit --args fit="--config configs/tokenizer-legacy.json"` | 03–09 |
+| E10 | `product_id` категорией | `git apply product-keys.patch`, затем `src.pipeline` (от 02) | 02–07 |
+| L | прежний словарь (ByteLevel, общая шкала суммы, минус вместе с малым остатком) | `src.pipeline --from fit --args fit="--config configs/tokenizer-legacy.json"` | 03–07 |
 | LT | прежний отсчёт времени: от последнего события | `src.pipeline --from dataset --to dataset --args dataset="--config configs/dataset-last-event.json"` | 05 |
 
 E7 (время от T), E8 (BPE `characters`) и E9 (шкалы денег) стали эталоном.
@@ -64,10 +68,10 @@ E7 (время от T), E8 (BPE `characters`) и E9 (шкалы денег) ст
 
 ### Как не потерять эталон при пересборке данных
 
-- **E2, E4.** До эксперимента: `cp -a data/09_backbone data/runs/09_backbone-default`.
+- **E2, E4.** До эксперимента: `cp -a data/07_backbone data/runs/07_backbone-default`.
   После: `python -m src.mlm.init_backbone` без конфигов. Веса разыгрываются из seed,
   поэтому каталог восстанавливается тем же.
-- **E10, L, LT.** До эксперимента: `cp -a data/0[2-5]_* data/09_* data/runs/data-default/`.
+- **E10, L, LT.** До эксперимента: `cp -a data/0[2-7]_* data/runs/data-default/`.
   После — вернуть копию. Можно и пересобрать конвейер без конфигов: вход тот же, выход
   побайтно тот же.
 - **Проверка перед снятием векторов.** `embed` отказывает, если чекпойнт обучен не на

@@ -41,9 +41,9 @@ from .settings import (
 # Вход: data/05_dataset/train и для validation data/05_dataset/val
 # (время и маска считаются при чтении, src.mlm.inputs); начальные
 # веса — входной слой
-# data/09_embeddings/train и backbone data/09_backbone (python -m
-# src.mlm.init_backbone). Этапы 10–13 не нужны: это диагностика.
-# Выход — каталог прогона, по умолчанию data/14_train (--out задаёт
+# data/06_embeddings/train и backbone data/07_backbone (python -m
+# src.mlm.init_backbone). Этапы 08–11 не нужны: это диагностика.
+# Выход — каталог прогона, по умолчанию data/12_train (--out задаёт
 # другой): checkpoint.pt (последнее состояние), best_checkpoint.pt
 # (лучший val_loss) и epochs/epoch_NN.pt — веса после каждой полной
 # эпохи. Новое обучение без --resume очищает ТОЛЬКО свой каталог.
@@ -93,7 +93,7 @@ from .settings import (
 # --max-steps в него не входит, он только останавливает прогон, а
 # --resume берёт горизонт из чекпойнта и продолжает ту же кривую.
 #
-# Промежуточные parquet этапов 10–13 сюда не читаются: через файл
+# Промежуточные parquet этапов 08–11 сюда не читаются: через файл
 # градиент не течёт. Весь проход собран в model.Model, и здесь он
 # вызывается без no_grad.
 #
@@ -604,7 +604,7 @@ def origin_problems(state: dict, backbone: dict, data: dict | None) -> list[str]
         was = state.get("backbone") or {}
         changed = sorted(key for key in set(was) | set(backbone) if was.get(key) != backbone.get(key))
         problems.append(
-            f"data/09_backbone собран не так, как при обучении (разные {', '.join(changed)}): "
+            f"data/07_backbone собран не так, как при обучении (разные {', '.join(changed)}): "
             "веса легли бы на другую архитектуру, словарь или входной слой"
         )
 
@@ -625,10 +625,10 @@ def load_trained(path: Path, device, attention_backend: str | None = None):
     best_checkpoint.pt или весов эпохи.
 
     Архитектура энкодеров берётся из самого чекпойнта (его lineage
-    backbone), а не из текущего data/09_backbone: иначе другое число
+    backbone), а не из текущего data/07_backbone: иначе другое число
     голов или rope_base загрузились бы в те же тензоры молча, а
     модель другой архитектуры не загрузилась бы вовсе после
-    пересборки 09_backbone под следующий эксперимент. Данные, словарь
+    пересборки 07_backbone под следующий эксперимент. Данные, словарь
     и входной слой обязаны совпасть с текущими (recorded_backbone).
     attention_backend=None — бэкенд из конфига обучения.
     """
@@ -941,7 +941,7 @@ def train(
     останавливает текущий прогон. Горизонт первого запуска лежит в
     чекпойнте и при продолжении не пересчитывается.
 
-    directory — каталог прогона (--out); None — data/14_train.
+    directory — каталог прогона (--out); None — data/12_train.
     """
 
     # torch импортируется здесь, а не в шапке: без него команда
@@ -1590,7 +1590,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--out", type=Path, default=None,
         help=(
-            "каталог прогона (по умолчанию data/14_train): чекпойнты и веса эпох; новое "
+            "каталог прогона (по умолчанию data/12_train): чекпойнты и веса эпох; новое "
             "обучение очищает только его"
         ),
     )

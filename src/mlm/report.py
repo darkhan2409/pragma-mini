@@ -233,7 +233,7 @@ def _technical(group, config, implementation, counts, paths) -> str:
 
 <table>
 <tr><td>группа</td><td>{html.escape(group)}</td></tr>
-<tr><td>d</td><td>{counts['dim']} — из весов этапа 09</td></tr>
+<tr><td>d</td><td>{counts['dim']} — из весов этапа 06</td></tr>
 <tr><td>голова</td>
 <td>Linear(3d → d) без нормировки и активации, логиты связанными весами общей
  таблицы; seed {config.seed}</td></tr>
@@ -252,8 +252,8 @@ def _technical(group, config, implementation, counts, paths) -> str:
 
 <p><b>Сквозной проход.</b> Векторы считаются моделью здесь и сейчас:
 <code>InputEmbedding → Event Encoder → Profile Encoder → History Encoder →
-MLM</code>. Векторы этапов 10–12 входом не служат — модель собрана из
-начальных весов (data/09_embeddings/train и data/09_backbone), тех же, с которых
+MLM</code>. Векторы этапов 08–10 входом не служат — модель собрана из
+начальных весов (data/06_embeddings/train и data/07_backbone), тех же, с которых
 начинается обучение. Градиент от потерь доходит до общей таблицы эмбеддингов и
 всех трёх энкодеров.</p>
 

@@ -38,7 +38,7 @@ from .settings import PROFILES_FILE, WEIGHTS_FILE, ProfileConfig, profiles_dir
 # словарь текущего кода, и потребители это сверяют.
 #
 # Входной слой не разыгрывается заново: он грузится из
-# data/09_embeddings/<group>/weights.pt вместе с vocab_size, dim
+# data/06_embeddings/<group>/weights.pt вместе с vocab_size, dim
 # и seed. Оттуда же берётся d.
 #
 # ВАЖНО, чем этот файл НЕ является. Векторы посчитаны начальным
@@ -208,9 +208,9 @@ def _table(model: BatchInput, vectors: torch.Tensor, dim: int) -> pa.Table:
 
 def _embedding(group: str, specials: dict) -> InputEmbedding:
     """
-    Входной слой этапа 09 со своими весами.
+    Входной слой этапа 06 со своими весами.
 
-    Тот же загрузчик есть в этапе 10. Повтор намеренный: этапы
+    Тот же загрузчик есть в этапе 08. Повтор намеренный: этапы
     держатся отдельно и друг друга не правят. Когда появится
     третий потребитель, его стоит вынести в сам пакет эмбеддингов.
     """

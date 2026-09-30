@@ -242,7 +242,7 @@ def _table(loaded: Loaded, events: Events, dated: np.ndarray) -> pa.Table:
 
 def _embedding(group: str, specials: dict) -> InputEmbedding:
     """
-    Входной слой этапа 09 со своими весами.
+    Входной слой этапа 06 со своими весами.
     """
 
     path = embeddings_dir(group) / EMBEDDING_WEIGHTS
@@ -276,7 +276,7 @@ def _save(encoder: EventEncoder, config: EventConfig, dim: int, path: Path) -> N
     Веса энкодера рядом с векторами — в формате backbone.payload.
 
     Веса входного слоя сюда не копируются: они лежат в
-    data/09_embeddings и остаются одним файлом на всю модель.
+    data/06_embeddings и остаются одним файлом на всю модель.
     """
 
     path.parent.mkdir(parents=True, exist_ok=True)

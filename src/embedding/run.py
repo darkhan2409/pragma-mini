@@ -20,7 +20,7 @@ from .settings import ConfigError, EmbeddingConfig
 #
 # Вход: data/05_dataset/<group>/samples.parquet; время и маска
 # считаются при чтении (src.embedding.inputs).
-# Выход: data/09_embeddings/<group>/ — веса слоя и отметка
+# Выход: data/06_embeddings/<group>/ — веса слоя и отметка
 # происхождения. Векторы токенов считает модель в прямом проходе.
 #
 # Энкодеров, внимания, MLM-головы и обучения здесь нет.

@@ -16,7 +16,7 @@ from src.generator.config import DATA_DIR
 # голов, какой FFN, какой dropout и каким seed разыграны веса.
 #
 # Длины вектора d здесь нет: она приходит из весов входного слоя
-# (data/09_embeddings/<group>/weights.pt).
+# (data/06_embeddings/<group>/weights.pt).
 #
 # Размера порции тоже нет, и он не нужен: вся анкета батча это
 # [B, P, d], где P около двадцати. Считается одним куском.
@@ -25,9 +25,9 @@ from src.generator.config import DATA_DIR
 
 # Один каталог на группу и два файла в нём.
 #
-#   data/11_profiles/<group>/profiles.parquet
-#   data/11_profiles/<group>/weights.pt
-PROFILES_DIR = DATA_DIR / "11_profiles"
+#   data/09_profiles/<group>/profiles.parquet
+#   data/09_profiles/<group>/weights.pt
+PROFILES_DIR = DATA_DIR / "09_profiles"
 
 PROFILES_FILE = "profiles.parquet"
 
@@ -69,7 +69,7 @@ class ProfileConfig:
     # что у энкодера истории: шкала времени у них общая.
     rope_base: float = 10000.0
 
-    # Где считать диагностический проход этапа 11. auto берёт CUDA,
+    # Где считать диагностический проход этапа 09. auto берёт CUDA,
     # если она есть. Веса от устройства не зависят: они разыграны
     # на CPU и только потом переезжают.
     device: str = "auto"
@@ -94,7 +94,7 @@ class ProfileConfig:
 
     def check_dim(self, dim: int) -> None:
         """
-        Сверка с длиной вектора, пришедшей из весов этапа 09.
+        Сверка с длиной вектора, пришедшей из весов этапа 06.
         """
 
         if dim % self.heads:

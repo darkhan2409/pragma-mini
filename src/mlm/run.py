@@ -20,8 +20,8 @@ from .settings import ConfigError, MlmConfig
 #
 # Вход: data/05_dataset группы (время и маска считаются при чтении,
 # src.mlm.inputs); модель — входной
-# слой data/09_embeddings/train и начальные веса data/09_backbone
-# (python -m src.mlm.init_backbone). Выход: data/13_mlm/<group>/ —
+# слой data/06_embeddings/train и начальные веса data/07_backbone
+# (python -m src.mlm.init_backbone). Выход: data/11_mlm/<group>/ —
 # результаты по целям, страница и веса головы.
 #
 # Этап считает потери необученной модели. Обучения здесь нет, и

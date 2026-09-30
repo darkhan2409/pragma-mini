@@ -51,7 +51,7 @@ from tests.test_profile_state import (
 #                             времени, у каждого токена своё
 #                             время; словарь учится только на
 #                             train;
-#   05 → 06 → 07              время доезжает как давность до T
+#   чтение набора 05          время доезжает как давность до T
 #                             той же шкалой, что у событий;
 #   энкодер                   время действительно влияет, чужие
 #                             вехи — нет;
@@ -377,7 +377,7 @@ def test_sample_carries_the_time_of_milestones_only(stage):
 
 
 # ============================================================
-# ВРЕМЯ (06)
+# ВРЕМЯ (ПРИ ЧТЕНИИ 05)
 # ============================================================
 
 
@@ -627,12 +627,12 @@ def test_samples_of_the_previous_format_are_refused(stage):
 
 
 @pytest.mark.parametrize("stamped, reason", [
-    ("09_embeddings/train", "прежним кодом"),
-    ("09_backbone", "не собраны"),
+    ("06_embeddings/train", "прежним кодом"),
+    ("07_backbone", "не собраны"),
 ])
 def test_weights_without_a_stamp_are_refused(stage, stamped: str, reason: str):
     """
-    Веса 09 собраны под словарь и анкету, backbone — под веса 09.
+    Веса 06 собраны под словарь и анкету, backbone — под веса 06.
     Без отметки происхождения load_model их не берёт.
     """
 
@@ -658,7 +658,7 @@ def test_profile_stage_refuses_unstamped_embeddings(stage):
 
     world.install(stage, {"train": [world.population()]})
 
-    (stage / "09_embeddings" / "train" / LINEAGE_FILE).unlink()
+    (stage / "06_embeddings" / "train" / LINEAGE_FILE).unlink()
 
     with pytest.raises(ProfileError, match="прежним кодом"):
         build_group("train", ProfileConfig(heads=world.HEADS))

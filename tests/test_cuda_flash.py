@@ -500,7 +500,7 @@ def test_backward_of_the_largest_client_needs_no_huge_buffer(monkeypatch):
 def loss_extra(count: int) -> int:
     """
     Сколько памяти сверх уже живой занимают потери и их backward
-    на count целях при словаре и d этапа 14.
+    на count целях при словаре и d этапа 12.
     """
 
     generator = torch.Generator(device=device()).manual_seed(4)
