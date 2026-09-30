@@ -50,7 +50,7 @@ from src.tokenization.specials import MASK, UNK, load_special_tokens
 # Группа строк набора здесь — только единица чтения. Сколько
 # клиентов модель считает за один проход, решает не она, а
 # micro_batches: клиенты идут потоком и собираются по бюджету
-# позиций.
+# токенов.
 # ============================================================
 
 
@@ -135,13 +135,12 @@ class Size(NamedTuple):
     """
     Длины клиента без самих массивов.
 
-    Ровно те три числа, которые читает cost: micro_batches по
+    Ровно те два числа, которые читает cost: micro_batches по
     Size делит поток так же, как по настоящим клиентам.
     """
 
     n_tokens: int
     profile_n_tokens: int
-    n_events: int
 
 
 class Source:
@@ -240,12 +239,12 @@ class Source:
         """
         Длины клиентов группы в порядке прохода (order).
 
-        Читаются только три колонки-списка, без времени и масок:
+        Читаются только две колонки-списка, без времени и масок:
         маскирование значения заменяет, а длины не меняет. Так
         число micro-batch'ей эпохи известно до обучения.
         """
 
-        columns = ["key_ids", "profile_key_ids", "event_starts"]
+        columns = ["key_ids", "profile_key_ids"]
 
         for index in self.order:
 
@@ -253,8 +252,8 @@ class Source:
 
             lengths = [pc.list_value_length(table.column(name)).to_pylist() for name in columns]
 
-            for tokens, profile, events in zip(*lengths):
-                yield Size(int(tokens), int(profile), int(events))
+            for tokens, profile in zip(*lengths):
+                yield Size(int(tokens), int(profile))
 
     def _mask(self, row: dict) -> dict:
         """
@@ -315,17 +314,19 @@ def _weights(masking: MaskingConfig) -> ValueWeights | None:
 
 def cost(client: Client) -> int:
     """
-    Во сколько позиций обходится клиент одному проходу модели.
-
-    Каждая позиция проходит хотя бы один трансформер:
+    Во сколько токенов обходится клиент одному проходу модели —
+    как в dynamiq-ai/pragmatiq:
 
       n_tokens          — токены событий, энкодер события;
       profile_n_tokens  — токены анкеты, энкодер анкеты;
-      n_events + 1      — позиции истории: по одной на событие и
-                          одна на вектор анкеты в слоте [USR].
+      1                 — слот [USR] клиента.
+
+    Позиции истории (n_events + 1) отдельно не считаются: у события
+    хотя бы один токен — [EVT] на нулевой позиции, поэтому история
+    клиента не длиннее его цены и бюджет ограничивает и её.
     """
 
-    return client.n_tokens + client.profile_n_tokens + client.n_events + 1
+    return client.n_tokens + client.profile_n_tokens + 1
 
 
 def micro_batches(clients: Iterable[Client], token_budget: int) -> Iterator[list[Client]]:

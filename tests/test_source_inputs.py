@@ -111,7 +111,6 @@ def test_sizes_agree_with_the_clients_they_describe(stage):
     for size, client in zip(short, full):
         assert size.n_tokens == client.n_tokens
         assert size.profile_n_tokens == client.profile_n_tokens
-        assert size.n_events == client.n_events
 
 
 def test_row_groups_are_batches(stage):

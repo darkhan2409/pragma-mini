@@ -71,7 +71,7 @@ from .settings import (
 # конфиге, и маска одна на все эпохи.
 #
 # Клиенты идут потоком и собираются в micro-batch по бюджету
-# позиций (inputs.micro_batches, token_budget). Группа строк набора
+# токенов (inputs.micro_batches, token_budget). Группа строк набора
 # — только единица чтения, а не батч модели. micro-batch
 # собирается model.pack в плоские массивы без заполнителя.
 #

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
+import numpy as np
 import pytest
 
 from src.mlm.inputs import Size, cost, micro_batches
@@ -12,13 +15,14 @@ from tests import world
 # ============================================================
 #
 # Группы строк набора — это единица чтения. Настоящий батч модели
-# собирается здесь, по цене клиента в позициях, и от разбивки
+# собирается здесь, по цене клиента в токенах, и от разбивки
 # файла зависеть не должен.
 #
-# Цена — n_tokens + profile_n_tokens + n_events + 1: токены
-# событий, токены анкеты и позиции истории вместе со слотом
-# анкеты. Проверяется не формула сама по себе, а то, что по ней
-# никто не теряется, не дублируется и не переставляется.
+# Цена — n_tokens + profile_n_tokens + 1: токены событий, токены
+# анкеты и слот [USR], как в dynamiq-ai/pragmatiq. Число событий
+# в цену не входит, но история клиента (n_events + 1) всё равно
+# не длиннее цены. Проверяется и то, что по цене никто не
+# теряется, не дублируется и не переставляется.
 # ============================================================
 
 
@@ -27,7 +31,7 @@ def sizes(*numbers: int) -> list[Size]:
     Клиенты, заданные прямо ценой: cost(Size) = сумма + 1.
     """
 
-    return [Size(number - 1, 0, 0) for number in numbers]
+    return [Size(number - 1, 0) for number in numbers]
 
 
 def prices(batches: list[list]) -> list[list[int]]:
@@ -39,29 +43,62 @@ def prices(batches: list[list]) -> list[list[int]]:
 # ============================================================
 
 
-def test_price_counts_tokens_profile_events_and_the_user_slot(clients):
+def test_price_counts_event_tokens_profile_tokens_and_the_user_slot(clients):
     """
-    Слот [USR] истории — то самое +1: без него история клиента
-    была бы короче на один вектор.
+    Слот [USR] — то самое +1. Число событий отдельно не
+    считается.
     """
 
     for client in clients:
 
-        assert cost(client) == (
-            client.n_tokens + client.profile_n_tokens + client.n_events + 1
-        )
+        assert cost(client) == client.n_tokens + client.profile_n_tokens + 1
+
+
+def test_price_does_not_depend_on_the_number_of_events(clients):
+    """
+    Те же токены, собранные в одно событие вместо многих, стоят
+    столько же: в бюджет идут токены, а не события.
+    """
+
+    many = max(clients, key=lambda client: client.n_events)
+
+    one = replace(
+        many,
+        event_starts=many.event_starts[:1],
+        event_lengths=np.array([many.n_tokens], dtype=many.event_lengths.dtype),
+        event_time_log=many.event_time_log[:1],
+        calendar=many.calendar[:1],
+        event_time=many.event_time[:1],
+    )
+
+    assert many.n_events > 1 and one.n_events == 1
+    assert cost(one) == cost(many)
+
+
+def test_history_of_a_client_fits_in_its_price(clients):
+    """
+    Почему события можно не считать: у каждого события на нулевой
+    позиции [EVT], поэтому событий не больше токенов, и история
+    клиента — n_events + 1 позиций — не длиннее его цены. Бюджет
+    micro-batch ограничивает и историю.
+    """
+
+    for client in clients:
+
+        assert all(length >= 1 for length in client.event_lengths)
+        assert client.n_events + 1 <= cost(client)
 
 
 def test_price_of_a_size_matches_the_price_of_its_client(clients):
     """
-    Size несёт ровно те три числа, которые читает cost: подсчёт
+    Size несёт ровно те два числа, которые читает cost: подсчёт
     micro-batch'ей до обучения обязан совпасть с тем, что потом
     случится на настоящих клиентах.
     """
 
     for client in clients:
 
-        short = Size(client.n_tokens, client.profile_n_tokens, client.n_events)
+        short = Size(client.n_tokens, client.profile_n_tokens)
 
         assert cost(short) == cost(client)
 
