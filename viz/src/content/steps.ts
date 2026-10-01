@@ -1,6 +1,7 @@
 import { demo, hero, int, num } from '../data/demo'
 import type { RegionId } from './layout'
 import type { ShotId } from './shots'
+import { CAUSES } from './wave'
 
 // ============================================================
 // ШАГИ ПРЕЗЕНТАЦИИ
@@ -8,15 +9,16 @@ import type { ShotId } from './shots'
 //
 // Единственный источник содержания PRESENT: заголовок, подпись,
 // биты (подшаги по стрелке), какие регионы в фокусе, какой кадр,
-// какой 2D-экран и что на шаге — иллюстрация, а не модель.
+// какой 2D-экран и что на шаге — числа обученной модели.
 // Числа в подписях — из экспорта (data/demo.ts).
 // ============================================================
 
 export type RegionState = 'focus' | 'context' | 'hidden'
 
-export type Illustration = 'vectors' | 'attention' | 'qk' | 'topk' | 'gradients'
+// Числа обученной модели на шаге (export_demo.py --checkpoint).
+export type Illustration = 'attention' | 'topk'
 
-export type Screen = 'dashboard' | 'wave4' | 'insight'
+export type Screen = 'dashboard' | 'insight' | 'causes'
 
 export interface Step {
   id: string
@@ -26,8 +28,6 @@ export interface Step {
   regions: Partial<Record<RegionId, RegionState>>
   shot?: ShotId | ShotId[]
   screen?: Screen
-  illustrative?: Illustration[]
-  // Что на шаге — числа обученной модели (export_demo.py --checkpoint).
   checkpoint?: Illustration[]
   part?: string
 }
@@ -79,7 +79,6 @@ export const STEPS: Step[] = [
     beats: ['таблица по видам токенов', 'выбор строк', 'векторы [128]'],
     regions: { embedding: 'focus' },
     shot: 'embedding',
-    illustrative: ['vectors'],
     part: 'embedding',
   },
   {
@@ -89,7 +88,6 @@ export const STEPS: Step[] = [
     beats: ['события по отдельности', 'блоки: внимание, FFN, residual', '[EVT] → вектор события'],
     regions: { eventEncoder: 'focus' },
     shot: 'eventEncoder',
-    illustrative: ['attention', 'vectors'],
     part: 'eventEncoder',
   },
   {
@@ -100,7 +98,6 @@ export const STEPS: Step[] = [
     beats: ['время события на окружностях', 'MLP и сумма'],
     regions: { calendar: 'focus' },
     shot: 'calendar',
-    illustrative: ['vectors'],
     part: 'calendar',
   },
   {
@@ -110,7 +107,6 @@ export const STEPS: Step[] = [
     beats: ['токены анкеты', 'блок и вектор анкеты'],
     regions: { profile: 'focus' },
     shot: 'profile',
-    illustrative: ['vectors'],
     part: 'profile',
   },
   {
@@ -131,7 +127,6 @@ export const STEPS: Step[] = [
     beats: ['Q, K, V', 'поворот Q и K'],
     regions: { rope: 'focus' },
     shot: 'rope',
-    illustrative: ['qk'],
     part: 'rope',
   },
   {
@@ -141,7 +136,6 @@ export const STEPS: Step[] = [
     beats: ['блоки', 'внимание [USR] к событиям', 'выходы'],
     regions: { historyEncoder: 'focus' },
     shot: 'historyEncoder',
-    illustrative: demo.model ? [] : ['attention'],
     checkpoint: demo.model ? ['attention'] : [],
     part: 'historyEncoder',
   },
@@ -152,7 +146,6 @@ export const STEPS: Step[] = [
     beats: ['маска', 'три входа головы', 'предсказание'],
     regions: { mlm: 'focus' },
     shot: 'mlm',
-    illustrative: demo.model ? ['vectors'] : ['topk', 'vectors'],
     checkpoint: demo.model ? ['topk'] : [],
     part: 'mlm',
   },
@@ -171,7 +164,6 @@ export const STEPS: Step[] = [
       embedding: 'context',
     },
     shot: 'backprop',
-    illustrative: ['gradients'],
     part: 'backprop',
   },
   {
@@ -218,20 +210,20 @@ export const STEPS: Step[] = [
     part: 'downstream',
   },
   {
-    id: 'wave4',
-    title: 'Волна 4',
-    caption: 'Эксперименты: что уже в эталоне, что запущено и что ждёт. Статусы — из каталогов прогонов, решения — только вручную.',
-    beats: ['эксперименты'],
-    regions: {},
-    screen: 'wave4',
-  },
-  {
     id: 'insight',
     title: 'Главный вывод',
-    caption: 'Низкий MLM loss ещё не значит полезный вектор клиента. Поэтому E1 даёт [USR] свою цель — это гипотеза, её нужно проверить.',
-    beats: ['три сценария', 'MLM ≠ представление', 'E1'],
+    caption: 'Низкий MLM loss ещё не значит полезный вектор клиента: на задаче [USR] далеко ниже handcrafted-признаков и к ним ничего не добавляет.',
+    beats: ['три сценария', 'MLM ≠ представление'],
     regions: {},
     screen: 'insight',
+  },
+  {
+    id: 'causes',
+    title: 'Почему так',
+    caption: 'Возможные причины слабого [USR] и что проверить: у каждой — эксперимент волны 4 и статус его прогона.',
+    beats: CAUSES.map((cause) => cause.title),
+    regions: {},
+    screen: 'causes',
   },
 ]
 

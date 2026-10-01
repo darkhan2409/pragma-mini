@@ -9,11 +9,8 @@ import { useStore } from '../store'
 // ============================================================
 
 const ILLUSTRATION: Record<Illustration, string> = {
-  vectors: 'значения векторов',
   attention: 'веса внимания',
-  qk: 'направления Q и K',
   topk: 'вероятности предсказаний',
-  gradients: 'толщина градиентов',
 }
 
 function Topbar() {
@@ -23,7 +20,6 @@ function Topbar() {
   const step = useStore((s) => STEPS[s.step])
   const index = useStore((s) => s.step)
 
-  const illustrative = mode === 'present' && step.illustrative?.length ? step.illustrative : null
   const real = mode === 'present' && demo.model && step.checkpoint?.length ? step.checkpoint : null
 
   return (
@@ -50,7 +46,6 @@ function Topbar() {
           ИЗ ЧЕКПОЙНТА {demo.model.checkpoint.split('/').slice(-2, -1)[0]}, эпоха {demo.model.epoch}: {real.map((item) => ILLUSTRATION[item]).join(', ')}
         </div>
       ) : null}
-      {illustrative ? <div className="badge">ИЛЛЮСТРАЦИЯ — не из модели: {illustrative.map((item) => ILLUSTRATION[item]).join(', ')}</div> : null}
       <div className="modes" onClick={(event) => event.stopPropagation()}>
         <button onClick={() => togglePanel('steps')}>ШАГИ · S</button>
         <button onClick={() => togglePanel('help')}>?</button>

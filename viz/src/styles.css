@@ -456,6 +456,34 @@ button {
   color: var(--text-2);
 }
 
+/* Пояснения метрик под таблицей шага 17. */
+.card .metrics {
+  margin: 12px 0 0;
+  padding-left: 18px;
+  line-height: 1.55;
+  color: var(--text-2);
+  font-size: 14px;
+}
+
+.card .metrics b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* Название причины на шаге 18 — заголовок карточки, крупнее подписей. */
+.card .cause-title {
+  margin: 0 0 10px;
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--text);
+}
+
+.card .cause-title .num {
+  color: var(--amber);
+  margin-right: 10px;
+}
+
 .status-line {
   font-size: 13px;
   color: var(--text-2);

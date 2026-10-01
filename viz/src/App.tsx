@@ -4,20 +4,23 @@ import { STEPS } from './content/steps'
 import { useStore } from './store'
 import { Stage } from './three/Stage'
 import { Overlay } from './ui/Overlay'
+import { shouldAdvance } from './ui/advance'
 
 // ============================================================
 // ПРИЛОЖЕНИЕ
 // ============================================================
 //
 // Сцена одна на всё время показа; 2D-экраны (шаги 14, 17, 18)
-// грузятся отдельно и ложатся поверх, пока сцена не рисуется.
-// Клавиши — как у презентации, кликер с PageUp/PageDown тоже.
+// грузятся отдельно и ложатся поверх, пока сцена не рисуется. Клик
+// по экрану листает дальше, как клик по сцене, кроме элементов
+// управления (ui/advance.ts). Клавиши — как у презентации, кликер с
+// PageUp/PageDown тоже.
 // ============================================================
 
 const SCREENS = {
   dashboard: lazy(() => import('./ui/screens/TrainingDashboard')),
-  wave4: lazy(() => import('./ui/screens/Wave4Screen')),
   insight: lazy(() => import('./ui/screens/InsightScreen')),
+  causes: lazy(() => import('./ui/screens/CausesScreen')),
 }
 
 function useKeys() {
@@ -127,6 +130,12 @@ export default function App() {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.4, ease: 'easeOut' }}
+            onClick={(event) => {
+              const s = useStore.getState()
+              if (s.mode === 'present' && shouldAdvance(event.target as Element, window.getSelection()?.toString() ?? '')) {
+                s.next()
+              }
+            }}
           >
             <Suspense fallback={null}>
               <Screen />

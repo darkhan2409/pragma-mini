@@ -7,7 +7,7 @@ import { ANCHOR, REGIONS } from './layout'
 import { PARTS } from './parts'
 import { SHOTS } from './shots'
 import { STEPS, shotOf } from './steps'
-import { ACCEPTED_BASELINE, EXPERIMENTS, SOURCE } from './wave'
+import { CAUSES, EXPERIMENTS, SOURCE } from './wave'
 
 // ============================================================
 // Содержание презентации: 18 шагов, у каждого есть кадр или
@@ -34,8 +34,19 @@ describe('шаги', () => {
     }
   })
 
-  test('2D-экраны — шаги 14, 17 и 18', () => {
+  test('2D-экраны — шаги 14, 17 и 18: обучение, главный вывод, причины', () => {
     expect(STEPS.map((step, index) => (step.screen ? index + 1 : null)).filter(Boolean)).toEqual([14, 17, 18])
+    expect(STEPS.filter((step) => step.screen).map((step) => step.screen)).toEqual(['dashboard', 'insight', 'causes'])
+  })
+
+  test('у шага причин по биту на причину, и каждая проверка волны 4 — из списка экспериментов', () => {
+    const causes = STEPS.find((step) => step.screen === 'causes')!
+    expect(causes.beats).toEqual(CAUSES.map((cause) => cause.title))
+    const ids = EXPERIMENTS.map((item) => item.id)
+    for (const cause of CAUSES) {
+      expect(cause.checks.length).toBeGreaterThan(0)
+      for (const check of cause.checks) if (check.id) expect(ids).toContain(check.id)
+    }
   })
 
   test('регионы шагов существуют, и у каждого 3D-шага есть регион в фокусе', () => {
@@ -45,20 +56,10 @@ describe('шаги', () => {
     }
   })
 
-  test('иллюстрации помечены там, где числа не из модели', () => {
-    const marked = Object.fromEntries(STEPS.map((step) => [step.id, step.illustrative ?? []]))
-    expect(marked.embedding).toContain('vectors')
-    expect(marked.eventEncoder).toContain('attention')
-    expect(marked.rope).toContain('qk')
-    // Веса внимания и вероятности — схема, пока в экспорте нет
-    // чисел обученной модели (export_demo.py --checkpoint).
-    expect(marked.historyEncoder.includes('attention')).toBe(demo.model === null)
-    expect(marked.mlm.includes('topk')).toBe(demo.model === null)
-    expect(marked.mlm).toContain('vectors')
+  test('числа обученной модели помечены там, где они есть в экспорте', () => {
     const real = Object.fromEntries(STEPS.map((step) => [step.id, step.checkpoint ?? []]))
     expect(real.historyEncoder).toEqual(demo.model ? ['attention'] : [])
     expect(real.mlm).toEqual(demo.model ? ['topk'] : [])
-    expect(marked.backprop).toContain('gradients')
   })
 
   test('детали EXPLORE ведут на существующие шаги', () => {
@@ -75,9 +76,8 @@ describe('шаги', () => {
 describe('волна 4', () => {
   const readme = readFileSync(join(ROOT, SOURCE), 'utf8')
 
-  test('эксперименты и принятое в эталон — из README аудита', () => {
+  test('эксперименты проверок — из README аудита', () => {
     for (const item of EXPERIMENTS) expect(readme).toContain(`| ${item.id} |`)
-    for (const item of ACCEPTED_BASELINE) expect(readme).toContain(item.id)
   })
 })
 

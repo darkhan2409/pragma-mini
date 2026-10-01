@@ -175,7 +175,7 @@ export default function TrainingDashboard() {
   const progressShare = view && view.where.totalSteps ? Math.min(1, view.where.step / view.where.totalSteps) : 0
 
   return (
-    <div className="screen" onClick={(event) => event.stopPropagation()}>
+    <div className="screen">
       <h1>Обучение</h1>
       <p className="sub">Живая телеметрия прогона — telemetry.jsonl каталога, дочитывается раз в {refresh} с.</p>
 

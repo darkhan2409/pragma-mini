@@ -1,16 +1,18 @@
 import { motion } from 'motion/react'
-import { demo, type Interval } from '../../data/demo'
+import { Bar, BarChart, CartesianGrid, Cell, LabelList, ResponsiveContainer, Tooltip, XAxis, YAxis, type TooltipContentProps } from 'recharts'
+import { demo, type ScenarioTask } from '../../data/demo'
 import { useStore } from '../../store'
 
 // ============================================================
-// ШАГ 18. ГЛАВНЫЙ ВЫВОД
+// ШАГ 17. ГЛАВНЫЙ ВЫВОД
 // ============================================================
 //
 // Бит 0 — три сценария прогона на val из экспорта: handcrafted →
-// CatBoost, [USR] → регрессия, handcrafted и [USR] → CatBoost, с
-// парной разницей к первому и 95% интервалом. Вывод — по интервалу,
-// не руками. Бит 1 — MLM quality ≠ representation quality; val loss
-// B0 из экспорта прогона. Бит 2 — E1 как гипотеза, без обещаний.
+// CatBoost, [USR] → регрессия, handcrafted и [USR] → CatBoost, и
+// короткое пояснение метрик. Внизу — те же PR-AUC и ROC-AUC
+// столбиками: сценарий только на [USR] выделен цветом, остальные —
+// серые. Бит 1 — MLM quality ≠ representation quality; val loss B0
+// из экспорта прогона. Почему так и что проверить — шаг 18.
 // ============================================================
 
 const LABEL: Record<string, string> = {
@@ -19,19 +21,76 @@ const LABEL: Record<string, string> = {
   catboost_plus_usr: 'handcrafted + [USR] → CatBoost',
 }
 
-function signed(value: number): string {
-  return `${value >= 0 ? '+' : '−'}${Math.abs(value).toFixed(3)}`
+// Выделен сценарий, о котором вывод; остальные — контекст.
+const ACCENT = '#BF8601'
+const CONTEXT = '#5B6672'
+const GRID = '#1E2733'
+const TICK = { fill: '#9AA5B1', fontSize: 11, fontFamily: 'JetBrains Mono, monospace' }
+
+interface Row {
+  key: string
+  label: string
+  pr_auc: number
+  roc_auc: number
 }
 
-function interval(delta: Interval): string {
-  return `${signed(delta.mean)} [${signed(delta.low)}, ${signed(delta.high)}]`
+type Metric = 'pr_auc' | 'roc_auc'
+
+const METRIC: Record<Metric, string> = { pr_auc: 'PR-AUC', roc_auc: 'ROC-AUC' }
+
+function BarTooltip({ active, payload, metric }: TooltipContentProps<number, string> & { metric: Metric }) {
+  if (!active || !payload?.length) return null
+  const row = payload[0].payload as Row
+  return (
+    <div style={{ background: '#0D1117', border: '1px solid #1E2733', borderRadius: 8, padding: '8px 10px', fontSize: 12 }}>
+      <div style={{ color: '#9AA5B1', marginBottom: 4 }}>{row.label}</div>
+      <div>
+        <b style={{ color: '#E6EBF1', fontFamily: 'JetBrains Mono, monospace', fontWeight: 500 }}>{row[metric].toFixed(3)}</b>
+        <span style={{ color: '#9AA5B1' }}> {METRIC[metric]}</span>
+      </div>
+    </div>
+  )
 }
 
-// Что говорит интервал разницы с CatBoost на handcrafted-признаках.
-function verdict(delta: Interval): string {
-  if (delta.low > 0) return '[USR] даёт сигнал сверх handcrafted-признаков'
-  if (delta.high < 0) return 'с [USR] модель хуже'
-  return '[USR] почти ничего не добавляет'
+function MetricChart({ rows, metric }: { rows: Row[]; metric: Metric }) {
+  return (
+    <div>
+      <h3>{METRIC[metric]}</h3>
+      <ResponsiveContainer width="100%" height={40 * rows.length + 40}>
+        <BarChart data={rows} layout="vertical" margin={{ top: 4, right: 52, bottom: 4, left: 4 }}>
+          <CartesianGrid stroke={GRID} horizontal={false} />
+          <XAxis type="number" domain={[0, 1]} ticks={[0, 0.25, 0.5, 0.75, 1]} tick={TICK} stroke={GRID} />
+          <YAxis type="category" dataKey="label" width={210} tick={{ ...TICK, fill: '#E6EBF1' }} stroke={GRID} />
+          <Tooltip cursor={{ fill: 'rgba(255,255,255,0.03)' }} content={(props) => <BarTooltip {...(props as TooltipContentProps<number, string>)} metric={metric} />} />
+          <Bar dataKey={metric} barSize={22} radius={[0, 4, 4, 0]} isAnimationActive={false}>
+            {rows.map((row) => (
+              <Cell key={row.key} fill={row.key === 'usr' ? ACCENT : CONTEXT} />
+            ))}
+            <LabelList dataKey={metric} position="right" formatter={(value) => Number(value).toFixed(3)} fill="#E6EBF1" fontSize={12} fontFamily="JetBrains Mono, monospace" />
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
+function ScenarioChart({ task, block }: { task: string; block: ScenarioTask }) {
+  const rows: Row[] = Object.entries(block.cells).map(([key, cell]) => ({
+    key,
+    label: LABEL[key] ?? key,
+    pr_auc: cell.pr_auc,
+    roc_auc: cell.roc_auc,
+  }))
+  return (
+    <div className="card" style={{ marginTop: 14 }}>
+      <h3>{`ТРИ СЦЕНАРИЯ НА ГРАФИКЕ — ${task}, VAL · больше — лучше`}</h3>
+      <div className="charts" style={{ marginTop: 4 }}>
+        <MetricChart rows={rows} metric="pr_auc" />
+        <MetricChart rows={rows} metric="roc_auc" />
+      </div>
+      <p className="source">Цветом — сценарий только на [USR].</p>
+    </div>
+  )
 }
 
 function Scenarios() {
@@ -49,7 +108,8 @@ function Scenarios() {
   return (
     <div className="card">
       {Object.entries(scenarios.tasks).map(([task, block]) => {
-        const plus = block.cells.catboost_plus_usr?.vs_reference
+        // PR-AUC случайного прогноза — доля ушедших.
+        const chance = block.positives / block.rows
         return (
           <div key={task}>
             <h3>{`ТРИ СЦЕНАРИЯ — ${task}, ${scenarios.group.toUpperCase()}`}</h3>
@@ -73,17 +133,18 @@ function Scenarios() {
                 ))}
               </tbody>
             </table>
-            {Object.entries(block.cells).map(([name, cell]) =>
-              cell.vs_reference ? (
-                <p key={name} style={{ marginTop: 8 }}>
-                  {`${LABEL[name] ?? name} − ${LABEL[block.reference] ?? block.reference}: PR-AUC ${interval(cell.vs_reference.pr_auc)}`}
-                  {name === 'catboost_plus_usr' && plus ? ` — ${verdict(plus.pr_auc)}.` : '.'}
-                </p>
-              ) : null,
-            )}
-            <p className="source">
-              {`${block.rows} клиентов, ${block.positives} ушедших; парный bootstrap, 95% интервал. Источник: ${scenarios.source}.`}
-            </p>
+            <ul className="metrics">
+              <li>
+                <b>PR-AUC</b> — насколько хорошо модель находит ушедших. 1 — идеально, случайный прогноз — {chance.toFixed(3)} (доля ушедших).
+              </li>
+              <li>
+                <b>ROC-AUC</b> — как часто ушедший получает балл выше оставшегося. 1 — всегда, 0.5 — наугад.
+              </li>
+              <li>
+                <b>log-loss</b> — насколько верны сами вероятности. Меньше — лучше.
+              </li>
+            </ul>
+            <p className="source">{`${block.rows} клиентов, ${block.positives} ушедших. Источник: ${scenarios.source}.`}</p>
           </div>
         )
       })}
@@ -96,7 +157,7 @@ export default function InsightScreen() {
   const run = demo.run
 
   return (
-    <div className="screen" onClick={(event) => event.stopPropagation()}>
+    <div className="screen">
       <h1>Low MLM loss ≠ useful Client Embedding</h1>
       <p className="sub">Хорошее предсказание скрытых токенов ещё не делает вектор клиента полезным для задач.</p>
 
@@ -122,22 +183,12 @@ export default function InsightScreen() {
               ) : null}
             </motion.div>
           ) : null}
-
-          {beat >= 2 ? (
-            <motion.div className="card" style={{ marginTop: 14 }} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
-              <h3>E1 — ГИПОТЕЗА, ЕЁ НУЖНО ПРОВЕРИТЬ</h3>
-              <p>
-                Дать [USR] свою цель: предсказать доли типов событий клиента за последние 7, 30 и 90 дней до точки отсчёта.
-              </p>
-              <p style={{ color: 'var(--text-2)' }}>
-                Голова Linear(128 → типы × 3) на [USR] после истории; потеря — cross-entropy долей, вес usr_aux_weight (по умолчанию 0 — выключено).
-                Решение — по протоколу волны 4 на val, не по MLM loss.
-              </p>
-              <p className="source">Ожидаемый эффект не заявляется: результат появится только после прогона и проб.</p>
-            </motion.div>
-          ) : null}
         </div>
       </div>
+
+      {Object.entries(demo.downstream.scenarios?.tasks ?? {}).map(([task, block]) => (
+        <ScenarioChart key={task} task={task} block={block} />
+      ))}
     </div>
   )
 }
