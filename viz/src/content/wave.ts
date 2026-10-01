@@ -1,4 +1,4 @@
-import { demo } from '../data/demo'
+import { demo, int } from '../data/demo'
 
 // ============================================================
 // ПОЧЕМУ ТАК: ВОЗМОЖНЫЕ ПРИЧИНЫ И ПРОВЕРКИ
@@ -25,9 +25,7 @@ export interface Experiment {
 // Эксперименты, на которые ссылаются причины.
 export const EXPERIMENTS: Experiment[] = [
   { id: 'E2', title: 'глубина: событие 2, история 5', enable: 'event-layers2.json + history-layers5.json' },
-  { id: 'E3', title: 'softmax только по кандидатам ключа', enable: 'train-restricted-softmax.json' },
   { id: 'E4', title: 'dropout 0', enable: '*-dropout0.json' },
-  { id: 'E6', title: 'закрыть ключи события под маской event', enable: 'train-hide-event-keys.json' },
 ]
 
 export interface Check {
@@ -43,6 +41,7 @@ export interface Cause {
 }
 
 const encoders = demo.architecture.encoders
+const clients = int(demo.batching.clients)
 const epochs = (demo.run?.epochs ?? []).map((item) => item.val_loss).filter((value): value is number => value !== null)
 const falling = epochs.length >= 2 && epochs[epochs.length - 1] < epochs[epochs.length - 2]
 
@@ -65,11 +64,16 @@ export const CAUSES: Cause[] = [
     checks: [{ id: 'E2', text: 'Больше слоёв на историю, меньше на событие.' }],
   },
   {
-    title: 'MLM решается внутри события',
-    why: 'Скрытое поле обычно видно по соседним полям того же события — история клиента не нужна.',
+    title: 'Отток в синтетике задают счётчики',
+    why: 'Уход в генераторе — пауза в действиях. Её предсказывают частота и давность действий, а новые паузы случайны: порядок событий для метки не важен.',
     checks: [
-      { id: 'E6', text: 'Прятать подсказки внутри события.' },
-      { id: 'E3', text: 'Выбирать ответ только из значений этого поля.' },
+      { text: 'CatBoost только на давности и счётчиках против всех признаков.' },
+      { text: 'Задача, где нужна именно история событий.' },
     ],
+  },
+  {
+    title: 'Мало клиентов',
+    why: `Модель училась на ${clients} клиентах, в статье PRAGMA — на 26 млн.`,
+    checks: [{ text: 'Обучить B0 на 25%, 50% и 100% клиентов и сравнить.' }],
   },
 ]
