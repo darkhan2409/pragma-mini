@@ -76,6 +76,19 @@ export interface EpochSummary {
   cuda_peak_allocated_gib: number | null
 }
 
+export interface Interval {
+  mean: number
+  low: number
+  high: number
+}
+
+export interface UsrDiagnosticTask {
+  rows: number
+  positives: number
+  cells: Record<string, { pr_auc: number; roc_auc: number; f1: number }>
+  deltas: Partial<Record<'usr_vs_control' | 'catboost_vs_lr', { pr_auc: Interval; roc_auc: Interval }>>
+}
+
 export interface Demo {
   format: number
   sources: { generated_at: string; vocabulary_digest: string; group: string }
@@ -131,6 +144,15 @@ export interface Demo {
     catboost_churn: {
       group: string
       tasks: Record<string, { pr_auc: number; roc_auc: number; rows: number; positives: number }>
+      source: string
+    } | null
+    // Диагностика [USR] прогона на val: векторы модели и начальных
+    // весов × регрессия и CatBoost только на [USR] (probe --control init).
+    usr_diagnostic: {
+      group: string
+      tag: string
+      control: string
+      tasks: Record<string, UsrDiagnosticTask>
       source: string
     } | null
   }

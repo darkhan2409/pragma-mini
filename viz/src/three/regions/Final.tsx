@@ -78,7 +78,7 @@ function Downstream() {
         {'StandardScaler'}
       </Label>
       <Label size={0.32} anchorX="center" position={[0, 1.1, 0.6]}>
-        {'LogisticRegressionCV'}
+        {'LogisticRegression'}
       </Label>
 
       <Appear show={beat >= 1}>

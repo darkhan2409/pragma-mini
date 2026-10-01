@@ -19,8 +19,8 @@ from .settings import EMBEDDINGS_META, FINAL_GROUPS, cutoff, downstream_dir, gro
 # ВЕКТОРЫ КЛИЕНТОВ НА МОМЕНТ T
 # ============================================================
 #
-#   python -m src.downstream.embed --checkpoint data/12_train/best_checkpoint.pt
-#   python -m src.downstream.embed --checkpoint init    # начальные веса, контроль
+#   python -m src.downstream.embed --checkpoint data/runs/w4-b0/best_checkpoint.pt --tag w4-b0
+#   python -m src.downstream.embed --checkpoint init --tag init   # начальные веса, контроль
 #
 # По умолчанию — train и val; test только в финальной оценке
 # (--final-test), пока идут эксперименты его векторы не нужны.
@@ -30,7 +30,7 @@ from .settings import EMBEDDINGS_META, FINAL_GROUPS, cutoff, downstream_dir, gro
 # градиента, четыре вектора на клиента (Model.readouts) и две
 # величины о самом входе: число событий и давность последнего
 # события до T. Она лежит рядом отдельной колонкой: при отсчёте
-# времени от последнего события (--anchor last_event) модели она
+# времени от последнего события (time_anchor = last_event) модели она
 # не видна, а контроль «только давность» нужен при любом отсчёте.
 #
 # Клиент без событий до T пропускается: модель такого входа не

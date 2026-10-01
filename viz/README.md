@@ -161,9 +161,11 @@ ACCEPTED и REJECTED сервер не ставит: это решение че�
 `decision` — `ACCEPTED` или `REJECTED`, `date` и `note` необязательны.
 
 Файл входит в сборку: `npm run dev` подхватывает правку сразу, для `preview` нужен
-`npm run build`. Список экспериментов, принятое в эталон, протокол и таблица волны 1
-взяты из `audit/2026-09-28-project/wave4/README.md` (`src/content/wave.ts`); vitest
-сверяет с README каждое число и каждый id.
+`npm run build`. Список экспериментов, принятое в эталон и протокол взяты из
+`audit/2026-09-28-project/wave4/README.md` (`src/content/wave.ts`); vitest сверяет с README
+каждый id. Главный вывод показывает диагностику `[USR]` прогона из экспорта: с `--run`
+экспортер берёт отчёт `data/13_downstream/<прогон>/report.json` пробы с `--control init`,
+если её векторы сняты с текущей выгрузки.
 
 ## Иллюстрации
 
@@ -195,7 +197,7 @@ src/
                            событий шага 10 и строк шага 11; wave4_decisions.json
   content/                 steps.ts — 18 шагов (подпись, биты, регионы, кадр, экран,
                            пометки); shots.ts — кадры камеры; layout.ts — якоря регионов;
-                           parts.ts — панели EXPLORE; wave.ts — волны 1 и 4
+                           parts.ts — панели EXPLORE; wave.ts — волна 4
   store.ts                 режим, шаг, бит, выделение; синхронизация с адресом
   three/Stage.tsx          Canvas, камера, рельс
   three/Region.tsx         регион: focus / context / hidden, бит, зона клика EXPLORE
@@ -226,7 +228,7 @@ cd .. && pytest tests/test_viz_export.py
 - соответствие экспорта: словарь, параметры, лента клиента, веса внимания и
   предсказание;
 - все символы сцены есть в обоих шрифтах — иначе troika ушла бы за шрифтом в сеть;
-- числа волны 1 из README аудита;
+- эксперименты волны 4 из README аудита;
 - порт телеметрии и чтение файла по частям.
 
 Тест `tests/test_viz_export.py` гоняет экспортер на синтетическом мире, а не на `data/`.

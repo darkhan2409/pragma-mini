@@ -15,8 +15,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=9,<10"]
 torch = ["torch==2.13.0"]
-# Varlen FlashAttention на CUDA. Необязательна: без неё обучение
-# идёт корзинами SDPA.
+# Varlen FlashAttention на CUDA. Без неё обучение на CUDA отказывает
+# (auto там — строго flash); SDPA — только явным attention_backend=sdpa.
 flash = ["flash-attn>=2.6"]
 # Живой дашборд обучения (python -m src.dashboard).
 dashboard = ["streamlit>=1.37"]

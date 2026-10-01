@@ -224,7 +224,7 @@ export const PARTS: Record<string, Part> = {
       ['T val', demo.downstream.cutoffs.val.slice(0, 10)],
     ],
     notes: [
-      'Проба — StandardScaler + LogisticRegressionCV (L2).',
+      'Проба — StandardScaler + LogisticRegression (L2), C — 3-кратной CV на train.',
       'CatBoost — отдельный бейзлайн churn на агрегатах, не на эмбеддинге.',
       'Фрод на уровне операции не оценивается: вектор нужен строго до каждой операции, а история двунаправленная.',
     ],

@@ -7,13 +7,13 @@ import { ANCHOR, REGIONS } from './layout'
 import { PARTS } from './parts'
 import { SHOTS } from './shots'
 import { STEPS, shotOf } from './steps'
-import { ACCEPTED_BASELINE, EXPERIMENTS, SOURCE, WAVE1 } from './wave'
+import { ACCEPTED_BASELINE, EXPERIMENTS, SOURCE } from './wave'
 
 // ============================================================
 // Содержание презентации: 18 шагов, у каждого есть кадр или
-// экран, регионы существуют, иллюстрации помечены; числа волны 1
-// и эксперименты — дословно из README аудита; всё, что пишет
-// сцена, есть в её шрифтах (иначе troika пошла бы в CDN).
+// экран, регионы существуют, иллюстрации помечены; эксперименты —
+// дословно из README аудита; всё, что пишет сцена, есть в её
+// шрифтах (иначе troika пошла бы в CDN).
 // ============================================================
 
 const VIZ = resolve(__dirname, '..', '..')
@@ -72,15 +72,8 @@ describe('шаги', () => {
   })
 })
 
-describe('волны аудита', () => {
+describe('волна 4', () => {
   const readme = readFileSync(join(ROOT, SOURCE), 'utf8')
-
-  test('каждое число волны 1 есть в README аудита', () => {
-    for (const row of WAVE1.rows) {
-      expect(readme).toContain(row.set === 'CatBoost' ? 'CatBoost' : `\`${row.set}\``)
-      for (const value of row.values) if (value !== null) expect(readme).toContain(value.toFixed(3))
-    }
-  })
 
   test('эксперименты и принятое в эталон — из README аудита', () => {
     for (const item of EXPERIMENTS) expect(readme).toContain(`| ${item.id} |`)

@@ -31,15 +31,6 @@ data/runs/
 # документы и локальные артефакты
 *.docx
 
-# локальные скрипты просмотра весов
-open_embeddings.py
-open_backbone.py
-
 # мусор сборки пакета
 build/
 *.egg-info/
-
-# Прогоны и снимок исходников аудита: воспроизводятся командами из
-# audit/<id>/README.md, в репозитории не нужны.
-audit/*/runs/
-audit/*/snapshot/
