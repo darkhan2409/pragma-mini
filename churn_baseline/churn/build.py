@@ -7,28 +7,41 @@ from pathlib import Path
 import pandas as pd
 
 from .activity import is_client_action
-from .config import DATA_DIR, GROUPS, HORIZON, RAW_DIR, REPORTS_DIR, cutoff, manifest
+from .config import DATA_DIR, FINAL_GROUP, FUTURE_DIR, FUTURE_LABEL_GROUPS, GROUPS, RAW_DIR, RECENT, REPORTS_DIR, cutoff
 from .features import compute
 from .profile import CATEGORICAL, DESCRIPTIONS as PROFILE_DESCRIPTIONS, profile_at
 from .raw import client_blocks, read_profile
+from .sources import acting_clients, diverged_clients, provenance
 from .target import labels
 
 
-# Колонки строки, которые не признаки.
-KEYS: tuple[str, ...] = ("client_id", "group", "T", "churn")
+# Колонки строки, которые не признаки. active90 — строка входит в
+# задачу churn_active90 (действие клиента за 90 дней до T).
+KEYS: tuple[str, ...] = ("client_id", "group", "T", "churn", "active90")
 
 CHANGE_COLUMNS = ["client_id", "t", "raw_row", "field_name", "old_value"]
 
 
-def build(group: str, raw_dir: Path = RAW_DIR, data_dir: Path = DATA_DIR, reports_dir: Path = REPORTS_DIR) -> dict:
+def build(
+    group: str,
+    raw_dir: Path = RAW_DIR,
+    data_dir: Path = DATA_DIR,
+    reports_dir: Path = REPORTS_DIR,
+    future_dir: Path = FUTURE_DIR,
+) -> dict:
     """
-    Признаки и target одной группы клиентов. Читает только выгрузку этой
-    группы, пишет data/<group>/features.parquet и meta.json.
+    Признаки и target одной группы клиентов. Признаки и популяция — из
+    выгрузки группы; target train — из её продолжения (future_dir).
+    Пишет data/<group>/features.parquet и meta.json.
     """
     if group not in GROUPS:
         raise ValueError(f"группа {group!r} не из {GROUPS}")
 
     moment = cutoff(group, raw_dir)
+    sources = provenance(group, raw_dir, future_dir)
+    future = group in FUTURE_LABEL_GROUPS
+    acting = acting_clients(group, raw_dir, future_dir) if future else None
+    diverged = diverged_clients(group, raw_dir, future_dir) if future else set()
     profile = read_profile(raw_dir / group / "profile.parquet")
 
     feature_parts: list[pd.DataFrame] = []
@@ -44,7 +57,7 @@ def build(group: str, raw_dir: Path = RAW_DIR, data_dir: Path = DATA_DIR, report
         elif list(described) != list(descriptions):
             raise RuntimeError("состав признаков разошёлся между блоками")
         feature_parts.append(features)
-        target_parts.append(labels(block, moment, action))
+        target_parts.append(labels(block, moment, action, acting))
         change_parts.append(block.loc[block["type"] == "profile_change", CHANGE_COLUMNS])
 
     features = pd.concat(feature_parts)
@@ -58,7 +71,9 @@ def build(group: str, raw_dir: Path = RAW_DIR, data_dir: Path = DATA_DIR, report
     at_cutoff = profile_at(known, changes, moment)
 
     table = target.join(at_cutoff).join(features)
-    population = table[table["has_action_before"]].copy()
+    # Метка клиента, чьё продолжение разошлось с выгрузкой, неизвестна.
+    excluded = table["has_action_before"] & table.index.isin(list(diverged))
+    population = table[table["has_action_before"] & ~excluded].copy()
     population.insert(0, "T", pd.Timestamp(moment).tz_convert("UTC"))
     population.insert(0, "group", group)
     population = population.drop(columns=["has_action_before", "has_history_before"])
@@ -71,22 +86,25 @@ def build(group: str, raw_dir: Path = RAW_DIR, data_dir: Path = DATA_DIR, report
     population.to_parquet(out / "features.parquet", index=False)
 
     churn = int(population["churn"].sum())
+    active = population["active90"]
     meta = {
         "group": group,
-        "T": moment.isoformat(),
-        "window": f"({moment.isoformat()}, {(moment + HORIZON).isoformat()}]",
+        **sources,
         "clients_in_profile": int(len(profile)),
         "clients_with_events": int(len(table)),
         "without_history_before_T": int((~table["has_history_before"]).sum()),
         "history_without_client_action_before_T": int(
             (table["has_history_before"] & ~table["has_action_before"]).sum()
         ),
+        "excluded_diverged_continuation": int(excluded.sum()),
         "population": int(len(population)),
         "churn_1": churn,
         "churn_0": int(len(population) - churn),
         "churn_rate": churn / len(population),
+        "active90_window": f"[{(moment - RECENT).isoformat()}, {moment.isoformat()})",
+        "active90": int(active.sum()),
+        "active90_churn_1": int(population.loc[active, "churn"].sum()),
         "features": len(population.columns) - len(KEYS),
-        "raw_events_sha256": manifest(group, raw_dir)["events_sha256"],
     }
     (out / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2))
 
@@ -114,7 +132,10 @@ def write_feature_list(path: Path, descriptions: dict[str, str]) -> None:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Признаки и target churn одной группы")
     parser.add_argument("group", choices=GROUPS)
+    parser.add_argument("--final-test", action="store_true", help="test строится только для финальной оценки")
     args = parser.parse_args(argv)
+    if args.group == FINAL_GROUP and not args.final_test:
+        parser.error("test строится только для финальной оценки: добавьте --final-test")
     meta = build(args.group)
     print(json.dumps(meta, ensure_ascii=False, indent=2))
 

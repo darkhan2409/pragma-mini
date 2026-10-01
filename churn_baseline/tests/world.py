@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -144,6 +145,38 @@ def write_group(raw_dir: Path, group: str, period_end: datetime, events: list[di
         "period_start": "2024-01-01T00:00:00+05:00",
         "period_end": period_end.astimezone(LOCAL).isoformat(),
         "events_sha256": f"synthetic-{group}",
+        "profile_sha256": f"synthetic-profile-{group}",
     }
     (out / "manifest.json").write_text(json.dumps(manifest))
+    return out
+
+
+def write_future(
+    future_dir: Path, raw_dir: Path, group: str, events: list[dict], period_end: datetime, diverged: tuple[str, ...] = ()
+) -> Path:
+    """
+    Продолжение группы в формате src.generator.continuation: хвост
+    событий после конца выгрузки и future.json о том, продолжением
+    какой выгрузки он является.
+    """
+    out = future_dir / group
+    out.mkdir(parents=True, exist_ok=True)
+    ordered = sorted(events, key=lambda row: (row["client_id"], datetime.fromisoformat(row["event_time"])))
+    table = pa.Table.from_pylist(
+        ordered,
+        schema=pa.schema([(name, pa.string()) for name in ("client_id", "event_time", "source", "payload")]),
+    )
+    pq.write_table(table, out / "events.parquet", row_group_size=4)
+    exported = json.loads((raw_dir / group / "manifest.json").read_text())
+    record = {
+        "source": {key: exported[key] for key in ("period_end", "events_sha256", "profile_sha256")},
+        "prefix": {"rows": 0, "sha256": "synthetic", "clients": 0},
+        "profile_past_matches": True,
+        "diverged_clients": sorted(diverged),
+        "period_start": exported["period_end"],
+        "period_end": period_end.astimezone(LOCAL).isoformat(),
+        "events_rows": len(ordered),
+        "events_sha256": hashlib.sha256((out / "events.parquet").read_bytes()).hexdigest(),
+    }
+    (out / "future.json").write_text(json.dumps(record))
     return out

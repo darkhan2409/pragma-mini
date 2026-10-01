@@ -148,11 +148,12 @@ def embeddings(model, clients: list[Client], device) -> "torch.Tensor":
     return torch.cat(rows, dim=0)
 
 
-def attention_to_events(model, client: Client, device) -> dict:
+def usr_attention_rows(model, client: Client, device) -> tuple[list["np.ndarray"], float]:
     """
-    Доли массы внимания [USR] -> [USR] и [USR] -> события по блокам
-    и головам энкодера истории: {"usr": [слои][головы], "events": ...,
-    "row_error": наибольшее расхождение строки с настоящим выходом}.
+    Строки внимания запроса [USR] в энкодере истории: для каждого
+    блока массив [головы, позиции] — вес самого [USR] (позиция 0) и
+    каждого события от старых к новым — и наибольшее расхождение
+    строки с настоящим выходом внимания.
 
     Модель обязана идти путём SDPA в fp32: хуки снимают вход блоков
     настоящего прохода.
@@ -182,7 +183,7 @@ def attention_to_events(model, client: Client, device) -> dict:
         for handle in handles:
             handle.remove()
 
-    usr, events, error = [], [], 0.0
+    rows, error = [], 0.0
 
     with torch.no_grad():
         for block, (x, rope, cos, sin, keys), real in zip(model.history.layers, seen, mixed):
@@ -210,10 +211,25 @@ def attention_to_events(model, client: Client, device) -> dict:
 
             error = max(error, float((row - real[:, 0]).abs().max()))
 
-            usr.append(weights[0, :, 0, 0].tolist())
-            events.append(weights[0, :, 0, 1:].sum(dim=-1).tolist())
+            rows.append(weights[0, :, 0].cpu().numpy())
 
-    return {"usr": usr, "events": events, "row_error": error}
+    return rows, error
+
+
+def attention_to_events(model, client: Client, device) -> dict:
+    """
+    Доли массы внимания [USR] -> [USR] и [USR] -> события по блокам
+    и головам энкодера истории: {"usr": [слои][головы], "events": ...,
+    "row_error": наибольшее расхождение строки с настоящим выходом}.
+    """
+
+    rows, error = usr_attention_rows(model, client, device)
+
+    return {
+        "usr": [row[:, 0].tolist() for row in rows],
+        "events": [row[:, 1:].sum(axis=-1).tolist() for row in rows],
+        "row_error": error,
+    }
 
 
 def cosine_l2(left: "torch.Tensor", right: "torch.Tensor") -> tuple[np.ndarray, np.ndarray]:
@@ -363,5 +379,6 @@ __all__ = [
     "diagnose",
     "embeddings",
     "summary",
+    "usr_attention_rows",
     "variant",
 ]

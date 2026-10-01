@@ -54,3 +54,9 @@ def test_client_split_into_two_runs_breaks_the_contract(tmp_path) -> None:
     pq.write_table(table, path, row_group_size=2)
     with pytest.raises(RawContractError):
         list(client_blocks(path))
+
+
+def test_an_empty_export_yields_no_blocks(tmp_path) -> None:
+    out = write_group(tmp_path, "val", datetime(2026, 4, 1, tzinfo=LOCAL), [], [])
+    assert list(client_blocks(out / "events.parquet")) == []
+

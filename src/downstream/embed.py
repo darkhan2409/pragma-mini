@@ -12,7 +12,7 @@ import pyarrow.parquet as pq
 from src.preprocessing.artifacts import write_json
 from src.preprocessing.run import EXIT_BLOCKED, EXIT_OK
 
-from .settings import EMBEDDINGS_META, cutoff, downstream_dir
+from .settings import EMBEDDINGS_META, FINAL_GROUPS, cutoff, downstream_dir, groups
 
 
 # ============================================================
@@ -21,6 +21,9 @@ from .settings import EMBEDDINGS_META, cutoff, downstream_dir
 #
 #   python -m src.downstream.embed --checkpoint data/12_train/best_checkpoint.pt
 #   python -m src.downstream.embed --checkpoint init    # начальные веса, контроль
+#
+# По умолчанию — train и val; test только в финальной оценке
+# (--final-test), пока идут эксперименты его векторы не нужны.
 #
 # Для каждой группы — клиенты на её момент T (settings.cutoff),
 # вход собран из прошлого (at_cutoff), один проход модели без
@@ -37,8 +40,6 @@ from .settings import EMBEDDINGS_META, cutoff, downstream_dir
 
 
 READOUTS = ("usr", "profile", "mean_event", "last_event")
-
-GROUPS = ("train", "val", "test")
 
 # Процессов сборки входа по умолчанию: сборка идёт на CPU, по
 # клиенту, и в одном процессе train занимал около 25 минут.
@@ -155,10 +156,46 @@ def embed_group(
         "clients": table.num_rows,
         "skipped_without_events": skipped,
         "seconds": time.perf_counter() - started,
+        **raw_record(group),
     }
 
 
+def raw_record(group: str) -> dict:
+    """
+    Из какой выгрузки собран вход на T: sha256 событий и анкеты её
+    manifest. Проба сверяет их с текущей выгрузкой — той же, из
+    которой churn-бейзлайн строит признаки.
+    """
+
+    from src.preprocessing.rawdata import read_manifest
+    from src.preprocessing.settings import raw_group_dir
+
+    exported = read_manifest(raw_group_dir(group))
+
+    return {"raw_events_sha256": exported.events_sha256, "raw_profile_sha256": exported.profile_sha256}
+
+
+def embed_groups(requested: list[str] | None, final_test: bool) -> list[str]:
+    """
+    Группы съёма: по умолчанию train и val, в финальной оценке и
+    test. Векторы test без --final-test не снимаются.
+    """
+
+    chosen = list(requested or groups(final_test))
+
+    if "test" in chosen and not final_test:
+        raise ValueError("test — только для финальной оценки: добавьте --final-test")
+
+    return chosen
+
+
 def run(args) -> int:
+
+    try:
+        chosen = embed_groups(args.groups, args.final_test)
+    except ValueError as error:
+        print(f"[embed] {error}")
+        return EXIT_BLOCKED
 
     try:
         import torch
@@ -183,9 +220,11 @@ def run(args) -> int:
     directory = downstream_dir(tag)
     directory.mkdir(parents=True, exist_ok=True)
 
-    meta = dict(source, tag=tag, device=str(device), attention=model.attention, groups={})
+    meta = dict(
+        source, tag=tag, device=str(device), attention=model.attention, final_test=args.final_test, groups={}
+    )
 
-    for group in args.groups:
+    for group in chosen:
 
         table, counts = embed_group(model, group, cutoff(group), device, config.token_budget, args.workers)
 
@@ -213,7 +252,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--checkpoint", required=True,
         help="чекпойнт или веса эпохи обученной модели; init — начальные веса",
     )
-    parser.add_argument("--groups", nargs="+", choices=GROUPS, default=list(GROUPS))
+    parser.add_argument(
+        "--groups", nargs="+", choices=FINAL_GROUPS, default=None,
+        help="группы; по умолчанию train и val, с --final-test — и test",
+    )
+    parser.add_argument(
+        "--final-test", action="store_true", help="финальная оценка: векторы и для test",
+    )
     parser.add_argument("--tag", default=None, help="имя каталога векторов (по умолчанию имя файла)")
     parser.add_argument(
         "--workers", type=int, default=WORKERS, help="процессов сборки входа на T; 0 — в этом процессе"
@@ -237,4 +282,4 @@ if __name__ == "__main__":
     main()
 
 
-__all__ = ["GROUPS", "READOUTS", "embed_group", "main", "schema", "trained_model"]
+__all__ = ["READOUTS", "embed_group", "embed_groups", "main", "raw_record", "schema", "trained_model"]

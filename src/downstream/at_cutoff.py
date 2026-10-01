@@ -187,6 +187,17 @@ class ClientsAtCutoff:
 
         profile, times = encode_profile(self.artifacts, history, self.limit)
 
+        # Защита от утечки: во входе на T всё строго раньше T. Поля
+        # анкеты — состояние на T и моментов не несут; вехи несут.
+        late = [event.event_time for event in history.events if event.event_time >= self.cutoff]
+        late += [moment for moment in times if moment is not None and moment >= self.cutoff]
+
+        if late:
+            raise CutoffError(
+                f"{client_id}: во входе на {self.cutoff.isoformat()} есть момент "
+                f"{min(late).isoformat()} — не раньше T"
+            )
+
         sample = build_sample(
             artifacts=self.artifacts,
             client=TokenizedClient(

@@ -6,12 +6,19 @@ from pathlib import Path
 
 
 # Проект лежит в корне репозитория PRAGMA, но от её кода не зависит:
-# отсюда читается только выгрузка генератора data/01_raw/<group>/.
+# отсюда читается только выгрузка генератора data/01_raw/<group>/ и
+# продолжение групп для меток (FUTURE_DIR).
 PROJECT = Path(__file__).resolve().parents[1]
 REPO = PROJECT.parent
 RAW_DIR = REPO / "data" / "01_raw"
 
 DATA_DIR = PROJECT / "data"
+
+# Продолжение группы после конца её выгрузки — те же клиенты,
+# прожитые дальше (python -m src.generator.continuation). Только для
+# меток: признаки и популяция — из выгрузки. Лежит здесь, вне data/
+# репозитория, — этапы PRAGMA его не видят.
+FUTURE_DIR = DATA_DIR / "future"
 MODELS_DIR = PROJECT / "models"
 REPORTS_DIR = PROJECT / "reports"
 
@@ -19,8 +26,21 @@ REPORTS_DIR = PROJECT / "reports"
 # проект не делает: клиент train PRAGMA остаётся train здесь.
 GROUPS: tuple[str, ...] = ("train", "val", "test")
 
+# Пока идут эксперименты, train учит, а val оценивает; test
+# строится и оценивается только в финальной оценке (--final-test).
+FINAL_GROUP = "test"
+
 # Окно наблюдения target: (T, T + HORIZON].
 HORIZON = timedelta(days=60)
+
+# Группы, у которых T — конец выгрузки, а окно target лежит в
+# продолжении. Конец выгрузки train — конец окна, на котором учился
+# backbone PRAGMA: с T раньше него окно target train попало бы в
+# историю предобучения.
+FUTURE_LABEL_GROUPS: tuple[str, ...] = ("train",)
+
+# Задача churn_active90: действие клиента в [T − RECENT, T).
+RECENT = timedelta(days=90)
 
 # Все времена RAW записаны со смещением Казахстана. Календарный день
 # клиента — местный: сутки считаются от местной полуночи.
@@ -31,6 +51,13 @@ RAW_OFFSET_SUFFIX = "+05:00"
 WINDOWS: tuple[int, ...] = (7, 30, 60, 90)
 
 SEED = 42
+
+
+def groups(final_test: bool) -> tuple[str, ...]:
+    """
+    Группы одного запуска: test — только в финальной оценке.
+    """
+    return GROUPS if final_test else tuple(group for group in GROUPS if group != FINAL_GROUP)
 
 
 def manifest(group: str, raw_dir: Path = RAW_DIR) -> dict:
@@ -46,8 +73,10 @@ def period_end(group: str, raw_dir: Path = RAW_DIR) -> datetime:
 
 def cutoff(group: str, raw_dir: Path = RAW_DIR) -> datetime:
     """
-    T группы: самый поздний момент, у которого окно (T, T + HORIZON]
-    целиком лежит внутри выгрузки. T — местная полночь, как и конец
-    выгрузки.
+    T группы, местная полночь, как и конец выгрузки:
+    - группа с метками из продолжения — сам конец выгрузки;
+    - остальные — самый поздний момент, у которого окно (T, T + HORIZON]
+      целиком лежит внутри выгрузки.
     """
-    return period_end(group, raw_dir) - HORIZON
+    end = period_end(group, raw_dir)
+    return end if group in FUTURE_LABEL_GROUPS else end - HORIZON

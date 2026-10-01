@@ -136,6 +136,10 @@ def client_blocks(path: Path, schema: pa.Schema = PAYLOAD) -> Iterator[pd.DataFr
         if carry is not None:
             frame = pd.concat([carry, frame], ignore_index=True)
 
+        # Пустая группа строк — законный parquet (например, пустой файл).
+        if not len(frame):
+            continue
+
         ids = frame["client_id"].to_numpy()
         tail = ids == ids[-1]
         carry = frame[tail]

@@ -1,20 +1,16 @@
 {
-  "train": {
-    "rows": 9339,
-    "churn_1": 776,
-    "churn_0": 8563,
-    "churn_rate": 0.08309240818074741
-  },
-  "val": {
-    "rows": 1434,
-    "churn_1": 140,
-    "churn_0": 1294,
-    "churn_rate": 0.09762900976290098
-  },
-  "test": {
-    "rows": 1460,
-    "churn_1": 142,
-    "churn_0": 1318,
-    "churn_rate": 0.09726027397260274
+  "churn_active90": {
+    "train": {
+      "rows": 6368,
+      "churn_1": 414,
+      "churn_0": 5954,
+      "churn_rate": 0.06501256281407035
+    },
+    "val": {
+      "rows": 916,
+      "churn_1": 47,
+      "churn_0": 869,
+      "churn_rate": 0.05131004366812227
+    }
   }
 }
