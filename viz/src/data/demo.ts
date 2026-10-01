@@ -82,11 +82,14 @@ export interface Interval {
   high: number
 }
 
-export interface UsrDiagnosticTask {
+export interface ScenarioTask {
   rows: number
   positives: number
-  cells: Record<string, { pr_auc: number; roc_auc: number; f1: number }>
-  deltas: Partial<Record<'usr_vs_control' | 'catboost_vs_lr', { pr_auc: Interval; roc_auc: Interval }>>
+  reference: string
+  cells: Record<
+    string,
+    { pr_auc: number; roc_auc: number; log_loss: number; f1: number; vs_reference: { pr_auc: Interval; roc_auc: Interval } | null }
+  >
 }
 
 export interface Demo {
@@ -137,7 +140,6 @@ export interface Demo {
     tasks: string[]
     reference: Record<string, string>
     compared: string[]
-    readouts: string[]
     horizon_days: number
     cutoffs: Record<string, string>
     // CatBoost-бейзлайн задач churn на val текущей выгрузки.
@@ -146,13 +148,12 @@ export interface Demo {
       tasks: Record<string, { pr_auc: number; roc_auc: number; rows: number; positives: number }>
       source: string
     } | null
-    // Диагностика [USR] прогона на val: векторы модели и начальных
-    // весов × регрессия и CatBoost только на [USR] (probe --control init).
-    usr_diagnostic: {
+    // Три сценария прогона на val из отчёта его пробы: handcrafted →
+    // CatBoost, [USR] → регрессия, handcrafted и [USR] → CatBoost.
+    scenarios: {
       group: string
       tag: string
-      control: string
-      tasks: Record<string, UsrDiagnosticTask>
+      tasks: Record<string, ScenarioTask>
       source: string
     } | null
   }

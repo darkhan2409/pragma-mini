@@ -56,23 +56,7 @@ function Downstream() {
         {`val: T = ${localDay(d.cutoffs.val)} — конец выгрузки − ${d.horizon_days} дней`}
       </Label>
 
-      {/* Наборы векторов */}
-      <group position={[-9.6, 3.6, 0]}>
-        <Label size={0.34} color={C.text2}>
-          {'readouts + recency'}
-        </Label>
-        {d.readouts.map((name, index) => (
-          <group key={name} position={[0.4 + index * 1.7, -2.2, 0]}>
-            <Glyph seed={index + 20} accent={index < 2 ? C.amber : C.cyan} height={2.4} width={0.3} cells={10} caption={null} />
-            <Label mono size={0.22} anchorX="center" color={C.text2} position={[0, -1.6, 0]}>
-              {name}
-            </Label>
-          </group>
-        ))}
-      </group>
-      <Arrow from={[-11.8, 1.4, 0]} to={[-10.2, 1.4, 0]} accent={C.amber} />
-
-      <Arrow from={[-3.0, 1.4, 0]} to={[-2.4, 1.4, 0]} accent={C.amber} />
+      <Arrow from={[-11.8, 1.4, 0]} to={[-2.4, 1.4, 0]} accent={C.amber} />
       <Block size={[4.6, 2.6, 1]} position={[0, 1.4, 0]} accent={C.amber} />
       <Label size={0.32} anchorX="center" position={[0, 1.8, 0.6]}>
         {'StandardScaler'}

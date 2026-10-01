@@ -270,3 +270,18 @@ def test_threshold_maximises_f1() -> None:
     y = pd.Series([0, 0, 1, 1, 0, 1]).to_numpy()
     score = pd.Series([0.1, 0.4, 0.35, 0.8, 0.2, 0.9]).to_numpy()
     assert threshold_max_f1(y, score) == pytest.approx(0.35)
+
+
+def test_log_loss_is_the_mean_cross_entropy_of_the_probability() -> None:
+    """
+    log_loss — средняя кросс-энтропия вероятности без порога: от
+    порога не зависит, у уверенно верного прогноза меньше, чем у
+    константы.
+    """
+    y = np.array([0, 0, 1, 1, 0, 1])
+    score = np.array([0.1, 0.4, 0.35, 0.8, 0.2, 0.9])
+    expected = -np.mean(y * np.log(score) + (1 - y) * np.log(1 - score))
+
+    assert evaluate(y, score, 0.35)["log_loss"] == pytest.approx(expected)
+    assert evaluate(y, score, 0.9)["log_loss"] == evaluate(y, score, 0.35)["log_loss"]
+    assert evaluate(y, score, 0.5)["log_loss"] < evaluate(y, np.full(6, 0.5), 0.5)["log_loss"]

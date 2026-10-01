@@ -6,8 +6,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 import torch
 
@@ -39,11 +37,9 @@ from tests.test_profile_state import (
 #     цепочки здесь нет;
 #   - всё, что случилось после T, — события, переезд, продукт, —
 #     вход на T не меняет ни на бит, а анкета откатывается на T;
-#   - в метках задач граница T строгая: событие ровно в T не
-#     признак и не метка, а конец окна метки в него входит;
 #   - строки задачи churn_active90 — строки churn-бейзлайна
-#     текущей выгрузки, и все наборы оцениваются на одних и тех же
-#     клиентах;
+#     текущей выгрузки, и все три сценария оцениваются на одних и
+#     тех же клиентах;
 #   - пока идут эксперименты, test не считается нигде: ни векторы,
 #     ни метрики, ни сравнения. Только явный --final-test.
 # ============================================================
@@ -253,100 +249,6 @@ def test_readouts_are_the_client_embedding_and_its_events():
         mine = events[torch.as_tensor(np.flatnonzero(owner == number))]
         assert torch.allclose(vectors["mean_event"][number], mine.mean(dim=0), atol=1e-6)
         assert torch.equal(vectors["last_event"][number], mine[-1])
-
-
-# ============================================================
-# ЗАДАЧИ
-# ============================================================
-
-
-def write_events(rows: list[tuple[str, object, str]]) -> None:
-    """
-    Лента 02 группы val из троек (клиент, время, тип). Группы строк
-    по три: клиент ложится в две соседние, суммы обязаны сложиться.
-    """
-
-    from src.preprocessing.canonical.build import EVENTS_FILE
-    from src.preprocessing.settings import group_dir
-
-    path = group_dir("val") / EVENTS_FILE
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    table = pa.table(
-        {
-            "client_id": [row[0] for row in rows],
-            "event_time": pa.array([row[1] for row in rows], pa.timestamp("us", tz="UTC")),
-            "type": [row[2] for row in rows],
-        }
-    )
-
-    pq.write_table(table, path, row_group_size=3)
-
-
-def test_task_features_are_strictly_before_T(stage):
-    """
-    Агрегатные признаки — только события строго раньше T: событие в
-    миг T и позже в счётчики и давность не входит, а клиент без
-    событий до T в таблицу не попадает.
-    """
-
-    from src.downstream.tasks import build_table
-
-    moment = cutoff("val")
-    day, tick = timedelta(days=1), timedelta(microseconds=1)
-
-    write_events([
-        ("a", moment - timedelta(seconds=1), "purchase"),
-        ("a", moment - 40 * day, "purchase"),
-        ("a", moment, "purchase"),
-        ("a", moment + tick, "purchase"),
-        ("b", moment - 100 * day, "purchase"),
-        ("b", moment - 5 * day, "loan_payment"),
-        ("c", moment + day, "purchase"),
-    ])
-
-    table = build_table("val", moment)
-
-    # c без событий до T в таблицу не входит.
-    assert list(table.index) == ["a", "b"]
-
-    a, b = table.loc["a"], table.loc["b"]
-
-    assert a["n_events"] == 2 and b["n_events"] == 2
-    assert a["gap_seconds"] == 1.0
-    assert a["n_30d_purchase"] == 1 and a["n_90d_purchase"] == 2
-    assert b["n_90d_purchase"] == 0 and b["n_365d_purchase"] == 1
-
-
-def test_task_features_do_not_see_the_future(stage):
-    """
-    События в T и позже не меняют ни одного признака таблицы задач.
-    """
-
-    from src.downstream.tasks import build_table
-
-    moment = cutoff("val")
-    day = timedelta(days=1)
-
-    past = [
-        ("a", moment - 3 * day, "purchase"),
-        ("a", moment - 20 * day, "installment_due"),
-        ("b", moment - 50 * day, "purchase"),
-    ]
-    future = [
-        ("a", moment, "installment_missed"),
-        ("a", moment + day, "delinquency_registered"),
-        ("b", moment + 2 * day, "application_submitted"),
-        ("b", moment + 70 * day, "purchase"),
-    ]
-
-    write_events(past)
-    quiet = build_table("val", moment)
-
-    write_events(past + future)
-    busy = build_table("val", moment)
-
-    pd.testing.assert_frame_equal(quiet, busy)
 
 
 # ============================================================
@@ -591,58 +493,42 @@ def test_input_built_in_processes_is_the_same_and_in_order(stage):
 SIZES = {"train": 120, "val": 60, "test": 60}
 
 
-def probe_world(monkeypatch, ready=(), drop: str | None = None) -> tuple[dict, list]:
+def probe_world(monkeypatch, plus: bool = False, drop: str | None = None) -> tuple[dict, list]:
     """
-    Таблицы задач и строки churn-бейзлайна групп — в памяти; какие
-    группы запрошены, записывается. Метки заданы номером клиента, так
-    что обе метки есть в задаче и в каждой группе. ready — пары (набор,
-    тег) готовых прогнозов CatBoost на [USR] (catboost_plus_usr,
-    catboost_usr) на тех же строках, у каждой пары свои; drop —
-    клиент, которого у них нет.
+    Строки churn-бейзлайна групп — в памяти; какие группы запрошены,
+    записывается. Метки заданы номером клиента, так что обе метки есть
+    в задаче и в каждой группе. plus — есть и catboost_plus_usr на тех
+    же строках; drop — клиент, которого у него нет.
     """
 
     import src.downstream.tasks as tasks
 
-    tables, baseline, asked = {}, {}, []
+    baseline, asked = {}, []
 
     for group, size in SIZES.items():
         index = pd.Index([f"{group}_{number:03d}" for number in range(size)], name="client_id")
         number = np.arange(size)
-        tables[group] = pd.DataFrame({
-            "n_events": 10 + number % 13,
-            "gap_seconds": (1 + number % 17) * 86_400.0,
-            "n_30d_purchase": number % 5,
-            "n_90d_purchase": number % 9,
-            "n_365d_purchase": number % 11,
-        }, index=index)
         churn = pd.DataFrame({"churn": (number % 5 == 0).astype(int), "score": (number % 5 == 0) * 0.5 + number / 1000},
                              index=index)
         baseline[group] = {"churn_active90": churn[number % 4 != 0]}
-
-    def table(group):
-        asked.append(("table", group))
-        return tables[group]
 
     def churn_rows(task, group):
         asked.append((task, group))
         return baseline[group][task]
 
-    def usr_catboost(name, tag, used, embedded):
-        if (name, tag) not in ready:
+    def plus_usr(tag, used, embedded):
+        if not plus:
             return None
-        shift = sorted(ready).index((name, tag)) / 10
         rows = {}
         for group in used:
             for task, frame in baseline[group].items():
-                noise = np.random.default_rng(len(frame)).uniform(0, 0.3, len(frame)) * shift
-                other = frame.assign(score=frame["score"] * 0.5 + 0.2 + noise)
+                other = frame.assign(score=frame["score"] * 0.5 + 0.2)
                 rows[(task, group)] = other.drop(index=drop) if drop in other.index else other
         return {"thresholds": {"churn_active90": 0.4}, "rows": rows}
 
-    monkeypatch.setattr(tasks, "table", table)
     monkeypatch.setattr(tasks, "churn_rows", churn_rows)
     monkeypatch.setattr(tasks, "churn_thresholds", lambda: {"churn_active90": 0.3})
-    monkeypatch.setattr(tasks, "usr_catboost", usr_catboost)
+    monkeypatch.setattr(tasks, "plus_usr", plus_usr)
 
     return baseline, asked
 
@@ -686,7 +572,7 @@ def test_the_probe_scores_val_by_default_and_test_only_in_the_final_evaluation(s
     raw_groups("train", "val", "test")
     write_vectors("m", ("train", "val"))
 
-    report = run_probe("m", None, draws=20, seed=0)
+    report = run_probe("m", draws=20, seed=0)
 
     assert report["groups"] == ["train", "val"] and not report["final_test"]
     assert all(group != "test" for _, group in asked)
@@ -715,13 +601,13 @@ def test_the_probe_scores_val_by_default_and_test_only_in_the_final_evaluation(s
     assert list(report["tasks"]) == ["churn_active90"]
     for task in report["tasks"]:
         assert f"{task}: эталон catboost" in text
-    assert "доля" in text and "val PR" in text and "test" not in text
+    assert "доля" in text and "val: сценарий" in text and "test" not in text
 
     # Сравнение моделей PRAGMA — парное, на тех же клиентах: та же
     # модель под другим тегом даёт нулевую разницу.
     write_vectors("same", ("train", "val"))
-    versus = run_probe("same", None, draws=20, seed=0, baseline="m")
-    delta = versus["tasks"]["churn_active90"]["results"]["usr+recency"]["vs_baseline"]
+    versus = run_probe("same", draws=20, seed=0, baseline="m")
+    delta = versus["tasks"]["churn_active90"]["results"]["usr"]["vs_baseline"]
     assert set(delta) == {"val"} and delta["val"]["pr_auc"]["mean"] == 0.0
 
     # Прогнозов test у пробы без --final-test нет — сравнивать не с чем.
@@ -732,14 +618,14 @@ def test_the_probe_scores_val_by_default_and_test_only_in_the_final_evaluation(s
     # Финальная оценка: без векторов test — отказ, с ними — test
     # рядом с тем же val.
     with pytest.raises(FileNotFoundError, match="--final-test"):
-        run_probe("m", None, draws=20, seed=0, final_test=True)
+        run_probe("m", draws=20, seed=0, final_test=True)
 
     write_vectors("m", ("train", "val", "test"))
-    final = run_probe("m", None, draws=20, seed=0, final_test=True)
+    final = run_probe("m", draws=20, seed=0, final_test=True)
 
     assert final["groups"] == ["train", "val", "test"]
-    assert "test PR" in show(final)
-    assert ("churn_active90", "test") in asked and ("table", "test") in asked
+    assert "test: сценарий" in show(final)
+    assert ("churn_active90", "test") in asked
 
     for task, block in final["tasks"].items():
         for name, result in block["results"].items():
@@ -782,7 +668,7 @@ def test_vectors_of_another_export_are_refused(stage, monkeypatch):
     write_raw(raw_group_dir("val"), EARLY + AFTER, BUSY_SNAPSHOT)
 
     with pytest.raises(ValueError, match="другой выгрузки"):
-        run_probe("m", None, draws=20, seed=0)
+        run_probe("m", draws=20, seed=0)
 
 
 # ============================================================
@@ -860,32 +746,6 @@ def test_the_chosen_C_depends_on_train_only():
     assert ((first >= 0) & (first <= 1)).all() and ((second >= 0) & (second <= 1)).all()
 
 
-def test_usr_last_event_is_the_usr_and_the_last_event_of_the_same_client():
-    """
-    Набор usr+last_event — [USR] и последнее событие строки, именно её
-    клиента и в порядке строк, а не файла векторов. Сравнивается
-    между моделями, как остальные наборы с векторами.
-    """
-
-    from src.downstream.probe import COMPARED, features
-
-    rng = np.random.default_rng(5)
-    clients = [f"val_{number:03d}" for number in range(6)]
-    file = pd.DataFrame({
-        "usr": list(rng.normal(size=(6, 3))),
-        "last_event": list(rng.normal(size=(6, 3))),
-        "mean_event": list(rng.normal(size=(6, 3))),
-    }, index=pd.Index(clients, name="client_id"))
-
-    rows = pd.DataFrame(index=pd.Index(["val_004", "val_001", "val_005"], name="client_id"))
-    matrix = features("model:usr+last_event", "val", rows, {"model": {"val": file}}, [])
-
-    expected = np.stack([np.concatenate([file.at[client, "usr"], file.at[client, "last_event"]])
-                         for client in rows.index])
-    np.testing.assert_array_equal(matrix, expected)
-    assert "usr+last_event" in COMPARED
-
-
 # ============================================================
 # ПОЛНЫЙ X + [USR] → CATBOOST И ПОРОГИ
 # ============================================================
@@ -900,11 +760,11 @@ def test_catboost_plus_usr_is_compared_with_catboost_on_the_same_clients(stage, 
 
     from src.downstream.probe import PREDICTIONS_FILE, run_probe, show
 
-    probe_world(monkeypatch, ready={("catboost_plus_usr", "m")})
+    probe_world(monkeypatch, plus=True)
     raw_groups("train", "val")
     write_vectors("m", ("train", "val"))
 
-    report = run_probe("m", None, draws=20, seed=0)
+    report = run_probe("m", draws=20, seed=0)
     predictions = pd.read_parquet(downstream_dir("m") / PREDICTIONS_FILE)
 
     assert report["plus_usr"]
@@ -919,19 +779,19 @@ def test_catboost_plus_usr_is_compared_with_catboost_on_the_same_clients(stage, 
         assert left == right and left
 
     text = show(report)
-    assert text.count("Δ catboost_plus_usr − catboost") == 1 and "главное сравнение на val" in text
+    assert text.count("Δ catboost_plus_usr − catboost (val)") == 1
 
 
 def test_catboost_plus_usr_on_other_clients_is_refused(stage, monkeypatch):
 
     from src.downstream.probe import run_probe
 
-    probe_world(monkeypatch, ready={("catboost_plus_usr", "m")}, drop="val_001")
+    probe_world(monkeypatch, plus=True, drop="val_001")
     raw_groups("train", "val")
     write_vectors("m", ("train", "val"))
 
     with pytest.raises(ValueError, match="другие клиенты или метки"):
-        run_probe("m", None, draws=20, seed=0)
+        run_probe("m", draws=20, seed=0)
 
 
 def test_without_catboost_plus_usr_the_report_says_so(stage, monkeypatch):
@@ -942,61 +802,9 @@ def test_without_catboost_plus_usr_the_report_says_so(stage, monkeypatch):
     raw_groups("train", "val")
     write_vectors("m", ("train", "val"))
 
-    report = run_probe("m", None, draws=20, seed=0)
+    report = run_probe("m", draws=20, seed=0)
 
     assert not report["plus_usr"] and "catboost_plus_usr нет" in show(report)
-
-
-def test_usr_diagnostic_compares_heads_and_vectors_pairwise_on_the_same_clients(stage, monkeypatch):
-    """
-    2×2 диагностика [USR]: векторы модели m и контроля c, регрессия и
-    CatBoost на одном [USR]. Регрессия на векторах контроля — та же,
-    что у контроля как самостоятельной модели (симметрия). Каждая
-    разница — парный bootstrap прогнозов тех же клиентов: модель −
-    контроль при той же голове, CatBoost − регрессия на тех же векторах.
-    """
-
-    from src.downstream.probe import PREDICTIONS_FILE, run_probe, show
-
-    probe_world(monkeypatch, ready={("catboost_usr", "m"), ("catboost_usr", "c")})
-    raw_groups("train", "val")
-    write_vectors("m", ("train", "val"), seed=0)
-    write_vectors("c", ("train", "val"), seed=1)
-
-    alone = run_probe("c", None, draws=20, seed=0)
-    report = run_probe("m", "c", draws=20, seed=0)
-    predictions = pd.read_parquet(downstream_dir("m") / PREDICTIONS_FILE)
-
-    pairs = {
-        ("usr", "vs_control"): "c:usr",
-        ("catboost_usr", "vs_lr"): "usr",
-        ("catboost_usr", "vs_control"): "c:catboost_usr",
-        ("c:catboost_usr", "vs_lr"): "c:usr",
-    }
-
-    for task, block in report["tasks"].items():
-        results = block["results"]
-
-        mine, theirs = results["c:usr"], alone["tasks"][task]["results"]["usr"]
-        assert (mine["val"], mine["C"], mine["threshold"]) == (theirs["val"], theirs["C"], theirs["threshold"])
-
-        part = predictions[(predictions["task"] == task) & (predictions["group"] == "val")]
-        score = {name: rows.set_index("client_id")["score"] for name, rows in part.groupby("set")}
-        clients = score["catboost"].index
-        assert all(series.index.equals(clients) for series in score.values())
-        y = part[part["set"] == "catboost"]["y"].to_numpy()
-
-        for (name, key), other in pairs.items():
-            expected = paired(y, score[name].to_numpy(), score[other].to_numpy(), 20, 0)
-            assert results[name][key]["val"] == expected
-
-        assert results["usr"]["vs_control"]["val"]["pr_auc"]["mean"] != 0.0
-
-    text = show(report)
-    assert text.count("диагностика [USR] на val") == 1
-    for label in ("c USR + LR", "m USR + LR", "m USR + CatBoost", "c USR + CatBoost",
-                  "m LR − c LR", "m CatBoost − m LR", "m CatBoost − c CatBoost", "c CatBoost − c LR"):
-        assert label in text
 
 
 @pytest.mark.parametrize(("damage", "message"), [
@@ -1031,7 +839,7 @@ def test_vectors_not_at_T_or_with_a_repeated_client_are_refused(stage, monkeypat
         pd.concat([frame, frame.iloc[[5]]], ignore_index=True).to_parquet(path, index=False)
 
     with pytest.raises(ValueError, match=message):
-        run_probe("m", None, draws=20, seed=0)
+        run_probe("m", draws=20, seed=0)
 
 
 def test_probe_thresholds_come_from_train_only(stage, monkeypatch):
@@ -1047,7 +855,7 @@ def test_probe_thresholds_come_from_train_only(stage, monkeypatch):
     raw_groups("train", "val")
     write_vectors("m", ("train", "val"))
 
-    first = run_probe("m", None, draws=20, seed=0)
+    first = run_probe("m", draws=20, seed=0)
     predictions = pd.read_parquet(downstream_dir("m") / PREDICTIONS_FILE)
 
     # Векторы val другие, векторы train — прежние.
@@ -1055,7 +863,7 @@ def test_probe_thresholds_come_from_train_only(stage, monkeypatch):
     write_vectors("m", ("train", "val"), seed=5)
     kept.to_parquet(downstream_dir("m") / "train.parquet", index=False)
 
-    second = run_probe("m", None, draws=20, seed=0)
+    second = run_probe("m", draws=20, seed=0)
 
     for task, block in first["tasks"].items():
         for name, result in block["results"].items():
@@ -1065,30 +873,55 @@ def test_probe_thresholds_come_from_train_only(stage, monkeypatch):
             assert {key: result["val"][key] for key in expected} == expected
 
 
-@pytest.mark.parametrize(("name", "folder", "flag"), [
-    ("catboost_plus_usr", "plus_usr", "churn.plus_usr заново"),
-    ("catboost_usr", "usr_only", "churn.plus_usr --usr-only заново"),
-])
-def test_catboost_on_usr_of_other_vectors_or_sources_is_refused(stage, name, folder, flag):
+def test_log_loss_of_every_set_is_the_cross_entropy_of_its_predictions(stage, monkeypatch):
     """
-    Прогнозы CatBoost на [USR] годятся, только если он обучен ровно на
-    этих векторах — тег, чекпойнт и записи групп (снятые заново векторы
-    — другие) — и на тех же источниках строк, что CatBoost-бейзлайн.
+    log-loss сценария — средняя кросс-энтропия его вероятностей на тех
+    же строках val, что и ROC-AUC и PR-AUC; у готовых прогнозов
+    CatBoost — так же, как у регрессии.
+    """
+
+    from sklearn.metrics import average_precision_score, log_loss, roc_auc_score
+
+    from src.downstream.probe import PREDICTIONS_FILE, run_probe, show
+
+    probe_world(monkeypatch, plus=True)
+    raw_groups("train", "val")
+    write_vectors("m", ("train", "val"))
+
+    report = run_probe("m", draws=20, seed=0)
+    predictions = pd.read_parquet(downstream_dir("m") / PREDICTIONS_FILE)
+
+    for task, block in report["tasks"].items():
+        for name, result in block["results"].items():
+            part = predictions[(predictions["task"] == task) & (predictions["set"] == name)]
+            y, score = part["y"].to_numpy(), part["score"].to_numpy()
+            assert result["val"]["log_loss"] == log_loss(y, score, labels=[0, 1])
+            assert result["val"]["roc_auc"] == roc_auc_score(y, score)
+            assert result["val"]["pr_auc"] == average_precision_score(y, score)
+
+    assert "LogLoss" in show(report)
+
+
+def test_catboost_plus_usr_of_other_vectors_or_sources_is_refused(stage):
+    """
+    catboost_plus_usr годится, только если обучен ровно на этих
+    векторах — тег, чекпойнт и записи групп (снятые заново векторы —
+    другие) — и на тех же источниках строк, что CatBoost-бейзлайн.
     """
 
     from src.downstream import settings
-    from src.downstream.tasks import usr_catboost
+    from src.downstream.tasks import plus_usr
 
     groups = {"train": {"cutoff": "T-train", "seconds": 1.0}, "val": {"cutoff": "T-val", "seconds": 2.0}}
     embedded = {"tag": "m", "checkpoint": "ckpt", "groups": groups}
 
-    assert usr_catboost(name, "m", ("train", "val"), embedded) is None
+    assert plus_usr("m", ("train", "val"), embedded) is None
 
     raw_groups("train", "val")
     write_churn_reports(CHURN_ROWS)
     baseline = json.loads((settings.CHURN_REPORTS / "metrics.json").read_text())
 
-    directory = settings.CHURN_REPORTS / folder / "m"
+    directory = settings.CHURN_REPORTS / "plus_usr" / "m"
     directory.mkdir(parents=True)
 
     rows = pd.concat(
@@ -1103,22 +936,22 @@ def test_catboost_on_usr_of_other_vectors_or_sources_is_refused(stage, name, fol
         }))
 
     write(embedded, baseline["sources"])
-    found = usr_catboost(name, "m", ("train", "val"), embedded)
+    found = plus_usr("m", ("train", "val"), embedded)
     assert found["thresholds"] == {"churn_active90": 0.4}
     assert ("churn_active90", "val") in found["rows"]
 
     with pytest.raises(ValueError, match="обучен на векторах"):
-        usr_catboost(name, "m", ("train", "val"), dict(embedded, checkpoint="другой чекпойнт"))
+        plus_usr("m", ("train", "val"), dict(embedded, checkpoint="другой чекпойнт"))
 
     again = dict(embedded, groups=dict(groups, val={"cutoff": "T-val", "seconds": 3.0}))
-    with pytest.raises(ValueError, match=f"векторы val сняты заново.*{flag}"):
-        usr_catboost(name, "m", ("train", "val"), again)
+    with pytest.raises(ValueError, match="векторы val сняты заново.*churn.plus_usr заново"):
+        plus_usr("m", ("train", "val"), again)
 
     write(embedded, dict(baseline["sources"], val={"T": "другой"}))
     with pytest.raises(ValueError, match="источники val"):
-        usr_catboost(name, "m", ("train", "val"), embedded)
+        plus_usr("m", ("train", "val"), embedded)
 
     write(embedded, baseline["sources"])
     with pytest.raises(ValueError, match="--final-test"):
-        usr_catboost(name, "m", ("train", "val", "test"), embedded)
+        plus_usr("m", ("train", "val", "test"), embedded)
 

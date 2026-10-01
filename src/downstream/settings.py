@@ -90,8 +90,8 @@ def groups(final_test: bool) -> tuple[str, ...]:
 
 def downstream_dir(tag: str) -> Path:
     """
-    Каталог векторов и отчёта одной модели: тег — имя чекпойнта или
-    init для начальных весов.
+    Каталог векторов и отчёта одной модели: тег — имя прогона или
+    чекпойнта.
     """
 
     return DOWNSTREAM_DIR / tag

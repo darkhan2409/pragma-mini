@@ -25,8 +25,8 @@ from tests.test_profile_state import EARLY, QUIET_SNAPSHOT, RAW_CLIENT
 #     кодированием, и расхождение останавливает экспорт;
 #   - кандидаты шага MLM — шкала суммы сквозного события при том
 #     же direction; суммы нет в токенах — экспорт отказывает.
-#   - диагностика [USR] — только из отчёта текущей пробы прогона
-#     с контролем init и без test.
+#   - три сценария — только из отчёта текущей пробы прогона и без
+#     test.
 # ============================================================
 
 
@@ -208,12 +208,11 @@ def test_the_export_is_compact_and_reads_back_the_same():
 
 
 
-def test_the_usr_diagnostic_is_taken_only_from_a_current_probe_against_init(stage):
+def test_the_scenarios_are_taken_only_from_a_current_probe(stage):
     """
-    Диагностика [USR] на экране вывода — из отчёта пробы прогона с
-    --control init, без test и по векторам текущей выгрузки. Иначе её
-    в экспорте нет: числа не пишутся руками и не берутся из старых
-    отчётов.
+    Три сценария на экране вывода — из отчёта пробы прогона, без test и
+    по векторам текущей выгрузки. Иначе их в экспорте нет: числа не
+    пишутся руками и не берутся из старых отчётов.
     """
 
     import json
@@ -223,21 +222,17 @@ def test_the_usr_diagnostic_is_taken_only_from_a_current_probe_against_init(stag
 
     module = exporter()
 
-    def delta(mean: float) -> dict:
-        one = {"mean": mean, "low": mean - 0.1, "high": mean + 0.1, "not_better": 0.5}
-        return {"val": {"pr_auc": one, "roc_auc": one}}
-
-    def cell(pr: float) -> dict:
-        return {"val": {"pr_auc": pr, "roc_auc": pr + 0.5, "f1": pr / 2, "rows": 3}}
+    def cell(pr: float, mean: float | None = None) -> dict:
+        result = {"val": {"pr_auc": pr, "roc_auc": pr + 0.5, "log_loss": 1 - pr, "f1": pr / 2, "rows": 3}}
+        if mean is not None:
+            one = {"mean": mean, "low": mean - 0.1, "high": mean + 0.1, "not_better": 0.5}
+            result["vs_reference"] = {"val": {"pr_auc": one, "roc_auc": one}}
+        return result
 
     report = {
-        "tag": "m", "control": "init", "final_test": False, "groups": ["train", "val"],
-        "tasks": {"churn_active90": {"rows": {"val": 3}, "positives": {"val": 1}, "results": {
-            "usr": {**cell(0.24), "vs_control": delta(-0.05)},
-            "init:usr": cell(0.3),
-            "catboost_usr": {**cell(0.18), "vs_lr": delta(-0.06)},
-            "init:catboost_usr": cell(0.28),
-            "catboost": cell(0.58),
+        "tag": "m", "final_test": False, "groups": ["train", "val"],
+        "tasks": {"churn_active90": {"reference": "catboost", "rows": {"val": 3}, "positives": {"val": 1}, "results": {
+            "catboost": cell(0.58), "usr": cell(0.24, -0.34), "catboost_plus_usr": cell(0.49, -0.09),
         }}},
     }
 
@@ -246,26 +241,23 @@ def test_the_usr_diagnostic_is_taken_only_from_a_current_probe_against_init(stag
 
     raw_groups("train", "val")
     write_vectors("m", ("train", "val"))
-    write_vectors("init", ("train", "val"), seed=1)
 
-    assert module.usr_diagnostic("m") is None
-
-    write(report)
-    found = module.usr_diagnostic("m")["tasks"]["churn_active90"]
-
-    assert set(found["cells"]) == {"usr", "init:usr", "catboost_usr", "init:catboost_usr"}
-    assert found["cells"]["usr"] == {"pr_auc": 0.24, "roc_auc": 0.74, "f1": 0.12}
-    assert found["deltas"]["usr_vs_control"]["pr_auc"] == {"mean": -0.05, "low": -0.15, "high": 0.05}
-    assert found["deltas"]["catboost_vs_lr"]["roc_auc"]["mean"] == -0.06
-    assert (found["rows"], found["positives"]) == (3, 1)
-
-    for damaged in (dict(report, control=None), dict(report, final_test=True)):
-        write(damaged)
-        assert module.usr_diagnostic("m") is None
+    assert module.scenarios("m") is None
 
     write(report)
-    meta = downstream_dir("init") / "meta.json"
+    found = module.scenarios("m")["tasks"]["churn_active90"]
+
+    assert list(found["cells"]) == ["catboost", "usr", "catboost_plus_usr"]
+    assert found["cells"]["catboost"] == {"pr_auc": 0.58, "roc_auc": 1.08, "log_loss": 0.42, "f1": 0.29, "vs_reference": None}
+    assert found["cells"]["usr"]["vs_reference"]["pr_auc"] == {"mean": -0.34, "low": -0.44, "high": -0.24}
+    assert (found["rows"], found["positives"], found["reference"]) == (3, 1, "catboost")
+
+    write(dict(report, final_test=True))
+    assert module.scenarios("m") is None
+
+    write(report)
+    meta = downstream_dir("m") / "meta.json"
     record = json.loads(meta.read_text())
     record["groups"]["val"]["raw_events_sha256"] = "previous-generation"
     meta.write_text(json.dumps(record))
-    assert module.usr_diagnostic("m") is None
+    assert module.scenarios("m") is None

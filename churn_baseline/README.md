@@ -160,17 +160,18 @@ churn = 0   есть хотя бы одно
      (`max F1 on train inner holdout`);
   3. CatBoost учится заново на всём train с числом деревьев лучшей модели — `best_iteration + 1`,
      потому что CatBoost считает итерации с нуля. Остальные параметры те же.
-- Порог фиксируется на train и больше не пересчитывается. val — только инференс: ROC-AUC и PR-AUC
-  по вероятности, без порога, а Precision, Recall, F1 и матрица ошибок — при этом пороге.
+- Порог фиксируется на train и больше не пересчитывается. val — только инференс: ROC-AUC, PR-AUC
+  и log-loss (средняя кросс-энтропия, та же Logloss, на которой учится CatBoost) по вероятности,
+  без порога, а Precision, Recall, F1 и матрица ошибок — при этом пороге.
 - test — только с `--final-test`, при том же пороге.
 
 ## Результаты
 
 Текущая выгрузка, T train = 2026-01-01 (метка из продолжения), только val. test не считался.
 
-| задача | inner_train / inner_holdout | best_iteration (деревьев) | порог | строк val | churn=1 | доля | ROC-AUC | PR-AUC | Precision | Recall | F1 | TN / FP / FN / TP |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `churn_active90` | 5094 / 1274 | 374 (375) | 0.282 | 916 | 47 | 5.1% | 0.969 | 0.577 | 0.500 | 0.766 | 0.605 | 833 / 36 / 11 / 36 |
+| задача | inner_train / inner_holdout | best_iteration (деревьев) | порог | строк val | churn=1 | доля | ROC-AUC | PR-AUC | log-loss | Precision | Recall | F1 | TN / FP / FN / TP |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `churn_active90` | 5094 / 1274 | 374 (375) | 0.282 | 916 | 47 | 5.1% | 0.969 | 0.577 | 0.0939 | 0.500 | 0.766 | 0.605 | 833 / 36 / 11 / 36 |
 
 Распределение target:
 
@@ -229,15 +230,6 @@ churn = 1. Хвост продолжения — 2 422 905 строк от 6879 
 
   Сравнение с `catboost` и `usr` — в пробе PRAGMA (`src/downstream/probe.py`).
 
-**Только [USR]** (`--usr-only`) — диагностика головы: CatBoost на одних `usr_*`, без
-handcrafted-признаков и категориальных, тем же протоколом и на тех же строках. Отчёт —
-`reports/usr_only/<тег>/`, модели — `models/usr_only/<тег>/`. В пробе PRAGMA это набор `catboost_usr`,
-парно сравниваемый с логистической регрессией на тех же векторах.
-
-```bash
-.venv/bin/python -m churn.plus_usr --embeddings ../data/13_downstream/w4-b0 --usr-only
-```
-
 ## Для сравнения с PRAGMA + Head
 
 - `reports/eval_rows.parquet` — точный список объектов оценки:
@@ -274,7 +266,7 @@ churn/
   sources.py   источники группы: отпечатки, продолжение для target
   build.py     строки группы
   train.py     обучение и оценка
-  plus_usr.py  полный X + [USR] PRAGMA → CatBoost; --usr-only — только [USR]
+  plus_usr.py  полный X + [USR] PRAGMA → CatBoost
 tests/           синтетические выгрузки во временном каталоге; data/ не читают
 data/<group>/    features.parquet (client_id, group, T, churn, active90, признаки), meta.json
 data/future/train/  продолжение train для target: events.parquet (хвост), future.json

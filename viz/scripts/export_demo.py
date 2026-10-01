@@ -530,18 +530,15 @@ def run_summary(run: Path) -> dict | None:
     }
 
 
-# Наборы диагностики [USR]: векторы модели и начальных весов (init),
-# регрессия и CatBoost только на [USR].
-DIAGNOSTIC_SETS = ("usr", "catboost_usr")
-
-
-def usr_diagnostic(tag: str) -> dict | None:
+def scenarios(tag: str) -> dict | None:
     """
-    Диагностика [USR] прогона на val — из отчёта его пробы
-    (probe --tag <прогон> --control init). Нет отчёта, контроль не
-    init, в нём test или векторы сняты не с текущей выгрузки — None.
+    Три сценария прогона на val — из отчёта его пробы (probe --tag
+    <прогон>): handcrafted → CatBoost, [USR] → регрессия, handcrafted
+    и [USR] → CatBoost, с парной разницей к первому. Нет отчёта, в нём
+    test или векторы сняты не с текущей выгрузки — None.
     """
 
+    from src.downstream.probe import SCENARIOS
     from src.downstream.settings import EMBEDDINGS_META, REPORT_FILE, downstream_dir
     from src.preprocessing.rawdata import read_manifest
     from src.preprocessing.settings import raw_group_dir
@@ -552,52 +549,43 @@ def usr_diagnostic(tag: str) -> dict | None:
         return None
 
     report = json.loads(path.read_text(encoding="utf-8"))
-    control = report.get("control")
 
-    if control != "init" or report.get("final_test"):
+    if report.get("final_test"):
         return None
 
-    for owner in (tag, control):
-        meta = json.loads((downstream_dir(owner) / EMBEDDINGS_META).read_text(encoding="utf-8"))
-        for group in report["groups"]:
-            exported = read_manifest(raw_group_dir(group))
-            recorded = meta.get("groups", {}).get(group, {})
-            if (recorded.get("raw_events_sha256"), recorded.get("raw_profile_sha256")) != (
-                exported.events_sha256, exported.profile_sha256
-            ):
-                return None
+    meta = json.loads((downstream_dir(tag) / EMBEDDINGS_META).read_text(encoding="utf-8"))
 
-    def interval(delta: dict) -> dict:
+    for group in report["groups"]:
+        exported = read_manifest(raw_group_dir(group))
+        recorded = meta.get("groups", {}).get(group, {})
+        if (recorded.get("raw_events_sha256"), recorded.get("raw_profile_sha256")) != (
+            exported.events_sha256, exported.profile_sha256
+        ):
+            return None
+
+    def cell(result: dict) -> dict:
+        delta = result.get("vs_reference", {}).get("val")
         return {
-            metric: {key: _round(delta[metric][key], 3) for key in ("mean", "low", "high")}
-            for metric in ("pr_auc", "roc_auc")
+            **{metric: _round(result["val"][metric], 4) for metric in ("pr_auc", "roc_auc", "log_loss", "f1")},
+            "vs_reference": {
+                metric: {key: _round(delta[metric][key], 3) for key in ("mean", "low", "high")}
+                for metric in ("pr_auc", "roc_auc")
+            } if delta else None,
         }
 
-    tasks = {}
-
-    for task, block in report["tasks"].items():
-        results = block["results"]
-        cells = {
-            name: {metric: _round(results[name]["val"][metric], 4) for metric in ("pr_auc", "roc_auc", "f1")}
-            for kind in DIAGNOSTIC_SETS
-            for name in (f"{control}:{kind}", kind)
-            if name in results
-        }
-        deltas = {
-            "usr_vs_control": results["usr"].get("vs_control", {}).get("val"),
-            "catboost_vs_lr": results.get("catboost_usr", {}).get("vs_lr", {}).get("val"),
-        }
-        tasks[task] = {
+    tasks = {
+        task: {
             "rows": block["rows"]["val"],
             "positives": block["positives"]["val"],
-            "cells": cells,
-            "deltas": {name: interval(delta) for name, delta in deltas.items() if delta},
+            "reference": block["reference"],
+            "cells": {name: cell(block["results"][name]) for name in SCENARIOS if name in block["results"]},
         }
+        for task, block in report["tasks"].items()
+    }
 
     return {
         "group": "val",
         "tag": tag,
-        "control": control,
         "tasks": tasks,
         "source": str(path.relative_to(ROOT) if path.is_relative_to(ROOT) else path),
     }
@@ -608,7 +596,6 @@ def downstream_summary(run: Path | None) -> dict:
     Задачи и пробы стенда оценки.
     """
 
-    from src.downstream.embed import READOUTS
     from src.downstream.probe import COMPARED, REFERENCE, TASKS
     from src.downstream.settings import HORIZON_DAYS, cutoff
     from src.preprocessing.rawdata import read_manifest
@@ -643,11 +630,10 @@ def downstream_summary(run: Path | None) -> dict:
         "tasks": list(TASKS),
         "reference": dict(REFERENCE),
         "compared": list(COMPARED),
-        "readouts": list(READOUTS),
         "horizon_days": HORIZON_DAYS,
         "cutoffs": {group: cutoff(group).isoformat() for group in ("train", "val", "test")},
         "catboost_churn": catboost,
-        "usr_diagnostic": usr_diagnostic(run.name) if run is not None else None,
+        "scenarios": scenarios(run.name) if run is not None else None,
     }
 
 

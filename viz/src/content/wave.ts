@@ -63,7 +63,7 @@ export const MEASUREMENT_FIXES = [
 ]
 
 export const PROTOCOL = [
-  'решает только val: Δ PR-AUC и ROC-AUC наборов usr+recency и readouts+recency на churn_active90',
+  'решает только val: Δ PR-AUC и ROC-AUC сценариев usr и catboost_plus_usr на churn_active90 к текущему лучшему',
   'MLM val loss — вторичный критерий',
   'test смотрится один раз, на финальном прогоне победителя',
 ]

@@ -1,6 +1,6 @@
 {
  "format": 1,
- "sources": {"generated_at": "2026-10-01T06:34:41+00:00", "vocabulary_digest": "c7a2644c171aecbe5df5dbc58a7efe6363a6f99e703cf9345592a91f17fe414d", "group": "train"},
+ "sources": {"generated_at": "2026-10-01T07:14:09+00:00", "vocabulary_digest": "c7a2644c171aecbe5df5dbc58a7efe6363a6f99e703cf9345592a91f17fe414d", "group": "train"},
  "vocabulary": {
   "size": 5747,
   "kinds": {
@@ -881,8 +881,7 @@
  "downstream": {
   "tasks": ["churn_active90"],
   "reference": {"churn_active90": "catboost"},
-  "compared": ["usr", "usr+recency", "usr+last_event", "readouts", "readouts+recency", "counts+usr"],
-  "readouts": ["usr", "profile", "mean_event", "last_event"],
+  "compared": ["usr", "catboost_plus_usr"],
   "horizon_days": 60,
   "cutoffs": {"train": "2025-12-31T19:00:00+00:00", "val": "2026-03-01T19:00:00+00:00", "test": "2026-07-02T19:00:00+00:00"},
   "catboost_churn": {
@@ -892,28 +891,35 @@
    },
    "source": "churn_baseline/reports/metrics.json"
   },
-  "usr_diagnostic": {
+  "scenarios": {
    "group": "val",
    "tag": "w4-b0",
-   "control": "init",
    "tasks": {
     "churn_active90": {
      "rows": 916,
      "positives": 47,
+     "reference": "catboost",
      "cells": {
-      "init:usr": {"pr_auc": 0.2973, "roc_auc": 0.8359, "f1": 0.4},
-      "usr": {"pr_auc": 0.2401, "roc_auc": 0.7879, "f1": 0.3392},
-      "init:catboost_usr": {"pr_auc": 0.2773, "roc_auc": 0.8202, "f1": 0.3537},
-      "catboost_usr": {"pr_auc": 0.1806, "roc_auc": 0.7599, "f1": 0.239}
-     },
-     "deltas": {
-      "usr_vs_control": {
-       "pr_auc": {"mean": -0.058, "low": -0.162, "high": 0.035},
-       "roc_auc": {"mean": -0.05, "low": -0.109, "high": 0.005}
+      "catboost": {"pr_auc": 0.5773, "roc_auc": 0.9692, "log_loss": 0.0939, "f1": 0.605, "vs_reference": null},
+      "usr": {
+       "pr_auc": 0.2401,
+       "roc_auc": 0.7879,
+       "log_loss": 0.1709,
+       "f1": 0.3392,
+       "vs_reference": {
+        "pr_auc": {"mean": -0.334, "low": -0.504, "high": -0.159},
+        "roc_auc": {"mean": -0.184, "low": -0.272, "high": -0.1}
+       }
       },
-      "catboost_vs_lr": {
-       "pr_auc": {"mean": -0.06, "low": -0.147, "high": 0.017},
-       "roc_auc": {"mean": -0.026, "low": -0.072, "high": 0.026}
+      "catboost_plus_usr": {
+       "pr_auc": 0.4918,
+       "roc_auc": 0.9612,
+       "log_loss": 0.1084,
+       "f1": 0.56,
+       "vs_reference": {
+        "pr_auc": {"mean": -0.085, "low": -0.185, "high": 0.002},
+        "roc_auc": {"mean": -0.008, "low": -0.014, "high": -0.003}
+       }
       }
      }
     }

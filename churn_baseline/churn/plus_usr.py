@@ -20,16 +20,11 @@ from .train import PARAMS, check_fresh, check_groups, evaluate, fit_task, load, 
 # ============================================================
 #
 #   python -m churn.plus_usr --embeddings ../data/13_downstream/w4-b0
-#   python -m churn.plus_usr --embeddings ../data/13_downstream/w4-b0 --usr-only
 #
 # Третий вариант сравнения: тот же полный X, на котором учится
 # CatBoost-бейзлайн, плюс вектор [USR] модели PRAGMA на T строки —
 # usr_0 … usr_{d−1}, числами, без стандартизации. Даёт ли [USR]
 # сигнал сверх handcrafted-признаков.
-#
-# --usr-only — диагностика: CatBoost только на usr_*, без единого
-# handcrafted-признака и без категориальных. Нет ли в [USR] сигнала,
-# который линейная проба не извлекает.
 #
 # Всё остальное — как у бейзлайна: те же строки, T и метки задач,
 # те же категориальные признаки, тот же fit_task (ранняя остановка
@@ -46,8 +41,6 @@ from .train import PARAMS, check_fresh, check_groups, evaluate, fit_task, load, 
 USR = "usr"
 
 PLUS_USR = "plus_usr"
-
-USR_ONLY = "usr_only"
 
 
 def with_usr(directory: Path, group: str, sources: dict, frame: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
@@ -98,7 +91,6 @@ def train_plus_usr(
     raw_dir: Path = RAW_DIR,
     future_dir: Path = FUTURE_DIR,
     final_test: bool = False,
-    usr_only: bool = False,
 ) -> dict:
     embeddings = Path(embeddings)
     used = groups(final_test)
@@ -120,17 +112,13 @@ def train_plus_usr(
             raise ValueError(f"у векторов {group} другая длина [USR]")
         usr = names
 
-    # Строки задач отбираются по полному X и в --usr-only, модель его
-    # не видит.
-    handcrafted, categorical = ([], []) if usr_only else (columns, categorical)
-    features = handcrafted + usr
-    kind = USR_ONLY if usr_only else PLUS_USR
+    features = columns + usr
     meta = json.loads((embeddings / "meta.json").read_text(encoding="utf-8"))
     tag = meta["tag"]
     evaluated = tuple(group for group in used if group != "train")
 
-    reports = reports_dir / kind / tag
-    models = models_dir / kind / tag
+    reports = reports_dir / PLUS_USR / tag
+    models = models_dir / PLUS_USR / tag
     reports.mkdir(parents=True, exist_ok=True)
     models.mkdir(parents=True, exist_ok=True)
 
@@ -169,7 +157,7 @@ def train_plus_usr(
     metrics.update(
         {
             "params": PARAMS,
-            "features": {"handcrafted": len(handcrafted), "usr": len(usr), "total": len(features)},
+            "features": {"handcrafted": len(columns), "usr": len(usr), "total": len(features)},
             "categorical": categorical,
             "embeddings": {
                 "tag": tag,
@@ -192,9 +180,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--embeddings", type=Path, required=True, help="каталог векторов, data/13_downstream/<тег>")
     parser.add_argument("--final-test", action="store_true", help="финальная оценка: оценить и test")
-    parser.add_argument("--usr-only", action="store_true", help="диагностика: CatBoost только на [USR]")
     args = parser.parse_args(argv)
-    metrics = train_plus_usr(args.embeddings, final_test=args.final_test, usr_only=args.usr_only)
+    metrics = train_plus_usr(args.embeddings, final_test=args.final_test)
     print(f"признаков: handcrafted {metrics['features']['handcrafted']} + usr {metrics['features']['usr']}")
     print(show(metrics))
 

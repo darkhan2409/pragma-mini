@@ -9,7 +9,7 @@ import pytest
 from catboost import CatBoostClassifier
 
 from churn.build import KEYS
-from churn.plus_usr import PLUS_USR, USR_ONLY, train_plus_usr
+from churn.plus_usr import train_plus_usr
 from churn.profile import CATEGORICAL
 from churn.target import TASKS
 from churn.train import train
@@ -70,7 +70,7 @@ def write_vectors(tmp_path, groups=("train", "val"), seed=0, damage=None) -> Non
     (directory / "meta.json").write_text(json.dumps(meta))
 
 
-def run(tmp_path, final_test=False, usr_only=False) -> dict:
+def run(tmp_path, final_test=False) -> dict:
     return train_plus_usr(
         tmp_path / "embeddings",
         data_dir=tmp_path / "data",
@@ -79,38 +79,33 @@ def run(tmp_path, final_test=False, usr_only=False) -> dict:
         raw_dir=tmp_path / "raw",
         future_dir=tmp_path / "future",
         final_test=final_test,
-        usr_only=usr_only,
     )
 
 
-def rows(tmp_path, name: str, kind: str = PLUS_USR) -> pd.DataFrame:
-    return pd.read_parquet(tmp_path / "reports" / kind / TAG / f"{name}.parquet")
+def rows(tmp_path, name: str) -> pd.DataFrame:
+    return pd.read_parquet(tmp_path / "reports" / "plus_usr" / TAG / f"{name}.parquet")
 
 
-@pytest.mark.parametrize("usr_only", [False, True])
-def test_the_model_takes_the_full_features_plus_usr_on_the_same_rows(tmp_path, template, usr_only) -> None:
+def test_the_model_takes_the_full_features_plus_usr_on_the_same_rows(tmp_path, template) -> None:
     """
-    catboost_plus_usr — полный X и usr_*; --usr-only — только usr_*,
-    без handcrafted и категориальных. Строки и метки у обоих — строки
-    CatBoost-бейзлайна.
+    catboost_plus_usr — полный X и usr_*, категориальные те же. Строки и
+    метки — строки CatBoost-бейзлайна.
     """
     raw = fresh(tmp_path, template)
     write_vectors(tmp_path)
-    metrics = run(tmp_path, usr_only=usr_only)
-    kind = USR_ONLY if usr_only else PLUS_USR
+    metrics = run(tmp_path)
 
     features = pd.read_parquet(tmp_path / "data" / "train" / "features.parquet")
-    columns = [] if usr_only else [name for name in features.columns if name not in KEYS]
+    columns = [name for name in features.columns if name not in KEYS]
     usr = [f"usr_{index}" for index in range(DIM)]
     assert metrics["features"] == {"handcrafted": len(columns), "usr": DIM, "total": len(columns) + DIM}
 
     for task in TASKS:
         model = CatBoostClassifier()
-        model.load_model(tmp_path / "models" / kind / TAG / f"catboost_{task}.cbm")
+        model.load_model(tmp_path / "models" / "plus_usr" / TAG / f"catboost_{task}.cbm")
         assert model.feature_names_ == columns + usr
         categorical = [model.feature_names_[index] for index in model.get_cat_feature_indices()]
-        assert categorical == [name for name in columns if name in CATEGORICAL]
-        assert bool(categorical) != usr_only
+        assert categorical == [name for name in columns if name in CATEGORICAL] and categorical
         block = metrics["tasks"][task]
         assert block["trees"] == block["best_iteration"] + 1
         assert block["threshold_rule"] == "max F1 on train inner holdout"
@@ -120,9 +115,9 @@ def test_the_model_takes_the_full_features_plus_usr_on_the_same_rows(tmp_path, t
           raw_dir=raw, future_dir=tmp_path / "future")
     for name in ("eval_rows", "train_rows"):
         baseline = pd.read_parquet(tmp_path / "reports" / f"{name}.parquet")
-        plus = rows(tmp_path, name, kind)
+        plus = rows(tmp_path, name)
         pd.testing.assert_frame_equal(plus[["task", *KEYS]], baseline[["task", *KEYS]])
-    assert set(rows(tmp_path, "eval_rows", kind)["group"]) == {"val"}
+    assert set(rows(tmp_path, "eval_rows")["group"]) == {"val"}
 
 
 @pytest.mark.parametrize(
@@ -142,17 +137,15 @@ def test_vectors_that_do_not_match_the_rows_are_refused(tmp_path, template, dama
         run(tmp_path)
 
 
-@pytest.mark.parametrize("usr_only", [False, True])
-def test_val_does_not_move_the_model(tmp_path, template, usr_only) -> None:
+def test_val_does_not_move_the_model(tmp_path, template) -> None:
     """
     Порог, число деревьев и сама модель — только от train: испорченные
     метки, признаки и векторы val их не меняют.
     """
     fresh(tmp_path, template)
     write_vectors(tmp_path)
-    kind = USR_ONLY if usr_only else PLUS_USR
-    first = run(tmp_path, usr_only=usr_only)
-    trained = rows(tmp_path, "train_rows", kind)
+    first = run(tmp_path)
+    trained = rows(tmp_path, "train_rows")
 
     spoil(tmp_path, "val")
     vectors = tmp_path / "embeddings" / "val.parquet"
@@ -160,9 +153,9 @@ def test_val_does_not_move_the_model(tmp_path, template, usr_only) -> None:
     frame["usr"] = [np.asarray(item) * 100 for item in frame["usr"]]
     frame.to_parquet(vectors, index=False)
 
-    second = run(tmp_path, usr_only=usr_only)
+    second = run(tmp_path)
     assert fitted(second) == fitted(first)
-    pd.testing.assert_frame_equal(rows(tmp_path, "train_rows", kind), trained)
+    pd.testing.assert_frame_equal(rows(tmp_path, "train_rows"), trained)
 
 
 def test_test_is_used_only_in_the_final_evaluation(tmp_path, template) -> None:

@@ -163,9 +163,9 @@ ACCEPTED и REJECTED сервер не ставит: это решение че�
 Файл входит в сборку: `npm run dev` подхватывает правку сразу, для `preview` нужен
 `npm run build`. Список экспериментов, принятое в эталон и протокол взяты из
 `audit/2026-09-28-project/wave4/README.md` (`src/content/wave.ts`); vitest сверяет с README
-каждый id. Главный вывод показывает диагностику `[USR]` прогона из экспорта: с `--run`
-экспортер берёт отчёт `data/13_downstream/<прогон>/report.json` пробы с `--control init`,
-если её векторы сняты с текущей выгрузки.
+каждый id. Главный вывод показывает три сценария прогона из экспорта (handcrafted → CatBoost,
+`[USR]` → LogisticRegression, handcrafted + `[USR]` → CatBoost): с `--run` экспортер берёт отчёт
+`data/13_downstream/<прогон>/report.json` его пробы, если её векторы сняты с текущей выгрузки.
 
 ## Иллюстрации
 

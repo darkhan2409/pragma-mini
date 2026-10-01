@@ -1,17 +1,13 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 
-import numpy as np
 import pandas as pd
-import pyarrow.parquet as pq
 
-from src.preprocessing.canonical.build import EVENTS_FILE
 from src.preprocessing.rawdata import read_manifest
-from src.preprocessing.settings import group_dir, raw_group_dir
+from src.preprocessing.settings import raw_group_dir
 
-from .settings import CHURN_FUTURE, CHURN_REPORTS, DOWNSTREAM_DIR, FUTURE_LABEL_GROUPS, cutoff
+from .settings import CHURN_FUTURE, CHURN_REPORTS, FUTURE_LABEL_GROUPS, cutoff
 
 
 # ============================================================
@@ -25,131 +21,15 @@ from .settings import CHURN_FUTURE, CHURN_REPORTS, DOWNSTREAM_DIR, FUTURE_LABEL_
 #                   учит churn_baseline: «действие клиента» определено
 #                   только там.
 #
-# Рядом — агрегатные признаки из наблюдаемой ленты 02_preprocessed,
-# только по событиям строго раньше T: счётчики событий каждого типа
-# за 30, 90 и 365 дней, число событий и давность последнего.
+# Там же — прогноз CatBoost на полном X и [USR] этих векторов
+# (catboost_plus_usr, python -m churn.plus_usr).
 # ============================================================
 
 
-COUNT_WINDOWS = (30, 90, 365)
-
 CHURN_TASKS = ("churn_active90",)
 
-# Прогнозы CatBoost на [USR] в отчётах churn-бейзлайна: набор →
-# каталог <каталог>/<тег> и ключ python -m churn.plus_usr.
-#   catboost_plus_usr  полный X бейзлайна и [USR]
-#   catboost_usr       только [USR] — диагностика головы
-USR_CATBOOST = {"catboost_plus_usr": ("plus_usr", ""), "catboost_usr": ("usr_only", " --usr-only")}
-
-TASKS_DIR = "tasks"
-
-# Состав таблицы: кэш прежнего состава пересчитывается.
-TABLE_FORMAT = 2
-
-
-def _counts(frame: pd.DataFrame, prefix: str) -> pd.DataFrame:
-    """
-    Клиенты × типы: число событий.
-    """
-
-    if frame.empty:
-        return pd.DataFrame(index=pd.Index([], name="client_id"))
-
-    table = frame.groupby(["client_id", "type"], observed=True).size().unstack(fill_value=0)
-    table.columns = [f"{prefix}{name}" for name in table.columns]
-
-    return table
-
-
-def _partial(table: pd.DataFrame, moment: pd.Timestamp) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Суммы и максимумы одной группы строк 02. Клиент может лежать в
-    двух соседних группах строк: суммы и максимумы складываются.
-    """
-
-    before = table[table["event_time"] < moment]
-
-    sums = [
-        before.groupby("client_id", observed=True).size().rename("n_events").to_frame(),
-        *[
-            _counts(before[before["event_time"] >= moment - pd.Timedelta(days=days)], f"n_{days}d_")
-            for days in COUNT_WINDOWS
-        ],
-    ]
-
-    last = before.groupby("client_id", observed=True)["event_time"].max().rename("last_event").to_frame()
-
-    return pd.concat(sums, axis=1), last
-
-
-def build_table(group: str, moment: datetime) -> pd.DataFrame:
-    """
-    По клиенту группы с событиями до T: счётчики и давность.
-    """
-
-    stamp = pd.Timestamp(moment)
-
-    events = pq.ParquetFile(group_dir(group) / EVENTS_FILE)
-
-    sums, lasts = [], []
-
-    for index in range(events.num_row_groups):
-
-        table = events.read_row_group(index, columns=["client_id", "event_time", "type"]).to_pandas()
-
-        part, last = _partial(table, stamp)
-
-        sums.append(part)
-        lasts.append(last)
-
-    total = pd.concat(sums).fillna(0).groupby(level=0).sum()
-    last = pd.concat(lasts).groupby(level=0).max()
-
-    total = total[total["n_events"] > 0].join(last, how="left")
-
-    windows = tuple(f"n_{days}d_" for days in COUNT_WINDOWS)
-    counts = sorted(name for name in total.columns if name.startswith(windows))
-
-    out = pd.concat(
-        [
-            total["n_events"].astype(np.int64),
-            (stamp - total["last_event"]).dt.total_seconds().rename("gap_seconds"),
-            total[counts].astype(np.int64),
-        ],
-        axis=1,
-    )
-    out.index.name = "client_id"
-
-    return out.sort_index()
-
-
-def table(group: str) -> pd.DataFrame:
-    """
-    Таблица задач группы на её T — из кэша, если он собран по тому
-    же файлу 02 и тому же T.
-    """
-
-    moment = cutoff(group)
-    source = group_dir(group) / EVENTS_FILE
-    stat = source.stat()
-
-    stamp = {"format": TABLE_FORMAT, "cutoff": moment.isoformat(), "source": str(source),
-             "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
-
-    directory = DOWNSTREAM_DIR / TASKS_DIR
-    path = directory / f"{group}.parquet"
-    meta = directory / f"{group}.json"
-
-    if path.exists() and meta.exists() and json.loads(meta.read_text(encoding="utf-8")) == stamp:
-        return pd.read_parquet(path)
-
-    built = build_table(group, moment)
-
-    directory.mkdir(parents=True, exist_ok=True)
-    built.to_parquet(path)
-    meta.write_text(json.dumps(stamp, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    return built
+# Каталог catboost_plus_usr в отчётах churn-бейзлайна: plus_usr/<тег>.
+PLUS_USR = "plus_usr"
 
 
 def churn_sources(group: str) -> dict:
@@ -225,11 +105,11 @@ def churn_thresholds() -> dict[str, float]:
     return {task: float(block["threshold"]) for task, block in metrics["tasks"].items()}
 
 
-def usr_catboost(name: str, tag: str, used: tuple[str, ...], embedded: dict) -> dict | None:
+def plus_usr(tag: str, used: tuple[str, ...], embedded: dict) -> dict | None:
     """
-    Прогнозы CatBoost churn-бейзлайна на [USR] векторов тега — набор
-    name из USR_CATBOOST: порог по задаче и строки (churn, score) по
-    задаче и группе. None — для этих векторов он не обучен.
+    catboost_plus_usr churn-бейзлайна (полный X + [USR] векторов тега →
+    CatBoost): порог по задаче и строки (churn, score) по задаче и
+    группе. None — для этих векторов он не обучен.
 
     embedded — meta.json векторов. Годится только CatBoost, обученный
     ровно на них: тот же тег и чекпойнт и те же записи групп (у снятых
@@ -237,8 +117,7 @@ def usr_catboost(name: str, tag: str, used: tuple[str, ...], embedded: dict) -> 
     тех же источниках строк, что и сам бейзлайн.
     """
 
-    folder, flag = USR_CATBOOST[name]
-    directory = CHURN_REPORTS / folder / tag
+    directory = CHURN_REPORTS / PLUS_USR / tag
 
     if not (directory / "metrics.json").exists():
         return None
@@ -261,7 +140,7 @@ def usr_catboost(name: str, tag: str, used: tuple[str, ...], embedded: dict) -> 
             problems.append(f"векторы {group} сняты заново после его обучения")
 
     if problems:
-        raise ValueError(f"{name} {tag}: {'; '.join(problems)} — python -m churn.plus_usr{flag} заново")
+        raise ValueError(f"catboost_plus_usr {tag}: {'; '.join(problems)} — python -m churn.plus_usr заново")
 
     rows = pd.concat(
         [pd.read_parquet(directory / f"{name}.parquet") for name in ("train_rows", "eval_rows")], ignore_index=True
@@ -309,12 +188,9 @@ def churn_rows(task: str, group: str) -> pd.DataFrame:
 
 __all__ = [
     "CHURN_TASKS",
-    "COUNT_WINDOWS",
-    "USR_CATBOOST",
-    "build_table",
+    "PLUS_USR",
     "churn_rows",
     "churn_sources",
     "churn_thresholds",
-    "table",
-    "usr_catboost",
+    "plus_usr",
 ]

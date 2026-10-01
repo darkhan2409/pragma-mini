@@ -6,14 +6,18 @@ import { useStore } from '../../store'
 // ШАГ 18. ГЛАВНЫЙ ВЫВОД
 // ============================================================
 //
-// Бит 0 — диагностика [USR] прогона на val из экспорта: векторы
-// модели и начальных весов × регрессия и CatBoost только на [USR],
-// парные разницы с 95% интервалом. Вывод — по интервалу, не руками.
-// Бит 1 — MLM quality ≠ representation quality; val loss B0 из
-// экспорта прогона. Бит 2 — E1 как гипотеза, без обещаний.
+// Бит 0 — три сценария прогона на val из экспорта: handcrafted →
+// CatBoost, [USR] → регрессия, handcrafted и [USR] → CatBoost, с
+// парной разницей к первому и 95% интервалом. Вывод — по интервалу,
+// не руками. Бит 1 — MLM quality ≠ representation quality; val loss
+// B0 из экспорта прогона. Бит 2 — E1 как гипотеза, без обещаний.
 // ============================================================
 
-const HIGHLIGHT = new Set(['usr', 'init:usr'])
+const LABEL: Record<string, string> = {
+  catboost: 'handcrafted → CatBoost',
+  usr: '[USR] → LogisticRegression',
+  catboost_plus_usr: 'handcrafted + [USR] → CatBoost',
+}
 
 function signed(value: number): string {
   return `${value >= 0 ? '+' : '−'}${Math.abs(value).toFixed(3)}`
@@ -23,90 +27,62 @@ function interval(delta: Interval): string {
   return `${signed(delta.mean)} [${signed(delta.low)}, ${signed(delta.high)}]`
 }
 
-// Что говорит интервал разницы: выше нуля, ниже нуля или неотличимо.
-function verdict(delta: Interval, better: string, worse: string, same: string): string {
-  if (delta.low > 0) return better
-  if (delta.high < 0) return worse
-  return same
+// Что говорит интервал разницы с CatBoost на handcrafted-признаках.
+function verdict(delta: Interval): string {
+  if (delta.low > 0) return '[USR] даёт сигнал сверх handcrafted-признаков'
+  if (delta.high < 0) return 'с [USR] модель хуже'
+  return '[USR] почти ничего не добавляет'
 }
 
-function Diagnostic() {
-  const diagnostic = demo.downstream.usr_diagnostic
+function Scenarios() {
+  const scenarios = demo.downstream.scenarios
 
-  if (!diagnostic) {
+  if (!scenarios) {
     return (
       <div className="card">
-        <h3>ДИАГНОСТИКА [USR]</h3>
-        <p className="source">
-          Диагностики в экспорте нет: python -m src.downstream.probe --tag &lt;прогон&gt; --control init, затем
-          export_demo.py --run.
-        </p>
+        <h3>ТРИ СЦЕНАРИЯ</h3>
+        <p className="source">Сравнения в экспорте нет: python -m src.downstream.probe --tag &lt;прогон&gt;, затем export_demo.py --run.</p>
       </div>
     )
   }
 
-  const { tag, control } = diagnostic
-  const label: Record<string, string> = {
-    [`${control}:usr`]: `${control} [USR] + регрессия`,
-    usr: `${tag} [USR] + регрессия`,
-    catboost_usr: `${tag} [USR] + CatBoost`,
-    [`${control}:catboost_usr`]: `${control} [USR] + CatBoost`,
-  }
-
   return (
     <div className="card">
-      {Object.entries(diagnostic.tasks).map(([task, block]) => {
-        const pretrain = block.deltas.usr_vs_control
-        const head = block.deltas.catboost_vs_lr
+      {Object.entries(scenarios.tasks).map(([task, block]) => {
+        const plus = block.cells.catboost_plus_usr?.vs_reference
         return (
           <div key={task}>
-            <h3>{`ДИАГНОСТИКА [USR] — ${task}, ${diagnostic.group.toUpperCase()}`}</h3>
+            <h3>{`ТРИ СЦЕНАРИЯ — ${task}, ${scenarios.group.toUpperCase()}`}</h3>
             <table className="grid">
               <thead>
                 <tr>
-                  <th>модель</th>
+                  <th>сценарий</th>
                   <th style={{ textAlign: 'right' }}>PR-AUC</th>
                   <th style={{ textAlign: 'right' }}>ROC-AUC</th>
+                  <th style={{ textAlign: 'right' }}>log-loss</th>
                 </tr>
               </thead>
               <tbody>
-                {Object.keys(label)
-                  .filter((name) => name in block.cells)
-                  .map((name) => (
-                    <tr key={name} style={HIGHLIGHT.has(name) ? { background: 'rgba(240,180,76,0.07)' } : undefined}>
-                      <td className="mono">{label[name]}</td>
-                      <td className="num">{block.cells[name].pr_auc.toFixed(3)}</td>
-                      <td className="num">{block.cells[name].roc_auc.toFixed(3)}</td>
-                    </tr>
-                  ))}
+                {Object.entries(block.cells).map(([name, cell]) => (
+                  <tr key={name} style={name === 'usr' ? { background: 'rgba(240,180,76,0.07)' } : undefined}>
+                    <td className="mono">{LABEL[name] ?? name}</td>
+                    <td className="num">{cell.pr_auc.toFixed(3)}</td>
+                    <td className="num">{cell.roc_auc.toFixed(3)}</td>
+                    <td className="num">{cell.log_loss.toFixed(4)}</td>
+                  </tr>
+                ))}
               </tbody>
             </table>
-            {pretrain ? (
-              <p style={{ marginTop: 12 }}>
-                {`${tag} − ${control}, регрессия: PR-AUC ${interval(pretrain.pr_auc)} — `}
-                {verdict(
-                  pretrain.pr_auc,
-                  'обучение сделало [USR] полезнее',
-                  'обученный [USR] хуже начальных весов',
-                  'обученный [USR] не отличим от начальных весов',
-                )}
-                .
-              </p>
-            ) : null}
-            {head ? (
-              <p>
-                {`CatBoost − регрессия на [USR] ${tag}: PR-AUC ${interval(head.pr_auc)} — `}
-                {verdict(
-                  head.pr_auc,
-                  'нелинейная голова находит больше',
-                  'нелинейная голова находит меньше',
-                  'нелинейная голова больше не находит',
-                )}
-                .
-              </p>
-            ) : null}
+            {Object.entries(block.cells).map(([name, cell]) =>
+              cell.vs_reference ? (
+                <p key={name} style={{ marginTop: 8 }}>
+                  {`${LABEL[name] ?? name} − ${LABEL[block.reference] ?? block.reference}: PR-AUC ${interval(cell.vs_reference.pr_auc)}`}
+                  {name === 'catboost_plus_usr' && plus ? ` — ${verdict(plus.pr_auc)}.` : '.'}
+                </p>
+              ) : null,
+            )}
             <p className="source">
-              {`${block.rows} клиентов, ${block.positives} ушедших; парный bootstrap, 95% интервал. Источник: ${diagnostic.source}.`}
+              {`${block.rows} клиентов, ${block.positives} ушедших; парный bootstrap, 95% интервал. Источник: ${scenarios.source}.`}
             </p>
           </div>
         )
@@ -125,7 +101,7 @@ export default function InsightScreen() {
       <p className="sub">Хорошее предсказание скрытых токенов ещё не делает вектор клиента полезным для задач.</p>
 
       <div className="two">
-        <Diagnostic />
+        <Scenarios />
 
         <div>
           {beat >= 1 ? (
@@ -141,7 +117,7 @@ export default function InsightScreen() {
                   <span className="mono" style={{ color: 'var(--text)' }}>
                     {run.epochs.map((item) => item.val_loss?.toFixed(3)).join(' → ')}
                   </span>
-                  . Это качество MLM, а не вектора клиента: на задаче его [USR] сравнивается с [USR] начальных весов слева.
+                  . Это качество MLM, а не вектора клиента: на задаче его [USR] — слева.
                 </p>
               ) : null}
             </motion.div>

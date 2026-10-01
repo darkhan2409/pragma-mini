@@ -20,7 +20,6 @@ from .settings import EMBEDDINGS_META, FINAL_GROUPS, cutoff, downstream_dir, gro
 # ============================================================
 #
 #   python -m src.downstream.embed --checkpoint data/runs/w4-b0/best_checkpoint.pt --tag w4-b0
-#   python -m src.downstream.embed --checkpoint init --tag init   # начальные веса, контроль
 #
 # По умолчанию — train и val; test только в финальной оценке
 # (--final-test), пока идут эксперименты его векторы не нужны.
@@ -29,9 +28,7 @@ from .settings import EMBEDDINGS_META, FINAL_GROUPS, cutoff, downstream_dir, gro
 # вход собран из прошлого (at_cutoff), один проход модели без
 # градиента, четыре вектора на клиента (Model.readouts) и две
 # величины о самом входе: число событий и давность последнего
-# события до T. Она лежит рядом отдельной колонкой: при отсчёте
-# времени от последнего события (time_anchor = last_event) модели она
-# не видна, а контроль «только давность» нужен при любом отсчёте.
+# события до T. Сравнение на задачах берёт из них [USR] (usr).
 #
 # Клиент без событий до T пропускается: модель такого входа не
 # видела, и ни одна из задач его не содержит. Сколько их — в
@@ -61,23 +58,11 @@ def schema() -> pa.Schema:
 
 def trained_model(checkpoint: str, device):
     """
-    Модель и её описание. init — начальные веса backbone и головы,
-    без обучения: контроль, что вектор даёт обучение, а не вход.
+    Обученная модель и её описание.
     """
 
-    from src.mlm.model import load_model
     from src.mlm.settings import MlmConfig
     from src.mlm.train import CheckpointError, data_record, load_trained
-
-    if checkpoint == "init":
-        config = MlmConfig()
-        model = load_model(
-            seed=config.seed,
-            events_per_chunk=config.events_per_chunk,
-            label_smoothing=config.label_smoothing,
-            device=device,
-        ).eval()
-        return model, config, {"checkpoint": "init", "epoch": 0}
 
     model, state = load_trained(Path(checkpoint), device)
 
@@ -215,7 +200,7 @@ def run(args) -> int:
         print(f"[embed] {error}")
         return EXIT_BLOCKED
 
-    tag = args.tag or ("init" if args.checkpoint == "init" else Path(args.checkpoint).stem)
+    tag = args.tag or Path(args.checkpoint).stem
 
     directory = downstream_dir(tag)
     directory.mkdir(parents=True, exist_ok=True)
@@ -250,7 +235,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m src.downstream.embed")
     parser.add_argument(
         "--checkpoint", required=True,
-        help="чекпойнт или веса эпохи обученной модели; init — начальные веса",
+        help="чекпойнт или веса эпохи обученной модели",
     )
     parser.add_argument(
         "--groups", nargs="+", choices=FINAL_GROUPS, default=None,

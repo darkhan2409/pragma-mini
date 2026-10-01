@@ -53,11 +53,9 @@ PLACES = (
     ("src.history.settings", "HISTORY_DIR", "10_history"),
     ("src.mlm.settings", "MLM_DIR", "11_mlm"),
     ("src.mlm.settings", "TRAIN_DIR", "12_train"),
-    # Оценка на задачах: векторы, кэш таблиц задач и отчёты
-    # churn-бейзлайна. tasks держит свои копии путей, снятые при
-    # импорте.
+    # Оценка на задачах: векторы и отчёты churn-бейзлайна. tasks
+    # держит свои копии путей, снятые при импорте.
     ("src.downstream.settings", "DOWNSTREAM_DIR", "13_downstream"),
-    ("src.downstream.tasks", "DOWNSTREAM_DIR", "13_downstream"),
     ("src.downstream.settings", "CHURN_REPORTS", "churn_baseline/reports"),
     ("src.downstream.tasks", "CHURN_REPORTS", "churn_baseline/reports"),
     ("src.downstream.settings", "CHURN_FUTURE", "churn_baseline/data/future"),

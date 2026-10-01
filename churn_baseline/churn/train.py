@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from catboost import CatBoostClassifier, Pool
-from sklearn.metrics import average_precision_score, confusion_matrix, precision_recall_curve, roc_auc_score
+from sklearn.metrics import average_precision_score, confusion_matrix, log_loss, precision_recall_curve, roc_auc_score
 from sklearn.model_selection import StratifiedShuffleSplit
 
 from .build import KEYS
@@ -123,6 +123,9 @@ def evaluate(y: np.ndarray, score: np.ndarray, threshold: float) -> dict:
         "positive_rate": float(y.mean()),
         "roc_auc": float(roc_auc_score(y, score)),
         "pr_auc": float(average_precision_score(y, score)),
+        # Средняя кросс-энтропия по вероятности, без порога: та же
+        # Logloss, на которой учится CatBoost.
+        "log_loss": float(log_loss(y, score, labels=[0, 1])),
         "f1": float(f1),
         "precision": float(precision),
         "recall": float(recall),
@@ -290,14 +293,14 @@ def show(metrics: dict) -> str:
             f"деревьев {block['trees']}; порог {block['threshold']:.3f} ({block['threshold_rule']})"
         )
         lines.append(
-            f"  {'группа':<6} {'строк':>6} {'churn=1':>8} {'доля':>7} {'ROC-AUC':>8} {'PR-AUC':>7} "
+            f"  {'группа':<6} {'строк':>6} {'churn=1':>8} {'доля':>7} {'ROC-AUC':>8} {'PR-AUC':>7} {'LogLoss':>8} "
             f"{'Precision':>9} {'Recall':>7} {'F1':>6}   TN / FP / FN / TP"
         )
         for group, result in block["groups"].items():
             matrix = result["confusion_matrix"]
             lines.append(
                 f"  {group:<6} {result['rows']:>6} {result['positives']:>8} {result['positive_rate']:>7.1%} "
-                f"{result['roc_auc']:>8.3f} {result['pr_auc']:>7.3f} {result['precision']:>9.3f} "
+                f"{result['roc_auc']:>8.3f} {result['pr_auc']:>7.3f} {result['log_loss']:>8.4f} {result['precision']:>9.3f} "
                 f"{result['recall']:>7.3f} {result['f1']:>6.3f}   "
                 f"{matrix['tn']} / {matrix['fp']} / {matrix['fn']} / {matrix['tp']}"
             )
