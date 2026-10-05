@@ -29,9 +29,6 @@ STATES = (
     "closed_relationship",
 )
 
-PAUSE_KINDS = ("full", "app_only", "cards_only", "other_bank", "seasonal")
-
-
 @dataclass(frozen=True)
 class LifecycleParams:
 

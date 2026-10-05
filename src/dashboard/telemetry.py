@@ -18,8 +18,7 @@ from pathlib import Path
 #   step   шаг оптимизатора: loss, lr, норма градиента до клипа,
 #          токены и время окна;
 #   epoch  полная эпоха: train_loss, val_loss, время, нормы, пики
-#          памяти CUDA. Строки прежнего формата без kind — тоже
-#          эпохи.
+#          памяти CUDA.
 #
 # Читатель только читает файл, с того места, где остановился в
 # прошлый раз: обучение он не тормозит и в GPU не заходит.
@@ -55,7 +54,7 @@ class Telemetry:
 
     def add(self, record: dict) -> None:
 
-        kind = record.get("kind", "epoch")
+        kind = record.get("kind")
 
         if kind == "run":
             step, epoch = int(record["step"]), int(record["epoch"])

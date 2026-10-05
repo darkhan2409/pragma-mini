@@ -16,6 +16,7 @@ import { EventRegion } from './regions/Event'
 import { EventEncoderRegion } from './regions/EventEncoder'
 import { ClientEmbeddingRegion, DownstreamRegion } from './regions/Final'
 import { HistoryRegion } from './regions/History'
+import { CatBoostTrainingRegion, LrTrainingRegion } from './regions/Heads'
 import { HistoryEncoderRegion } from './regions/HistoryEncoder'
 import { LoopRegion } from './regions/Loop'
 import { MlmRegion } from './regions/Mlm'
@@ -51,6 +52,8 @@ const PART_SHOT: Record<string, ShotId> = {
   loop: 'loop',
   clientEmbedding: 'final',
   downstream: 'downstream',
+  lrTraining: 'lrTraining',
+  catboostTraining: 'catboostTraining',
 }
 
 // Панель деталей EXPLORE закрывает справа столько пикселей (с
@@ -227,6 +230,8 @@ export function Stage() {
           <LoopRegion />
           <ClientEmbeddingRegion />
           <DownstreamRegion />
+          <LrTrainingRegion />
+          <CatBoostTrainingRegion />
         </Suspense>
       </Canvas>
     </div>

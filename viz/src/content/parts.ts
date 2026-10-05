@@ -22,6 +22,11 @@ const enc = arch.encoders
 const t = demo.training
 const m = demo.masking
 
+// Обучение голов первой задачи (шаги 17 и 18); без экспорта — прочерки.
+const heads = Object.values(demo.downstream.training?.tasks ?? {})[0]
+const lr = heads?.lr
+const boost = heads?.catboost ?? {}
+
 function params(n: number): string {
   return int(n)
 }
@@ -229,5 +234,40 @@ export const PARTS: Record<string, Part> = {
       'Фрод на уровне операции не оценивается: вектор нужен строго до каждой операции, а история двунаправленная.',
     ],
     step: 'downstream',
+  },
+  lrTraining: {
+    title: 'Обучение регрессии',
+    code: 'src/downstream/probe.py · fit_predict, oof_threshold',
+    facts: [
+      ['фолдов', lr ? String(lr.folds) : '—'],
+      ['сетка C', lr ? `${lr.grid[0].C} … ${lr.grid[lr.grid.length - 1].C}` : '—'],
+      ['выбран C', lr ? String(lr.C) : '—'],
+      ['порог', lr ? lr.threshold.toFixed(3) : '—'],
+      ['train', lr ? `${int(lr.train.rows)} клиентов` : '—'],
+    ],
+    notes: [
+      'StandardScaler учится внутри каждого фолда, не на всём train.',
+      'C — по наименьшему log-loss на отложенных фолдах; порог — max F1 по их же прогнозам.',
+      'val в выбор C и порога не попадает.',
+    ],
+    step: 'lrTraining',
+  },
+  catboostTraining: {
+    title: 'Обучение CatBoost',
+    code: 'churn_baseline/churn/train.py · fit_task',
+    facts: [
+      ['отложено из train', boost.catboost ? `${Math.round(boost.catboost.holdout_share * 100)}%` : '—'],
+      ['seed', demo.downstream.training ? String(demo.downstream.training.seed) : '—'],
+      ...Object.entries(boost).map(([name, item]): [string, string] => [
+        name === 'catboost' ? 'деревьев, handcrafted' : 'деревьев, + [USR]',
+        String(item.trees),
+      ]),
+    ],
+    notes: [
+      'Ранняя остановка по PR-AUC на отложенной части train, там же порог max F1.',
+      'Потом обучение на всём train с тем же числом деревьев.',
+      'val только оценивает.',
+    ],
+    step: 'catboostTraining',
   },
 }

@@ -4,8 +4,8 @@
 //
 // Один мир, регионы вдоль X в порядке pipeline. Параллельные
 // дорожки: календарь под энкодером события, анкета над историей,
-// обучение («верхняя палуба») над History Encoder. Позиции
-// регионов — только здесь.
+// обучение («верхняя палуба») над History Encoder, обучение CatBoost
+// под обучением регрессии. Позиции регионов — только здесь.
 // ============================================================
 
 export type Vec3 = [number, number, number]
@@ -26,6 +26,8 @@ export const REGIONS = [
   'loop',
   'clientEmbedding',
   'downstream',
+  'lrTraining',
+  'catboostTraining',
 ] as const
 
 export type RegionId = (typeof REGIONS)[number]
@@ -46,6 +48,8 @@ export const ANCHOR: Record<RegionId, Vec3> = {
   loop: [224, 16, 0],
   clientEmbedding: [214, 0, 0],
   downstream: [240, 0, 0],
+  lrTraining: [272, 0, 0],
+  catboostTraining: [272, -16, 0],
 }
 
 // Заголовки регионов на общем плане (Rail).
@@ -64,6 +68,8 @@ export const REGION_TITLE: Partial<Record<RegionId, string>> = {
   loop: 'Цикл обучения',
   clientEmbedding: 'Client Embedding',
   downstream: 'Задачи',
+  lrTraining: 'Обучение регрессии',
+  catboostTraining: 'Обучение CatBoost',
 }
 
 // Путь данных для рельса: основная линия и притоки.
@@ -77,6 +83,7 @@ export const RAIL_MAIN: RegionId[] = [
   'historyEncoder',
   'clientEmbedding',
   'downstream',
+  'lrTraining',
 ]
 
 export const RAIL_BRANCHES: [RegionId, RegionId][] = [
@@ -87,6 +94,8 @@ export const RAIL_BRANCHES: [RegionId, RegionId][] = [
   ['history', 'rope'],
   ['historyEncoder', 'mlm'],
   ['mlm', 'loop'],
+  // CatBoost учится не на [USR] регрессии — нижняя дорожка от задач.
+  ['downstream', 'catboostTraining'],
 ]
 
 export function at(region: RegionId, dx = 0, dy = 0, dz = 0): Vec3 {

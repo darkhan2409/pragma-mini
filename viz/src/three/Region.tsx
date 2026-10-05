@@ -34,6 +34,8 @@ const OWN_STEP: Record<RegionId, string> = {
   loop: 'loop',
   clientEmbedding: 'final',
   downstream: 'downstream',
+  lrTraining: 'lrTraining',
+  catboostTraining: 'catboostTraining',
 }
 
 // Детали EXPLORE по региону.
@@ -52,6 +54,8 @@ const PART: Partial<Record<RegionId, string>> = {
   loop: 'loop',
   clientEmbedding: 'clientEmbedding',
   downstream: 'downstream',
+  lrTraining: 'lrTraining',
+  catboostTraining: 'catboostTraining',
 }
 
 export function Region({

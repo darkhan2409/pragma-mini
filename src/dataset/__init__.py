@@ -9,7 +9,3 @@
 
 Маскирование, MLM-голова и обучение сюда не входят.
 """
-
-from .version import FORMAT_VERSION, IMPLEMENTATION_VERSION, SCHEMA_VERSION
-
-__all__ = ["FORMAT_VERSION", "IMPLEMENTATION_VERSION", "SCHEMA_VERSION"]

@@ -75,8 +75,21 @@ def cutoff(group: str, raw_dir: Path = RAW_DIR) -> datetime:
     """
     T группы, местная полночь, как и конец выгрузки:
     - группа с метками из продолжения — сам конец выгрузки;
-    - остальные — самый поздний момент, у которого окно (T, T + HORIZON]
-      целиком лежит внутри выгрузки.
+    - остальные — 1-е число месяца, в котором лежит «конец выгрузки −
+      HORIZON» (month_start): окно (T, T + HORIZON] целиком внутри
+      выгрузки.
     """
     end = period_end(group, raw_dir)
-    return end if group in FUTURE_LABEL_GROUPS else end - HORIZON
+    return end if group in FUTURE_LABEL_GROUPS else month_start(end - HORIZON)
+
+
+def month_start(moment: datetime) -> datetime:
+    """
+    Местная полночь 1-го числа месяца, в котором лежит moment.
+
+    T всех групп — 1-е число: в 23:55 последнего дня месяца банк
+    пишет снимки остатка, кэшбэк, комиссии и проценты, и T train
+    стоит сразу после этой пачки. T val и test, взятый в другой день
+    месяца, дал бы модели PRAGMA вход другой фазы.
+    """
+    return moment.replace(day=1, hour=0, minute=0, second=0, microsecond=0)

@@ -161,6 +161,9 @@ def fit_task(rows: pd.DataFrame, columns: list[str], categorical: list[str]) -> 
 
     best = int(stopped.get_best_iteration())
     threshold = threshold_max_f1(y[held], stopped.predict_proba(held_pool)[:, 1])
+    # PR-AUC на inner_holdout после каждого дерева: по ней выбрана
+    # лучшая итерация.
+    curve = [round(float(value), 4) for value in stopped.get_evals_result()["validation"]["PRAUC"]]
 
     params = {key: value for key, value in PARAMS.items() if key not in EARLY_STOPPING}
     model = CatBoostClassifier(**{**params, "iterations": best + 1})
@@ -178,6 +181,7 @@ def fit_task(rows: pd.DataFrame, columns: list[str], categorical: list[str]) -> 
         # столько же у модели на всём train.
         "best_iteration": best,
         "trees": int(model.tree_count_),
+        "holdout_curve": curve,
     }
 
 

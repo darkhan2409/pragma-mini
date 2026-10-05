@@ -75,12 +75,6 @@ WEEKEND_SOLO = (
     RoutineStep("sports", 9, 20, "other", 0.18),
 )
 
-MONTHLY = (
-    RoutineStep("utilities", 9, 21, "home", 0.0),
-    RoutineStep("telecom", 9, 21, "home", 0.0),
-)
-
-
 def routine_for(
     weekday: int,
     transport: str,

@@ -12,7 +12,6 @@ from src.dataset.build import SAMPLES_SCHEMA
 from src.dataset.lineage import lineage, write_lineage
 from src.dataset.settings import DEFAULT_ANCHOR, META_FILE, SAMPLES_FILE, dataset_dir
 from src.embedding.layer import InputEmbedding
-from src.embedding.settings import EmbeddingConfig
 from src.event.encoder import EventEncoder
 from src.event.settings import EventConfig
 from src.history.encoder import HistoryEncoder
@@ -447,8 +446,6 @@ def write_weights(
     Начальные веса модели так, как их готовит конвейер: входной слой
     этапа 06 группы и — для train — backbone настоящим init_backbone.
     backbone=False оставляет только этап 06.
-
-    Этапы 08–10 весов модели не дают: они диагностика.
     """
 
     import torch

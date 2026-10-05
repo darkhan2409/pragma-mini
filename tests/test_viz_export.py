@@ -261,3 +261,95 @@ def test_the_scenarios_are_taken_only_from_a_current_probe(stage):
     record["groups"]["val"]["raw_events_sha256"] = "previous-generation"
     meta.write_text(json.dumps(record))
     assert module.scenarios("m") is None
+
+
+def test_curve_thinning_keeps_the_first_best_and_last_iteration():
+
+    module = exporter()
+
+    curve = [index / 1000 for index in range(675)]
+    curve[374] = 0.99
+    thinned = module.thinned(curve, 374, limit=200)
+
+    assert len(thinned) <= 202
+    assert [thinned[0][0], thinned[-1][0]] == [0, 674]
+    assert [374, 0.99] in thinned
+    assert all(curve[index] == value for index, value in thinned)
+    assert module.thinned([0.1, 0.2], 1) == [[0, 0.1], [1, 0.2]]
+
+
+def test_training_is_taken_only_from_current_reports(stage):
+    """
+    Процесс обучения голов (шаги 17 и 18): перебор C — из отчёта пробы,
+    кривая ранней остановки и переобучение CatBoost — из отчётов
+    churn_baseline. Отчёт другой выгрузки или с test — блока нет.
+    """
+
+    import json
+
+    from src.downstream import settings
+    from src.downstream.settings import downstream_dir
+    from tests.test_downstream import CHURN_ROWS, raw_groups, write_churn_reports, write_vectors
+
+    module = exporter()
+
+    def cell(pr: float, extra: dict | None = None) -> dict:
+        result = {"val": {"pr_auc": pr, "roc_auc": pr + 0.4, "log_loss": 0.2, "f1": pr / 2, "rows": 3, "positives": 1}}
+        result.update(extra or {})
+        return result
+
+    grid = [{"C": 0.01, "log_loss": 0.23}, {"C": 0.1, "log_loss": 0.22}, {"C": 1.0, "log_loss": 0.24}]
+    report = {
+        "tag": "m", "final_test": False, "groups": ["train", "val"],
+        "tasks": {"churn_active90": {
+            "reference": "catboost", "rows": {"train": 5, "val": 3}, "positives": {"train": 2, "val": 1},
+            "results": {
+                "catboost": cell(0.58),
+                "usr": cell(0.24, {"C": 0.1, "threshold": 0.11, "cv": grid}),
+                "catboost_plus_usr": cell(0.49),
+            },
+        }},
+    }
+
+    raw_groups("train", "val")
+    write_vectors("m", ("train", "val"))
+    (downstream_dir("m") / "report.json").write_text(json.dumps(report))
+    write_churn_reports(CHURN_ROWS)
+
+    def fitted(best: int) -> dict:
+        curve = [0.3 + 0.01 * index for index in range(best + 1)] + [0.2] * 5
+        return {
+            "inner_train": {"rows": 4, "positives": 2, "positive_rate": 0.5},
+            "inner_holdout": {"rows": 1, "positives": 0, "positive_rate": 0.0},
+            "threshold": 0.28, "best_iteration": best, "trees": best + 1, "holdout_curve": curve,
+            "groups": {"val": {"pr_auc": 0.577, "roc_auc": 0.969, "f1": 0.6, "rows": 3, "positives": 1}},
+        }
+
+    sources = json.loads((settings.CHURN_REPORTS / "metrics.json").read_text())["sources"]
+    baseline = {"final_test": False, "sources": sources, "features": 116, "holdout_share": 0.2,
+                "params": {"random_seed": 42}, "tasks": {"churn_active90": fitted(7)}}
+    plus = {"final_test": False, "sources": sources, "features": {"handcrafted": 116, "usr": 128, "total": 244},
+            "params": {"random_seed": 42}, "tasks": {"churn_active90": fitted(2)}}
+    (settings.CHURN_REPORTS / "metrics.json").write_text(json.dumps(baseline))
+    (settings.CHURN_REPORTS / "plus_usr" / "m").mkdir(parents=True)
+    (settings.CHURN_REPORTS / "plus_usr" / "m" / "metrics.json").write_text(json.dumps(plus))
+
+    found = module.training("m")
+    task = found["tasks"]["churn_active90"]
+
+    assert found["seed"] == 42
+    assert task["lr"]["grid"] == grid and task["lr"]["C"] == 0.1 and task["lr"]["folds"] == 3
+    assert task["lr"]["train"] == {"rows": 5, "positives": 2}
+    assert task["catboost"]["catboost"]["features"] == 116 and task["catboost"]["catboost"]["usr"] == 0
+    assert task["catboost"]["catboost_plus_usr"]["features"] == 244 and task["catboost"]["catboost_plus_usr"]["usr"] == 128
+    best = task["catboost"]["catboost"]
+    assert [best["best_iteration"], best["trees"]] == [7, 8]
+    assert [7, max(point[1] for point in best["curve"])] in best["curve"]
+
+    (settings.CHURN_REPORTS / "metrics.json").write_text(json.dumps(dict(baseline, final_test=True)))
+    assert module.training("m") is None
+
+    stale = json.loads(json.dumps(sources))
+    stale["val"]["feature_history_events_sha256"] = "previous-generation"
+    (settings.CHURN_REPORTS / "metrics.json").write_text(json.dumps(dict(baseline, sources=stale)))
+    assert module.training("m") is None

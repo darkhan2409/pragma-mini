@@ -419,6 +419,3 @@ def stable_unit(*parts: object) -> float:
 
     return stable_hash(current_seed(), *parts) / _UNIT
 
-
-def second_of_day(ts) -> int:
-    return ts.hour * 3600 + ts.minute * 60 + ts.second

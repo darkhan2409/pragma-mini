@@ -124,10 +124,6 @@ class BatchInput:
     def width(self) -> int:
         return int(self.key_ids.shape[1])
 
-    @property
-    def profile_width(self) -> int:
-        return int(self.profile_key_ids.shape[1])
-
 
 @dataclass(frozen=True)
 class Loaded:
@@ -152,7 +148,7 @@ class Source:
     Вход слоя одной группы, открытый один раз.
 
     masking — по какому конфигу разыгрывается маска; без него
-    MaskingConfig(), как у этапа 11 и обучения по умолчанию.
+    MaskingConfig(), как у обучения по умолчанию.
     """
 
     def __init__(
@@ -272,14 +268,6 @@ class Source:
         return masked["value_ids"]
 
 
-def load_batch(group: str, index: int) -> Loaded:
-    """
-    Один батч группы, когда остальные не нужны.
-    """
-
-    return Source(group).batch(index)
-
-
 def _padded(rows: list[dict], pad: int) -> list[dict]:
     """
     Клиенты группы, дополненные до общей ширины по трём осям:
@@ -385,5 +373,4 @@ __all__ = [
     "InputError",
     "Loaded",
     "Source",
-    "load_batch",
 ]

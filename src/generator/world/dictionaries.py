@@ -163,38 +163,15 @@ CATEGORY_BY_NAME = {item.name: item for item in CATEGORIES}
 
 CATEGORY_NAMES = tuple(item.name for item in CATEGORIES)
 
-SECTORS = tuple(sorted({item.sector for item in CATEGORIES}))
-
-NEEDS = tuple(sorted({item.need for item in CATEGORIES}))
-
-ALL_MCCS = tuple(sorted({mcc for item in CATEGORIES for mcc in item.mccs}))
-
 # MCC служебных зачислений и снятий.
 MCC_SALARY = "6012"
 MCC_TRANSFER = "4829"
 MCC_CASH = "6011"
-MCC_LOAN = "6012"
-MCC_DEPOSIT = "6012"
-MCC_FEE = "6012"
-
-SERVICE_MCCS = (MCC_SALARY, MCC_TRANSFER, MCC_CASH)
 
 
 # ------------------------------------------------------------
 # КАНАЛЫ ОПЕРАЦИЙ
 # ------------------------------------------------------------
-
-OPERATION_CHANNELS = ("pos", "ecom", "atm", "app", "branch", "qr", "system", "partner_pos")
-
-DECLINE_REASONS = (
-    "insufficient_funds",
-    "card_blocked",
-    "limit_exceeded",
-    "antifraud_hold",
-    "technical_error",
-    "wrong_details",
-    "expired_card",
-)
 
 ERROR_CODES = ("E100", "E205", "E301", "E402", "E403", "E500", "E503", "E777")
 
@@ -203,12 +180,7 @@ ERROR_CODES = ("E100", "E205", "E301", "E402", "E403", "E500", "E503", "E777")
 # КОММУНИКАЦИИ
 # ------------------------------------------------------------
 
-COMM_CHANNELS = ("call", "sms", "push", "email")
-
 DELIVERY_RATE = {"call": 0.062, "sms": 0.813, "push": 0.426, "email": 0.55}
-
-PURPOSES = ("offer", "service", "collection", "security", "survey", "winback")
-
 
 @dataclass(frozen=True)
 class Campaign:
@@ -286,8 +258,6 @@ BROWSE_SCREENS: dict[str, tuple] = {
     "invest": ("s_a10_invest", "s_a11_bond_detail", "s_a12_certificate"),
 }
 
-FUNNEL_STAGES = ("view", "application", "kyc", "approved", "rejected")
-
 FUNNEL_SCREENS = {
     "view": "s_b00_offer_view",
     "application": "s_b01_application_form",
@@ -308,8 +278,6 @@ DOMAIN_OPERATIONS: dict[str, tuple] = {
     "support": ("chat_open", "callback_request", "complaint", "dispute_open"),
     "invest": ("bond_buy", "certificate_open", "certificate_close"),
 }
-
-APP_DOMAINS = tuple(DOMAIN_OPERATIONS)
 
 DOMAIN_ADOPTION = {
     "auth": 0.849,
@@ -370,67 +338,7 @@ BANNER_OFFER_FAMILY = {
 }
 
 
-# ------------------------------------------------------------
-# ПОДДЕРЖКА
-# ------------------------------------------------------------
-
-SUPPORT_CHANNELS = ("chat", "call_center", "branch", "email")
-
-SUPPORT_TOPICS = (
-    "operation_question",
-    "card_block",
-    "dispute",
-    "fraud_report",
-    "app_error",
-    "loan_payment",
-    "loan_restructure",
-    "data_change",
-    "complaint",
-    "statement_request",
-    "product_question",
-    "deposit_question",
-)
-
-SUPPORT_RESOLUTIONS = (
-    "explained",
-    "card_unblocked",
-    "card_reissued",
-    "chargeback_started",
-    "refund_issued",
-    "record_corrected",
-    "escalated",
-    "declined",
-    "callback_scheduled",
-    "document_sent",
-)
-
-CASE_STATUSES = ("open", "in_progress", "waiting_client", "resolved", "closed")
-
-
-# ------------------------------------------------------------
-# ПРОФИЛЬ
-# ------------------------------------------------------------
-
-PROFILE_CHANGE_SOURCES = ("client", "branch", "application", "external_registry", "call_center")
-
-PROFILE_TRACKED_FIELDS = (
-    "family_status",
-    "children",
-    "education",
-    "region",
-    "city",
-    "housing_type",
-    "income_type",
-    "declared_income",
-    "industry",
-    "income_day",
-    "consent_marketing",
-)
-
-
 __all__ = [
-    "ALL_MCCS",
-    "APP_DOMAINS",
     "BANNER_OFFERS",
     "BANNER_OFFER_FAMILY",
     "BANNER_SLOTS",
@@ -439,14 +347,11 @@ __all__ = [
     "CAMPAIGNS",
     "CAMPAIGNS_BY_FAMILY",
     "CAMPAIGN_BY_CODE",
-    "CASE_STATUSES",
     "CATEGORIES",
     "CATEGORY_BY_NAME",
     "CATEGORY_NAMES",
-    "COMM_CHANNELS",
     "Campaign",
     "Category",
-    "DECLINE_REASONS",
     "DELIVERY_RATE",
     "DEVICE_TYPES",
     "DEVICE_WEIGHTS",
@@ -455,21 +360,10 @@ __all__ = [
     "DOMAIN_OPERATIONS",
     "ERROR_CODES",
     "FUNNEL_SCREENS",
-    "FUNNEL_STAGES",
     "MCC_CASH",
     "MCC_SALARY",
     "MCC_TRANSFER",
-    "NEEDS",
-    "OPERATION_CHANNELS",
     "OPERATION_STATUSES",
-    "PROFILE_CHANGE_SOURCES",
-    "PROFILE_TRACKED_FIELDS",
-    "PURPOSES",
     "SCREEN_HOME",
     "SCREEN_OFFERS",
-    "SECTORS",
-    "SERVICE_MCCS",
-    "SUPPORT_CHANNELS",
-    "SUPPORT_RESOLUTIONS",
-    "SUPPORT_TOPICS",
 ]

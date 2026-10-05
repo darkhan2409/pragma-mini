@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 import torch
-import torch.nn.functional as F
 
 from src.mlm.model import candidate_table, hits_in_pieces, mlm_loss, pack
 from src.mlm.settings import checkpoint_path

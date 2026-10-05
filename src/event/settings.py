@@ -5,8 +5,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
-from src.generator.config import DATA_DIR
-
 
 # ============================================================
 # ИДЕЯ
@@ -22,16 +20,6 @@ from src.generator.config import DATA_DIR
 # то же молча разошлись бы.
 # ============================================================
 
-
-# Один каталог на группу и два файла в нём.
-#
-#   data/08_events/<group>/events.parquet
-#   data/08_events/<group>/weights.pt
-EVENTS_DIR = DATA_DIR / "08_events"
-
-EVENTS_FILE = "events.parquet"
-
-WEIGHTS_FILE = "weights.pt"
 
 DEVICES = ("auto", "cpu", "cuda")
 
@@ -63,17 +51,15 @@ class EventConfig:
     # Ширина FFN. Эталон держит 4 * d.
     feedforward: int = 512
 
-    # При сборке артефакта слой стоит в eval, и dropout выключен.
-    # Число хранится для обучения.
+    # Dropout при обучении; при оценке модель стоит в eval.
     dropout: float = 0.1
 
-    # Сколько событий считается за один проход. Ограничивает
-    # память: весь батч сразу это сотни мегабайт заполнителя.
+    # events_per_chunk и device остались от диагностического этапа
+    # 08 и обучением не читаются: порцию и устройство обучения задаёт
+    # MlmConfig. Поля хранятся, потому что входят в конфиг весов
+    # 07_backbone и чекпойнтов, а from_dict строг к ключам.
     events_per_chunk: int = 1024
 
-    # Где считать диагностический проход этапа 08. auto берёт CUDA,
-    # если она есть. Веса от устройства не зависят: они разыграны
-    # на CPU и только потом переезжают.
     device: str = "auto"
 
     def validate(self) -> None:
@@ -152,20 +138,8 @@ class EventConfig:
         return EventConfig.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
-def events_dir(group: str) -> Path:
-    """
-    Каталог векторов событий группы.
-    """
-
-    return EVENTS_DIR / group
-
-
 __all__ = [
     "DEVICES",
-    "EVENTS_DIR",
-    "EVENTS_FILE",
-    "WEIGHTS_FILE",
     "ConfigError",
     "EventConfig",
-    "events_dir",
 ]

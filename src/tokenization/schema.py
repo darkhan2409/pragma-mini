@@ -14,7 +14,7 @@ from src.preprocessing.keys import (
     keys_registry,
 )
 from src.preprocessing.profile_state import INCLUDED_FIELDS
-from src.preprocessing.projection import PROJECTION_VERSION, EVENT_TYPE_FIELD, model_role
+from src.preprocessing.projection import EVENT_TYPE_FIELD, model_role
 
 
 # ============================================================
@@ -121,12 +121,6 @@ class SemanticSchema:
         if not registry.get("keys"):
             raise SchemaError("реестр смыслов пуст: каталог ключей не дал ни одного ключа")
 
-        self.registry = registry
-
-        self.keys_version = registry["keys_version"]
-        self.projection_version = PROJECTION_VERSION
-
-
         self.keys: dict[str, KeyInfo] = {}
 
         for key, row in sorted(registry["keys"].items()):
@@ -208,10 +202,6 @@ class SemanticSchema:
 
     def of_kind(self, kind: str) -> tuple[str, ...]:
         return tuple(key for key, info in self.keys.items() if info.value_kind == kind)
-
-    @property
-    def model_feature_keys(self) -> tuple[str, ...]:
-        return tuple(key for key, info in self.keys.items() if info.is_model_feature)
 
     @property
     def numeric_keys(self) -> tuple[str, ...]:

@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -181,7 +180,8 @@ def probe_model(seed: int) -> GridSearchCV:
 
 def fit_predict(train_x: np.ndarray, train_y: np.ndarray, others: list[np.ndarray], seed: int):
     """
-    Голова по train и её вероятности на others; выбранный C.
+    Голова по train и её вероятности на others; выбранный C и кривая
+    перебора — средний log-loss фолдов при каждом C сетки.
     """
 
     model = probe_model(seed)
@@ -190,7 +190,12 @@ def fit_predict(train_x: np.ndarray, train_y: np.ndarray, others: list[np.ndarra
 
     chosen = float(model.best_params_["logisticregression__C"])
 
-    return [model.predict_proba(x)[:, 1] for x in others], chosen
+    cv = [
+        {"C": float(c), "log_loss": float(-score)}
+        for c, score in zip(model.cv_results_["param_logisticregression__C"], model.cv_results_["mean_test_score"])
+    ]
+
+    return [model.predict_proba(x)[:, 1] for x in others], chosen, cv
 
 
 def threshold_max_f1(y: np.ndarray, score: np.ndarray) -> float:
@@ -339,7 +344,7 @@ def run_probe(tag: str, draws: int, seed: int, baseline: str | None = None, fina
         y = {group: rows[group]["y"].to_numpy() for group in used}
         usr = {group: usr_matrix(vectors[group], rows[group]) for group in used}
 
-        predicted, chosen = fit_predict(usr["train"], y["train"], [usr[group] for group in evaluated], seed)
+        predicted, chosen, cv = fit_predict(usr["train"], y["train"], [usr[group] for group in evaluated], seed)
 
         scores: dict[str, dict[str, np.ndarray]] = {
             "catboost": {group: rows[group]["catboost"].to_numpy() for group in evaluated},
@@ -377,6 +382,8 @@ def run_probe(tag: str, draws: int, seed: int, baseline: str | None = None, fina
             }
             results[name]["C"] = chosen if name == "usr" else None
             results[name]["threshold"] = cut[name]
+            if name == "usr":
+                results[name]["cv"] = cv
             if name != reference:
                 results[name]["vs_reference"] = {
                     group: paired(y[group], by_group[group], scores[reference][group], draws, seed)

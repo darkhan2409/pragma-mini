@@ -158,22 +158,6 @@ def test_a_new_file_in_place_of_the_old_one_is_read_from_the_start(tmp_path):
     assert progress(telemetry)["total_steps"] == 10
 
 
-def test_old_lines_without_kind_are_epochs(tmp_path):
-
-    path = tmp_path / "telemetry.jsonl"
-
-    path.write_text(lines(
-        {"epoch": 1, "step": 3, "train_seconds": 1.0, "steps": 3},
-        {"epoch": 2, "step": 6, "train_seconds": 1.0, "steps": 3},
-    ))
-
-    telemetry = TelemetryReader(path).poll()
-    where = progress(telemetry)
-
-    assert sorted(telemetry.epochs) == [1, 2]
-    assert where["step"] == 6 and where["val_loss"] is None and where["total_steps"] is None
-
-
 def test_progress_estimates_epochs_beyond_the_plan_and_respects_max_steps():
 
     from src.dashboard.telemetry import Telemetry

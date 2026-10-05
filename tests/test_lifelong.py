@@ -650,41 +650,6 @@ def test_weights_without_a_stamp_are_refused(stage, stamped: str, reason: str):
         load_model(1, 512, 0.1, CPU, "sdpa")
 
 
-def test_profile_stage_refuses_unstamped_embeddings(stage):
-
-    from src.dataset.lineage import LINEAGE_FILE
-    from src.profile.build import ProfileError, build_group
-    from src.profile.settings import ProfileConfig
-
-    world.install(stage, {"train": [world.population()]})
-
-    (stage / "06_embeddings" / "train" / LINEAGE_FILE).unlink()
-
-    with pytest.raises(ProfileError, match="прежним кодом"):
-        build_group("train", ProfileConfig(heads=world.HEADS))
-
-
-def test_history_refuses_profiles_of_the_previous_encoder(stage):
-
-    from src.event.build import EVENTS_SCHEMA
-    from src.event.settings import EVENTS_FILE, events_dir
-    from src.history.inputs import InputError, Source
-    from src.profile.build import PROFILES_SCHEMA
-    from src.profile.settings import PROFILES_FILE, profiles_dir
-
-    world.write_samples("train", [world.population()])
-
-    for directory, name, schema in (
-        (events_dir("train"), EVENTS_FILE, EVENTS_SCHEMA),
-        (profiles_dir("train"), PROFILES_FILE, PROFILES_SCHEMA),
-    ):
-        directory.mkdir(parents=True, exist_ok=True)
-        pq.write_table(schema.empty_table(), directory / name)
-
-    with pytest.raises(InputError, match="прежним кодом"):
-        Source("train")
-
-
 def test_declared_milestones_are_the_raw_contract():
 
     from src.generator.profile import LIFELONG_TYPES as RAW

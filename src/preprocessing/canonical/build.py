@@ -9,7 +9,7 @@ from ..artifacts import TableWriter
 from ..rawdata import RawDataset, check_raw
 from ..settings import PreprocessingConfig
 from .events import build_batch, canonical_schema, iter_client_batches
-from .schema import SCHEMA_VERSION, payload_columns
+from .schema import payload_columns
 
 
 # ============================================================
@@ -165,7 +165,6 @@ __all__ = [
     "EVENTS_FILE",
     "PERIOD_END_KEY",
     "PERIOD_START_KEY",
-    "SCHEMA_VERSION",
     "STAGE",
     "CanonicalResult",
     "build_group",

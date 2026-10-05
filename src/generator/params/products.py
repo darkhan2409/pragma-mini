@@ -14,11 +14,6 @@ from dataclasses import dataclass, field
 # ============================================================
 
 
-MIGRATION_REASONS = ("successor_offer", "auto_renewal", "forced_migration", "client_request")
-
-DATE_POLICIES = ("period_start", "period_middle", "period_end")
-
-
 @dataclass(frozen=True)
 class ProductParams:
 

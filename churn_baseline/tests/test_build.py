@@ -8,12 +8,12 @@ import pandas as pd
 import pytest
 
 from churn.build import KEYS, build
-from churn.config import HORIZON, RECENT, cutoff
+from churn.config import HORIZON, RECENT, cutoff, month_start
 from churn.target import task_rows
 from world import LOCAL, UTC, event, login, profile, profile_change, purchase, push, salary, write_future, write_group
 
 END = datetime(2026, 4, 1, tzinfo=LOCAL)
-T = END - HORIZON
+T = datetime(2026, 1, 1, tzinfo=LOCAL)
 AS_OF = END
 
 
@@ -33,8 +33,26 @@ def base(client: str) -> list[dict]:
     ]
 
 
-def test_cutoff_leaves_a_full_window() -> None:
-    assert T == datetime(2026, 1, 31, tzinfo=LOCAL)
+@pytest.mark.parametrize("end", [
+    datetime(2026, 4, 1, tzinfo=LOCAL),
+    datetime(2026, 5, 1, tzinfo=LOCAL),
+    datetime(2026, 9, 1, tzinfo=LOCAL),
+    datetime(2026, 3, 2, tzinfo=LOCAL),
+    datetime(2026, 3, 1, tzinfo=LOCAL),
+])
+def test_cutoff_is_the_latest_first_of_a_month_with_a_full_window(tmp_path, end) -> None:
+    """
+    T val — местная полночь 1-го числа, окно метки целиком внутри
+    выгрузки, и следующее 1-е число этому уже не удовлетворяет.
+    """
+    write_group(tmp_path / "raw", "val", end, base("c"), [profile("c", end)])
+    moment = cutoff("val", tmp_path / "raw")
+    assert (moment.day, moment.hour, moment.minute, moment.second) == (1, 0, 0, 0)
+    assert moment.utcoffset() == timedelta(hours=5)
+    assert moment + HORIZON <= end
+    following = month_start(moment + timedelta(days=32))
+    assert following + HORIZON > end
+    assert month_start(END - HORIZON) == T
 
 
 def test_target_window_is_open_at_T_and_closed_at_the_horizon(tmp_path) -> None:
@@ -169,7 +187,7 @@ def test_profile_is_rolled_back_to_T(tmp_path) -> None:
         region="Almaty",
         income_type="self_employed",
         children=1,
-        birth_date=datetime(1990, 1, 31).date(),
+        birth_date=datetime(1990, 1, 1).date(),
         lifelong=[
             {"type": "bank_registered", "event_time": (T - timedelta(days=100)).astimezone(UTC), "source_id": None},
             {"type": "app_registered", "event_time": (T + timedelta(days=1)).astimezone(UTC), "source_id": None},
@@ -180,7 +198,7 @@ def test_profile_is_rolled_back_to_T(tmp_path) -> None:
     assert row["region"] == "Almaty"
     assert row["income_type"] == "unemployed"
     assert row["children"] == 0
-    # 31 января 2026 — ровно 36-й день рождения.
+    # 1 января 2026 (T) — ровно 36-й день рождения.
     assert row["age"] == 36
     # Работа по найму есть в записях, но вид дохода на T — безработный.
     assert np.isnan(row["job_tenure_months"])
@@ -197,12 +215,12 @@ def test_snapshot_fields_are_not_features(tmp_path) -> None:
 
 def test_job_tenure_uses_records_known_before_T(tmp_path) -> None:
     records = [
-        {"start_date": datetime(2020, 1, 15).date(), "record_time": datetime(2020, 2, 1, tzinfo=UTC)},
+        {"start_date": datetime(2019, 12, 15).date(), "record_time": datetime(2020, 1, 1, tzinfo=UTC)},
         {"start_date": datetime(2025, 6, 1).date(), "record_time": (T + timedelta(days=3)).astimezone(UTC)},
     ]
     table = run(tmp_path, base("c"), [profile("c", AS_OF, employment=records)])
-    # С 15.01.2020 по 31.01.2026 — 72 полных месяца; запись, о которой банк
-    # узнал после T, не видна.
+    # С 15.12.2019 по 01.01.2026 (T) — 72 полных месяца; запись, о которой
+    # банк узнал после T, не видна.
     assert table.loc["c", "job_tenure_months"] == 72
 
 
@@ -246,7 +264,7 @@ def test_train_T_is_the_end_of_its_export_and_val_keeps_its_window(tmp_path) -> 
     write_group(tmp_path / "raw", "train", TRAIN_END, history("c"), [profile("c", TRAIN_END)])
     write_group(tmp_path / "raw", "val", END, base("c"), [profile("c", AS_OF)])
     assert cutoff("train", tmp_path / "raw") == TRAIN_END
-    assert cutoff("val", tmp_path / "raw") == END - HORIZON
+    assert cutoff("val", tmp_path / "raw") == T
 
 
 def test_train_target_comes_from_the_continuation_with_strict_edges(tmp_path) -> None:

@@ -13,16 +13,6 @@ from dataclasses import dataclass, field
 # ============================================================
 
 
-LIFE_STAGES = (
-    "young_adult",      # 18-24
-    "early_career",     # 25-34
-    "family",           # 35-49
-    "mature",           # 50-62
-    "retired",          # 63+
-)
-
-HCB_ROLES = ("primary", "secondary", "credit_only", "deposit_only", "episodic")
-
 # Режим активности клиента. Он один задаёт, сколько следов
 # человек оставляет в банке за месяц:
 #
@@ -33,9 +23,10 @@ HCB_ROLES = ("primary", "secondary", "credit_only", "deposit_only", "episodic")
 #   extreme   карта и приложение под рукой каждый день
 #
 # Объявленные полосы событий на клиента в месяц лежат в
-# calibration.EVENTS_PER_MONTH_BY_MODE и проверяются отчётом
-# реализма ПОСЛЕ генерации: клиент, выпавший из своей полосы,
-# попадает в отчёт, а лента его не обрезается.
+# calibration.EVENTS_PER_MONTH_BY_MODE. Это ожидание, а не
+# ограничитель: ленту клиента, выпавшего из полосы, никто не
+# обрезает. Сверка с полосами — проверкой калибровки после
+# генерации (README, раздел 1).
 ACTIVITY_MODES = ("silent", "rare", "regular", "high", "extreme")
 
 

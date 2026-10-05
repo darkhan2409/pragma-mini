@@ -644,32 +644,8 @@ class ProductCatalog:
             view for view in self.views.values() if view.family == family
         )
 
-    def sellable(self, ts: datetime, family: str | None = None) -> tuple:
-        return tuple(
-            view
-            for view in self.views.values()
-            if view.sellable_at(ts) and (family is None or view.family == family)
-        )
-
     def families(self) -> tuple:
         return tuple(sorted({view.family for view in self.views.values()}))
-
-    def family_of(self, product_id: str | None) -> str | None:
-        """
-        Семейство по идентификатору продукта.
-
-        Нужно там, где семейства нет под рукой: в событие оно
-        больше не копируется, потому что его знает каталог.
-        """
-
-        if not product_id:
-            return None
-
-        for view in self.views.values():
-            if view.record.product_id == product_id:
-                return view.family
-
-        return None
 
     def version_at(self, code: str, ts: datetime) -> Version:
         return self.views[code].version_at(ts)

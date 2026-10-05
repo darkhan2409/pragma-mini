@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime
@@ -153,12 +152,3 @@ class TableWriter:
 
         return self.rows
 
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-
-    with open(path, "rb") as handle:
-        for block in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(block)
-
-    return digest.hexdigest()

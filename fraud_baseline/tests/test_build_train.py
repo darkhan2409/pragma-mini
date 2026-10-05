@@ -8,7 +8,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from fraud.build import KEYS, build, sampled
-from fraud.config import GROUPS, NEGATIVE_ONE_IN
+from fraud.config import NEGATIVE_ONE_IN
 from fraud.train import ROW_KEYS, train
 from world import LOCAL, login, profile, purchase, transfer, write_group
 

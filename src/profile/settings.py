@@ -5,8 +5,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
-from src.generator.config import DATA_DIR
-
 
 # ============================================================
 # ИДЕЯ
@@ -22,16 +20,6 @@ from src.generator.config import DATA_DIR
 # [B, P, d], где P около двадцати. Считается одним куском.
 # ============================================================
 
-
-# Один каталог на группу и два файла в нём.
-#
-#   data/09_profiles/<group>/profiles.parquet
-#   data/09_profiles/<group>/weights.pt
-PROFILES_DIR = DATA_DIR / "09_profiles"
-
-PROFILES_FILE = "profiles.parquet"
-
-WEIGHTS_FILE = "weights.pt"
 
 DEVICES = ("auto", "cpu", "cuda")
 
@@ -62,16 +50,17 @@ class ProfileConfig:
     # Ширина FFN. Эталон держит 4 * d.
     feedforward: int = 512
 
-    # При сборке артефакта слой стоит в eval, и dropout выключен.
+    # Dropout при обучении; при оценке модель стоит в eval.
     dropout: float = 0.1
 
     # Основание лестницы частот TimeRoPE по времени вех — то же,
     # что у энкодера истории: шкала времени у них общая.
     rope_base: float = 10000.0
 
-    # Где считать диагностический проход этапа 09. auto берёт CUDA,
-    # если она есть. Веса от устройства не зависят: они разыграны
-    # на CPU и только потом переезжают.
+    # Осталось от диагностического этапа 09 и обучением не читается:
+    # устройство обучения задаёт MlmConfig. Хранится, потому что
+    # входит в конфиг весов 07_backbone и чекпойнтов, а from_dict
+    # строг к ключам.
     device: str = "auto"
 
     def validate(self) -> None:
@@ -156,20 +145,8 @@ class ProfileConfig:
         return ProfileConfig.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
-def profiles_dir(group: str) -> Path:
-    """
-    Каталог векторов клиентов группы.
-    """
-
-    return PROFILES_DIR / group
-
-
 __all__ = [
     "DEVICES",
-    "PROFILES_DIR",
-    "PROFILES_FILE",
-    "WEIGHTS_FILE",
     "ConfigError",
     "ProfileConfig",
-    "profiles_dir",
 ]

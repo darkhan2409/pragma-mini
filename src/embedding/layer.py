@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 
 import torch
 from torch import nn
-
-from .inputs import BatchInput
 
 
 # ============================================================
@@ -49,18 +46,6 @@ from .inputs import BatchInput
 
 # Знаменатель синусоиды из исходного трансформера.
 PERIOD = 10000.0
-
-
-@dataclass(frozen=True)
-class Embedded:
-    """
-    Выход слоя: события и анкета со своими масками.
-    """
-
-    tokens: torch.Tensor        # [B, T, d]
-    token_mask: torch.Tensor    # [B, T]
-    profile: torch.Tensor       # [B, P, d]
-    profile_mask: torch.Tensor  # [B, P]
 
 
 class InputEmbedding(nn.Module):
@@ -164,28 +149,8 @@ class InputEmbedding(nn.Module):
 
         return (self.table(key_ids) * self.scale + rest) * mask.unsqueeze(-1)
 
-    def forward(self, batch: BatchInput) -> Embedded:
-        """
-        Батч целиком: события и анкета.
-        """
-
-        return Embedded(
-            tokens=self.embed(
-                batch.key_ids, batch.value_ids, batch.positions, batch.token_mask
-            ),
-            token_mask=batch.token_mask,
-            profile=self.embed(
-                batch.profile_key_ids,
-                batch.profile_value_ids,
-                batch.profile_positions,
-                batch.profile_token_mask,
-            ),
-            profile_mask=batch.profile_token_mask,
-        )
-
 
 __all__ = [
     "PERIOD",
-    "Embedded",
     "InputEmbedding",
 ]

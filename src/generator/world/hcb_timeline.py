@@ -140,9 +140,6 @@ class ProductRecord:
                 return item
         return None
 
-    def milestones_of(self, kind: str) -> tuple:
-        return tuple(item for item in self.milestones if item.kind == kind)
-
 
 @dataclass(frozen=True)
 class Timeline:
@@ -153,16 +150,10 @@ class Timeline:
     bank_rules: tuple
     sha256: str
 
-    def by_code(self, code: str) -> ProductRecord | None:
-        for product in self.products:
-            if product.product_code == code:
-                return product
-        return None
-
     def unresolved_sources(self) -> list[dict]:
         """
-        Записи, которым не хватает источника. Отчёт реализма
-        перечисляет их как требующие подтверждения.
+        Записи, которым не хватает источника: каталог продуктов
+        хранит их как требующие подтверждения.
         """
 
         rows: list[dict] = []

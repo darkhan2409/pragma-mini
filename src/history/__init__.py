@@ -1,24 +1,8 @@
 """
-Этап 10: энкодер истории.
+Энкодер истории: последовательность клиента [вектор анкеты,
+события от старых к новым], двунаправленное внимание, время —
+через TimeRoPE по непрерывным log-секундам до точки отсчёта.
 
-Одна команда на группу:
-
-    python -m src.history.run train|val|test
-
-Вход — вектор анкеты этапа 09, векторы событий этапа 08 и
-временные позиции набора 05, посчитанные при чтении. Выход — итоговый вектор клиента в
-data/10_history/<group>/history.parquet и веса энкодера.
-Обновлённые векторы событий возвращаются вызывающему для будущей
-MLM-головы, но на диск не пишутся.
-
-Внимание двунаправленное и охватывает историю одного клиента.
-Время входит через TimeRoPE по непрерывным log-секундам.
-MLM-голова и обучение — не здесь.
+Часть модели (src/mlm/model.py); начальные веса разыгрывает
+python -m src.mlm.init_backbone в data/07_backbone/history.pt.
 """
-
-from __future__ import annotations
-
-from .version import FORMAT_VERSION, IMPLEMENTATION_VERSION, SCHEMA_VERSION
-
-
-__all__ = ["FORMAT_VERSION", "IMPLEMENTATION_VERSION", "SCHEMA_VERSION"]

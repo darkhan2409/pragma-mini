@@ -1,4 +1,4 @@
-venv/
+.venv/
 __pycache__/
 *.py[cod]
 
@@ -15,10 +15,6 @@ data/04_tokenized/
 data/05_dataset/
 data/06_embeddings/
 data/07_backbone/
-data/08_events/
-data/09_profiles/
-data/10_history/
-data/11_mlm/
 data/12_train/
 data/13_downstream/
 data/runs/

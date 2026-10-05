@@ -268,10 +268,6 @@ def regions() -> tuple:
     return tuple(sorted({item.region for item in _geography()}))
 
 
-def metropolises() -> tuple:
-    return tuple(item.name for item in _geography() if item.settlement_type == "metropolis")
-
-
 def weights() -> tuple:
     return tuple(item.population_weight for item in _geography())
 
@@ -285,7 +281,6 @@ __all__ = [
     "SETTLEMENTS",
     "Settlement",
     "by_name",
-    "metropolises",
     "names",
     "regions",
     "settlements",

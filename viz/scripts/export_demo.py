@@ -591,6 +591,117 @@ def scenarios(tag: str) -> dict | None:
     }
 
 
+# Точек кривой ранней остановки в экспорте не больше этого.
+CURVE_POINTS = 200
+
+
+def thinned(curve: list[float], best: int, limit: int = CURVE_POINTS) -> list[list[float]]:
+    """
+    Кривая [итерация, значение], прорежённая до limit точек: первая,
+    лучшая и последняя итерации остаются всегда.
+    """
+
+    stride = max(1, -(-len(curve) // limit))
+    keep = sorted(set(range(0, len(curve), stride)) | {best, len(curve) - 1})
+    return [[index, curve[index]] for index in keep]
+
+
+def current_churn(metrics: dict) -> bool:
+    """
+    Отчёт churn_baseline собран на текущей выгрузке train и val и без
+    test.
+    """
+
+    from src.preprocessing.rawdata import read_manifest
+    from src.preprocessing.settings import raw_group_dir
+
+    if metrics.get("final_test"):
+        return False
+
+    for group in ("train", "val"):
+        exported = read_manifest(raw_group_dir(group))
+        built = metrics.get("sources", {}).get(group, {})
+        if (built.get("feature_history_events_sha256"), built.get("feature_profile_sha256")) != (
+            exported.events_sha256, exported.profile_sha256
+        ):
+            return False
+
+    return True
+
+
+def training(tag: str) -> dict | None:
+    """
+    Процесс обучения голов для шагов 17 и 18: перебор C регрессии над
+    [USR] — из отчёта пробы прогона; ранняя остановка, порог и
+    переобучение CatBoost на handcrafted-признаках и на них же с [USR]
+    — из отчётов churn_baseline. Только текущие отчёты без test, иначе
+    None.
+    """
+
+    from src.downstream.probe import FOLDS
+    from src.downstream.settings import CHURN_REPORTS, REPORT_FILE, downstream_dir
+
+    # Отчёт пробы — тот же, что у трёх сценариев, с теми же проверками.
+    found = scenarios(tag)
+
+    if found is None:
+        return None
+
+    # CatBoost на handcrafted + [USR] — только если проба его приняла.
+    paths = {"catboost": CHURN_REPORTS / "metrics.json"}
+    if all("catboost_plus_usr" in block["cells"] for block in found["tasks"].values()):
+        paths["catboost_plus_usr"] = CHURN_REPORTS / "plus_usr" / tag / "metrics.json"
+
+    if not all(path.exists() for path in paths.values()):
+        return None
+
+    metrics = {name: json.loads(path.read_text(encoding="utf-8")) for name, path in paths.items()}
+
+    if not all(current_churn(item) for item in metrics.values()):
+        return None
+
+    report = json.loads((downstream_dir(tag) / REPORT_FILE).read_text(encoding="utf-8"))
+
+    def val(result: dict) -> dict:
+        return {key: _round(result[key], 4) for key in ("pr_auc", "roc_auc", "f1")} | {
+            "rows": result["rows"], "positives": result["positives"],
+        }
+
+    tasks = {}
+
+    for task, block in report["tasks"].items():
+        usr = block["results"]["usr"]
+        lr = {
+            "folds": FOLDS,
+            "grid": [{"C": point["C"], "log_loss": _round(point["log_loss"], 4)} for point in usr["cv"]],
+            "C": usr["C"],
+            "threshold": _round(usr["threshold"], 4),
+            "train": {"rows": block["rows"]["train"], "positives": block["positives"]["train"]},
+            "val": val(usr["val"]),
+        }
+
+        catboost = {}
+        for name, item in metrics.items():
+            fitted = item["tasks"][task]
+            features = item["features"]
+            catboost[name] = {
+                "features": features if isinstance(features, int) else features["total"],
+                "usr": 0 if isinstance(features, int) else features["usr"],
+                "holdout_share": item.get("holdout_share", metrics["catboost"].get("holdout_share")),
+                "inner_train": {key: fitted["inner_train"][key] for key in ("rows", "positives")},
+                "inner_holdout": {key: fitted["inner_holdout"][key] for key in ("rows", "positives")},
+                "best_iteration": fitted["best_iteration"],
+                "trees": fitted["trees"],
+                "threshold": _round(fitted["threshold"], 4),
+                "curve": thinned(fitted["holdout_curve"], fitted["best_iteration"]),
+                "val": val(fitted["groups"]["val"]),
+            }
+
+        tasks[task] = {"lr": lr, "catboost": catboost}
+
+    return {"group": "val", "tag": tag, "seed": metrics["catboost"]["params"]["random_seed"], "tasks": tasks}
+
+
 def downstream_summary(run: Path | None) -> dict:
     """
     Задачи и пробы стенда оценки.
@@ -634,6 +745,7 @@ def downstream_summary(run: Path | None) -> dict:
         "cutoffs": {group: cutoff(group).isoformat() for group in ("train", "val", "test")},
         "catboost_churn": catboost,
         "scenarios": scenarios(run.name) if run is not None else None,
+        "training": training(run.name) if run is not None else None,
     }
 
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from collections import Counter, defaultdict
 from datetime import datetime
-from pathlib import Path
 
 import pyarrow.parquet as pq
 import pytest

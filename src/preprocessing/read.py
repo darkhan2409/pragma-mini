@@ -200,9 +200,6 @@ class Group:
 
     # --- клиенты ---
 
-    def profile_row(self, client_id: str) -> dict | None:
-        return self._profile_rows.get(client_id)
-
     def _addresses(self) -> dict[str, tuple[int, int]]:
         """
         Первая строка клиента и число его строк: строки одного

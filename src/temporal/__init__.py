@@ -11,10 +11,3 @@ Attributes). Точка отсчёта записана в meta.json набор�
 Ничего не отбирается, не переставляется и не кодируется: к примеру
 только добавляются числовые каналы.
 """
-
-from __future__ import annotations
-
-from .version import FORMAT_VERSION, IMPLEMENTATION_VERSION
-
-
-__all__ = ["FORMAT_VERSION", "IMPLEMENTATION_VERSION"]

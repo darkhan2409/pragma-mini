@@ -46,18 +46,6 @@ CONSTANT: tuple[str, ...] = ("gender",)
 
 NUMERIC_FIELDS: tuple[str, ...] = ("declared_income", "income_day", "children")
 
-# Снимок на as_of: состояние договоров и стаж на конец выгрузки.
-SNAPSHOT_ONLY: tuple[str, ...] = (
-    "contracts_count",
-    "active_contracts",
-    "holds_credit_card",
-    "holds_debit_card",
-    "holds_deposit",
-    "credit_limit",
-    "credit_utilization",
-    "relationship_months",
-)
-
 MILESTONES: tuple[str, ...] = (
     "bank_registered",
     "app_registered",

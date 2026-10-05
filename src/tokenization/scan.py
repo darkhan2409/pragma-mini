@@ -262,9 +262,6 @@ class FitStatistics:
             self.key_counts[key] = counter
         return counter
 
-    def observed_keys(self) -> tuple[str, ...]:
-        return tuple(sorted(self.key_counts))
-
 
 def _note_key(stats: FitStatistics, key: str, kind: str, client_id: str) -> None:
 

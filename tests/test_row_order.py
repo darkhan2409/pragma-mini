@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from src.mlm.inputs import Prefetch, Source
+from src.mlm.inputs import Prefetch
 from src.mlm.settings import checkpoint_path
 from src.mlm.train import horizon, train, train_source
 

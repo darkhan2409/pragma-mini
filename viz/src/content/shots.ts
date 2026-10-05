@@ -45,6 +45,8 @@ const BOX: Partial<Record<RegionId, Box>> = {
   loop: [-0.1, 0.4, 29.8, 12.2],
   downstream: [0.3, 0.4, 30.6, 12.8],
   clientEmbedding: [0, 0.9, 17, 15.8],
+  lrTraining: [0, 0.5, 30.4, 12.4],
+  catboostTraining: [0, 0.5, 30.4, 12.4],
 }
 
 export function fit(region: RegionId): Shot {
@@ -77,11 +79,14 @@ export const SHOTS = {
   mlm: fit('mlm'),
   loop: fit('loop'),
   downstream: fit('downstream'),
+  lrTraining: fit('lrTraining'),
+  catboostTraining: fit('catboostTraining'),
   finalClose: fit('clientEmbedding'),
   // Общие планы: цепочка от таблицы до головы и до [USR].
   backprop: { position: [146, 4, 116], target: [146, 4, 0] } as Shot,
   final: { position: [156, -1, 128], target: [156, -1, 0] } as Shot,
-  overview: { position: [120, 4, 250], target: [120, 4, 0] } as Shot,
+  // Весь мир: от клиента до обучения голов.
+  overview: { position: [140, 0, 300], target: [140, 0, 0] } as Shot,
 } satisfies Record<string, Shot>
 
 export type ShotId = keyof typeof SHOTS

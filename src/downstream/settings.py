@@ -23,8 +23,11 @@ from src.generator.config import DATA_DIR
 #              в истории предобучения. Метку churn_baseline берёт из
 #              продолжения тех же клиентов после конца выгрузки;
 #              вход модели на T — вся история, которую модель знает.
-#   val, test  конец выгрузки минус HORIZON_DAYS: окно метки
-#              (T, T + HORIZON_DAYS] целиком лежит внутри выгрузки.
+#   val, test  местная полночь 1-го числа месяца, в котором лежит
+#              «конец выгрузки минус HORIZON_DAYS»: окно метки
+#              (T, T + HORIZON_DAYS] целиком внутри выгрузки, а T — в
+#              той же фазе месяца, что T train и все примеры
+#              предобучения (их конец окна — тоже 1-е число).
 #
 #   data/13_downstream/<тег>/<group>.parquet   векторы на T
 #   data/13_downstream/<тег>/meta.json         из чего посчитаны
@@ -64,20 +67,28 @@ REPORT_FILE = "report.json"
 def cutoff(group: str) -> datetime:
     """
     Момент T группы в UTC: у train — конец окна группы, у остальных —
-    конец окна минус HORIZON_DAYS.
+    местная полночь 1-го числа месяца, в котором лежит «конец окна
+    минус HORIZON_DAYS».
 
-    Конец окна — final_cutoff группы, местная полночь. Вычитание в
-    UTC сохраняет её: у Asia/Almaty нет перехода часов.
+    Почему 1-е число: в 23:55 последнего дня месяца банк пишет снимки
+    остатка, кэшбэк, комиссии и проценты. T train и конец окна каждого
+    примера предобучения стоят через 5 минут после этой пачки; T,
+    взятый сутки спустя, дал бы вход, которого модель не видела.
     """
 
     from src.preprocessing.settings import PreprocessingConfig
 
-    window = PreprocessingConfig.load(None).windows[group]
+    config = PreprocessingConfig.load(None)
+    window = config.windows[group]
 
     if group in FUTURE_LABEL_GROUPS:
         return window.final_cutoff.astimezone(timezone.utc)
 
-    return (window.final_cutoff - timedelta(days=HORIZON_DAYS)).astimezone(timezone.utc)
+    # Месяц считается по местному времени: в UTC местная полночь
+    # 1-го числа — ещё вечер последнего дня прошлого месяца.
+    latest = (window.final_cutoff - timedelta(days=HORIZON_DAYS)).astimezone(config.bank_timezone())
+
+    return latest.replace(day=1, hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
 
 
 def groups(final_test: bool) -> tuple[str, ...]:

@@ -92,6 +92,39 @@ export interface ScenarioTask {
   >
 }
 
+export interface ValMetrics {
+  pr_auc: number
+  roc_auc: number
+  f1: number
+  rows: number
+  positives: number
+}
+
+// Логистическая регрессия над [USR]: перебор C по фолдам train.
+export interface LrTraining {
+  folds: number
+  grid: { C: number; log_loss: number }[]
+  C: number
+  threshold: number
+  train: { rows: number; positives: number }
+  val: ValMetrics
+}
+
+// CatBoost: ранняя остановка на inner_holdout и переобучение.
+export interface CatBoostTraining {
+  features: number
+  usr: number
+  holdout_share: number
+  inner_train: { rows: number; positives: number }
+  inner_holdout: { rows: number; positives: number }
+  best_iteration: number
+  trees: number
+  threshold: number
+  // [итерация, PR-AUC на inner_holdout], прорежено.
+  curve: [number, number][]
+  val: ValMetrics
+}
+
 export interface Demo {
   format: number
   sources: { generated_at: string; vocabulary_digest: string; group: string }
@@ -155,6 +188,13 @@ export interface Demo {
       tag: string
       tasks: Record<string, ScenarioTask>
       source: string
+    } | null
+    // Процесс обучения голов (шаги 17 и 18) из отчётов пробы и churn_baseline.
+    training: {
+      group: string
+      tag: string
+      seed: number
+      tasks: Record<string, { lr: LrTraining; catboost: Record<string, CatBoostTraining> }>
     } | null
   }
   // Настоящие числа обученной модели (export_demo.py --checkpoint).

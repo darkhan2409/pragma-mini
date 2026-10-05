@@ -236,7 +236,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Лента одного клиента")
 
-    parser.add_argument("--raw", type=Path, default=RAW_DIR / "smoke")
+    parser.add_argument("--raw", type=Path, default=RAW_DIR / "train")
     parser.add_argument("--client", default=None, help="client_id; по умолчанию самый активный")
     parser.add_argument("--limit", type=int, default=200, help="0 — без ограничения")
     parser.add_argument("--since", default=None)

@@ -13,8 +13,7 @@ from src.generator.config import DATA_DIR
 # ============================================================
 #
 # Всё, что решает человек про голову: seed, сглаживание меток,
-# сколько предсказаний показывать, размер порции, устройство и
-# параметры оптимизатора обучения.
+# размер порции, устройство и параметры оптимизатора обучения.
 #
 # Размерности, глубины и seed'ы четырёх энкодеров сюда НЕ
 # входят: они приходят из весов входного слоя (этап 06) и
@@ -24,8 +23,8 @@ from src.generator.config import DATA_DIR
 
 
 # Начальные веса backbone — энкодеров события, анкеты и истории.
-# Один каталог на модель: учится одна модель, на train, и val,
-# test и отчёты считаются ею же. Пишет его python -m
+# Один каталог на модель: учится одна модель, на train, и val и
+# test считаются ею же. Пишет его python -m
 # src.mlm.init_backbone: по весам этапа 06, без прохода по данным.
 #
 #   data/07_backbone/event.pt      энкодер события
@@ -36,28 +35,13 @@ BACKBONE_DIR = DATA_DIR / "07_backbone"
 
 BACKBONE_FILES = {"event": "event.pt", "profile": "profile.pt", "history": "history.pt"}
 
-# Один каталог на группу и три файла в нём — отчёт этапа 11.
-# Обучению он не нужен.
-#
-#   data/11_mlm/<group>/targets.parquet
-#   data/11_mlm/<group>/preview.html
-#   data/11_mlm/<group>/weights.pt
-MLM_DIR = DATA_DIR / "11_mlm"
-
-TARGETS_FILE = "targets.parquet"
-
-PREVIEW_FILE = "preview.html"
-
-WEIGHTS_FILE = "weights.pt"
-
 DEVICES = ("auto", "cpu", "cuda")
 
 # Бэкенд внимания. auto — flash-attn, когда есть CUDA и библиотека,
 # иначе корзины SDPA. Совпадает с varlen.BACKENDS: здесь без torch.
 ATTENTION_BACKENDS = ("auto", "flash", "sdpa")
 
-# Чекпойнт обучения лежит отдельно от 11_mlm: отчёт очищает свой
-# каталог целиком и стёр бы его.
+# Чекпойнт обучения — каталог прогона по умолчанию.
 #
 #   data/12_train/checkpoint.pt
 TRAIN_DIR = DATA_DIR / "12_train"
@@ -93,7 +77,7 @@ class ConfigError(ValueError):
 @dataclass(frozen=True)
 class MlmConfig:
     """
-    Решения человека о голове и об отчёте.
+    Решения человека о голове и обучении.
     """
 
     # Seed розыгрыша весов головы. Остальное загружается.
@@ -103,7 +87,9 @@ class MlmConfig:
     # значением 0.1; здесь настройка, но с тем же значением.
     label_smoothing: float = 0.1
 
-    # Сколько предсказаний показывать и сохранять на цель.
+    # Осталось от отчёта этапа 11 и ничем не читается. Хранится,
+    # потому что входит в конфиг чекпойнтов, а from_dict строг к
+    # ключам.
     top_k: int = 5
 
     # Событий за один проход энкодера события.
@@ -111,7 +97,7 @@ class MlmConfig:
 
     device: str = "auto"
 
-    # AdamW обучения. Отчёт их не использует.
+    # AdamW обучения.
     learning_rate: float = 3e-4
     weight_decay: float = 0.01
 
@@ -151,9 +137,16 @@ class MlmConfig:
     # вместо всего словаря; сглаживание меток — внутри них же.
     restricted_softmax: bool = False
 
-    # Вес вспомогательной цели [USR] (model.RecentTypes): доли типов
-    # событий за 7/30/90 дней. 0 — цели нет.
+    # Вес вспомогательной цели [USR] (model.RecentTypes): log-счётчики
+    # типов событий за 7/30/90 дней и log-давность последнего события
+    # каждого типа. 0 — цели нет.
     usr_aux_weight: float = 0.0
+
+    # Давность события до точки отсчёта слагаемым к его вектору перед
+    # энкодером истории и свой вектор у слота [USR]
+    # (model.RecencyEmbedding). Без неё время входит только поворотом
+    # Q и K в TimeRoPE.
+    recency_embedding: bool = False
 
     # Новая перестановка групп строк train на каждую эпоху (seed из
     # seed и номера эпохи). Без неё каждая эпоха — одна и та же
@@ -255,6 +248,7 @@ class MlmConfig:
             "loader_workers": self.loader_workers,
             "restricted_softmax": self.restricted_softmax,
             "usr_aux_weight": self.usr_aux_weight,
+            "recency_embedding": self.recency_embedding,
             "shuffle_row_groups": self.shuffle_row_groups,
             "hide_event_keys": self.hide_event_keys,
         }
@@ -293,6 +287,7 @@ class MlmConfig:
             loader_workers=int(data.get("loader_workers", base.loader_workers)),
             restricted_softmax=bool(data.get("restricted_softmax", base.restricted_softmax)),
             usr_aux_weight=float(data.get("usr_aux_weight", base.usr_aux_weight)),
+            recency_embedding=bool(data.get("recency_embedding", base.recency_embedding)),
             shuffle_row_groups=bool(data.get("shuffle_row_groups", base.shuffle_row_groups)),
             hide_event_keys=bool(data.get("hide_event_keys", base.hide_event_keys)),
         )
@@ -318,14 +313,6 @@ def backbone_dir() -> Path:
     """
 
     return BACKBONE_DIR
-
-
-def mlm_dir(group: str) -> Path:
-    """
-    Каталог результатов головы для группы.
-    """
-
-    return MLM_DIR / group
 
 
 def train_dir(directory: Path | None = None) -> Path:
@@ -369,17 +356,12 @@ __all__ = [
     "DEVICES",
     "EPOCHS_DIR",
     "TELEMETRY_FILE",
-    "MLM_DIR",
-    "PREVIEW_FILE",
-    "TARGETS_FILE",
     "TRAIN_DIR",
-    "WEIGHTS_FILE",
     "ConfigError",
     "MlmConfig",
     "backbone_dir",
     "best_checkpoint_path",
     "checkpoint_path",
     "epoch_weights_path",
-    "mlm_dir",
     "train_dir",
 ]

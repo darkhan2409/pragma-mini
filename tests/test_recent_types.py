@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from src.mlm.inputs import IGNORE
-from src.mlm.model import RECENT_DAYS, RecentTypes, pack
+from src.mlm.model import RECENCY_CAP_DAYS, RECENT_DAYS, RecentTypes, pack
 from src.mlm.settings import checkpoint_path
 from src.mlm.train import load_trained, train
 
@@ -19,13 +21,15 @@ from tests.test_training_math import CPU, every_value, settle, tiny
 # ИДЕЯ
 # ============================================================
 #
-# Вспомогательная цель [USR] — доли типов событий за 7/30/90 дней
-# до последнего события. Проверяется, что:
+# Вспомогательная цель [USR] — log1p числа событий каждого типа за
+# 7/30/90 дней до точки отсчёта и log1p давности последнего события
+# каждого типа (не больше RECENCY_CAP_DAYS). Проверяется, что:
 #
-#   - потеря — ровно кросс-энтропия с долями, посчитанными руками
-#     по ленте клиента;
+#   - цели ровно те, что посчитаны руками по ленте клиента, включая
+#     пустые окна (ноль) и типы без событий (предел давности);
+#   - потеря — средний квадрат ошибки по этим целям;
 #   - тип закрытого маской события берётся из его метки: маска MLM
-#     не прячет от вспомогательной цели то, что было на самом деле;
+#     не прячет от цели то, что было на самом деле;
 #   - с весом больше нуля голова учится и едет в чекпойнте.
 #
 # В синтетическом мире ключа event_type нет: его роль играет key_a,
@@ -42,9 +46,9 @@ def head(dim: int = world.DIM) -> RecentTypes:
     return RecentTypes(dim, type_of_value, world.KEY_A, seed=1)
 
 
-def expected(recent: RecentTypes, data, usr: torch.Tensor) -> torch.Tensor:
+def expected_targets(recent: RecentTypes, data) -> torch.Tensor:
     """
-    Та же потеря циклами по клиентам и событиям.
+    Те же цели циклами по клиентам и событиям.
     """
 
     key_ids, labels, values = data.key_ids.tolist(), data.labels.tolist(), data.value_ids.tolist()
@@ -58,42 +62,64 @@ def expected(recent: RecentTypes, data, usr: torch.Tensor) -> torch.Tensor:
             value = labels[index] if labels[index] != IGNORE else values[index]
             kinds[owner[index]] = int(recent.type_of_value[value])
 
-    logq = recent.proj(usr).view(data.clients, len(RECENT_DAYS), recent.types).log_softmax(-1)
+    out = np.zeros((data.clients, len(RECENT_DAYS) + 1, recent.types))
 
-    losses = []
     for client in range(data.clients):
-        for window, limit in enumerate(RECENT_DAYS):
-            counts = np.zeros(recent.types)
-            for event, kind in kinds.items():
-                days = 8 * math.expm1(ages[event] / 8) / 86_400
-                if client_of[event] == client and kind >= 0 and days <= limit:
-                    counts[kind] += 1
-            if counts.sum():
-                share = torch.as_tensor(counts / counts.sum(), dtype=torch.float32)
-                losses.append(-(share * logq[client, window]).sum())
+        latest = np.full(recent.types, RECENCY_CAP_DAYS)
+        for event, kind in kinds.items():
+            if client_of[event] != client or kind < 0:
+                continue
+            days = 8 * math.expm1(ages[event] / 8) / 86_400
+            for window, limit in enumerate(RECENT_DAYS):
+                if days <= limit:
+                    out[client, window, kind] += 1
+            latest[kind] = min(latest[kind], days, RECENCY_CAP_DAYS)
+        out[client, len(RECENT_DAYS)] = latest
 
-    return torch.stack(losses).mean()
+    return torch.as_tensor(np.log1p(out), dtype=torch.float32)
 
 
-def test_loss_is_the_cross_entropy_with_the_recent_type_shares():
+def test_targets_are_the_counts_and_the_recency_of_each_type():
+
+    recent = head()
+    data = pack(world.clients(), CPU)
+
+    assert torch.allclose(recent.targets(data), expected_targets(recent, data), atol=1e-5)
+
+
+def test_empty_windows_and_unseen_types_are_targets_too():
+    """
+    Пустое окно учится нулём, тип без событий — пределом давности: «за
+    7 дней ничего» — тоже ответ.
+    """
+
+    recent = head()
+    data = pack(world.clients(), CPU)
+    targets = recent.targets(data)
+
+    assert (targets[:, : len(RECENT_DAYS)] == 0).any()
+    assert torch.isclose(targets[:, len(RECENT_DAYS)], torch.tensor(math.log1p(RECENCY_CAP_DAYS))).any()
+
+
+def test_loss_is_the_mean_squared_error_against_the_targets():
 
     recent = head()
     data = pack(world.clients(), CPU)
     usr = torch.randn(data.clients, world.DIM)
 
-    assert torch.allclose(recent(data, usr), expected(recent, data, usr), atol=1e-6)
+    predicted = recent.proj(usr).view(data.clients, len(RECENT_DAYS) + 1, recent.types)
+
+    assert torch.allclose(recent(data, usr), F.mse_loss(predicted, expected_targets(recent, data)), atol=1e-6)
 
 
 def test_a_masked_event_type_is_read_from_its_label():
     """
-    Метка у закрытого маской значения — настоящий тип: доли те же,
+    Метка у закрытого маской значения — настоящий тип: цели те же,
     что без маски.
     """
 
     recent = head()
-    clients = world.clients()
-    data = pack(clients, CPU)
-    usr = torch.randn(data.clients, world.DIM)
+    data = pack(world.clients(), CPU)
 
     first = next(index for index, key in enumerate(data.key_ids.tolist())
                  if key == world.KEY_A and int(data.positions[index]) == 0)
@@ -103,11 +129,9 @@ def test_a_masked_event_type_is_read_from_its_label():
     labels[first] = hidden[first]
     hidden[first] = 2  # [MASK]
 
-    from dataclasses import replace
-
     masked = replace(data, value_ids=hidden, labels=labels)
 
-    assert torch.equal(recent(masked, usr), recent(data, usr))
+    assert torch.equal(recent.targets(masked), recent.targets(data))
 
 
 def test_the_auxiliary_head_learns_and_travels_in_the_checkpoint(stage, monkeypatch):

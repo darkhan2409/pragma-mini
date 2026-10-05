@@ -27,9 +27,6 @@ INCOME_KINDS = (
     "severance",
 )
 
-LANDINGS = ("hcb_account", "other_bank", "cash")
-
-
 @dataclass(frozen=True)
 class IncomeParams:
 

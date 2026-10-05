@@ -24,13 +24,11 @@ from tests.test_training_math import every_value, settle, tiny
 #   init_backbone   веса трёх энкодеров без прохода по данным: ни
 #                   батчей, ни прохода энкодеров, ни parquet — только
 #                   три файла весов и lineage.json;
-#   те же веса      что у диагностических этапов 08–10 при том же
-#                   конфиге, что у прежнего кода (прямой вызов
-#                   конструкторов) и — для итоговой архитектуры — те
-#                   же отпечатки, что снял код коммита 60afd4f;
-#   обучение        собирает модель только из 06 и backbone, этапы
-#                   08–11 ему не нужны, val считается той же моделью,
-#                   что учится;
+#   те же веса      что у прямого вызова конструкторов при том же
+#                   конфиге, и — для итоговой архитектуры — те же
+#                   отпечатки, что снял код коммита 60afd4f;
+#   обучение        собирает модель только из 06 и backbone, val
+#                   считается той же моделью, что учится;
 #   градиент        доходит до таблицы, трёх энкодеров и головы, и
 #                   шаг AdamW двигает каждую часть;
 #   старое          backbone не под текущие словарь, веса 06, набор
@@ -51,9 +49,6 @@ GOLDEN = {
     "profile": "8a19eed0d7f75d97f4547b0513d8bc28b4d98bfce15f7cc99a0f8814af8e84e1",
     "history": "a4d9c59081a6c6c82e34bc83dde27f2be975c4a8a671f71bde92ca4f9a83ee17",
 }
-
-DIAGNOSTIC_DIRS = ("08_events", "09_profiles", "10_history", "11_mlm")
-
 
 def files(root: Path) -> set[Path]:
     return {path for path in root.rglob("*") if path.is_file()}
@@ -94,7 +89,6 @@ def test_init_reads_no_data_and_runs_no_forward(stage, monkeypatch):
         "src.embedding.layer.InputEmbedding.embed",
         "src.embedding.inputs.Source.__init__",
         "src.mlm.inputs.Source.__init__",
-        "src.history.inputs.Source.__init__",
     ):
         monkeypatch.setattr(target, forbidden)
 
@@ -108,41 +102,22 @@ def test_init_reads_no_data_and_runs_no_forward(stage, monkeypatch):
 
     assert created == {directory / name for name in (*BACKBONE_FILES.values(), LINEAGE_FILE)}
     assert not [path for path in files(stage) if path.suffix == ".parquet"]
-    assert not [name for name in DIAGNOSTIC_DIRS if (stage / name).exists()]
 
     assert report["bytes"] == sum(path.stat().st_size for path in created)
 
 
-def test_initial_weights_are_those_of_the_diagnostic_stages_and_the_old_code(stage):
+def test_initial_weights_are_those_of_the_constructors(stage):
     """
-    Этапы 08–10 с тем же конфигом пишут те же веса, что init_backbone,
-    бит в бит. И те же, что прямой вызов конструкторов — так начальные
-    веса создавал код до init_backbone.
+    init_backbone пишет бит в бит те же веса, что прямой вызов
+    конструкторов с тем же конфигом и seed — так начальные веса
+    создавал код до init_backbone.
     """
 
-    from src.event.build import build_group as build_events
     from src.event.encoder import EventEncoder
-    from src.event.settings import WEIGHTS_FILE, events_dir
-    from src.history.build import build_group as build_history
     from src.history.encoder import HistoryEncoder
-    from src.history.settings import history_dir
-    from src.profile.build import build_group as build_profiles
     from src.profile.encoder import ProfileEncoder
-    from src.profile.settings import profiles_dir
 
     settle(stage, train_people=many())
-
-    event, profile, history = world.encoder_configs()
-
-    build_events("train", event)
-    build_profiles("train", profile)
-    build_history("train", history)
-
-    stages = {
-        "event": events_dir("train") / WEIGHTS_FILE,
-        "profile": profiles_dir("train") / WEIGHTS_FILE,
-        "history": history_dir("train") / WEIGHTS_FILE,
-    }
 
     direct = {
         "event": EventEncoder(world.DIM, world.LAYERS, world.HEADS, world.FEEDFORWARD, 0.0, world.SEED),
@@ -152,15 +127,8 @@ def test_initial_weights_are_those_of_the_diagnostic_stages_and_the_old_code(sta
                                   world.ROPE_BASE, world.SEED),
     }
 
-    for name, path in stages.items():
-
-        light = saved(name)
-        legacy = torch.load(path, map_location="cpu", weights_only=True)
-
-        assert (light["dim"], light["config"]) == (legacy["dim"], legacy["config"]), name
-
-        same_state(light["state_dict"], legacy["state_dict"])
-        same_state(light["state_dict"], direct[name].state_dict())
+    for name, encoder in direct.items():
+        same_state(saved(name)["state_dict"], encoder.state_dict())
 
 
 @pytest.mark.parametrize("name", ["event", "profile", "history"])
@@ -209,39 +177,8 @@ def test_default_configs_give_blocks_1_5_2(stage):
 
 
 # ============================================================
-# ОБУЧЕНИЕ БЕЗ ЭТАПОВ 08–11
+# ОБУЧЕНИЕ
 # ============================================================
-
-
-def test_training_needs_no_diagnostic_stage(stage, monkeypatch):
-    """
-    Этапов 08–11 нет, их команды запрещены, а на месте отчёта 11
-    лежит мусор: обучение читает только 05, 06 и 07.
-    """
-
-    from src.mlm.train import train
-
-    settle(stage, train_people=many())
-
-    assert not [name for name in DIAGNOSTIC_DIRS if (stage / name).exists()]
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("обучение не запускает диагностические этапы")
-
-    for target in ("src.event.build.build_group", "src.profile.build.build_group",
-                   "src.history.build.build_group", "src.mlm.build.build_group"):
-        monkeypatch.setattr(target, forbidden)
-
-    report = stage / "11_mlm" / "train"
-    report.mkdir(parents=True)
-
-    for name in ("weights.pt", "targets.parquet"):
-        (report / name).write_bytes(b"not an artifact")
-
-    result = train(tiny(token_budget=6), epochs=1, max_steps=None, masking=every_value())
-
-    assert result["reason"] == "epochs"
-    assert not [name for name in DIAGNOSTIC_DIRS[:3] if (stage / name).exists()]
 
 
 def test_validation_scores_the_model_being_trained(stage, monkeypatch):
@@ -413,27 +350,6 @@ def test_file_from_another_run_is_refused(stage):
                backbone_dir() / BACKBONE_FILES["event"])
 
     with pytest.raises(BackboneError, match="не из того запуска"):
-        load_model(1, 512, 0.1, CPU, "sdpa")
-
-
-def test_old_stage_weights_are_not_a_backbone(stage):
-    """
-    Веса прежних этапов 08–10 лежат на месте, а backbone нет: модель
-    их не подбирает, а называет команду init_backbone.
-    """
-
-    import shutil
-
-    from src.event.build import build_group as build_events
-    from src.mlm.model import load_model
-
-    settle(stage, train_people=many())
-
-    build_events("train", world.encoder_configs()[0])
-
-    shutil.rmtree(backbone_dir())
-
-    with pytest.raises(BackboneError, match="init_backbone"):
         load_model(1, 512, 0.1, CPU, "sdpa")
 
 

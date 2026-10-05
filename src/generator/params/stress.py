@@ -26,17 +26,6 @@ TRIGGERS = (
     "random_shock",
 )
 
-RESOLUTIONS = (
-    "income_restored",
-    "refinanced",
-    "restructured",
-    "savings_spent",
-    "family_help",
-    "faded",
-    "unresolved",
-)
-
-
 @dataclass(frozen=True)
 class StressParams:
 

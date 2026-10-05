@@ -5,7 +5,7 @@
 
 ```
 обычные признаки → CatBoost                     (этот проект)
-PRAGMA history → client embedding → Fraud Head  (позже)
+PRAGMA history → client embedding → Fraud Head  (не оценивается)
 ```
 
 Проект изолирован от PRAGMA и от `churn_baseline`:
@@ -14,8 +14,12 @@ PRAGMA history → client embedding → Fraud Head  (позже)
 - все датасеты, модели и отчёты лежат внутри `fraud_baseline/`;
 - своё окружение `.venv` и свои тесты.
 
-Генератор (`src.generator`) импортирует один файл — `fraud/replay.py`, только ради target (см.
-ниже).
+Код генератора (`src.generator`) импортирует один файл — `fraud/replay.py`, только ради target
+(см. ниже).
+
+PRAGMA фрод на уровне операции не оценивает: вектор нужен на момент каждой операции строго до неё,
+а история в модели двунаправленная (README PRAGMA, раздел 13). Сравнивать этот бейзлайн пока не с
+чем.
 
 ## Разбиение
 
@@ -34,7 +38,7 @@ PRAGMA history → client embedding → Fraud Head  (позже)
 
 **Явной метки в выгрузке нет.**
 - В payload нет поля «мошенничество».
-- Выгрузки `truth/*` нет: её убрали в коммите `ab0c7a1`.
+- Выгрузки `truth/*` нет: её убрали в коммите `29bcd68` (контракт RAW v10).
 - Состояние эпизода живёт только в памяти генератора (`src/generator/life/fraud.py`,
   `engine_products.py`).
 - На ленте мошенническая операция — это обычная `purchase` или `transfer_out`. Target существует

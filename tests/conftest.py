@@ -48,10 +48,6 @@ PLACES = (
     ("src.dataset.settings", "DATASET_DIR", "05_dataset"),
     ("src.embedding.settings", "EMBEDDINGS_DIR", "06_embeddings"),
     ("src.mlm.settings", "BACKBONE_DIR", "07_backbone"),
-    ("src.event.settings", "EVENTS_DIR", "08_events"),
-    ("src.profile.settings", "PROFILES_DIR", "09_profiles"),
-    ("src.history.settings", "HISTORY_DIR", "10_history"),
-    ("src.mlm.settings", "MLM_DIR", "11_mlm"),
     ("src.mlm.settings", "TRAIN_DIR", "12_train"),
     # Оценка на задачах: векторы и отчёты churn-бейзлайна. tasks
     # держит свои копии путей, снятые при импорте.

@@ -27,9 +27,6 @@ from ..rawdata import DTYPE_MAP, ENVELOPE_SCHEMA, RawManifest
 # ============================================================
 
 
-# 16 — колонка lifelong_source: пометка события-источника вехи.
-SCHEMA_VERSION = 16
-
 # Время события в слое УЖЕ нормализовано: в выгрузке это
 # строка ISO 8601 со смещением, здесь — момент в UTC.
 # Второго перевода пояса ниже по конвейеру нет.
@@ -114,7 +111,6 @@ __all__ = [
     "LIFELONG_SOURCE_COLUMN",
     "NORMALIZED_FIELDS",
     "TS_UTC",
-    "SCHEMA_VERSION",
     "events_schema",
     "payload_columns",
 ]

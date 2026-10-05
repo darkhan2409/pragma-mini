@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -459,20 +460,30 @@ def hits(logits: torch.Tensor, targets: torch.Tensor, k: int = 5) -> tuple[int, 
 # (time_anchor набора: cutoff T, а с last_event — последнее событие).
 RECENT_DAYS = (7, 30, 90)
 
+# Давность типа, которого в окне истории не было или который был
+# давнее, — этот предел, в сутках: «не было» и «было очень давно» для
+# цели одно и то же.
+RECENCY_CAP_DAYS = 365.0
+
 
 class RecentTypes(nn.Module):
     """
-    Вспомогательная цель вектора клиента: по [USR] предсказать, из
-    каких типов событий состоят последние 7, 30 и 90 дней истории.
+    Вспомогательная цель вектора клиента: по [USR] восстановить, сколько
+    событий каждого типа было за последние 7, 30 и 90 дней и сколько
+    дней прошло от последнего события каждого типа до точки отсчёта.
 
     [USR] у MLM своей цели не имеет — он лишь третий вектор в голове
-    каждой цели, — и вырождается в кодировку анкеты. Здесь он
-    обязан помнить недавнее прошлое клиента (как в NPPR: «вспомнить
-    прошлое» — самое полезное для задач уровня клиента).
+    каждой цели, — и вырождается в кодировку анкеты (аудит 2026-10-05:
+    из выхода энкодера анкеты он восстанавливается с R² 0.88, а давность
+    действий — с R² 0.36). Здесь он обязан знать объём и давность
+    недавнего прошлого — то, на чём держатся счётчики бейзлайна.
 
-    Цель — доля каждого типа среди событий окна; тип закрытого
-    маской события берётся из его метки. Потеря — кросс-энтропия
-    с этой долей, среднее по (клиент, окно) с событиями.
+    Цели — log1p числа событий типа в окне (пустое окно — ноль, и оно
+    учится так же) и log1p давности последнего события типа, не больше
+    RECENCY_CAP_DAYS. Потеря — средний квадрат ошибки по всем клиентам,
+    типам и целям. Тип закрытого маской события берётся из его метки;
+    событие, тип которого маскер испортил в [UNK] без метки, не
+    считается: его тип неизвестен.
     """
 
     def __init__(self, dim: int, type_of_value: torch.Tensor, event_type_key: int, seed: int):
@@ -484,10 +495,15 @@ class RecentTypes(nn.Module):
 
         self.register_buffer("type_of_value", type_of_value, persistent=False)
 
+        # На тип: счётчик в каждом окне и давность.
         with _seeded(seed):
-            self.proj = nn.Linear(dim, self.types * len(RECENT_DAYS))
+            self.proj = nn.Linear(dim, self.types * (len(RECENT_DAYS) + 1))
 
-    def forward(self, data: "PackedBatch", usr: torch.Tensor) -> torch.Tensor:
+    def targets(self, data: "PackedBatch") -> torch.Tensor:
+        """
+        [B, окна + 1, типы]: log1p счётчиков по окнам, затем log1p
+        давности последнего события типа.
+        """
 
         from src.temporal.position import TIME_SCALE
 
@@ -498,7 +514,9 @@ class RecentTypes(nn.Module):
             (data.key_ids == self.event_type_key) & (data.positions == 0), as_tuple=True
         )[0]
 
-        kind = torch.full((data.events.segments,), -1, dtype=torch.long, device=usr.device)
+        device = data.event_time_log.device
+
+        kind = torch.full((data.events.segments,), -1, dtype=torch.long, device=device)
         kind[data.event_of_token[typed]] = self.type_of_value[original[typed]]
 
         # Давность до точки отсчёта — из той же шкалы, что видит
@@ -506,27 +524,83 @@ class RecentTypes(nn.Module):
         days = TIME_SCALE * torch.expm1(data.event_time_log.float() / TIME_SCALE) / 86_400.0
 
         known = kind >= 0
-        windows = torch.tensor(RECENT_DAYS, dtype=days.dtype, device=days.device)
+        windows = torch.tensor(RECENT_DAYS, dtype=days.dtype, device=device)
         inside = (days[:, None] <= windows[None, :]) & known[:, None]          # [E, W]
 
-        counts = usr.new_zeros(data.clients, len(RECENT_DAYS), self.types, dtype=torch.float32)
+        counts = torch.zeros(data.clients, len(RECENT_DAYS), self.types, dtype=torch.float32, device=device)
         event, window = torch.nonzero(inside, as_tuple=True)
         counts.index_put_(
             (data.user_of_event[event], window, kind[event]),
             torch.ones_like(event, dtype=torch.float32), accumulate=True,
         )
 
-        totals = counts.sum(dim=-1)
-        present = totals > 0
+        # Давность типа — у самого свежего его события; без событий
+        # типа — предел.
+        recency = torch.full((data.clients, self.types), RECENCY_CAP_DAYS, dtype=torch.float32, device=device)
+        chosen = torch.nonzero(known, as_tuple=True)[0]
+        recency.view(-1).scatter_reduce_(
+            0, data.user_of_event[chosen] * self.types + kind[chosen],
+            days[chosen].clamp(max=RECENCY_CAP_DAYS), reduce="amin",
+        )
 
-        if not bool(present.any()):
-            return (usr.sum() * 0.0).float()
+        return torch.cat([counts, recency.unsqueeze(1)], dim=1).log1p()
 
-        share = counts / totals.clamp(min=1.0).unsqueeze(-1)
+    def forward(self, data: "PackedBatch", usr: torch.Tensor) -> torch.Tensor:
 
-        logq = self.proj(usr).float().view(data.clients, len(RECENT_DAYS), self.types).log_softmax(-1)
+        predicted = self.proj(usr).float().view(data.clients, len(RECENT_DAYS) + 1, self.types)
 
-        return -(share * logq).sum(dim=-1)[present].mean()
+        return F.mse_loss(predicted, self.targets(data))
+
+
+# Периоды Фурье-признаков давности в единицах шкалы event_time_log
+# (8·log1p(секунды / 8): минута ≈ 17, сутки ≈ 74, 90 суток ≈ 110,
+# два года ≈ 127): от 2 до 256 — от различия в секунды до всей шкалы.
+RECENCY_PERIODS = tuple(2.0 * 2.0 ** (number / 2) for number in range(15))
+
+
+class RecencyEmbedding(nn.Module):
+    """
+    Давность события до точки отсчёта — слагаемым к его вектору перед
+    энкодером истории, и свой вектор у слота [USR].
+
+    TimeRoPE поворачивает только Q и K: давность меняет веса внимания,
+    но в сами векторы не попадает, и [USR] видит, сколько клиент
+    делал, но не когда (аудит 2026-10-05). Здесь давность — содержимое
+    вектора события: sin/cos позиции на периодах RECENCY_PERIODS и сама
+    позиция, через Linear -> GELU -> Linear.
+
+    Выходной слой и вектор [USR] начинаются с нуля: при инициализации
+    модель бит в бит та же, что без этой части, и давность входит в
+    неё только по мере обучения.
+    """
+
+    def __init__(self, dim: int, seed: int):
+
+        super().__init__()
+
+        omega = torch.tensor([2.0 * math.pi / period for period in RECENCY_PERIODS], dtype=torch.float32)
+        self.register_buffer("omega", omega, persistent=False)
+
+        with _seeded(seed):
+            self.inner = nn.Linear(2 * len(RECENCY_PERIODS) + 1, dim)
+            self.outer = nn.Linear(dim, dim)
+
+        nn.init.zeros_(self.outer.weight)
+        nn.init.zeros_(self.outer.bias)
+
+        self.usr = nn.Parameter(torch.zeros(dim))
+
+    def forward(self, positions: torch.Tensor) -> torch.Tensor:
+        """
+        [E] позиций event_time_log -> [E, d]. Углы — в fp32.
+        """
+
+        position = positions.float()[:, None]
+        angle = position * self.omega
+
+        features = torch.cat([angle.sin(), angle.cos(), position / 128.0], dim=-1)
+
+        return self.outer(F.gelu(self.inner(features)))
 
 
 class Model(nn.Module):
@@ -571,12 +645,40 @@ class Model(nn.Module):
         # Вспомогательная цель [USR] (attach_recent); None — её нет.
         self.recent: RecentTypes | None = None
 
+        # Давность события слагаемым перед энкодером истории
+        # (attach_recency); None — время только в TimeRoPE.
+        self.recency: RecencyEmbedding | None = None
+
         # Чем закрыт ключ у значений события под маской event
         # (hide_event_keys); None — ключи видны.
         self.hidden_key: int | None = None
 
     def attach_recent(self, recent: RecentTypes) -> None:
         self.recent = recent.to(self.embedding.weight.device)
+
+    def attach_recency(self, recency: RecencyEmbedding) -> None:
+        self.recency = recency.to(self.embedding.weight.device)
+
+    def _history_input(
+        self, data: PackedBatch, profile: torch.Tensor, dated: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Плоский вход энкодера истории [B + E, d]: у каждого клиента
+        слот анкеты, затем его события. С RecencyEmbedding к событию
+        прибавляется его давность, к слоту [USR] — свой вектор.
+        """
+
+        if self.recency is not None:
+            dated = dated + self.recency(data.event_time_log).to(dated.dtype)
+            profile = profile + self.recency.usr.to(profile.dtype)
+
+        # Вне графа только нулевой холст: index_copy возвращает
+        # новый тензор, и градиент идёт к анкетам и событиям.
+        return (
+            profile.new_zeros(data.clients + data.events.segments, profile.shape[-1])
+            .index_copy(0, data.history_profile_slot, profile)
+            .index_copy(0, data.history_event_slot, dated)
+        )
 
     def hide_event_keys(self, hidden: int) -> None:
         """
@@ -641,7 +743,7 @@ class Model(nn.Module):
 
         rows = self.key_row[data.key_ids[data.target_token]] if self.allowed is not None else None
 
-        # Логиты целиком — для точности, отчёта и разбора по целям;
+        # Логиты целиком — для точности и разбора val по целям;
         # потери считает mlm_loss кусками, по тем же входам головы.
         full = (
             self.head(token_vectors, event_rows, client_rows, self.embedding.weight)
@@ -832,11 +934,7 @@ class Model(nn.Module):
 
         encoder = self.history
 
-        x = (
-            profile.new_zeros(data.clients + data.events.segments, profile.shape[-1])
-            .index_copy(0, data.history_profile_slot, profile)
-            .index_copy(0, data.history_event_slot, dated)
-        )
+        x = self._history_input(data, profile, dated)
 
         cos, sin = encoder.rope.angles(data.history_positions)
 
@@ -971,13 +1069,7 @@ class Model(nn.Module):
 
         width = data.clients + data.events.segments
 
-        # Вне графа только нулевой холст: index_copy возвращает
-        # новый тензор, и градиент идёт к анкетам и событиям.
-        flat = (
-            profile.new_zeros(width, profile.shape[-1])
-            .index_copy(0, data.history_profile_slot, profile)
-            .index_copy(0, data.history_event_slot, dated)
-        )
+        flat = self._history_input(data, profile, dated)
 
         parts: list[torch.Tensor] = []
         indices: list[torch.Tensor] = []
@@ -1016,11 +1108,10 @@ def load_model(
     энкодеры тогда строятся по записанной в нём архитектуре
     (recorded_backbone), а их веса придут из state_dict.
 
-    Модель одна: обучение, validation и отчёты по любой группе
+    Модель одна: обучение, validation и оценка по любой группе
     собирают её из одних и тех же весов. Ни одна размерность не
     объявляется здесь заново: d, глубины и seed'ы лежат в файлах
-    весов вместе с состоянием. Этапы 08–11 не читаются — их векторы
-    и отчёты модели не нужны.
+    весов вместе с состоянием.
     """
 
     specials = load_special_tokens()
@@ -1134,7 +1225,10 @@ __all__ = [
     "PackedBatch",
     "Predicted",
     "TARGETS_PER_CHUNK",
+    "RECENCY_CAP_DAYS",
+    "RECENCY_PERIODS",
     "RECENT_DAYS",
+    "RecencyEmbedding",
     "RecentTypes",
     "candidate_table",
     "recent_types",

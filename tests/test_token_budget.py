@@ -7,8 +7,6 @@ import pytest
 
 from src.mlm.inputs import Size, cost, micro_batches
 
-from tests import world
-
 
 # ============================================================
 # ИДЕЯ

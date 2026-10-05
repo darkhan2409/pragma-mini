@@ -10,7 +10,3 @@
 применяет готовый словарь и ничего не дообучает: значение, которого
 на train не было, получает [UNK]. Результат ложится в `data/04_tokenized/<group>/`.
 """
-
-from .version import FORMAT_VERSION, IMPLEMENTATION_VERSION, SCHEMA_VERSION
-
-__all__ = ["FORMAT_VERSION", "IMPLEMENTATION_VERSION", "SCHEMA_VERSION"]

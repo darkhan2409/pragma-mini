@@ -92,13 +92,7 @@ def pieces(masked: dict, value) -> list[int]:
     return masked["value_ids"][value.start:value.start + value.length]
 
 
-def test_the_old_setting_is_gone_and_the_new_one_is_on_by_default():
-
-    assert "key_hides_context" not in MaskingConfig().as_dict()
-    assert not hasattr(MaskingConfig(), "key_hides_context")
-
-    with pytest.raises(ConfigError, match="неизвестные ключи"):
-        MaskingConfig.from_dict({"key_hides_context": True})
+def test_corruption_is_on_by_default_and_checked():
 
     assert MaskingConfig().key_context_corruption_probability == 0.5
 
@@ -224,8 +218,8 @@ def test_on_train_the_whole_context_is_the_target_period_and_nothing_is_corrupte
 
 def test_train_val_and_test_read_the_context_through_one_implementation(stage):
     """
-    Вход обучения и слой эмбеддингов этапов 06, 08 и 09 портят контекст
-    одним и тем же кодом для всех трёх групп.
+    Вход обучения и слой эмбеддингов этапа 06 портят контекст одним и
+    тем же кодом для всех трёх групп.
     """
 
     from src.embedding.inputs import Source as EmbeddingSource

@@ -46,16 +46,6 @@ describe('разбор строк', () => {
     expect(where.completedEpochs).toBe(2)
   })
 
-  test('строки прежнего формата без kind — эпохи', () => {
-    const telemetry = emptyTelemetry()
-    addLines(telemetry, lines({ epoch: 1, step: 3, train_seconds: 1, steps: 3 }, { epoch: 2, step: 6, train_seconds: 1, steps: 3 }))
-    const where = progress(telemetry)
-    expect([...telemetry.epochs.keys()]).toEqual([1, 2])
-    expect(where.step).toBe(6)
-    expect(where.valLoss).toBeNull()
-    expect(where.totalSteps).toBeNull()
-  })
-
   test('не объект и неизвестный вид — пропуск без изменений', () => {
     const telemetry = emptyTelemetry()
     add(telemetry, [1, 2])

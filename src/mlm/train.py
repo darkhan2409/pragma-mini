@@ -42,7 +42,7 @@ from .settings import (
 # (время и маска считаются при чтении, src.mlm.inputs); начальные
 # веса — входной слой
 # data/06_embeddings/train и backbone data/07_backbone (python -m
-# src.mlm.init_backbone). Этапы 08–11 не нужны: это диагностика.
+# src.mlm.init_backbone).
 # Выход — каталог прогона, по умолчанию data/12_train (--out задаёт
 # другой): checkpoint.pt (последнее состояние), best_checkpoint.pt
 # (лучший val_loss) и epochs/epoch_NN.pt — веса после каждой полной
@@ -93,9 +93,8 @@ from .settings import (
 # --max-steps в него не входит, он только останавливает прогон, а
 # --resume берёт горизонт из чекпойнта и продолжает ту же кривую.
 #
-# Промежуточные parquet этапов 08–11 сюда не читаются: через файл
-# градиент не течёт. Весь проход собран в model.Model, и здесь он
-# вызывается без no_grad.
+# Весь проход собран в model.Model, и здесь он вызывается без
+# no_grad: градиент идёт через все слои сразу.
 #
 # После каждой полностью пройденной эпохи та же модель считает
 # потери на val: фиксированная маска val (seed конфига), eval и
@@ -684,6 +683,9 @@ def load_trained(path: Path, device, attention_backend: str | None = None):
     if config.usr_aux_weight > 0.0:
         attach_recent(model, config)
 
+    if config.recency_embedding:
+        attach_recency(model, config)
+
     model.load_state_dict(state["model_state_dict"])
 
     if config.restricted_softmax:
@@ -706,6 +708,17 @@ def attach_recent(model, config: MlmConfig) -> None:
     from .model import recent_types
 
     model.attach_recent(recent_types(FrozenArtifacts.load(), int(model.embedding.dim), config.seed + 1))
+
+
+def attach_recency(model, config: MlmConfig) -> None:
+    """
+    Давность события слагаемым перед энкодером истории. Свой seed —
+    seed головы плюс два: остальные веса от неё не зависят.
+    """
+
+    from .model import RecencyEmbedding
+
+    model.attach_recency(RecencyEmbedding(int(model.embedding.dim), config.seed + 2))
 
 
 def hide_keys(model) -> None:
@@ -1019,6 +1032,9 @@ def train(
 
     if config.usr_aux_weight > 0.0:
         attach_recent(model, config)
+
+    if config.recency_embedding:
+        attach_recency(model, config)
 
     # Модель целиком на устройстве и учится целиком: таблица
     # эмбеддингов, три энкодера и голова.
@@ -1552,7 +1568,6 @@ def run_training(args) -> int:
 
     try:
         from .backbone import BackboneError
-        from .build import MlmError
         from .inputs import InputError
         from .varlen import BackendError
 
@@ -1586,7 +1601,7 @@ def run_training(args) -> int:
         )
 
     except (
-        ConfigError, MaskingConfigError, InputError, MlmError, BackendError,
+        ConfigError, MaskingConfigError, InputError, BackendError,
         BackboneError, CheckpointError, DeviceError, TrainingError, FileNotFoundError,
     ) as error:
         print(f"[train] {error}")
@@ -1699,6 +1714,7 @@ __all__ = [
     "lr_factor",
     "main",
     "origin_problems",
+    "attach_recency",
     "attach_recent",
     "restrict",
     "resumed_horizon",

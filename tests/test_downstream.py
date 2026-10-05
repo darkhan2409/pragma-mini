@@ -401,17 +401,24 @@ def test_a_continuation_of_another_export_is_refused(stage):
 def test_train_T_is_the_end_of_the_pretraining_window_and_val_keeps_its_horizon():
     """
     T train — конец окна, на котором учился backbone: окно метки train
-    за пределами истории предобучения. У val и test окно метки внутри
-    их выгрузки, как раньше.
+    за пределами истории предобучения. У val и test T — местная
+    полночь 1-го числа, как у train, окно метки целиком внутри их
+    выгрузки, а следующее 1-е число этому уже не удовлетворяет.
     """
 
     from src.preprocessing.settings import PreprocessingConfig
 
-    windows = PreprocessingConfig.load(None).windows
+    config = PreprocessingConfig.load(None)
+    windows = config.windows
+    horizon = timedelta(days=60)
 
     assert cutoff("train") == windows["train"].final_cutoff
     for group in ("val", "test"):
-        assert cutoff(group) == windows[group].final_cutoff - timedelta(days=60)
+        local = cutoff(group).astimezone(config.bank_timezone())
+        assert (local.day, local.hour, local.minute, local.second) == (1, 0, 0, 0)
+        assert cutoff(group) + horizon <= windows[group].final_cutoff
+        following = (local + timedelta(days=32)).replace(day=1)
+        assert following + horizon > windows[group].final_cutoff
 
 
 def test_the_label_only_continuation_is_outside_every_pragma_stage():
@@ -727,20 +734,25 @@ def test_the_scaler_is_fitted_inside_each_fold():
 
 def test_the_chosen_C_depends_on_train_only():
     """
-    Другой val не меняет ни C, ни голову: прогнозы на одинаковых
-    строках те же. Выход — вероятность на каждую строку каждой группы.
+    Другой val не меняет ни C, ни голову, ни кривую перебора: прогнозы
+    на одинаковых строках те же. Кривая — средний log-loss фолдов при
+    каждом C сетки, выбранный C — её минимум. Выход — вероятность на
+    каждую строку каждой группы.
     """
 
-    from src.downstream.probe import fit_predict
+    from src.downstream.probe import CS, fit_predict
 
     x, y = shifted()
     rng = np.random.default_rng(11)
     val_a, val_b = rng.normal(size=(40, 4)), rng.normal(size=(55, 4)) * 100
 
-    (first, second), chosen = fit_predict(x, y, [val_a, val_b], seed=7)
-    (again,), chosen_again = fit_predict(x, y, [val_a], seed=7)
+    (first, second), chosen, cv = fit_predict(x, y, [val_a, val_b], seed=7)
+    (again,), chosen_again, cv_again = fit_predict(x, y, [val_a], seed=7)
 
-    assert chosen == chosen_again
+    assert chosen == chosen_again and cv == cv_again
+    assert [point["C"] for point in cv] == [float(c) for c in CS]
+    assert chosen == min(cv, key=lambda point: point["log_loss"])["C"]
+    assert all(point["log_loss"] > 0 for point in cv)
     np.testing.assert_array_equal(first, again)
     assert first.shape == (40,) and second.shape == (55,)
     assert ((first >= 0) & (first <= 1)).all() and ((second >= 0) & (second <= 1)).all()

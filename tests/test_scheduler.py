@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import math
 import re
-from pathlib import Path
 
 import pytest
 
-from src.masking.settings import MaskingConfig
 from src.mlm.settings import MlmConfig
 from src.mlm.train import horizon, lr_factor, train
 

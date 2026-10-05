@@ -32,12 +32,6 @@ class MonthlyBudget:
     discretionary: int
     stress: float
 
-    @property
-    def free_share(self) -> float:
-        if self.income <= 0:
-            return 0.0
-        return max(0.0, self.discretionary / self.income)
-
 
 def budget_for_month(
     persona: Persona,

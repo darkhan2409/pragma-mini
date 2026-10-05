@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 
 import pyarrow as pa
@@ -162,14 +161,6 @@ def group_window(group: str):
         raise TransformError(f"для группы {group} не объявлено окно наблюдения")
 
     return window
-
-
-def group_cutoff(group: str) -> datetime:
-    """
-    Конечный cutoff группы: дальше её истории не существует.
-    """
-
-    return group_window(group).final_cutoff
 
 
 def encode_group(
@@ -387,5 +378,4 @@ __all__ = [
     "TransformError",
     "check_vocab",
     "encode_group",
-    "group_cutoff",
 ]

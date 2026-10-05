@@ -20,9 +20,9 @@ const VIZ = resolve(__dirname, '..', '..')
 const ROOT = resolve(VIZ, '..')
 
 describe('шаги', () => {
-  test('18 шагов с уникальными id, у каждого — кадр или 2D-экран', () => {
-    expect(STEPS).toHaveLength(18)
-    expect(new Set(STEPS.map((step) => step.id)).size).toBe(18)
+  test('20 шагов с уникальными id, у каждого — кадр или 2D-экран', () => {
+    expect(STEPS).toHaveLength(20)
+    expect(new Set(STEPS.map((step) => step.id)).size).toBe(20)
     for (const step of STEPS) {
       expect(step.beats.length).toBeGreaterThan(0)
       if (step.screen) continue
@@ -34,8 +34,8 @@ describe('шаги', () => {
     }
   })
 
-  test('2D-экраны — шаги 14, 17 и 18: обучение, главный вывод, причины', () => {
-    expect(STEPS.map((step, index) => (step.screen ? index + 1 : null)).filter(Boolean)).toEqual([14, 17, 18])
+  test('2D-экраны — шаги 14, 19 и 20: обучение, главный вывод, причины', () => {
+    expect(STEPS.map((step, index) => (step.screen ? index + 1 : null)).filter(Boolean)).toEqual([14, 19, 20])
     expect(STEPS.filter((step) => step.screen).map((step) => step.screen)).toEqual(['dashboard', 'insight', 'causes'])
   })
 
@@ -70,6 +70,19 @@ describe('шаги', () => {
 
   test('у каждого региона есть якорь', () => {
     for (const region of REGIONS) expect(ANCHOR[region]).toHaveLength(3)
+  })
+
+  test('обучение голов — шаги 17 и 18, свои регионы и кадры, по биту на этап', () => {
+    const ids = STEPS.map((step) => step.id)
+    expect(ids.indexOf('lrTraining')).toBe(16)
+    expect(ids.indexOf('catboostTraining')).toBe(17)
+    for (const id of ['lrTraining', 'catboostTraining'] as const) {
+      const step = STEPS.find((item) => item.id === id)!
+      expect(step.regions[id]).toBe('focus')
+      expect(step.shot).toBe(id)
+      expect(step.beats).toHaveLength(4)
+      expect(PARTS[id].step).toBe(id)
+    }
   })
 })
 

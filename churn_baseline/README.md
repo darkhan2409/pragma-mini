@@ -9,7 +9,8 @@ PRAGMA history → client embedding → голова      (src/downstream/probe.
 
 Проект изолирован от PRAGMA:
 - код PRAGMA (`src/`) не импортируется;
-- из репозитория читается только выгрузка генератора `data/01_raw/<group>/` — только чтение;
+- из репозитория читается только выгрузка генератора `data/01_raw/<group>/` и, для варианта
+  `catboost_plus_usr`, векторы PRAGMA `data/13_downstream/<тег>/` — только чтение;
 - все датасеты, модели и отчёты лежат внутри `churn_baseline/`;
 - своё окружение `.venv` и свои тесты.
 
@@ -37,13 +38,17 @@ churn = 0   есть хотя бы одно
 - **train** — конец выгрузки train. Это конец истории, на которой учился backbone PRAGMA: с T
   раньше него окно target train попало бы в историю предобучения. Выгрузка кончается ровно в T,
   поэтому target train берётся из **продолжения** тех же клиентов (ниже);
-- **val, test** — конец выгрузки − 60 суток: окно target целиком внутри выгрузки.
+- **val, test** — 1-е число месяца, в котором лежит «конец выгрузки − 60 суток»
+  (`config.month_start`): окно target целиком внутри выгрузки, а T в той же фазе месяца, что
+  T train. В 23:55 последнего дня месяца банк пишет снимки остатка, кэшбэк, комиссии и
+  проценты; T train стоит сразу после этой пачки, и вход PRAGMA на T val в другой день месяца
+  был бы другой фазы (аудит 2026-10-05; до него T val было 2026-03-02, T test — 2026-07-03).
 
 | группа | конец выгрузки | T | окно target | источник target |
 |---|---|---|---|---|
 | train | 2026-01-01 | 2026-01-01 | (2026-01-01, 2026-03-02] | продолжение `data/future/train` |
-| val | 2026-05-01 | 2026-03-02 | (2026-03-02, 2026-05-01] | та же выгрузка |
-| test | 2026-09-01 | 2026-07-03 | (2026-07-03, 2026-09-01] | та же выгрузка |
+| val | 2026-05-01 | 2026-03-01 | (2026-03-01, 2026-04-30] | та же выгрузка |
+| test | 2026-09-01 | 2026-07-01 | (2026-07-01, 2026-08-30] | та же выгрузка |
 
 **Продолжение train** — те же 7000 клиентов, прожитые генератором дальше конца выгрузки:
 `python -m src.generator.continuation train --days 60 --out churn_baseline/data/future/train` (из
@@ -167,18 +172,19 @@ churn = 0   есть хотя бы одно
 
 ## Результаты
 
-Текущая выгрузка, T train = 2026-01-01 (метка из продолжения), только val. test не считался.
+Текущая выгрузка, T train = 2026-01-01 (метка из продолжения), T val = 2026-03-01, только val.
+test не считался. При прежнем T val 2026-03-02 было 916 строк val, PR-AUC 0.577, ROC-AUC 0.969.
 
 | задача | inner_train / inner_holdout | best_iteration (деревьев) | порог | строк val | churn=1 | доля | ROC-AUC | PR-AUC | log-loss | Precision | Recall | F1 | TN / FP / FN / TP |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `churn_active90` | 5094 / 1274 | 374 (375) | 0.282 | 916 | 47 | 5.1% | 0.969 | 0.577 | 0.0939 | 0.500 | 0.766 | 0.605 | 833 / 36 / 11 / 36 |
+| `churn_active90` | 5094 / 1274 | 374 (375) | 0.282 | 914 | 47 | 5.1% | 0.967 | 0.587 | 0.0965 | 0.493 | 0.766 | 0.600 | 830 / 37 / 11 / 36 |
 
 Распределение target:
 
 | задача | группа | клиентов | churn=1 | churn=0 | доля |
 |---|---|---|---|---|---|
 | `churn_active90` | train | 6368 | 414 | 5954 | 6.5% |
-| `churn_active90` | val | 916 | 47 | 869 | 5.1% |
+| `churn_active90` | val | 914 | 47 | 867 | 5.1% |
 
 Вне популяции:
 - train: 121 клиент только с событиями банка до T и 14 клиентов, чьё прошлое в продолжении
@@ -241,6 +247,7 @@ churn = 1. Хвост продолжения — 2 422 905 строк от 6879 
 - `reports/metrics.json` хранит по задаче:
   - `inner_train` и `inner_holdout` — строки, положительные и их долю;
   - `best_iteration`, `trees`, `threshold` и `threshold_rule`;
+  - `holdout_curve` — PR-AUC на `inner_holdout` после каждого дерева ранней остановки;
   - метрики групп;
   - sha256 обоих файлов строк;
   - `sources` по группам — отдельно `feature_history_events_sha256` (история признаков),
@@ -270,9 +277,10 @@ churn/
 tests/           синтетические выгрузки во временном каталоге; data/ не читают
 data/<group>/    features.parquet (client_id, group, T, churn, active90, признаки), meta.json
 data/future/train/  продолжение train для target: events.parquet (хвост), future.json
-models/          catboost_churn_active90.cbm
+models/          catboost_churn_active90.cbm; plus_usr/<тег>/ — модель полного X + [USR]
 reports/         features.md, target_distribution.json, metrics.json,
-                 feature_importance.csv, eval_rows.parquet, train_rows.parquet
+                 feature_importance.csv, eval_rows.parquet, train_rows.parquet;
+                 plus_usr/<тег>/ — metrics.json, eval_rows.parquet, train_rows.parquet
 ```
 
 ## Воспроизведение

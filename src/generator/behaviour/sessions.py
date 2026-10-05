@@ -52,19 +52,6 @@ GOAL_PROFILE = "profile_settings"
 GOAL_LOAN = "loan_service"
 GOAL_DEPOSIT = "deposit_service"
 
-GOALS = (
-    GOAL_BALANCE,
-    GOAL_PAYMENT,
-    GOAL_TRANSFER,
-    GOAL_CARDS,
-    GOAL_EXPLORE,
-    GOAL_SUPPORT,
-    GOAL_MARKET,
-    GOAL_PROFILE,
-    GOAL_LOAN,
-    GOAL_DEPOSIT,
-)
-
 GOAL_DOMAIN = {
     GOAL_BALANCE: "home",
     GOAL_PAYMENT: "payments",
@@ -655,7 +642,6 @@ def _build_steps(
 
 
 __all__ = [
-    "GOALS",
     "GOAL_BALANCE",
     "GOAL_CARDS",
     "GOAL_DEPOSIT",

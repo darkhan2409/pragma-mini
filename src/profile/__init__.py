@@ -1,24 +1,8 @@
 """
-Этап 9: энкодер анкеты.
+Энкодер анкеты: внимание по всей анкете клиента, вектор анкеты из
+позиции [USR]. Анкета — Attributes на cutoff (время 0) и вехи
+Lifelong раньше него (давность вехи до cutoff, через TimeRoPE).
 
-Одна команда на группу:
-
-    python -m src.profile.run train|val|test
-
-Вход — токены анкеты из выровненных батчей с их временем и веса
-входного слоя этапа 06. Выход — один вектор на клиента в
-data/09_profiles/<group>/profiles.parquet и веса самого
-энкодера.
-
-Анкета это Attributes на cutoff (время 0) и вехи Lifelong раньше
-него (время — давность вехи до cutoff, через TimeRoPE). Вектор
-клиента это выход позиции [USR]. Событий и календаря этот этап
-не видит вовсе.
+Часть модели (src/mlm/model.py); начальные веса разыгрывает
+python -m src.mlm.init_backbone в data/07_backbone/profile.pt.
 """
-
-from __future__ import annotations
-
-from .version import FORMAT_VERSION, IMPLEMENTATION_VERSION, SCHEMA_VERSION
-
-
-__all__ = ["FORMAT_VERSION", "IMPLEMENTATION_VERSION", "SCHEMA_VERSION"]

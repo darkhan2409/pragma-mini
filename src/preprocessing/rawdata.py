@@ -22,8 +22,6 @@ from src.generator.config import (
 )
 from src.generator.profile import LIFELONG_SOURCE_FIELD, LIFELONG_TYPES, PROFILE_SCHEMA
 
-from .artifacts import sha256_file
-
 
 # ============================================================
 # ИДЕЯ
@@ -63,10 +61,6 @@ TABLE_FILES: dict[str, str] = {
     "events": "events.parquet",
     "profile": "profile.parquet",
 }
-
-# Таблицы выгрузки: их подписывает манифест и читает
-# препроцессинг. Других в выгрузке нет.
-MAIN_TABLES: tuple[str, ...] = ("events", "profile")
 
 REQUIRED_MANIFEST_KEYS: tuple[str, ...] = (
     "schema_version",
@@ -209,10 +203,6 @@ class EventTypeInfo:
     fields: tuple[FieldInfo, ...]
 
     @property
-    def field_names(self) -> tuple[str, ...]:
-        return tuple(item.name for item in self.fields)
-
-    @property
     def required(self) -> tuple[str, ...]:
         return tuple(item.name for item in self.fields if not item.nullable)
 
@@ -285,30 +275,6 @@ class RawManifest:
     @property
     def rows(self) -> dict[str, int]:
         return {"events": self.events_rows, "profile": self.profile_rows}
-
-    @property
-    def file_sha256(self) -> dict[str, str]:
-        return {
-            TABLE_FILES["events"]: self.events_sha256,
-            TABLE_FILES["profile"]: self.profile_sha256,
-        }
-
-    def echo(self) -> dict:
-        """
-        Манифест целиком: он и так короткий.
-        """
-
-        return {
-            "schema_version": self.schema_version,
-            "period_start": self.period_start.isoformat(),
-            "period_end": self.period_end.isoformat(),
-            "timezone": "UTC: время выгрузки приведено при чтении",
-            "events_rows": self.events_rows,
-            "profile_rows": self.profile_rows,
-            "events_sha256": self.events_sha256,
-            "profile_sha256": self.profile_sha256,
-            "manifest_sha256": self.sha256,
-        }
 
 
 def _dt(value) -> datetime:
@@ -451,17 +417,6 @@ class RawDataset:
     def missing_required_files(self) -> list[str]:
         return [name for name in REQUIRED_FILES if not (self.raw_dir / name).exists()]
 
-    def listed_files(self) -> list[str]:
-        """
-        Все parquet-файлы каталога относительными путями с прямыми
-        слэшами.
-        """
-
-        return sorted(
-            path.relative_to(self.raw_dir).as_posix()
-            for path in self.raw_dir.rglob("*.parquet")
-        )
-
     # --- таблицы ---
 
     def schema(self, table: str) -> pa.Schema:
@@ -489,107 +444,6 @@ class RawDataset:
 
         for index in range(parquet.num_row_groups):
             yield index, parquet.read_row_group(index, columns=columns)
-
-    # --- сверка с манифестом ---
-
-    def verify_files(self) -> dict[str, dict]:
-        """
-        sha256 двух основных файлов: манифест подписывает только
-        их. Каталоги мира сверяет отдельная проверка корпуса.
-        """
-
-        result: dict[str, dict] = {}
-
-        for name, expected in sorted(self.manifest.file_sha256.items()):
-
-            path = self.raw_dir / name
-
-            if not path.exists():
-                result[name] = {"status": "missing", "expected": expected, "actual": None}
-                continue
-
-            actual = sha256_file(path)
-
-            result[name] = {
-                "status": "ok" if actual == expected else "mismatch",
-                "expected": expected,
-                "actual": actual,
-            }
-
-        return result
-
-    def verify_rows(self) -> dict[str, dict]:
-
-        result: dict[str, dict] = {}
-
-        for table in MAIN_TABLES:
-
-            expected = self.manifest.rows.get(table)
-
-            if not self.exists(table):
-                result[table] = {"status": "missing", "expected": expected, "actual": None}
-                continue
-
-            try:
-                actual = self.num_rows(table)
-            except Exception as error:  # noqa: BLE001 — повреждённый файл это результат проверки
-                result[table] = {"status": "unreadable", "expected": expected, "actual": None, "error": type(error).__name__}
-                continue
-
-            result[table] = {
-                "status": "ok" if expected == actual else "mismatch",
-                "expected": expected,
-                "actual": actual,
-            }
-
-        return result
-
-    def verify_schemas(self) -> dict[str, dict]:
-
-        result: dict[str, dict] = {}
-
-        for table, expected in EXPECTED_SCHEMAS.items():
-
-            if not self.exists(table):
-                result[table] = {"status": "missing", "differences": []}
-                continue
-
-            try:
-                actual = self.schema(table)
-            except Exception as error:  # noqa: BLE001
-                result[table] = {"status": "unreadable", "differences": [type(error).__name__]}
-                continue
-
-            differences = schema_differences(expected, actual)
-
-            result[table] = {"status": "ok" if not differences else "mismatch", "differences": differences}
-
-        return result
-
-
-def schema_differences(expected: pa.Schema, actual: pa.Schema) -> list[str]:
-
-    differences: list[str] = []
-
-    expected_names = expected.names
-    actual_names = actual.names
-
-    for name in expected_names:
-        if name not in actual_names:
-            differences.append(f"нет колонки {name}")
-        elif not expected.field(name).type.equals(actual.field(name).type):
-            differences.append(
-                f"{name}: ожидался {expected.field(name).type}, получен {actual.field(name).type}"
-            )
-
-    for name in actual_names:
-        if name not in expected_names:
-            differences.append(f"лишняя колонка {name}")
-
-    if not differences and expected_names != actual_names:
-        differences.append("другой порядок колонок")
-
-    return differences
 
 
 # ============================================================
@@ -1096,7 +950,6 @@ __all__ = [
     "EXPECTED_SCHEMAS",
     "EventTypeInfo",
     "FieldInfo",
-    "MAIN_TABLES",
     "MANIFEST_NAME",
     "ParsedPayload",
     "REQUIRED_FILES",
@@ -1111,5 +964,4 @@ __all__ = [
     "iter_event_types",
     "parse_payloads",
     "read_manifest",
-    "schema_differences",
 ]

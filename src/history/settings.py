@@ -5,34 +5,22 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
-from src.generator.config import DATA_DIR
-
 
 # ============================================================
 # ИДЕЯ
 # ============================================================
 #
 # Всё, что решает человек: глубина и ширина энкодера, основание
-# лестницы частот RoPE, seed и устройство счёта.
+# лестницы частот RoPE и seed.
 #
-# Длины вектора d здесь нет: она приходит из векторов этапов 08
-# и 09 и сверяется между ними.
+# Длины вектора d здесь нет: она приходит из весов входного слоя
+# (data/06_embeddings/<group>/weights.pt).
 #
 # Капа на длину истории здесь нет: её ограничивает набор 05
 # (MAX_EVENTS, MAX_TOKENS в src/dataset/settings.py), а внимание
 # по оставшейся истории полное и точное.
 # ============================================================
 
-
-# Один каталог на группу и два файла в нём.
-#
-#   data/10_history/<group>/history.parquet
-#   data/10_history/<group>/weights.pt
-HISTORY_DIR = DATA_DIR / "10_history"
-
-HISTORY_FILE = "history.parquet"
-
-WEIGHTS_FILE = "weights.pt"
 
 DEVICES = ("auto", "cpu", "cuda")
 
@@ -62,7 +50,7 @@ class HistoryConfig:
     # Ширина FFN. Эталон держит 4 * d.
     feedforward: int = 512
 
-    # При сборке артефакта слой стоит в eval, и dropout выключен.
+    # Dropout при обучении; при оценке модель стоит в eval.
     dropout: float = 0.1
 
     # Основание лестницы частот TimeRoPE. В эталоне помечено как
@@ -71,8 +59,10 @@ class HistoryConfig:
     # пороге 0.85.
     rope_base: float = 10000.0
 
-    # Где считать. auto берёт CUDA, если она есть: на самой
-    # длинной истории это 694 мс против 3.6 с.
+    # Осталось от диагностического этапа 10 и обучением не читается:
+    # устройство обучения задаёт MlmConfig. Хранится, потому что
+    # входит в конфиг весов 07_backbone и чекпойнтов, а from_dict
+    # строг к ключам.
     device: str = "auto"
 
     def validate(self) -> None:
@@ -95,7 +85,7 @@ class HistoryConfig:
 
     def check_dim(self, dim: int) -> None:
         """
-        Сверка с длиной вектора, пришедшей из векторов этапов 08 и 09.
+        Сверка с длиной вектора, пришедшей из весов этапа 06.
         """
 
         if dim % self.heads:
@@ -157,20 +147,8 @@ class HistoryConfig:
         return HistoryConfig.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
-def history_dir(group: str) -> Path:
-    """
-    Каталог векторов истории группы.
-    """
-
-    return HISTORY_DIR / group
-
-
 __all__ = [
     "DEVICES",
-    "HISTORY_DIR",
-    "HISTORY_FILE",
-    "WEIGHTS_FILE",
     "ConfigError",
     "HistoryConfig",
-    "history_dir",
 ]

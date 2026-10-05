@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import fields, replace
+from dataclasses import fields
 
-import pyarrow.parquet as pq
 import pytest
 import torch
 
@@ -19,15 +18,12 @@ from tests.test_training_math import every_value, settle, tiny
 #
 # Настоящая CUDA, без подмен ядра:
 #
-#   этапы 08–10   считают на карте, веса — те же, что на CPU (они
-#                 разыграны на CPU), векторы совпадают с CPU в
-#                 пределах fp32;
-#   этап 11       на карте идёт через настоящий flash-attn;
 #   шаг модели    параметры и все тензоры батча на карте, внимание
 #                 через flash_attn_varlen_func (bf16, cu_seqlens
 #                 int32, causal=False), параметры, градиенты и
 #                 состояние AdamW — fp32, шаг двигает каждую часть;
-#   обучение      auto на CUDA — строгий flash.
+#   обучение      auto на CUDA — строгий flash; с давностью в векторе
+#                 события и целью [USR] — тоже.
 # ============================================================
 
 
@@ -38,83 +34,6 @@ flash_only = pytest.mark.skipif(not world.flash_ready(), reason="нужны CUDA
 CUDA = torch.device("cuda")
 
 PARTS = ("embedding", "event", "profile", "history", "head")
-
-
-def vectors(path, column: str) -> torch.Tensor:
-    return torch.tensor(pq.read_table(path).column(column).to_pylist())
-
-
-def weights(path) -> dict:
-    return torch.load(path, map_location="cpu", weights_only=True)
-
-
-@flash_only
-def test_diagnostic_stages_run_on_cuda_and_agree_with_the_cpu(stage, tmp_path):
-
-    from src.event.build import build_group as build_events
-    from src.event.settings import EVENTS_FILE, WEIGHTS_FILE, events_dir
-    from src.history.build import build_group as build_history
-    from src.history.settings import HISTORY_FILE, history_dir
-    from src.profile.build import build_group as build_profiles
-    from src.profile.settings import PROFILES_FILE, profiles_dir
-
-    settle(stage, train_people=many())
-
-    event, profile, history = world.encoder_configs()
-
-    runs = (
-        ("event", build_events, event, events_dir, EVENTS_FILE, "vector"),
-        ("profile", build_profiles, profile, profiles_dir, PROFILES_FILE, "profile"),
-        ("history", build_history, history, history_dir, HISTORY_FILE, "client"),
-    )
-
-    for name, build, config, directory, table, column in runs:
-
-        on_cpu = build("train", config)
-        on_cuda = build("train", replace(config, device="cuda"), directory=tmp_path / name)
-
-        assert on_cpu["device"] == "cpu" and on_cuda["device"].startswith("cuda"), name
-
-        cpu_weights = weights(directory("train") / WEIGHTS_FILE)
-        cuda_weights = weights(tmp_path / name / WEIGHTS_FILE)
-
-        for key, value in cpu_weights["state_dict"].items():
-            assert torch.equal(value, cuda_weights["state_dict"][key]), (name, key)
-
-        left = vectors(directory("train") / table, column)
-        right = vectors(tmp_path / name / table, column)
-
-        assert left.shape == right.shape and torch.isfinite(right).all(), name
-        assert torch.allclose(left, right, atol=1e-4, rtol=1e-4), (name, float((left - right).abs().max()))
-
-
-@flash_only
-def test_stage_11_on_cuda_goes_through_flash(stage, tmp_path, monkeypatch):
-
-    import flash_attn
-
-    from src.mlm.build import build_group
-    from src.mlm.settings import MlmConfig
-
-    settle(stage, train_people=many())
-
-    on_cpu = build_group("val", MlmConfig(device="cpu", attention_backend="sdpa"))
-
-    real = flash_attn.flash_attn_varlen_func
-    calls = []
-
-    def spy(*args, **kwargs):
-        calls.append(kwargs.get("causal"))
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(flash_attn, "flash_attn_varlen_func", spy)
-
-    on_cuda = build_group("val", MlmConfig(device="auto"), directory=tmp_path)
-
-    assert on_cuda["device"].startswith("cuda")
-    assert calls and set(calls) == {False}
-    assert on_cuda["targets"] == on_cpu["targets"]
-    assert on_cuda["loss"] == pytest.approx(on_cpu["loss"], rel=2e-2)
 
 
 def tensors_of(data) -> dict[str, torch.Tensor]:
@@ -234,3 +153,34 @@ def test_training_on_cuda_turns_auto_into_strict_flash(stage, capsys):
     printed = capsys.readouterr().out
 
     assert "внимание flash" in printed and described["gpu"] in printed
+
+
+@flash_only
+def test_recency_and_the_usr_target_train_on_cuda(stage, monkeypatch):
+    """
+    Давность в векторе события и цель [USR] на счётчиках и давности —
+    тем же путём, что обучение: flash в bf16, параметры в fp32.
+    """
+
+    import src.mlm.model as model_module
+    from src.mlm.settings import checkpoint_path
+    from src.mlm.train import train
+
+    from tests.test_recent_types import head
+
+    monkeypatch.setattr(model_module, "recent_types", lambda artifacts, dim, seed: head(dim))
+
+    settle(stage, train_people=many())
+
+    result = train(
+        tiny(token_budget=6, device="auto", attention_backend="auto", recency_embedding=True, usr_aux_weight=1.0),
+        epochs=1, max_steps=None, masking=every_value(),
+    )
+
+    assert result["model"]["attention"] == "flash"
+
+    weights = torch.load(checkpoint_path(), map_location="cpu", weights_only=True)["model_state_dict"]
+
+    assert all(bool(torch.isfinite(value).all()) for value in weights.values())
+    assert float(weights["recency.outer.weight"].abs().sum()) > 0.0
+    assert float(weights["recency.usr"].abs().sum()) > 0.0

@@ -81,18 +81,6 @@ class CommunityGraph:
     def active(self, client_ordinal: int, ts: datetime) -> tuple:
         return tuple(item for item in self.of(client_ordinal) if item.active_at(ts))
 
-    def household_of(self, client_ordinal: int) -> str | None:
-        return self.households.get(client_ordinal)
-
-    def household_members(self, household_id: str) -> tuple:
-        return tuple(
-            sorted(
-                ordinal
-                for ordinal, value in self.households.items()
-                if value == household_id
-            )
-        )
-
 
 def masked_name(seed_text: str) -> str:
     """

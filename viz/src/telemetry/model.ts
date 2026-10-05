@@ -6,8 +6,7 @@
 //
 //   run    начало прогона и продолжения: план и горизонт шагов;
 //   step   шаг оптимизатора: loss, lr, норма до клипа, токены;
-//   epoch  полная эпоха: train/val loss, время, пики CUDA. Строка
-//          без kind — тоже эпоха (прежний формат).
+//   epoch  полная эпоха: train/val loss, время, пики CUDA.
 //
 // Строка run продолжения отбрасывает шаги после своего шага и
 // эпохи с её эпохи: их писал оборвавшийся прогон. Битая строка
@@ -82,7 +81,7 @@ export function add(telemetry: Telemetry, record: unknown): void {
   }
 
   const item = record as Record_
-  const kind = item.kind === undefined ? 'epoch' : item.kind
+  const kind = item.kind
 
   try {
     if (kind === 'run') {

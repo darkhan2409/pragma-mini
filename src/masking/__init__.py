@@ -9,10 +9,3 @@
 
 Саму модель и обучение пакет не содержит.
 """
-
-from __future__ import annotations
-
-from .version import FORMAT_VERSION, IMPLEMENTATION_VERSION
-
-
-__all__ = ["FORMAT_VERSION", "IMPLEMENTATION_VERSION"]

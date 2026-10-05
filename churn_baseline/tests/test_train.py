@@ -12,9 +12,9 @@ import pytest
 from catboost import CatBoostClassifier
 
 from churn.build import KEYS, build
-from churn.config import FUTURE_LABEL_GROUPS, GROUPS, HORIZON
+from churn.config import FUTURE_LABEL_GROUPS, GROUPS, HORIZON, month_start
 from churn.target import TASKS, task_rows
-from churn.train import THRESHOLD_RULE, check_groups, evaluate, holdout, threshold_max_f1, train
+from churn.train import PARAMS, THRESHOLD_RULE, check_groups, evaluate, holdout, threshold_max_f1, train
 from world import LOCAL, login, profile, purchase, push, salary, write_future, write_group
 
 ENDS = {
@@ -33,7 +33,7 @@ def world(tmp_path):
     raw = tmp_path / "raw"
     for group, end in ENDS.items():
         future_labels = group in FUTURE_LABEL_GROUPS
-        cutoff = end if future_labels else end - HORIZON
+        cutoff = end if future_labels else month_start(end - HORIZON)
         events, profiles, future = [], [], []
         for index in range(20):
             client = f"{group}_{index:02d}"
@@ -153,7 +153,7 @@ def fitted(metrics: dict) -> dict:
     """
     Всё, что выбирается при обучении, по задачам.
     """
-    keys = ("threshold", "threshold_rule", "best_iteration", "trees", "inner_train", "inner_holdout")
+    keys = ("threshold", "threshold_rule", "best_iteration", "trees", "inner_train", "inner_holdout", "holdout_curve")
     return {task: {key: block[key] for key in keys} for task, block in metrics["tasks"].items()}
 
 
@@ -285,3 +285,19 @@ def test_log_loss_is_the_mean_cross_entropy_of_the_probability() -> None:
     assert evaluate(y, score, 0.35)["log_loss"] == pytest.approx(expected)
     assert evaluate(y, score, 0.9)["log_loss"] == evaluate(y, score, 0.35)["log_loss"]
     assert evaluate(y, score, 0.5)["log_loss"] < evaluate(y, np.full(6, 0.5), 0.5)["log_loss"]
+
+
+def test_holdout_curve_is_the_early_stopping_curve(tmp_path, template) -> None:
+    """
+    holdout_curve — PR-AUC на inner_holdout после каждого дерева
+    остановленной модели: лучшая итерация — её максимум, а кривая
+    тянется ещё od_wait деревьев после неё или до лимита.
+    """
+    raw = fresh(tmp_path, template)
+    metrics = train(data_dir=tmp_path / "data", models_dir=tmp_path / "models", reports_dir=tmp_path / "reports",
+                    raw_dir=raw, future_dir=tmp_path / "future")
+    for block in metrics["tasks"].values():
+        curve = block["holdout_curve"]
+        assert curve[block["best_iteration"]] == max(curve)
+        assert len(curve) in (block["best_iteration"] + 1 + PARAMS["od_wait"], PARAMS["iterations"])
+        assert all(0.0 <= value <= 1.0 for value in curve)

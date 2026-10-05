@@ -1,35 +1,20 @@
 """
-Этап 11: MLM-голова и сквозной прямой проход.
+Модель целиком и её обучение.
 
-Одна команда на группу:
+Начальные веса энкодеров события, анкеты и истории — без прохода по
+данным:
 
-    python -m src.mlm.run train|val|test
+    python -m src.mlm.init_backbone
 
-Этап собирает в памяти дифференцируемый проход
-InputEmbedding -> Event Encoder -> Profile Encoder ->
-History Encoder -> MLM и считает по нему кросс-энтропию на
-размеченных токенах.
-
-Модель одна: входной слой из data/06_embeddings/train, начальные
-веса энкодеров события, анкеты и истории из data/07_backbone
-(python -m src.mlm.init_backbone — без прохода по данным), голова
-разыгрывается заново. Этапы 08–11 обучению не нужны: это
-диагностика.
-
-Обучение — отдельная команда на train:
+Обучение на train — сквозной проход InputEmbedding -> Event Encoder ->
+Profile Encoder -> History Encoder -> MLM, backward, клип и шаг AdamW
+с warmup + cosine по всем весам модели:
 
     python -m src.mlm.train [--epochs N] [--max-steps N] [--resume]
 
-Тот же проход, но без no_grad: потери батча, backward, клип и шаг
-AdamW с warmup + cosine по всем весам модели. Маска train
-разыгрывается заново на каждую эпоху маскером src.masking.
-Чекпойнты — data/12_train/checkpoint.pt (последний) и
-best_checkpoint.pt (лучший val_loss).
+Модель одна: входной слой из data/06_embeddings/train, начальные веса
+из data/07_backbone, голова разыгрывается заново. Маска train
+разыгрывается маскером src.masking заново на каждую эпоху. Чекпойнты —
+data/12_train/checkpoint.pt (последний) и best_checkpoint.pt (лучший
+val_loss).
 """
-
-from __future__ import annotations
-
-from .version import FORMAT_VERSION, IMPLEMENTATION_VERSION, SCHEMA_VERSION
-
-
-__all__ = ["FORMAT_VERSION", "IMPLEMENTATION_VERSION", "SCHEMA_VERSION"]
