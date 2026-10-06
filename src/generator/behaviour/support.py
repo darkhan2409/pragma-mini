@@ -88,6 +88,9 @@ def contact_probability(persona: Persona, cause: str, ts: datetime, stress: floa
         "delinquency": 0.16,
         "profile_change": 0.25,
         "statement": 0.10,
+        # Желание пожаловаться уже есть (behaviour/engagement):
+        # дойдёт ли оно до обращения, решает общительность.
+        "complaint": 0.70,
     }.get(cause, 0.05)
 
     base *= 0.5 + 1.2 * persona.trait("sociality", ts)
@@ -103,9 +106,15 @@ def open_case(
     cause: str,
     ts: datetime,
     index: int,
+    feasible: tuple | None = None,
 ) -> CasePlan:
     """
     Обращение с исходом и сроком решения.
+
+    feasible — исходы, которые симуляция в силах исполнить: другой
+    выпавший исход заменяется первым из них. Иначе в ленте
+    оставались бы «карта перевыпущена» без перевыпуска и «возврат
+    начат» без возврата.
     """
 
     # Собственный неймспейс: ворота обращения разыгрываются в
@@ -131,6 +140,9 @@ def open_case(
     weights = RESOLUTION_WEIGHTS.get(topic)
 
     resolution = str(rng.choice(list(options), p=list(weights) if weights else None))
+
+    if feasible and resolution not in feasible:
+        resolution = feasible[0]
 
     hours = rng.integers(1, 96)
 

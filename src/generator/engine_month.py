@@ -6,10 +6,10 @@ from datetime import datetime, timedelta
 from . import params as params_module
 from . import config
 from .config import (
-    CLIENT_ACTION_EVENT_TYPES,
     EVENT_TYPE_PRIORITY,
     PROFILE_FIELDS,
 )
+from .behaviour import engagement as engagement_module
 from .engine import _HANDLERS, _emit_money
 from .engine_credit import emit_product_closed
 from .engine_products import LOAN_FAMILIES
@@ -23,10 +23,10 @@ from .finance.entities import (
 from .finance.ledger import COUNTERPART_BANK, COUNTERPART_GOVERNMENT, NON_PAYMENT_KINDS
 from .life import calendar as cal
 from .life import income as income_module
-from .life import lifecycle as lifecycle_module
 from .life import stress as stress_module
 from .observe import defects as defect_module
 from .profile import employment, lifelong, utc
+from .truth import transition
 from .rng import (
     NS_CARD_CREDIT,
     NS_CONSENT,
@@ -72,7 +72,11 @@ def _expire_cards(sim, state: ClientState, day: datetime) -> None:
         if remaining > 31 or remaining < 0:
             continue
 
-        moment = day.replace(hour=12, minute=int(stable_hash(card.card_id) % 60))
+        # Перевыпуск датируется тем моментом, когда он исполняется, —
+        # в конце дня, после операций дня. Прежде он стоял на 12:xx,
+        # и строки того же дня после полудня шли со старой картой
+        # после её закрытия.
+        moment = day.replace(hour=23, minute=40 + int(stable_hash(card.card_id) % 10))
 
         _reissue_card(state, card, moment, reason="expiry")
 
@@ -89,7 +93,11 @@ def _close_deposits_early(sim, state: ClientState, day: datetime) -> None:
 
     boost = 1.0 + params_module.active().stress.deposit_close_boost * stress
 
-    monthly = settings.deposit_early_close_share_per_year / 12.0 * boost
+    # Клиент, переносящий жизнь в другой банк, забирает и вклад.
+    monthly = (
+        settings.deposit_early_close_share_per_year / 12.0 * boost
+        / engagement_module.factor(state, "deposits")
+    )
 
     for contract_id, deposit in list(state.deposits.items()):
 
@@ -570,7 +578,7 @@ def _sweep_bills(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
         # В паузе клиент не платит и старые счета через этот
         # банк: они закрываются мимо него.
-        silenced = lifecycle_module.silenced_streams(state.pauses, moment)
+        silenced = engagement_module.silenced(state, moment)
 
         if sources and "bills" not in silenced and rng.random() < 0.45:
 
@@ -664,15 +672,9 @@ def month_end(sim, state: ClientState, day: datetime) -> None:
     # и именно поэтому у спящего клиента бывают месяцы совсем
     # без событий.
 
-    moved = {
-        event.payload.get("account_id")
-        for event in state.events
-        if event.event_time >= month and event.payload.get("account_id")
-    }
+    moved, silent_month = month_activity(state.events, month, ts.replace(minute=55))
 
     snapshot_rng = keyed_rng(NS_LEDGER, state.ordinal, day.toordinal(), 31)
-
-    silent_month = not any(event.event_time >= month for event in state.events)
 
     threshold = 0.08 if silent_month else 0.35
 
@@ -707,12 +709,7 @@ def month_end(sim, state: ClientState, day: datetime) -> None:
     state.monthly_atm_count = 0
     state.monthly_transfer = 0
     state.monthly_cashback = 0
-    state.month_purchases = 0
     state.comm_fatigue = max(0, state.comm_fatigue - 4)
-
-    # --- жизненный цикл ---
-
-    _update_state(state, day)
 
     # --- версия профиля ---
 
@@ -778,7 +775,9 @@ def _close_deposit(state: ClientState, ts: datetime, deposit, early: bool = Fals
 
     catalog = product_catalog.catalog()
 
-    if not early and rng.random() < settings.deposit_rollover_share and catalog.has(contract.product_code):
+    rollover = settings.deposit_rollover_share * engagement_module.factor(state, "deposits")
+
+    if not early and rng.random() < rollover and catalog.has(contract.product_code):
 
         view = catalog.view(contract.product_code)
 
@@ -881,60 +880,24 @@ def _close_deposit(state: ClientState, ts: datetime, deposit, early: bool = Fals
     emit_product_closed(state, ts, contract, reason)
 
 
-def _update_state(state: ClientState, day: datetime) -> None:
+def month_activity(events: list, month: datetime, moment: datetime) -> tuple[set, bool]:
+    """
+    Счета, по которым в месяце был оборот к моменту снимка, и был
+    ли месяц пустым.
 
-    persona = state.persona
+    Только строки не позже снимка: датированные будущим (активация
+    карты, chargeback, разблокировка) есть в ленте лишь тогда, когда
+    их дата внутри выгрузки, и иначе снимок у края окна зависел бы
+    от того, где окно кончается.
+    """
 
-    stress = stress_module.level_at(state.stress_episodes, day)
+    current = [event for event in events if month <= event.event_time <= moment]
 
-    silence = (day - state.last_client_event).days if state.last_client_event else 9999
+    moved = {
+        event.payload.get("account_id") for event in current if event.payload.get("account_id")
+    }
 
-    month = cal.month_start(day)
-
-    current = [
-        event
-        for event in state.events
-        if event.event_type in CLIENT_ACTION_EVENT_TYPES and event.event_time >= month
-    ]
-
-    previous_month = cal.month_start(month - timedelta(days=1))
-
-    previous = [
-        event
-        for event in state.events
-        if event.event_type in CLIENT_ACTION_EVENT_TYPES
-        and previous_month <= event.event_time < month
-    ]
-
-    ratio = len(current) / max(1, len(previous)) if previous else 1.0
-
-    new_state, _ = lifecycle_module.month_state(
-        persona=persona,
-        ts=day,
-        previous=state.state,
-        days_since_client_event=silence,
-        activity_ratio=ratio,
-        stress_level=stress,
-        worst_dpd=state.worst_dpd(),
-        has_open_contract=bool(state.open_contracts(day)),
-        returned_recently=state.returned_flag,
-    )
-
-    state.returned_flag = False
-
-    if new_state != state.state:
-        state.state = new_state
-
-    # Дата закрытия отношений живёт РОВНО пока клиент закрыт.
-    # Клиент, который вернулся и снова покупает, отношений не
-    # прекращал, и покрытие источников обязано это показывать:
-    # иначе таблица покрытия говорит «источник кончился», а в
-    # ленте после этой даты лежат сотни его операций.
-    if new_state == lifecycle_module.STATE_CLOSED:
-        if state.closed_at is None:
-            state.closed_at = day
-    elif state.closed_at is not None:
-        state.closed_at = None
+    return moved, not current
 
 
 def _update_profile(
@@ -965,7 +928,9 @@ def _update_profile(
 
     values = dict(state.profile_values)
 
-    open_contracts = state.open_contracts(day)
+    # Все поля анкеты — к одному моменту: прежде договоры брались на
+    # начало дня, а остатки и число договоров — на его конец.
+    open_contracts = state.open_contracts(moment)
 
     credit_limit = sum(
         int(item.amount_or_limit or 0)
@@ -1012,10 +977,16 @@ def finish(sim) -> CommunityResult:
 
     events: list = []
     profile_rows: list = []
+    transitions: list = []
+    states: list = []
 
     for ordinal in sorted(sim.clients):
 
         state = sim.clients[ordinal]
+
+        # Правда симуляции — рядом с лентой, а не в ней (truth.py).
+        transitions.extend(_truth_rows(state))
+        states.extend(state.engagement.snapshots)
 
         assign_balances(state, sorted(state.events, key=_tape_order))
 
@@ -1042,13 +1013,37 @@ def finish(sim) -> CommunityResult:
             }
             row.update({name: state.profile_values.get(name) for name in PROFILE_FIELDS})
             row["employment"] = employment(
-                income_module.employment(persona, state.life_events, state.income_streams),
+                # Записи о работе — по исходной персоне: занятость
+                # нынешней (после потери работы — unemployed) их
+                # прошлое не стирает.
+                income_module.employment(sim.personas[ordinal], state.life_events, state.income_streams),
                 config.HISTORY_END,
             )
             row["lifelong"] = lifelong(milestones(state), config.HISTORY_END)
             profile_rows.append(row)
 
-    return CommunityResult(events=events, profile_rows=profile_rows)
+    return CommunityResult(
+        events=events, profile_rows=profile_rows, transitions=transitions, states=states
+    )
+
+
+def _truth_rows(state: ClientState) -> list:
+    """
+    Переходы скрытого состояния клиента и, для аудита, начала его
+    эпизодов стресса и мошенничества — только внутри окна.
+    """
+
+    rows = list(state.engagement.journal)
+
+    for episode in state.stress_episodes:
+        if config.HISTORY_START <= episode.start < config.HISTORY_END:
+            rows.append(transition(state.client_id, episode.start, "stress", episode.trigger, episode.resolution))
+
+    for episode in state.fraud_episodes:
+        if config.HISTORY_START <= episode.start < config.HISTORY_END:
+            rows.append(transition(state.client_id, episode.start, "fraud", episode.kind, episode.decision))
+
+    return sorted(rows, key=lambda row: (row["time"], row["component"], row["value"]))
 
 
 # Семейства вкладов: те же, что в holds_deposit анкеты.

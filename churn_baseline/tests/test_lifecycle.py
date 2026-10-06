@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -395,3 +397,16 @@ def test_the_lifecycle_is_not_a_feature() -> None:
     names = " ".join(features.columns).lower()
     assert "stage" not in names and "lifecycle" not in names
     assert not any(name in features.columns for name in lc.STAGES)
+
+
+def test_feature_builders_never_read_lifecycle_or_truth() -> None:
+    """
+    Стадия — разметка для анализа после прогноза. Модули признаков, метки
+    и обучения её не читают, как и служебную правду генератора truth/.
+    """
+    churn = Path(__file__).resolve().parents[1] / "churn"
+    for name in ("features.py", "profile.py", "build.py", "train.py", "plus_usr.py", "target.py", "raw.py", "sources.py"):
+        assert "lifecycle" not in (churn / name).read_text(encoding="utf-8"), name
+
+    pattern = re.compile(r"""["'/]truth\b""")
+    assert [path.name for path in churn.glob("*.py") if pattern.search(path.read_text(encoding="utf-8"))] == []

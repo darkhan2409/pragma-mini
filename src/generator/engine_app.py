@@ -3,13 +3,14 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from .behaviour import communications as comm_module
+from .behaviour import engagement as engagement_module
 from .behaviour import outcomes as outcome_module
 from . import config
 from . import params as params_module
 from .config import (
     SOURCE_AVAILABILITY,
 )
-from .engine import _HANDLERS, _emit_money, _touch_client
+from .engine import _HANDLERS, REFUND_ORDER, _emit_money, _touch_client
 from .finance import deposits as deposit_rules
 from .finance import loans as loan_rules
 from .finance.entities import CARD_BLOCKED, Offer
@@ -18,7 +19,7 @@ from .world.dictionaries import MCC_TRANSFER
 from .world.relationships import _external
 from .life import stress as stress_module
 from .rng import COMPONENT_OUTCOME, NS_SESSION, event_rng, stable_hash
-from .simulate import ClientState, _transfer_id
+from .simulate import Action, ClientState, _transfer_id
 from .world.dictionaries import (
     BANNER_OFFERS,
     BANNER_OFFER_FAMILY,
@@ -454,9 +455,9 @@ def _topup_deposit(state: ClientState, ts: datetime, deposit, amount: int, sessi
     """
     Пополнение вклада из сессии приложения.
 
-    Всё, что могло помешать — условия продукта, деньги на счёте,
-    граница окна — проверено до того, как операция объявлена
-    успешной. Здесь остаётся только движение денег.
+    Всё, что могло помешать — условия продукта и деньги на счёте, —
+    проверено до того, как операция объявлена успешной. Здесь
+    остаётся только движение денег.
     """
 
     sources = [
@@ -858,6 +859,10 @@ def _on_communication(sim, state: ClientState, ts: datetime, payload: dict) -> N
     if not contact.clicked:
         return
 
+    # Откликнулся на попытку вернуть — возвращение вероятнее.
+    if contact.purpose == "winback":
+        engagement_module.clicked_winback(state, ts)
+
     if contact.product_family and contact.offer_id:
         state.offers.append(
             Offer(
@@ -871,6 +876,32 @@ def _on_communication(sim, state: ClientState, ts: datetime, payload: dict) -> N
                 channel=contact.channel,
             )
         )
+
+
+def defer_unblock(sim, state: ClientState, ts: datetime, card, reason: str) -> None:
+    """
+    Разблокировка в будущий момент: до него карта остаётся
+    заблокированной, и решения раньше этого момента её не видят
+    разблокированной. Прежде unblock_card с будущим временем сразу
+    менял состояние карты.
+    """
+
+    payload = {"card_id": card.card_id, "reason": reason}
+
+    if ts.toordinal() == state.today.toordinal():
+        sim.schedule(Action(ts=ts, ordinal=state.ordinal, order=REFUND_ORDER + 1, kind="card_unblock", payload=payload))
+    else:
+        state.deferred.setdefault(ts.toordinal(), []).append((ts, "card_unblock", payload))
+
+
+def _on_card_unblock(sim, state: ClientState, ts: datetime, payload: dict) -> None:
+
+    card = state.cards.get(payload["card_id"])
+
+    if card is None or card.status != CARD_BLOCKED:
+        return
+
+    unblock_card(state, ts, card, payload["reason"])
 
 
 def _on_block_expired(sim, state: ClientState, ts: datetime, payload: dict) -> None:
@@ -888,6 +919,7 @@ def _on_block_expired(sim, state: ClientState, ts: datetime, payload: dict) -> N
 
 
 _HANDLERS["card_block_expired"] = _on_block_expired
+_HANDLERS["card_unblock"] = _on_card_unblock
 _HANDLERS["session"] = _on_session
 _HANDLERS["communication"] = _on_communication
 

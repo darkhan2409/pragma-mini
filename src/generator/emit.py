@@ -25,6 +25,7 @@ from .config import (
     WORLD_SEED,
 )
 from .profile import PROFILE_SCHEMA
+from .truth import STATES_SCHEMA, TRANSITIONS_SCHEMA
 from .world import communities
 
 
@@ -38,6 +39,8 @@ from .world import communities
 # числа воркеров, ни от размера чанка, ни от порядка завершения.
 #
 # Выгрузка это ДВЕ таблицы: events.parquet и profile.parquet.
+# Рядом, в truth/, лежит скрытое состояние симуляции (truth.py):
+# его читает только аудит, вход модели и метки — никогда.
 #
 # event_time выгружается СТРОКОЙ ISO 8601 со смещением
 # часового пояса, как его отдала бы банковская система.
@@ -66,6 +69,8 @@ EVENTS_SCHEMA = pa.schema(
 TABLES = {
     "events": ("events.parquet", EVENTS_SCHEMA),
     "profile": ("profile.parquet", PROFILE_SCHEMA),
+    "transitions": ("truth/transitions.parquet", TRANSITIONS_SCHEMA),
+    "states": ("truth/states.parquet", STATES_SCHEMA),
 }
 
 PARTS_DIR = "parts"
@@ -214,7 +219,12 @@ def _run_batch(job: tuple) -> tuple:
 
             result = run_community(community_id, members)
 
-            for name, rows in (("events", result.events), ("profile", result.profile_rows)):
+            for name, rows in (
+                ("events", result.events),
+                ("profile", result.profile_rows),
+                ("transitions", result.transitions),
+                ("states", result.states),
+            ):
                 if rows:
                     writers[name].write_table(pa.Table.from_pylist(rows, schema=TABLES[name][1]))
                     counts[name] += len(rows)
@@ -554,10 +564,8 @@ def generate_dataset(
             "national_merchants": _file_sha256(config.NATIONAL_MERCHANTS_PATH),
             "product_timeline": _file_sha256(config.PRODUCT_TIMELINE_PATH),
         },
-        "events_rows": counts["events"],
-        "profile_rows": counts["profile"],
-        "events_sha256": _file_sha256(out / TABLES["events"][0]),
-        "profile_sha256": _file_sha256(out / TABLES["profile"][0]),
+        **{f"{name}_rows": counts[name] for name in TABLES},
+        **{f"{name}_sha256": _file_sha256(out / TABLES[name][0]) for name in TABLES},
     }
 
     _write_json(out / "manifest.json", manifest)

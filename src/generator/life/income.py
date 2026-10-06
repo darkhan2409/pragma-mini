@@ -191,8 +191,11 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
             )
         )
 
-    # Жизненные события закрывают и открывают потоки.
-    index = len(streams)
+    # Жизненные события закрывают и открывают потоки. Номер потока
+    # берётся от события — его дня, — а не от длины списка: иначе
+    # пенсия, появившаяся при более далёком горизонте планирования,
+    # сдвигала бы номера всех потоков после неё, а с ними и
+    # розыгрыши сумм (_amount_at).
 
     # Указатель на действующий основной поток: список при этом
     # хранит и прежние места работы, иначе история дохода
@@ -223,19 +226,13 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
 
         item_rng = keyed_rng(NS_INCOME, persona.client_ordinal, 2, int(event.ts.toordinal()))
 
-        # Смена работы у самого края окна до среза ничего не
-        # меняет: новое место начинается уже за границей выгрузки,
-        # и человек продолжает получать на прежнем. Закрыть поток
-        # и не открыть новый значило бы оставить его вообще без
-        # дохода на ровном месте — анкета обещала бы деньги,
-        # которых в ленте нет.
-        #
-        # У потери работы всё иначе: там поток кончается по самому
-        # событию, и отсутствие дохода к срезу это правда.
-        if event.kind == "job_change":
-            if event.ts + timedelta(days=int(event.payload.get("gap_days", 0))) >= config.PLANNING_END:
-                continue
+        tag = int(event.ts.toordinal())
 
+        # Смена работы закрывает прежний поток в день события, даже
+        # если новое место начнётся за горизонтом планирования:
+        # между работами дохода нет, и это правда. Раньше смену у
+        # края горизонта пропускали, и продление горизонта меняло
+        # прошлое — поток закрывался задним числом.
         streams[primary_position] = replace(primary, valid_to=event.ts)
 
         if event.kind == "job_loss":
@@ -244,10 +241,9 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
             severance_months = item_rng.integers(*settings.severance_months)
 
             if severance_months > 0:
-                index += 1
                 streams.append(
                     IncomeStream(
-                        stream_id=f"inc_{persona.client_ordinal}_{index}",
+                        stream_id=f"inc_{persona.client_ordinal}_severance_{tag}",
                         kind="severance",
                         payer=primary.payer,
                         schedule="irregular",
@@ -260,10 +256,9 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
                 )
 
             if item_rng.random() < settings.unemployment_benefit_share:
-                index += 1
                 streams.append(
                     IncomeStream(
-                        stream_id=f"inc_{persona.client_ordinal}_{index}",
+                        stream_id=f"inc_{persona.client_ordinal}_benefit_{tag}",
                         kind="social_benefit",
                         payer="state_benefit",
                         schedule="monthly",
@@ -287,8 +282,6 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
 
         factor = float(event.payload.get("income_factor", item_rng.uniform(0.85, 1.35)))
 
-        index += 1
-
         employer = f"emp_{stable_hash('employer', persona.client_ordinal, int(event.ts.toordinal())) % 10 ** 9:09d}"
 
         # График и день выплаты назначает новый работодатель.
@@ -301,7 +294,7 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
 
         streams.append(
             IncomeStream(
-                stream_id=f"inc_{persona.client_ordinal}_{index}",
+                stream_id=f"inc_{persona.client_ordinal}_job_{tag}",
                 kind="salary",
                 payer=employer,
                 schedule=schedule,
@@ -654,26 +647,30 @@ def vacation_payouts(persona: Persona, streams: tuple, events: tuple) -> tuple:
 
     settings = params_module.active().income
 
-    salary = next((item for item in streams if item.kind == "salary"), None)
-
-    if salary is None:
-        return ()
-
     result: list[Payout] = []
 
-    for index, event in enumerate(events):
+    for event in events:
 
         if event.kind != "vacation":
             continue
 
-        rng = keyed_rng(NS_INCOME, persona.client_ordinal, 9, index)
+        # Ключ — номер отпуска среди отпусков, а не место в общем
+        # списке событий.
+        rng = keyed_rng(NS_INCOME, persona.client_ordinal, 9, event.serial)
 
         if rng.random() >= settings.vacation_pay_share:
             continue
 
         ts = event.ts - timedelta(days=int(rng.integers(1, 5)))
 
-        if not (config.HISTORY_START <= ts < config.PLANNING_END) or not salary.active_at(ts):
+        # Отпускные платит работодатель, у которого человек работает
+        # в день выплаты, а не первый в списке: после смены работы
+        # прежнего уже нет.
+        salary = next(
+            (item for item in streams if item.kind == "salary" and item.active_at(ts)), None
+        )
+
+        if salary is None or not (config.HISTORY_START <= ts < config.PLANNING_END):
             continue
 
         amount = int(salary.base_amount * rng.uniform(*settings.vacation_pay_of_income))
@@ -686,16 +683,63 @@ def vacation_payouts(persona: Persona, streams: tuple, events: tuple) -> tuple:
     return tuple(result)
 
 
-def monthly_income(streams: tuple, ts: datetime) -> int:
+def expected_payday(streams: tuple, day: datetime) -> datetime | None:
     """
-    Ожидаемый месячный доход домохозяйства на дату.
+    Ближайший день зарплаты или пенсии, начиная с day, по графику
+    потоков, которые действуют сегодня.
+
+    Человек ждёт зарплату по графику своей работы и не знает, что
+    через неделю её потеряет. Поэтому здесь читается только
+    сегодняшнее состояние потоков, а не реализованные будущие
+    выплаты: в них будущая потеря работы уже стёрла следующую
+    зарплату, и траты сегодня от неё зависели.
     """
 
-    total = 0
+    settings = params_module.active().income
+
+    month = cal.month_start(day)
+
+    best = None
+
+    for stream in streams:
+
+        if stream.kind not in ("salary", "pension") or stream.schedule == "irregular":
+            continue
+
+        if not stream.active_at(day):
+            continue
+
+        paydays = [stream.payday]
+
+        if stream.schedule == "twice_monthly":
+            paydays.append(((stream.payday + settings.second_payday_offset - 1) % 28) + 1)
+
+        for current in (month, cal.next_month(month)):
+            for payday in paydays:
+                planned = cal.day_in_month(current, payday)
+                if planned >= day and (best is None or planned < best):
+                    best = planned
+
+    return best
+
+
+def monthly_income(streams: tuple, ts: datetime) -> int:
+    """
+    Ожидаемый месячный доход домохозяйства на дату — с повышениями
+    и снижениями из жизненных событий, как и сами выплаты
+    (_amount_at). Раньше бюджет их не видел: деньги менялись, а
+    траты жили по прежнему доходу.
+    """
+
+    total = 0.0
 
     for stream in streams:
         if stream.active_at(ts):
-            total += stream.base_amount
+            amount = float(stream.base_amount)
+            for moment, factor in stream.shifts:
+                if stream.valid_from <= moment <= ts:
+                    amount *= factor
+            total += amount
 
     return int(total)
 

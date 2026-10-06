@@ -46,18 +46,13 @@ class ActivityParams:
         }
     )
 
-    # Множитель по состоянию жизненного цикла.
+    # Множитель по стадии клиента на день (behaviour/engagement.stage).
     #
-    # Только состояния, которые заданы НЕ лентой: срок с
-    # регистрации, скрытый стресс и нехватка денег на платёж.
-    # Ярлыки, выведенные из объёма действий (active, growing,
-    # stable, dormant, churn_risk, churned, returned,
-    # closed_relationship), поведения не меняют: ярлык описывает
-    # поведение, а не вызывает его. Иначе множитель на них
-    # замыкал круг — ноль у dormant не давал клиенту ни одного
-    # действия, чтобы выйти из молчания, спад у churn_risk
-    # углублял сам себя, рост у growing разгонял сам себя.
-    # Настоящее молчание задают скрытые паузы (silenced_streams).
+    # Только стадии, которые заданы НЕ лентой: срок с прихода,
+    # скрытый стресс и просрочка. Ярлыков, выведенных из объёма
+    # действий, нет вовсе: ярлык описывает поведение, а не вызывает
+    # его, и множитель на нём замыкал бы круг. Молчание задают
+    # отношения клиента с банком (behaviour/engagement).
     state_factor: dict = field(
         default_factory=lambda: {
             "prospect": 0.0,
@@ -81,19 +76,6 @@ class ActivityParams:
             "episodic": 1.00,
         }
     )
-
-    # Пауза по видам: что именно замолкает.
-    pause_silences: dict = field(
-        default_factory=lambda: {
-            "full": ("purchases", "sessions", "transfers", "cash", "bills"),
-            "app_only": ("sessions",),
-            "cards_only": ("purchases", "cash"),
-            "other_bank": ("purchases", "transfers", "cash", "bills"),
-            "seasonal": ("purchases", "sessions", "transfers", "cash", "bills"),
-        }
-    )
-
-    other_bank_residual: float = 0.12
 
     # Нехватка денег на счёте в банке почти никогда не выглядит
     # как отказ: потребность закрывается наличными, деньгами в

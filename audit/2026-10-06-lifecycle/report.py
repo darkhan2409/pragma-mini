@@ -1,10 +1,13 @@
 """
 Диагностика стадий CAPP на выгрузке генератора. Только читает RAW и
-печатает таблицы; ничего не пишет.
+прогнозы и печатает таблицы; ничего не пишет.
 
     cd churn_baseline
     .venv/bin/python ../audit/2026-10-06-lifecycle/report.py --raw ../data/01_raw/val \
         --until 2026-05-01 --cutoff 2026-03-01
+    # срез готовых прогнозов churn по стадии на T (стадия — не признак)
+    .venv/bin/python ../audit/2026-10-06-lifecycle/report.py --raw ../data/01_raw/val \
+        --until 2026-05-01 --cutoff 2026-03-01 --scores ../data/13_downstream/<тег>/predictions.parquet
     # сверка горизонтов: та же группа, выгруженная до двух концов окна
     .venv/bin/python ../audit/2026-10-06-lifecycle/report.py --raw <short> --until <short_end> \
         --horizon <long>
@@ -27,6 +30,7 @@ from churn.activity import is_client_action  # noqa: E402
 from churn.products import DEBIT_CARD, SERVICE, families  # noqa: E402
 from churn.raw import client_blocks, read_profile  # noqa: E402
 from churn.target import labels  # noqa: E402
+from sklearn.metrics import average_precision_score, roc_auc_score  # noqa: E402
 
 LOCAL = timezone(timedelta(hours=5))
 
@@ -175,6 +179,44 @@ def leakage(raw: Path, history: pd.DataFrame, moments: list[pd.Timestamp]) -> No
         print(f"  обрезка на {moment.tz_convert(LOCAL)}: переходов {len(known)}, совпадают: {short.equals(known)}")
 
 
+# Меньше положительных или отрицательных в срезе — метрика не считается:
+# на десятке примеров PR-AUC ничего не говорит.
+MINIMUM = 10
+
+
+def by_stage(raw: Path, history: pd.DataFrame, cutoff: pd.Timestamp, scores: Path) -> None:
+    """
+    Качество готовых прогнозов churn отдельно по стадии на T. Прогнозы —
+    eval_rows churn_baseline (churn, score) или predictions пробы
+    (set, y, score). Стадия здесь только разрез, в модели её нет.
+    """
+    rows = pd.read_parquet(scores)
+    if "group" in rows:
+        rows = rows[rows["group"] == raw.name]
+    label = "y" if "y" in rows else "churn"
+    scenario = "set" if "set" in rows else None
+    stage = lc.stage_at(history, cutoff)["stage"]
+    rows = rows.assign(stage=rows["client_id"].map(stage).fillna("нет приложения"))
+
+    print(f"\n## Прогнозы {scores} по стадии на T")
+    for name, part in rows.groupby(scenario) if scenario else [("прогноз", rows)]:
+        table = []
+        for current, group in [("все", part), *part.groupby("stage")]:
+            positive = int(group[label].sum())
+            negative = len(group) - positive
+            enough = positive >= MINIMUM and negative >= MINIMUM
+            table.append({
+                "стадия": current,
+                "строк": len(group),
+                "ушли": positive,
+                "доля": round(positive / len(group), 3),
+                "PR-AUC": round(average_precision_score(group[label], group["score"]), 3) if enough else "мало",
+                "ROC-AUC": round(roc_auc_score(group[label], group["score"]), 3) if enough else "мало",
+            })
+        print(f"\n### {name}")
+        print(pd.DataFrame(table).to_string(index=False))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--raw", type=Path, required=True)
@@ -182,11 +224,17 @@ def main() -> None:
     parser.add_argument("--cutoff", default=None, help="T для метки churn, местная дата")
     parser.add_argument("--leakage", nargs="*", default=[], help="моменты обрезки, местные даты")
     parser.add_argument("--horizon", type=Path, default=None, help="та же группа, выгруженная дальше")
+    parser.add_argument("--scores", type=Path, default=None, help="прогнозы churn: eval_rows или predictions пробы")
     args = parser.parse_args()
 
     until = local(args.until)
     cutoff = local(args.cutoff) if args.cutoff else None
     history = report(args.raw, until, cutoff)
+
+    if args.scores is not None:
+        if cutoff is None:
+            parser.error("--scores нужен --cutoff: стадия берётся на T прогнозов")
+        by_stage(args.raw, history, cutoff, args.scores)
 
     if args.leakage:
         print("\n## Без будущего: обрезка ленты")

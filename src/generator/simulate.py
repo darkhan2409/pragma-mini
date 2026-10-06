@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
 from . import params as params_module
 from .behaviour import adoption as adoption_module
+from .behaviour import engagement as engagement_module
 from .behaviour import habits as habits_module
 from . import config
 from .config import (
@@ -29,7 +30,6 @@ from .life import calendar as cal
 from .life import events as life_events
 from .life import fraud as fraud_plan
 from .life import income as income_module
-from .life import lifecycle as lifecycle_module
 from .life import stress as stress_module
 from .life.persona import Persona, app_adoption, consent_date, draw_persona
 from .life.traits import event_shift
@@ -68,12 +68,21 @@ class ClientState:
 
     life_events: tuple = ()
     stress_episodes: tuple = ()
-    pauses: tuple = ()
     fraud_episodes: tuple = ()
+    # Отношения с банком: скрытое состояние, из которого рождается
+    # неактивность (behaviour/engagement).
+    engagement: object = None
     income_streams: tuple = ()
     payouts: tuple = ()
+    # Те же выплаты по порядковому номеру дня: план дня смотрит
+    # только свой день и вчерашний, а не весь список.
+    payouts_by_day: dict = field(default_factory=dict)
+    last_payday: datetime | None = None
     habits: object = None
-    traits: object = None
+    # Как жизнь меняет персону (life/events.persona_changes) и
+    # сколько изменений уже применено.
+    persona_changes: tuple = ()
+    applied_changes: int = 0
 
     contracts: dict = field(default_factory=dict)
     cards: dict = field(default_factory=dict)
@@ -86,34 +95,44 @@ class ClientState:
     app_adopted_at: datetime | None = None
     consent_at: datetime | None = None
 
-    state: str = lifecycle_module.STATE_PROSPECT
+    state: str = "prospect"
     last_client_event: datetime | None = None
-    last_state_change: datetime | None = None
     comm_fatigue: int = 0
     recent_failure_at: datetime | None = None
+    # Последний пропущенный взнос: повод обращения читает его, а не
+    # хвост ленты, — в хвосте могли оказаться строки с будущим
+    # временем, которых в короткой выгрузке нет.
+    last_missed_at: datetime | None = None
+    # Начало дня, который сейчас симулируется. Событие дня не
+    # может лечь раньше него (emit): тогда история до T зависит
+    # только от дней раньше T.
+    today: datetime | None = None
     decline_day: int = 0
     decline_count: int = 0
     fraud_alert_at: datetime | None = None
     pending_notice: bool = False
-    returned_flag: bool = False
 
     monthly_atm: int = 0
     monthly_atm_count: int = 0
     monthly_transfer: int = 0
     monthly_cashback: int = 0
-    month_purchases: int = 0
+    # Покупки последних 30 дней по дням: давление бюджета скользит,
+    # а не обнуляется с календарным месяцем (household.budget_pressure).
+    spend_by_day: dict = field(default_factory=dict)
     pending_cashback: dict = field(default_factory=dict)
-    month_key: int = 0
 
     profile_values: dict = field(default_factory=dict)
     # Возвраты и отмены, назначенные покупкой на будущие дни:
     # ключ это порядковый номер дня исполнения.
     pending_refunds: dict = field(default_factory=dict)
+    # Действия, назначенные на будущий момент другого дня
+    # (разблокировка карты по исходу обращения): до своего момента
+    # они состояние не меняют.
+    deferred: dict = field(default_factory=dict)
     open_bills: list = field(default_factory=list)
     cases: list = field(default_factory=list)
     support_last_by_cause: dict = field(default_factory=dict)
     fraud_disputes: set = field(default_factory=set)
-    closed_at: datetime | None = None
 
     # --------------------------------------------------------
 
@@ -147,7 +166,24 @@ class ClientState:
         Объект всё равно возвращается: деньги по нему двигались,
         договор открылся, цепочка остатков осталась целой. Просто
         наблюдения этой строки у банка нет.
+
+        Опыт клиента от наблюдаемости не зависит: отказ случился,
+        даже если система, которая его записала бы, ещё не
+        запущена. Поэтому улика для состояния отношений снимается
+        до фильтра (behaviour/engagement.note).
         """
+
+        if self.today is not None and event.event_time < self.today:
+            raise ValueError(
+                f"{self.client_id}: {event.event_type} в {event.event_time} датирован раньше "
+                f"симулируемого дня {self.today:%Y-%m-%d}"
+            )
+
+        if event.event_type == "installment_missed":
+            self.last_missed_at = event.event_time
+
+
+        engagement_module.note(self, event)
 
         if not in_window(event.event_time):
             return event
@@ -180,6 +216,21 @@ class ClientState:
         self.decline_count += 1
 
         return True
+
+    def spent(self, day: datetime) -> int:
+        """
+        Покупки за 30 дней до этого дня.
+        """
+
+        first = day.toordinal() - 30
+
+        for key in [key for key in self.spend_by_day if key < first]:
+            del self.spend_by_day[key]
+
+        return sum(self.spend_by_day.values())
+
+    def add_spend(self, ts: datetime, amount: int) -> None:
+        self.spend_by_day[ts.toordinal()] = self.spend_by_day.get(ts.toordinal(), 0) + int(amount)
 
     def has_open_loan(self) -> bool:
         """
@@ -303,7 +354,15 @@ class ClientState:
         return max(1, int(self.profile_values.get("declared_income") or self.persona.declared_income))
 
     def worst_dpd(self) -> int:
-        return max((state.dpd for state in self.loans.values() if not state.closed), default=0)
+        """
+        Худшая просрочка по всем долгам: кредитам и кредитным картам.
+        Раньше просрочку карты не видели ни коллекшн, ни обращения.
+        """
+
+        loans = (state.dpd for state in self.loans.values() if not state.closed)
+        cards = (credit.dpd for credit in self.card_credits.values() if not credit.closed)
+
+        return max((*loans, *cards), default=0)
 
     def card_facts(self, card, card_id: str | None = None) -> dict:
         """
@@ -345,6 +404,8 @@ class Action:
 class CommunityResult:
     events: list
     profile_rows: list
+    transitions: list = field(default_factory=list)
+    states: list = field(default_factory=list)
 
 
 # ============================================================
@@ -376,16 +437,10 @@ def in_window(ts: datetime) -> bool:
     """
     Момент попадает в окно выгрузки.
 
-    Границы не симметричны по смыслу, и это важно:
-
-      до начала окна мир ЖИЛ — деньги двигались, договоры
-      открывались, просто банк этого в выгрузку не положил;
-
-      на конце окна и позже мира ещё НЕТ — выгрузка снята в этот
-      момент, и ничего после него случиться не успело.
-
-    Поэтому проводка до начала окна делается, а после конца —
-    нет: иначе остаток менялся бы от события, которого не было.
+    Окно — свойство НАБЛЮДЕНИЯ, а не симуляции: до начала окна мир
+    жил, после конца он живёт дальше. Проводки делаются всегда, и
+    решения от конца окна не зависят (G5); граница решает только,
+    попадёт ли строка в выгрузку (ClientState.emit).
     """
 
     return config.HISTORY_START <= ts < config.HISTORY_END
@@ -449,7 +504,6 @@ class CommunitySimulation:
 
         state.life_events = life_events.plan_events(persona)
         state.stress_episodes = stress_module.plan_episodes(persona, state.life_events)
-        state.pauses = lifecycle_module.plan_pauses(persona, state.life_events)
         state.fraud_episodes = fraud_plan.plan_episodes(persona, state.life_events)
         state.income_streams = income_module.build_streams(persona, state.life_events)
 
@@ -461,8 +515,15 @@ class CommunitySimulation:
             )
         )
 
+        for payout in state.payouts:
+            state.payouts_by_day.setdefault(payout.ts.toordinal(), []).append(payout)
+
         state.habits = habits_module.build_habits(persona, state.life_events)
 
+        # Черты сдвигаются после жизненных событий и после
+        # пережитого мошенничества, и поведение читает их из
+        # персоны клиента. Раньше сдвиги складывались в отдельное
+        # поле, которое никто не читал (аудит 2026-10-05, G3).
         traits = persona.traits
 
         for event in state.life_events:
@@ -470,7 +531,17 @@ class CommunitySimulation:
             if shift is not None:
                 traits = traits.with_shift(shift)
 
-        state.traits = traits
+        for episode in state.fraud_episodes:
+            if episode.kind != "false_positive":
+                traits = traits.with_shift(event_shift("fraud_incident", episode.start))
+
+        state.persona = replace(persona, traits=traits)
+
+        state.persona_changes = life_events.persona_changes(
+            persona, state.life_events, state.income_streams
+        )
+
+        state.engagement = engagement_module.start(persona)
 
         state.app_adopted_at = app_adoption(persona.client_ordinal)
         state.consent_at = consent_date(persona.client_ordinal)
@@ -689,9 +760,6 @@ class CommunitySimulation:
 
             activation = ts + timedelta(days=int(rng.integers(low, high + 1)), hours=int(rng.integers(1, 20)))
 
-            if activation >= config.PLANNING_END:
-                activation = ts
-
             card.activated_at = activation
             card.status = CARD_ACTIVE
 
@@ -885,13 +953,6 @@ class CommunitySimulation:
         # наблюдавшихся проводок, а начальное условие ленты.
         for account in state.ledger.accounts.values():
             account.opening_balance = account.balance
-
-    def _outlets_by_id(self, state: ClientState, category: str, ts: datetime) -> tuple:
-        from .world import merchants as catalog
-
-        era = state.habits.era_at(ts)
-
-        return catalog.outlets_of(era.settlement, category)
 
     def _prehistory_debt_fits(
         self, state: ClientState, ts, family: str, amount, term, item

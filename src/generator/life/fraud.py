@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -61,25 +62,30 @@ def plan_episodes(persona: Persona, events: tuple) -> tuple:
     rate *= 1.0 + (settings.travel_exposure_factor - 1.0) * mobility
 
     start = max(config.HISTORY_START, persona.relationship_start)
-    span_days = (config.PLANNING_END - start).days
-
-    if span_days <= 30:
-        return ()
-
-    rng = keyed_rng(NS_FRAUD, persona.client_ordinal, 1)
-
-    count = rng.poisson(rate * span_days / 365.25)
 
     episodes: list[FraudEpisode] = []
 
-    for index in range(min(count, 3)):
+    if rate <= 0.0:
+        return ()
+
+    # Эпизоды идут вперёд по времени: следующий — через
+    # экспоненциальный интервал после предыдущего, первый — не
+    # раньше чем через пять дней после прихода в банк. Горизонт
+    # планирования только обрезает будущее.
+    clock = 5.0
+
+    for index in range(3):
 
         item_rng = keyed_rng(NS_FRAUD, persona.client_ordinal, 2, index)
 
+        clock += -math.log(1.0 - item_rng.random()) / rate * 365.25
+
         kind = item_rng.weighted(settings.kind_weights)
 
-        offset = int(item_rng.integers(5, span_days - 5))
-        begin = start + timedelta(days=offset, hours=int(item_rng.integers(0, 24)))
+        begin = start + timedelta(days=int(clock), hours=int(item_rng.integers(0, 24)))
+
+        if begin >= config.PLANNING_END:
+            break
 
         steps: list[FraudStep] = []
 

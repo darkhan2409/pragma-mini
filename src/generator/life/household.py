@@ -115,14 +115,20 @@ def purchase_budget(budget: MonthlyBudget) -> int:
     return int(available * settings.card_share_of_spend)
 
 
-def budget_pressure(budget: MonthlyBudget, spent: int, ts: datetime) -> float:
+def budget_pressure(budget: MonthlyBudget, spent: int, tracked_days: int) -> float:
     """
-    Во сколько раз клиент сбавляет траты, если деньги месяца
-    кончаются раньше времени.
+    Во сколько раз клиент сбавляет траты, если потратил больше, чем
+    позволяет месячный бюджет.
 
-    Это не бухгалтерский лимит, а поведение: человек, потративший
-    к середине месяца всё, до зарплаты покупает заметно меньше и
-    заметно дешевле.
+    Это не бухгалтерский лимит, а поведение: человек, уже
+    потративший месячное, покупает заметно меньше и заметно дешевле.
+
+    spent — покупки последних 30 дней, tracked_days — сколько дней
+    из них уже наблюдается (в начале окна меньше 30). Окно скользит:
+    прежде траты считались с начала календарного месяца, счётчик
+    обнулялся в его конце, и у тех, кто тратит быстрее бюджета,
+    первое число месяца давало всплеск покупок вдвое против других
+    дней (проверка scratch 2026-10-06).
     """
 
     settings = params_module.active().amounts
@@ -132,11 +138,7 @@ def budget_pressure(budget: MonthlyBudget, spent: int, ts: datetime) -> float:
     if target <= 0:
         return 1.0
 
-    days = cal.month_end(ts).day
-
-    elapsed = max(1, ts.day) / days
-
-    expected = target * elapsed
+    expected = target * min(30, max(1, tracked_days)) / 30
 
     if expected <= 0 or spent <= expected:
         return 1.0

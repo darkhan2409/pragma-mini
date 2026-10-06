@@ -82,7 +82,12 @@ def test_with_the_window_as_the_bound_every_persona_is_a_client(runs):
     assert len(clients(runs["planning"], "profile")) < CLIENTS
 
     assert len(clients(runs["window"], "profile")) == CLIENTS
-    assert clients(runs["window"], "events") == clients(runs["window"], "profile")
+
+    # У каждого клиента ленты есть анкета. Обратное не обязано:
+    # давний клиент, ушедший из банка ещё до окна, может не оставить
+    # за короткое окно ни одной строки — банк держит его в базе, а
+    # событий у него нет (Generator V1, behaviour/engagement).
+    assert clients(runs["window"], "events") <= clients(runs["window"], "profile")
 
 
 def test_newcomers_arrive_at_least_a_margin_before_the_bound(runs):

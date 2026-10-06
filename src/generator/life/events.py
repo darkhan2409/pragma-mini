@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
@@ -22,6 +23,13 @@ from .persona import Persona
 #
 # Банк узнаёт о событии позже, чем оно произошло, и далеко не
 # о каждом.
+#
+# События каждого вида идут вперёд по времени: следующее — через
+# случайный интервал после предыдущего. Поэтому горизонт
+# планирования только обрезает будущее: поднятый PLANNING_END
+# дописывает события после прежнего и не трогает ни одного
+# раньше него. Раньше число событий бралось Poisson от длины
+# горизонта, а даты раскладывались по нему же.
 # ============================================================
 
 
@@ -66,6 +74,10 @@ class LifeEvent:
     payload: dict
     known_to_bank_at: datetime | None
     confirmed: bool
+    # Номер события среди событий своего вида: ключ его
+    # розыгрышей в других модулях. Позиция в общем списке ключом
+    # быть не может — событие другого вида сдвигало бы её.
+    serial: int = 0
 
     @property
     def changes_profile(self) -> tuple:
@@ -83,11 +95,14 @@ def _rate(persona: Persona, kind: str) -> float:
     return rate * factor
 
 
-def _move_target(persona: Persona, rng) -> dict:
+def _move_target(settlement: str, rng) -> dict:
+    """
+    Куда переезжает человек, который сейчас живёт в settlement.
+    """
 
     settings = params_module.active().lifecycle
 
-    home = geography.by_name(persona.settlement)
+    home = geography.by_name(settlement)
 
     if rng.random() < settings.move_to_other_settlement_share:
 
@@ -135,11 +150,7 @@ def plan_events(persona: Persona) -> tuple:
 
     settings = params_module.active().lifecycle
 
-    span_days = (config.PLANNING_END - config.HISTORY_START).days
-    years = span_days / 365.25
-
     events: list[LifeEvent] = []
-
 
     for kind in EVENT_KINDS:
 
@@ -148,29 +159,34 @@ def plan_events(persona: Persona) -> tuple:
         if rate <= 0.0:
             continue
 
-        rng = keyed_rng(NS_LIFE, persona.client_ordinal, EVENT_KINDS.index(kind))
-
-        count = rng.poisson(rate * years)
-
         limit = settings.life_event_max.get(kind)
 
-        if limit is not None:
-            count = min(count, limit)
+        # Интервалы до следующего события — экспоненциальные со
+        # ставкой вида: тот же процесс Пуассона, что и прежде, но
+        # шагами вперёд, без длины горизонта.
+        clock = 0.0
 
-        for index in range(count):
+        index = 0
+
+        while limit is None or index < limit:
 
             item_rng = keyed_rng(
                 NS_LIFE, persona.client_ordinal, EVENT_KINDS.index(kind), 100 + index
             )
 
-            offset = item_rng.integers(0, span_days)
-            ts = config.HISTORY_START + timedelta(days=int(offset), hours=int(item_rng.integers(8, 20)))
+            clock += -math.log(1.0 - item_rng.random()) / rate * 365.25
 
+            ts = config.HISTORY_START + timedelta(days=int(clock), hours=int(item_rng.integers(8, 20)))
+
+            if ts >= config.PLANNING_END:
+                break
+
+            # Цель переезда разыгрывается позже, по порядку времени
+            # (_in_time_order): второй переезд идёт от того места, где
+            # человек живёт после первого, а не от исходного.
             payload: dict = {}
 
-            if kind == "move":
-                payload = _move_target(persona, item_rng)
-            elif kind == "job_change":
+            if kind == "job_change":
                 payload = {
                     "industry": persona.industry,
                     "income_factor": float(item_rng.uniform(0.85, 1.45)),
@@ -205,11 +221,11 @@ def plan_events(persona: Persona) -> tuple:
 
             known_share = settings.profile_change_known_share.get(kind, 0.0)
 
+            # Дата, когда банк узнал, может лежать за горизонтом:
+            # это значит «ещё не узнал», и в выгрузку она не попадёт.
             if known_share > 0.0 and item_rng.random() < known_share:
                 delay = item_rng.integers(*settings.profile_change_delay_days)
                 known_at = ts + timedelta(days=int(delay))
-                if known_at >= config.PLANNING_END:
-                    known_at = None
             else:
                 known_at = None
 
@@ -220,8 +236,11 @@ def plan_events(persona: Persona) -> tuple:
                     payload=payload,
                     known_to_bank_at=known_at,
                     confirmed=bool(item_rng.random() < settings.profile_change_confirmed_share),
+                    serial=index,
                 )
             )
+
+            index += 1
 
     events.sort(key=lambda item: (item.ts, item.kind))
 
@@ -230,16 +249,34 @@ def plan_events(persona: Persona) -> tuple:
 
 def _in_time_order(persona: Persona, events: list) -> list:
     """
-    Семейное положение меняется по порядку ВРЕМЕНИ, а не
-    розыгрыша: даты разыгрываются независимо, и развод иначе мог
-    оказаться раньше свадьбы. Событие, которое в этот момент
-    невозможно, выпадает. Рождению значение не нужно: анкета
-    добавляет по ребёнку на каждое сообщение банку.
+    События, возможные в свой момент, по порядку ВРЕМЕНИ, а не
+    розыгрыша: даты разыгрываются независимо по видам.
+
+      семья — развод только после свадьбы, свадьба только вне брака;
+      работа — сменить или потерять работу может только тот, кто
+               сейчас получает зарплату: не пенсионер, не
+               предприниматель и не тот, кто ещё ищет новое место
+               после прошлой потери (тот же порядок, что у потоков
+               дохода, income.build_streams). Раньше такие события
+               оставались в плане без денег и меняли только анкету
+               и стресс;
+      переезд — цель от того места, где человек живёт сейчас.
+
+    Событие, которое в этот момент невозможно, выпадает. Рождению
+    значение не нужно: анкета добавляет по ребёнку на каждое
+    сообщение банку.
     """
 
     settings = params_module.active().lifecycle
 
+    primary = params_module.active().income.primary_kind_by_income_type
+
     family_status = persona.family_status
+
+    salaried = primary.get(persona.income_type) == "salary"
+    working_from = None
+
+    settlement = persona.settlement
 
     kept = []
 
@@ -251,9 +288,95 @@ def _in_time_order(persona: Persona, events: list) -> list:
             family_status = "married" if event.kind == "wedding" else "divorced"
             event = replace(event, payload={"family_status_after": family_status})
 
+        if event.kind in ("job_change", "job_loss"):
+            if not salaried or (working_from is not None and event.ts < working_from):
+                continue
+            pause = event.payload.get("recovery_days" if event.kind == "job_loss" else "gap_days", 0)
+            working_from = event.ts + timedelta(days=int(pause))
+
+        if event.kind == "move":
+            rng = keyed_rng(NS_LIFE, persona.client_ordinal, EVENT_KINDS.index("move"), 500 + event.serial)
+            target = _move_target(settlement, rng)
+            settlement = target["settlement"]
+            event = replace(event, payload=target)
+
         kept.append(event)
 
     return kept
+
+
+def persona_changes(persona: Persona, events: tuple, streams: tuple) -> tuple:
+    """
+    Как жизнь меняет персону: (порядковый день, поле, операция,
+    значение) по порядку дней. Изменение действует со следующего
+    дня после события — поведение дня решается на его начало.
+
+    Меняются только те поля, которые поведение читает и после
+    подготовки клиента: дети и размер семьи, место жизни,
+    занятость и настоящий доход. Анкета банка (profile_values)
+    узнаёт об этом своим путём — событиями profile_change, позже и
+    не всегда.
+
+    streams — потоки дохода (income.build_streams): новая работа
+    начинается тогда, когда начинается её зарплата.
+    """
+
+    changes: list[tuple] = []
+
+    for event in events:
+
+        day = event.ts.toordinal() + 1
+
+        if event.kind == "child_birth":
+            changes += [(day, "children", "+", 1), (day, "household_size", "+", 1)]
+        elif event.kind == "wedding":
+            changes.append((day, "household_size", "+", 1))
+        elif event.kind == "divorce":
+            changes.append((day, "household_size", "-", 1))
+        elif event.kind == "move":
+            changes += [
+                (day, name, "=", event.payload[name])
+                for name in ("settlement", "region", "settlement_type")
+            ]
+        elif event.kind == "job_loss":
+            changes.append((day, "income_type", "=", "unemployed"))
+        elif event.kind in ("income_up", "income_down"):
+            changes.append((day, "true_income", "*", float(event.payload.get("factor") or 1.0)))
+
+    for stream in streams:
+        if "_job_" in stream.stream_id:
+            day = stream.valid_from.toordinal() + 1
+            changes += [
+                (day, "income_type", "=", persona.income_type),
+                (day, "true_income", "=", int(stream.base_amount)),
+            ]
+
+    return tuple(sorted(changes, key=lambda item: item[0]))
+
+
+def apply_changes(persona: Persona, changes: tuple) -> Persona:
+    """
+    Персона после изменений одного дня.
+    """
+
+    values: dict = {}
+
+    for _, name, operation, value in changes:
+
+        current = values.get(name, getattr(persona, name))
+
+        if operation == "+":
+            current = current + value
+        elif operation == "-":
+            current = max(1 if name == "household_size" else 0, current - value)
+        elif operation == "*":
+            current = int(current * value)
+        else:
+            current = value
+
+        values[name] = current
+
+    return replace(persona, **values)
 
 
 def active_vacation(events: tuple, ts: datetime) -> LifeEvent | None:
@@ -272,5 +395,7 @@ __all__ = [
     "PROFILE_EFFECT",
     "LifeEvent",
     "active_vacation",
+    "apply_changes",
+    "persona_changes",
     "plan_events",
 ]

@@ -12,10 +12,8 @@ from src.generator import rng as rng_module
 from src.generator.behaviour import habits
 from src.generator.behaviour.sessions import GOAL_FLOW
 from src.generator.life import events as life_events
-from src.generator.life import lifecycle
 from src.generator.life.persona import draw_persona
 from src.generator.params.population import ACTIVITY_MODES
-from src.generator.world import communities
 
 
 # ============================================================
@@ -30,8 +28,8 @@ from src.generator.world import communities
 #     молча брали запасное значение;
 #   - счета и подписки клиент проводит через банк с долей по режиму
 #     активности: тихий держит их в другом банке;
-#   - деньги извне идут туда, где клиент живёт: в паузе, где молчат
-#     его переводы, внешних приходов в ленте нет.
+#   - деньги извне идут туда, где клиент живёт: ушедшему из банка и
+#     тому, кто в отлучке без банка, внешних приходов в ленте нет.
 # ============================================================
 
 
@@ -109,35 +107,55 @@ def tape(tmp_path_factory):
 
     rows = pq.read_table(out / "events.parquet", columns=["client_id", "event_time", "payload"]).to_pylist()
 
-    return [(row["client_id"], row["event_time"], json.loads(row["payload"])) for row in rows]
+    return {
+        "events": [(row["client_id"], row["event_time"], json.loads(row["payload"])) for row in rows],
+        "transitions": pq.read_table(out / "truth" / "transitions.parquet").to_pylist(),
+    }
 
 
-def test_money_from_outside_does_not_arrive_in_a_pause(tape, restore):
+def quiet_transfers(transitions: list) -> dict[str, list[tuple]]:
+    """
+    Отрезки, когда переводы клиента молчат: он ушёл (lapsed) или в
+    отлучке offline. По правде симуляции truth/transitions.
+    """
 
-    activate(SEED)
+    spans: dict[str, list[tuple]] = {}
+    opened: dict[tuple, datetime] = {}
 
-    pauses = {}
+    for row in sorted(transitions, key=lambda item: (item["client_id"], item["time"])):
 
-    for ordinal in range(1, CLIENTS + 1):
-        persona = draw_persona(ordinal)
-        pauses[communities.client_id(ordinal)] = lifecycle.plan_pauses(
-            persona, life_events.plan_events(persona)
-        )
+        client, moment = row["client_id"], row["time"]
+        key = (client, row["component"])
 
-    quiet = [
-        (client_id, pause) for client_id, items in pauses.items() for pause in items
-        if "transfers" in lifecycle.silenced_streams((pause,), pause.start)
-    ]
+        if (row["component"], row["value"]) in (("regime", "lapsed"), ("away", "offline")):
+            opened[key] = moment
+        elif (row["component"], row["value"]) in (("regime", "active"), ("away", "end")) and key in opened:
+            spans.setdefault(client, []).append((opened.pop(key), moment))
 
-    assert quiet, "в выборке есть паузы, где молчат переводы"
+    for (client, _), moment in opened.items():
+        spans.setdefault(client, []).append((moment, datetime.max.replace(tzinfo=moment.tzinfo)))
+
+    return spans
+
+
+def test_money_from_outside_does_not_arrive_while_transfers_are_quiet(tape):
+    """
+    Деньги шлют туда, где человек живёт: ушедшему из банка и тому,
+    кто в отлучке без банка, внешние приходы сюда не идут.
+    """
+
+    spans = quiet_transfers(tape["transitions"])
+
+    assert spans, "в выборке есть уход или отлучка offline"
 
     inbound = [
-        (client_id, datetime.fromisoformat(event_time).replace(tzinfo=None))
-        for client_id, event_time, payload in tape
+        (client_id, datetime.fromisoformat(event_time))
+        for client_id, event_time, payload in tape["events"]
         if payload["type"] == "transfer_in" and payload.get("reason") == "inbound"
     ]
 
     assert inbound, "в ленте есть внешние приходы"
 
     for client_id, moment in inbound:
-        assert "transfers" not in lifecycle.silenced_streams(pauses[client_id], moment), (client_id, moment)
+        for left, right in spans.get(client_id, ()):
+            assert not left <= moment < right, (client_id, moment, left, right)

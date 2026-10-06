@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from . import params as params_module
 from .behaviour import adoption as adoption_module
 from .behaviour import communications as comm_module
+from .behaviour import engagement as engagement_module
 from .behaviour import habits as habits_module
 from .behaviour import merchants as merchant_choice
 from .behaviour import needs as needs_module
@@ -21,7 +22,7 @@ from .finance.ledger import COUNTERPART_BANK, COUNTERPART_GOVERNMENT
 from .life import calendar as cal
 from .life import events as life_events_module
 from .life import household as household_module
-from .life import lifecycle as lifecycle_module
+from .life import income as income_module
 from .life import stress as stress_module
 from .observe import defects as defect_module
 from .rng import (
@@ -78,7 +79,15 @@ def run_community(community_id: int, ordinals: tuple) -> CommunityResult:
     for state in sim.clients.values():
 
         sim._prehistory(state)
-        state.state = lifecycle_module.initial_state(state.persona, config.HISTORY_START)
+
+        # Пришедший до окна входит в него с прожитым состоянием
+        # отношений, а не с нулевым (behaviour/engagement.burn_in).
+        if state.persona.relationship_start < config.HISTORY_START:
+            engagement_module.burn_in(
+                state,
+                engagement_module.ties(state, config.HISTORY_START),
+                engagement_module.obligated(state, config.HISTORY_START),
+            )
 
         # Клиент, пришедший до окна наблюдения, известен банку с
         # первого его дня: первая версия профиля описывает то, с
@@ -151,7 +160,35 @@ def _action_order(action: Action) -> tuple:
     return (action.ts, action.ordinal, action.order)
 
 
+def _apply_life_changes(state: ClientState, day: datetime) -> None:
+    """
+    Изменения персоны, вступающие в силу к этому дню.
+    """
+
+    changes = state.persona_changes
+    start = state.applied_changes
+    stop = start
+
+    while stop < len(changes) and changes[stop][0] <= day.toordinal():
+        stop += 1
+
+    if stop > start:
+        state.persona = life_events_module.apply_changes(state.persona, changes[start:stop])
+        state.applied_changes = stop
+
+
 def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> list:
+
+    state.today = day
+
+    # Жизнь меняет персону и до прихода в банк: переезд или рождение
+    # ребёнка раньше регистрации не теряются. Как и последняя
+    # зарплата: доход шёл и до прихода.
+    _apply_life_changes(state, day)
+
+    for payout in state.payouts_by_day.get(day.toordinal() - 1, ()):
+        if payout.kind in ("salary", "pension"):
+            state.last_payday = payout.ts
 
     persona = state.persona
 
@@ -167,9 +204,21 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
         if config.HISTORY_START <= ts < config.HISTORY_END:
             actions.append(Action(ts=ts, ordinal=state.ordinal, order=order, kind=kind, payload=payload))
 
-    silenced = lifecycle_module.silenced_streams(state.pauses, day)
-
     stress = stress_module.level_at(state.stress_episodes, day)
+
+    # Стадия на день: срок с прихода, стресс и просрочка по
+    # вечерней проверке вчерашнего дня.
+    state.state = engagement_module.stage(persona, day, stress, state.worst_dpd())
+
+    # Отношения с банком на начало дня: от них зависит, какие
+    # потоки клиента молчат и насколько реже идут остальные.
+    engagement_module.advance(
+        state, day, stress,
+        engagement_module.ties(state, day),
+        engagement_module.obligated(state, day),
+    )
+
+    silenced = engagement_module.silenced(state, day)
 
     month = cal.month_start(day)
 
@@ -183,22 +232,16 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
 
     # Деньги месяца не бесконечны: потратив их раньше срока,
     # клиент покупает реже и дешевле, а не упирается в отказы.
-    factor *= household_module.budget_pressure(budget, state.month_purchases, day)
+    tracked = (day - max(config.HISTORY_START, persona.relationship_start)).days
+    factor *= household_module.budget_pressure(budget, state.spent(day), tracked)
     factor *= household_module.funds_pressure(state.ledger.payment_capacity(day), budget)
 
     # После зарплаты тратят охотнее, перед ней придерживают.
-    last_payday = None
-    next_payday = None
+    # Прошлая зарплата — из случившихся выплат, следующая — по
+    # графику сегодняшней работы (income.expected_payday).
+    next_payday = income_module.expected_payday(state.income_streams, day)
 
-    for payout in state.payouts:
-        if payout.kind not in ("salary", "pension"):
-            continue
-        if payout.ts <= day:
-            last_payday = payout.ts if last_payday is None or payout.ts > last_payday else last_payday
-        elif next_payday is None or payout.ts < next_payday:
-            next_payday = payout.ts
-
-    factor *= cal.payday_factor(day, last_payday, next_payday)
+    factor *= cal.payday_factor(day, state.last_payday, next_payday)
     factor *= cal.month_factor(day)
 
     # --- регистрация клиента внутри окна ---
@@ -208,9 +251,8 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
 
     # --- доход ---
 
-    for payout in state.payouts:
-        if payout.ts.date() == day.date():
-            add(payout.ts, "income", {"payout": payout})
+    for payout in state.payouts_by_day.get(day.toordinal(), ()):
+        add(payout.ts, "income", {"payout": payout})
 
     # --- счета ---
 
@@ -222,7 +264,7 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
         if cal.day_in_month(day, bill.day_of_month).date() != day.date():
             continue
 
-        if "bills" in silenced:
+        if "bills" in silenced or not engagement_module.in_bank(state, "bill", (bill.kind, index)):
             # Счёт никуда не делся, но оплачен мимо этого банка.
             continue
 
@@ -251,6 +293,9 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
         if "bills" in silenced or "purchases" in silenced:
             continue
 
+        if not engagement_module.in_bank(state, "subscription", (subscription.outlet_id, index)):
+            continue
+
         if cal.day_in_month(day, subscription.day_of_month).date() != day.date():
             continue
 
@@ -268,14 +313,17 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
     # --- покупки ---
 
     for index, intent in enumerate(
-        needs_module.daily_intents(persona, state.habits, day, state.state, factor, silenced)
+        needs_module.daily_intents(
+            persona, state.habits, day, state.state, factor, silenced,
+            engagement_module.factor(state, "purchases"),
+        )
     ):
         add(intent.ts, "purchase",
             {"intent": intent, "index": index, "factor": factor, "stress": stress})
 
     # --- наличные ---
 
-    if needs_module.cash_need(persona, day, silenced):
+    if needs_module.cash_need(persona, day, silenced, engagement_module.factor(state, "cash")):
         rng = keyed_rng(NS_LEDGER, state.ordinal, day.toordinal(), 7)
         ts = day.replace(hour=int(rng.integers(9, 21)), minute=int(rng.integers(0, 60)))
         add(ts, "cash_withdrawal", {"budget": budget})
@@ -284,7 +332,7 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
 
     if "cash" not in silenced and state.ledger.balance(state.ledger.cash_id) > persona.true_income * 0.4:
         rng = keyed_rng(NS_LEDGER, state.ordinal, day.toordinal(), 13)
-        if rng.random() < 0.05:
+        if rng.random() < 0.05 * engagement_module.factor(state, "cash"):
             add(day.replace(hour=int(rng.integers(10, 20)), minute=int(rng.integers(0, 60))),
                 "cash_deposit", {})
 
@@ -311,6 +359,7 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
                 + params_module.active().traits.sociality_transfer_factor
                 * persona.trait("sociality", day)
             )
+            * engagement_module.factor(state, "transfers")
         )
 
         scale = (budget_per_month / planned) if planned > 0 else 0.0
@@ -323,6 +372,11 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
                 if cal.day_in_month(day, min(28, persona.income_day + 2)).date() != day.date():
                     continue
                 rate = 1.0
+
+            # Переезд жизни в другой банк уносит туда и деньги:
+            # переводы на свой счёт там учащаются.
+            if relation.relation_type == "own_account_other_bank":
+                rate *= engagement_module.outflow(state)
 
             rng = event_rng(NS_TRANSFER, state.ordinal, day.toordinal(), index, COMPONENT_CONTENT)
 
@@ -346,7 +400,10 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
     # наравне с основным клиентом.
     # В паузе, где молчат переводы, клиент живёт через другой счёт,
     # и приходы идут туда же.
-    inbound_share = 0.0 if "transfers" in silenced else persona.visible_share * 1.4
+    inbound_share = (
+        0.0 if "transfers" in silenced
+        else persona.visible_share * 1.4 * engagement_module.factor(state, "inbound")
+    )
 
     for index, relation in enumerate(sim.graph.active(state.ordinal, day)):
 
@@ -381,23 +438,34 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
             and cal.day_in_month(day, bill.day_of_month) <= day
         ),
         card_blocked=any(card.is_blocked_at(day) for card in state.cards.values()),
-        recent_offer_family=state.offers[-1].product_family if state.offers else None,
+        # Оффер напоминает о себе месяц, а не всю оставшуюся жизнь.
+        recent_offer_family=(
+            state.offers[-1].product_family
+            if state.offers and (day - state.offers[-1].created_at).days <= 30
+            else None
+        ),
         has_loan=state.has_open_loan(),
         has_deposit=state.assets() > 0,
         has_card=any(card.usable_at(day) for card in state.cards.values()),
         accounts=len(state.ledger.visible_accounts(day)),
         dpd=state.worst_dpd(),
+        # Зарплата, пришедшая в другой банк, сюда не зовёт.
         salary_just_arrived=any(
-            payout.ts.date() == (day - timedelta(days=1)).date() for payout in state.payouts
+            payout.landing == "hcb_account"
+            and (payout.kind != "salary" or engagement_module.salary_here(state, payout.ts))
+            for payout in state.payouts_by_day.get(day.toordinal() - 1, ())
         ),
         recent_failure=state.recent_failure_at is not None
         and (day - state.recent_failure_at).days <= 3,
         fraud_alert=state.fraud_alert_at is not None and (day - state.fraud_alert_at).days <= 3,
+        servicing=engagement_module.servicing(state),
     )
 
     for index, session in enumerate(
         session_module.plan_sessions(
-            persona, day, state.state, silenced, app_adopted, context, state.stress_episodes
+            persona, day, state.state, silenced, app_adopted, context, state.stress_episodes,
+            rate_factor=engagement_module.factor(state, "sessions"),
+            depth_factor=engagement_module.depth(state),
         )
     ):
         add(session.started_at, "session", {"session": session, "index": index})
@@ -453,15 +521,17 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
             owned_families=state.owned_families(day),
             candidate_families=families,
             dpd=live_dpd,
+            # Тишину банк считает от последнего действия клиента, а у
+            # того, кто не действовал ни разу, — от прихода в банк.
             silent=(
-                state.last_client_event is not None
-                and (day - state.last_client_event).days
+                (day - (state.last_client_event or persona.relationship_start)).days
                 >= params_module.active().lifecycle.winback_after_silence_days
             ),
             stress=stress,
             pending_notice=state.pending_notice,
             fraud_alert=state.fraud_alert_at is not None and (day - state.fraud_alert_at).days <= 5,
             days_to_due=days_to_due,
+            responsiveness=engagement_module.factor(state, "response"),
         )
 
         for index, contact in enumerate(contacts):
@@ -539,7 +609,8 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
                 second=int(pick.integers(0, 60)),
             ),
             "adoption",
-            {"stress": stress, "app": app_adopted},
+            {"stress": stress, "app": app_adopted,
+             "factor": engagement_module.factor(state, "applications")},
         )
 
     # --- крупная покупка как жизненное событие ---
@@ -547,7 +618,7 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
     # Раньше событие только запускало стресс, а самой покупки
     # не порождало: «крупная покупка» ничего не покупала.
 
-    for index, event in enumerate(state.life_events):
+    for event in state.life_events:
 
         if event.kind != "big_purchase" or event.ts.date() != day.date():
             continue
@@ -568,7 +639,7 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
                 "intent": needs_module.Intent(
                     ts=moment, category=category, zone="other"
                 ),
-                "index": 900 + index,
+                "index": 900 + event.serial,
                 "factor": factor * float(event.payload.get("amount_factor") or 1.0),
                 "stress": stress,
             },
@@ -614,7 +685,10 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
 
             products = params_module.active().products
 
-            if pick.random() < products.card_block_client_share_per_year / 365.25:
+            if pick.random() < (
+                products.card_block_client_share_per_year / 365.25
+                * engagement_module.factor(state, "purchases")
+            ):
 
                 card = usable[int(pick.integers(0, len(usable)))]
 
@@ -661,11 +735,13 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
 
     if live_dpd >= 30:
         causes.append("delinquency")
-    elif any(
-        event.event_type == "installment_missed" and (day - event.event_time).days <= 3
-        for event in state.events[-40:]
-    ):
+    elif state.last_missed_at is not None and 0 <= (day - state.last_missed_at).days <= 3:
         causes.append("missed_installment")
+
+    # Недовольный клиент жалуется: чем больше недовольство, тем
+    # чаще (behaviour/engagement.complaint).
+    if engagement_module.complaint(state):
+        causes.append("complaint")
 
     if causes:
 
@@ -684,6 +760,11 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
 
     if state.open_bills:
         add(day.replace(hour=21, minute=5), "bill_sweep", {})
+
+    # --- отложенные действия ---
+
+    for moment, kind, body in state.deferred.pop(day.toordinal(), ()):
+        add(moment, kind, body)
 
     # --- назначенные ранее возвраты ---
 
@@ -726,13 +807,9 @@ def _execute(sim: CommunitySimulation, action: Action) -> None:
 
 def _touch_client(state: ClientState, ts: datetime) -> None:
     """
-    Клиентское действие: оно и определяет паузы и возвращения.
+    Клиентское действие: от последнего банк отсчитывает тишину
+    клиента (winback).
     """
-
-    previous = state.last_client_event
-
-    if previous is not None and (ts - previous).days >= 45:
-        state.returned_flag = True
 
     state.last_client_event = ts
 
@@ -1024,7 +1101,11 @@ def _on_income(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         state.ledger.post(ts, counterpart, state.ledger.cash_id, amount)
         return
 
-    if payout.landing == "other_bank":
+    # Зарплату, которую клиент перевёл в другой банк, этот банк
+    # больше не зачисляет: деньги приходят туда.
+    if payout.landing == "other_bank" or (
+        payout.kind == "salary" and not engagement_module.salary_here(state, ts)
+    ):
         state.ledger.post(ts, counterpart, state.ledger.other_bank_id, amount)
         return
 
@@ -1059,7 +1140,7 @@ def _on_bill(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     amount = habits_module.bill_amount(bill, ts, state.persona.region, rng)
 
-    silenced = lifecycle_module.silenced_streams(state.pauses, ts)
+    silenced = engagement_module.silenced(state, ts)
 
     if "purchases" in silenced and not bill.autopay:
         return
@@ -1142,7 +1223,10 @@ def _on_subscription(sim, state: ClientState, ts: datetime, payload: dict) -> No
 
     outlet = None
 
-    for item in sim._outlets_by_id(state, "subscription", ts):
+    # Подписка оформлена в каталоге своего поселения: после переезда
+    # её точка не теряется (раньше искалась в новом городе, и мерчант
+    # пропадал из записи).
+    for item in merchant_catalog.outlets_of(subscription.settlement, "subscription"):
         if item.outlet_id == subscription.outlet_id:
             outlet = item
             break
@@ -1182,7 +1266,7 @@ def _on_subscription(sim, state: ClientState, ts: datetime, payload: dict) -> No
         return
 
     _schedule_refunds(sim, state, event)
-    state.month_purchases += amount
+    state.add_spend(ts, amount)
 
 
 def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
@@ -1258,8 +1342,20 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             return
 
         if rng.random() < settings.decline_attempt_share and state.may_decline(ts):
-            _decline(state, ts, "purchase", None, amount, "debit", body,
-                     "insufficient_funds")
+
+            # Отказ — это попытка заплатить картой: в точке без карты
+            # её не бывает, а у онлайн-оплаты карта тоже указана.
+            attempt = state.primary_card_account(ts)
+            card = state.usable_card(attempt.account_id, ts) if attempt is not None else None
+
+            if card is None and not choice.outlet.is_online:
+                return
+
+            if card is not None:
+                body["card_id"] = card.card_id
+
+            _decline(state, ts, "purchase", attempt.account_id if card is not None else None,
+                     amount, "debit", body, "insufficient_funds")
             _touch_client(state, ts)
             return
 
@@ -1288,6 +1384,17 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             _touch_client(state, ts)
             return
 
+        # Пригодной карты нет — новая ещё не активирована после
+        # выпуска или перевыпуска. Платят наличными или другой
+        # картой: банк этой покупки не видит. Раньше в ленте
+        # оставалась покупка в точке без карты.
+        hidden = state.ledger.hidden_sources(amount)
+
+        if hidden:
+            state.ledger.post(ts, hidden[0].account_id, merchant_catalog.counterpart(choice.outlet), amount)
+
+        return
+
     body["card_id"] = card.card_id if card else None
 
     event = _emit_money(
@@ -1302,7 +1409,7 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         return
 
     _schedule_refunds(sim, state, event)
-    state.month_purchases += amount
+    state.add_spend(ts, amount)
 
     _touch_client(state, ts)
 
@@ -1454,7 +1561,12 @@ def _on_cash(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     card = state.usable_card(account.account_id, ts)
 
-    body["card_id"] = card.card_id if card else None
+    # Банкомат без карты денег не выдаёт: пока новая карта не
+    # активирована, снятия через этот банк нет.
+    if card is None:
+        return
+
+    body["card_id"] = card.card_id
 
     taken = _emit_money(
         state, ts, "cash_withdrawal", account.account_id, amount, "debit",
@@ -1503,6 +1615,13 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     amount = int(rng.integers(max(1_000, relation.typical_amount_low),
                               max(2_000, relation.typical_amount_high)))
+
+    own = relation.relation_type == "own_account_other_bank"
+
+    # Переезжая в другой банк, клиент переводит туда и накопленное:
+    # суммы себе растут вместе с частотой (behaviour/engagement).
+    if own:
+        amount = int(amount * engagement_module.outflow(state))
 
     amount = int(round(amount / 100) * 100)
 
@@ -1570,7 +1689,7 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
                 state, ts, "p2p_out" if internal else "transfer_out", None, amount, "debit",
                 {
                     "channel": CHANNEL_REMOTE,
-                    "counterparty": counterpart.masked_name,
+                    "counterparty": "Own account" if own else counterpart.masked_name,
                     "mcc": MCC_TRANSFER,
                     "merchant_country": "KZ",
                     "reason": "transfer",
@@ -1589,7 +1708,9 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         # app_operation и session_id у него нет, поэтому и канал
         # не app.
         "channel": CHANNEL_REMOTE,
-        "counterparty": counterpart.masked_name,
+        # Перевод себе в другой банк банк узнаёт по получателю — это
+        # сам клиент — и подписывает так же, как деньги оттуда.
+        "counterparty": "Own account" if own else counterpart.masked_name,
         "mcc": MCC_TRANSFER,
         "merchant_country": "KZ",
         "reason": "transfer",
@@ -1634,11 +1755,7 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     else:
 
-        destination = (
-            state.ledger.other_bank_id
-            if relation.relation_type == "own_account_other_bank"
-            else f"external:{counterpart.counterpart_id}"
-        )
+        destination = state.ledger.other_bank_id if own else f"external:{counterpart.counterpart_id}"
 
         sent = _emit_money(
             state, ts, "transfer_out", account.account_id, amount, "debit",

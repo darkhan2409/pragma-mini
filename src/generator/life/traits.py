@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 import numpy as np
@@ -86,14 +86,27 @@ class Traits:
     base: dict
     channel_preferences: dict
     shifts: tuple = ()
+    # Значения по дням. Сдвиг смешивается по календарным дням, и за
+    # день значение одно, — а читают черты десятки раз за день
+    # клиента. В сравнение кэш не входит.
+    memo: dict = field(default_factory=dict, compare=False, repr=False)
 
     def at(self, ts: datetime) -> dict:
         """
-        Значения характеристик на дату с учётом дрейфа.
+        Значения характеристик на дату с учётом дрейфа. Сдвиг
+        действует со следующего дня после события и набирает силу
+        за drift_blend_days: черта меняется после события, а не до.
         """
 
         if not self.shifts:
             return self.base
+
+        day = ts.toordinal()
+
+        cached = self.memo.get(day)
+
+        if cached is not None:
+            return cached
 
         settings = params_module.active().traits
 
@@ -101,16 +114,18 @@ class Traits:
 
         for shift in self.shifts:
 
-            if shift.ts > ts:
+            elapsed = day - shift.ts.toordinal()
+
+            if elapsed < 0:
                 break
 
-            elapsed = (ts - shift.ts).days
-
-            weight = min(1.0, max(0.0, elapsed / max(1, settings.drift_blend_days)))
+            weight = min(1.0, elapsed / max(1, settings.drift_blend_days))
 
             for name, delta in shift.deltas.items():
                 if name in values:
                     values[name] = float(min(1.0, max(0.0, values[name] + delta * weight)))
+
+        self.memo[day] = values
 
         return values
 

@@ -7,86 +7,27 @@ from dataclasses import dataclass, field
 # ЖИЗНЕННЫЙ ЦИКЛ
 # ============================================================
 #
-# Состояние это следствие истории, а не независимый месячный
-# розыгрыш. Переходы бывают двух видов: месячные по накопленным
-# признакам и событийные, срабатывающие немедленно.
+# Стадия клиента на день и жизненные события. Неактивность
+# заранее не планируется: она вырастает из отношений клиента с
+# банком (params/engagement.py, behaviour/engagement.py).
 # ============================================================
 
-
-STATES = (
-    "prospect",
-    "onboarding",
-    "new_client",
-    "active",
-    "growing",
-    "stable",
-    "financial_stress",
-    "delinquent",
-    "dormant",
-    "churn_risk",
-    "churned",
-    "returned",
-    "closed_relationship",
-)
 
 @dataclass(frozen=True)
 class LifecycleParams:
 
-    states: tuple = STATES
-
-    # Сколько месяцев клиент считается новым после регистрации.
+    # Стадия клиента на день (behaviour/engagement.stage): сколько
+    # месяцев он новый после прихода, с какого уровня стресса и с
+    # какой просрочки поведение сбавляет частоты.
     onboarding_months: int = 1
     new_client_months: int = 3
-
-    # Пороги месячных переходов по клиентской активности.
-    dormant_after_days_without_client_events: int = 45
-    churn_risk_drop_ratio: float = 0.35
-    churned_after_days_without_client_events: int = 180
+    stress_stage_level: float = 0.45
+    delinquent_dpd: int = 30
 
     # Сколько дней молчания банк ждёт, прежде чем звать клиента
-    # назад. Скрытую паузу банк не видит, он видит только
+    # назад. Скрытое состояние банк не видит, он видит только
     # отсутствие операций, и замечает его не в первый же день.
     winback_after_silence_days: int = 30
-
-    # Рост: клиентские события и обороты выросли к предыдущему кварталу.
-    growing_ratio: float = 1.35
-    stable_band: tuple = (0.80, 1.20)
-
-    # Паузы.
-    pause_probability_per_year: dict = field(
-        default_factory=lambda: {
-            "silent": 4.00,
-            "rare": 3.20,
-            "regular": 0.70,
-            "high": 0.28,
-            "extreme": 0.10,
-        }
-    )
-
-    pause_kind_weights: dict = field(
-        default_factory=lambda: {
-            "full": 0.34,
-            "app_only": 0.22,
-            "cards_only": 0.12,
-            "other_bank": 0.20,
-            "seasonal": 0.12,
-        }
-    )
-
-    pause_length_days: dict = field(
-        default_factory=lambda: {
-            "full": (60, 300),
-            "app_only": (30, 180),
-            "cards_only": (25, 150),
-            "other_bank": (90, 380),
-            "seasonal": (30, 110),
-        }
-    )
-
-    # Отношения закрываются, когда закрыты все договоры и
-    # клиент не возвращается. Порог обязан быть больше порога
-    # оттока: иначе закрытие наступает сразу и отток недостижим.
-    closed_relationship_after_days: int = 365
 
     # ------------------------------------------------------------
     # ЖИЗНЕННЫЕ СОБЫТИЯ

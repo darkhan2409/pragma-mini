@@ -10,6 +10,7 @@ from .activity import ActivityParams
 from .amounts import AmountParams
 from .calibration import CalibrationParams, CalibrationTarget
 from .defects import DefectParams
+from .engagement import EngagementParams
 from .fraud import FraudParams
 from .geography import GeographyParams
 from .income import IncomeParams
@@ -42,6 +43,7 @@ class GeneratorParams:
     population: PopulationParams = PopulationParams()
     traits: TraitParams = TraitParams()
     lifecycle: LifecycleParams = LifecycleParams()
+    engagement: EngagementParams = EngagementParams()
     income: IncomeParams = IncomeParams()
     stress: StressParams = StressParams()
     relationships: RelationshipParams = RelationshipParams()
@@ -154,6 +156,7 @@ __all__ = [
     "CalibrationTarget",
     "DEFAULT",
     "DefectParams",
+    "EngagementParams",
     "FraudParams",
     "GeneratorParams",
     "GeographyParams",

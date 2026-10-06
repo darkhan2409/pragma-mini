@@ -46,16 +46,18 @@ def daily_purchase_rate(
     state: str,
     spending_factor: float,
     silenced: frozenset,
+    share_factor: float = 1.0,
 ) -> float:
     """
     Сколько покупок клиент делает в этот день.
+
+    share_factor — какая доля его покупок сейчас идёт через этот
+    банк относительно обычной (behaviour/engagement).
     """
 
     settings = params_module.active().activity
 
     if "purchases" in silenced:
-        if "other_bank" in silenced:
-            return settings.purchases_per_day[persona.activity_mode] * settings.other_bank_residual
         return 0.0
 
     rate = settings.purchases_per_day[persona.activity_mode]
@@ -74,6 +76,7 @@ def daily_purchase_rate(
         rate *= settings.weekend_factor_purchases
 
     rate *= spending_factor
+    rate *= share_factor
 
     return float(max(0.0, rate))
 
@@ -138,6 +141,7 @@ def daily_intents(
     state: str,
     spending_factor: float,
     silenced: frozenset,
+    share_factor: float = 1.0,
 ) -> tuple:
     """
     Намерения покупок на день.
@@ -145,7 +149,7 @@ def daily_intents(
 
     settings = params_module.active()
 
-    rate = daily_purchase_rate(persona, ts, state, spending_factor, silenced)
+    rate = daily_purchase_rate(persona, ts, state, spending_factor, silenced, share_factor)
 
     if rate <= 0.0:
         return ()
@@ -222,7 +226,7 @@ def daily_intents(
     return tuple(intents)
 
 
-def cash_need(persona: Persona, ts: datetime, silenced: frozenset) -> bool:
+def cash_need(persona: Persona, ts: datetime, silenced: frozenset, share_factor: float = 1.0) -> bool:
     """
     Нужны ли сегодня наличные.
     """
@@ -236,7 +240,7 @@ def cash_need(persona: Persona, ts: datetime, silenced: frozenset) -> bool:
 
     cash_level = settings.geography.cash_share[persona.settlement_type]
 
-    rate = per_month * (0.4 + 1.6 * cash_level) / 30.0
+    rate = per_month * (0.4 + 1.6 * cash_level) / 30.0 * share_factor
 
     rng = day_rng(NS_NEEDS, persona.client_ordinal, ts.toordinal(), COMPONENT_CHANNEL)
 

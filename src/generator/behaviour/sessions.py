@@ -142,6 +142,9 @@ class SessionContext:
     salary_just_arrived: bool = False
     recent_failure: bool = False
     fraud_alert: bool = False
+    # Клиент перестал пользоваться банком, но долг здесь остался:
+    # он заходит только посмотреть остаток, кредит и карту.
+    servicing: bool = False
 
 
 @state_cache
@@ -299,6 +302,12 @@ def _goal_weights(persona: Persona, ts: datetime, context: SessionContext, adopt
     weights[GOAL_EXPLORE] *= 0.5 + 1.5 * persona.trait("credit_appetite", ts)
     weights[GOAL_MARKET] *= 0.4 + 1.4 * digital
 
+    if context.servicing:
+        weights = {
+            name: value for name, value in weights.items()
+            if name in (GOAL_BALANCE, GOAL_LOAN, GOAL_CARDS)
+        }
+
     return {name: value for name, value in weights.items() if value > 0.0}
 
 
@@ -310,14 +319,22 @@ def plan_sessions(
     app_adopted: bool,
     context: SessionContext,
     stress_episodes: tuple = (),
+    rate_factor: float = 1.0,
+    depth_factor: float = 1.0,
 ) -> tuple:
     """
     Сессии приложения за день.
+
+    rate_factor и depth_factor — насколько клиент сейчас вовлечён
+    в приложение относительно обычного: реже заходит и меньше
+    смотрит (behaviour/engagement).
     """
 
     settings = params_module.active().activity
 
     rate = daily_session_rate(persona, day, state, silenced, app_adopted, stress_episodes)
+
+    rate *= rate_factor
 
     if rate <= 0.0:
         return ()
@@ -377,6 +394,7 @@ def plan_sessions(
             adopted=adopted,
             rng=content_rng,
             session_index=ordinal * 16 + index,
+            depth_factor=depth_factor,
         )
 
         sessions.append(
@@ -403,6 +421,7 @@ def _build_steps(
     adopted: tuple,
     rng,
     session_index: int = 0,
+    depth_factor: float = 1.0,
 ) -> list:
     """
     Экраны и операции сессии. Длина зависит от цели.
@@ -518,7 +537,7 @@ def _build_steps(
     # Строго по цели: запасное значение прятало расхождение ключей
     # параметра с именами целей.
     extra = extra_rng.poisson(
-        params_module.active().activity.session_extra_screens[goal]
+        params_module.active().activity.session_extra_screens[goal] * depth_factor
     )
 
     limit = params_module.active().activity.max_screens_per_session

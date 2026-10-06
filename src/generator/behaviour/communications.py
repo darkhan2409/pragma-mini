@@ -231,9 +231,14 @@ def _delivered(channel: str, persona: Persona, app_adopted: bool, rng) -> bool:
     return rng.random() < DELIVERY_RATE.get(channel, 0.5)
 
 
-def _clicked(persona: Persona, campaign, channel: str, ts: datetime, stress: float, rng) -> bool:
+def _clicked(persona: Persona, campaign, channel: str, ts: datetime, stress: float, rng,
+             responsiveness: float = 1.0) -> bool:
     """
     Скрытая реакция на доставленное сообщение.
+
+    responsiveness — насколько клиент сейчас вообще откликается
+    банку (behaviour/engagement): отдаляющийся клиент открывает
+    сообщения реже, причём любые, а не только «перед уходом».
     """
 
     probability = 0.04 + 0.16 * persona.trait("digital_affinity", ts)
@@ -249,7 +254,7 @@ def _clicked(persona: Persona, campaign, channel: str, ts: datetime, stress: flo
     if campaign.purpose == "collection":
         probability += 0.18
 
-    return rng.random() < min(0.80, probability)
+    return rng.random() < min(0.80, probability * responsiveness)
 
 
 # Шаблоны с условием на аудиторию.
@@ -343,9 +348,11 @@ def contacts_for_day(
     pending_notice: bool,
     fraud_alert: bool,
     days_to_due: int | None = None,
+    responsiveness: float = 1.0,
 ) -> tuple:
     """
-    Отправки банка за день.
+    Отправки банка за день. Сколько и что слать, решает банк;
+    отклик клиента — responsiveness.
     """
 
     rate = daily_rate(persona, day, consented, fatigue, state_factor, silent)
@@ -404,7 +411,7 @@ def contacts_for_day(
 
         delivered = _delivered(channel, persona, app_adopted, rng)
 
-        clicked = delivered and _clicked(persona, campaign, channel, day, stress, rng)
+        clicked = delivered and _clicked(persona, campaign, channel, day, stress, rng, responsiveness)
 
         offer_id = (
             f"off_{stable_hash('offer', persona.client_id, ordinal, index) % 10 ** 12:012d}"

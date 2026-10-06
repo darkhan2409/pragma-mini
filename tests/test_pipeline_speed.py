@@ -59,7 +59,7 @@ def test_workers_do_not_change_the_export(tmp_path):
     generate(pooled, workers=2, chunk=8)
     generate(wide, workers=1, chunk=16)
 
-    for name in ("events.parquet", "profile.parquet"):
+    for name in ("events.parquet", "profile.parquet", "truth/transitions.parquet", "truth/states.parquet"):
         assert (alone / name).read_bytes() == (pooled / name).read_bytes(), name
         assert pq.read_table(alone / name).equals(pq.read_table(wide / name)), name
 

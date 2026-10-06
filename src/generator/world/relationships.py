@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -305,11 +306,11 @@ def build_graph(community_id: int, members: tuple, personas: dict) -> CommunityG
 
                 valid_to = None
 
-                end_share = settings.relation_end_share_per_year.get(relation_type)
+                end_share = settings.relation_end_share.get(relation_type)
 
                 if end_share and item_rng.random() < end_share:
-                    offset = item_rng.integers(60, max(61, (config.PLANNING_END - start).days))
-                    valid_to = start + timedelta(days=int(offset))
+                    offset = 60 + int(-math.log(1.0 - item_rng.random()) * settings.relation_life_days)
+                    valid_to = start + timedelta(days=offset)
 
                 relationships.append(
                     Relationship(

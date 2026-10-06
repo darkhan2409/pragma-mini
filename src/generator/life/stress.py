@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .. import params as params_module
 from .. import config
 from ..rng import NS_STRESS, keyed_rng
+from .events import EVENT_KINDS
 from .persona import Persona
+
+# Номер вида жизненного события в ключах розыгрыша.
+EVENT_KIND_CODES = {kind: index for index, kind in enumerate(EVENT_KINDS)}
 
 
 # ============================================================
@@ -65,11 +70,17 @@ class StressEpisode:
         return self.intensity * (1.0 - (ts - self.peak_end).total_seconds() / span)
 
 
-def _trigger_events(persona: Persona, events: tuple) -> list[tuple[str, datetime]]:
+def _trigger_events(persona: Persona, events: tuple) -> list[tuple[str, datetime, int]]:
+    """
+    Жизненные события, породившие стресс: причина, момент и ключ
+    розыгрыша эпизода. Ключ — вид события и его номер среди своих
+    (LifeEvent.serial), а не место в общем списке: событие другого
+    вида или вне окна не меняет розыгрыш этого.
+    """
 
     settings = params_module.active().stress
 
-    triggers: list[tuple[str, datetime]] = []
+    triggers: list[tuple[str, datetime, int]] = []
 
     mapping = {
         "job_loss": "job_loss",
@@ -81,17 +92,19 @@ def _trigger_events(persona: Persona, events: tuple) -> list[tuple[str, datetime
         "income_down": "obligation_growth",
     }
 
-    for index, event in enumerate(events):
+    for event in events:
 
         trigger = mapping.get(event.kind)
 
         if trigger is None:
             continue
 
-        rng = keyed_rng(NS_STRESS, persona.client_ordinal, 1, index)
+        key = 1000 * (1 + EVENT_KIND_CODES[event.kind]) + event.serial
+
+        rng = keyed_rng(NS_STRESS, persona.client_ordinal, 1, key)
 
         if rng.random() < settings.trigger_probability.get(trigger, 0.0):
-            triggers.append((trigger, event.ts))
+            triggers.append((trigger, event.ts, key))
 
     return triggers
 
@@ -108,25 +121,28 @@ def plan_episodes(persona: Persona, events: tuple) -> tuple:
 
     candidates = _trigger_events(persona, events)
 
-    span_days = (config.PLANNING_END - config.HISTORY_START).days
-    years = span_days / 365.25
+    # Спонтанные шоки идут вперёд по времени: следующий — через
+    # экспоненциальный интервал после предыдущего. Горизонт
+    # планирования их только обрезает.
+    clock = 0.0
+    index = 0
 
-    shock_rng = keyed_rng(NS_STRESS, persona.client_ordinal, 2)
-
-    shocks = shock_rng.poisson(settings.random_shock_per_year * years)
-
-    for index in range(shocks):
+    while settings.random_shock_per_year > 0.0:
         item_rng = keyed_rng(NS_STRESS, persona.client_ordinal, 3, index)
-        offset = item_rng.integers(0, span_days)
-        candidates.append(("random_shock", config.HISTORY_START + timedelta(days=int(offset))))
+        clock += -math.log(1.0 - item_rng.random()) / settings.random_shock_per_year * 365.25
+        moment = config.HISTORY_START + timedelta(days=int(clock))
+        if moment >= config.PLANNING_END:
+            break
+        candidates.append(("random_shock", moment, index))
+        index += 1
 
-    candidates.sort(key=lambda item: item[1])
+    candidates.sort(key=lambda item: (item[1], item[2]))
 
     episodes: list[StressEpisode] = []
 
     last_end: datetime | None = None
 
-    for index, (trigger, moment) in enumerate(candidates):
+    for trigger, moment, key in candidates:
 
         if len(episodes) >= settings.max_episodes:
             break
@@ -134,7 +150,7 @@ def plan_episodes(persona: Persona, events: tuple) -> tuple:
         if last_end is not None and moment < last_end + timedelta(days=settings.cooldown_days):
             continue
 
-        rng = keyed_rng(NS_STRESS, persona.client_ordinal, 4, index)
+        rng = keyed_rng(NS_STRESS, persona.client_ordinal, 4, key)
 
         low, high = settings.intensity_range[trigger]
         intensity = rng.uniform(low, high)

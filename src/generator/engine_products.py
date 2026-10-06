@@ -4,11 +4,12 @@ from datetime import datetime, timedelta
 
 from . import params as params_module
 from .behaviour import adoption as adoption_module
+from .behaviour import engagement as engagement_module
 from .behaviour import support as support_module
 from .behaviour import fraud as fraud_behaviour
 from . import config
 from .engine import _HANDLERS, _decline, _emit_money, _touch_client
-from .engine_app import unblock_card
+from .engine_app import defer_unblock, unblock_card
 from .engine_credit import emit_product_closed
 from .finance import cards as card_rules
 from .finance import deposits as deposit_rules
@@ -386,7 +387,7 @@ def _on_adoption(sim, state: ClientState, ts: datetime, payload: dict) -> None:
     probability = adoption_module.application_probability(
         persona, candidate, ts, from_offer, stress,
         total_weight=sum(item.weight for item in pool),
-    )
+    ) * payload.get("factor", 1.0)
 
     if rng.random() >= probability:
         return
@@ -852,6 +853,11 @@ def _apply_new_versions(state: ClientState, ts: datetime) -> None:
 
             event_type = "contract_terms_changed" if terms_changed else "product_repriced"
 
+            # Условия, ставшие хуже, клиент замечает и запоминает.
+            engagement_module.notice_repricing(
+                state, ts, contract.product_family, contract.terms, version.terms
+            )
+
             contract.product_version = version.product_version
             contract.tariff_version = version.tariff_version
             contract.terms = dict(version.terms)
@@ -1157,6 +1163,7 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
     # карта — одна блокировка, и перевыпуск тоже один.
     blocked = (
         decision == "block"
+        and subject == "card"
         and card is not None
         and not card.is_blocked_at(decision_ts)
     )
@@ -1193,6 +1200,12 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
 
     episode_key = (episode.kind, episode.start)
 
+    refund = (
+        episode.chargeback
+        and episode.kind in settings.chargeback_kinds
+        and event.payload.get("status") == "approved"
+    )
+
     if (
         episode.opens_case
         and episode_key not in state.fraud_disputes
@@ -1200,6 +1213,19 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
     ):
 
         state.fraud_disputes.add(episode_key)
+
+        # Исход обращения — тот, что банк на деле исполнит: карту
+        # разблокирует или перевыпустит, деньги вернёт или передаст
+        # разбор дальше. Прежде он разыгрывался отдельно, и в ленте
+        # были «возврат начат» без возврата.
+        if blocked:
+            outcomes = (
+                ("card_reissued",) if compromised and episode.reissue
+                else ("explained",) if compromised
+                else ("card_unblocked",)
+            )
+        else:
+            outcomes = ("chargeback_started",) if refund else ("escalated",)
 
         # Тема обращения — по тому, что клиент увидел: карту
         # заблокировали или пришла тревога. Прежде она бралась от
@@ -1209,6 +1235,7 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
             state.persona, "card_blocked" if blocked else "fraud_alert",
             decision_ts + timedelta(hours=int(rng.integers(1, 20))),
             len(state.cases),
+            feasible=outcomes,
         )
 
         _emit_case(state, case)
@@ -1220,11 +1247,7 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
         # И возвращают только то, что действительно списали:
         # у отклонённой операции денег не забирали, возвращать
         # нечего.
-        if (
-            episode.chargeback
-            and episode.kind in settings.chargeback_kinds
-            and event.payload.get("status") == "approved"
-        ):
+        if refund:
 
             back_ts = case.resolved_at + timedelta(days=int(rng.integers(*settings.chargeback_delay_days)))
 
@@ -1268,7 +1291,7 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
     # Причина нейтральная: прежняя строка «confirmed_by_client»
     # была прямым пересказом скрытого ответа клиента и
     # переживала бы правку самого fraud_decision.
-    unblock_card(state, unblock_ts, card, "fraud_check_closed")
+    defer_unblock(sim, state, unblock_ts, card, "fraud_check_closed")
 
 
 def _reissue_card(state: ClientState, card, ts: datetime, reason: str = "fraud_reissue") -> None:
@@ -1529,36 +1552,40 @@ def _on_support_check(sim, state: ClientState, ts: datetime, payload: dict) -> N
 
     rng = event_rng(NS_SUPPORT, state.ordinal, ts.toordinal(), len(state.cases), COMPONENT_CONTENT)
 
-    probability = support_module.contact_probability(state.persona, cause, ts, payload["stress"])
+    probability = support_module.contact_probability(
+        state.persona, cause, ts, payload["stress"]
+    ) * engagement_module.factor(state, "support")
 
     if rng.random() >= probability:
         return
 
     state.support_last_by_cause[cause] = ts
 
+    # Поддержка снимает временную заморозку. Утраченную или
+    # скомпрометированную карту не размораживает никто: у такой
+    # блокировки нет срока, и её исход — объяснение (перевыпуск по
+    # ней уже идёт своим путём).
+    card = next((item for item in state.cards.values() if item.releasable()), None)
+
+    feasible = ("card_unblocked", "explained") if card is not None else ("explained",)
+
     # Повод обращения известен симуляции и остаётся её знанием:
     # ссылки на событие-причину в выгрузке нет, и искать его
     # здесь больше незачем.
-    case = support_module.open_case(state.persona, cause, ts, len(state.cases))
+    case = support_module.open_case(
+        state.persona, cause, ts, len(state.cases),
+        feasible=feasible if cause == "card_blocked" else None,
+    )
 
     _emit_case(state, case)
 
     _touch_client(state, ts)
 
-    if case.resolution == "card_unblocked":
-        # Поддержка снимает временную заморозку. Утраченную или
-        # скомпрометированную карту не размораживает никто: у
-        # такой блокировки нет срока, и она не заканчивается.
-        card = next(
-            (
-                item
-                for item in state.cards.values()
-                if item.releasable()
-            ),
-            None,
-        )
-        if card is not None:
-            unblock_card(state, case.resolved_at, card, "support_resolution")
+    if cause == "complaint":
+        engagement_module.complained(state, ts)
+
+    if case.resolution == "card_unblocked" and card is not None:
+        defer_unblock(sim, state, case.resolved_at, card, "support_resolution")
 
     if case.resolution == "record_corrected":
         state.pending_notice = True
@@ -1714,7 +1741,7 @@ def _on_card_block_request(sim, state: ClientState, ts: datetime, payload: dict)
     )
 
     if card.blocked_until is not None and unblock_ts < card.blocked_until:
-        unblock_card(state, unblock_ts, card, "client_request")
+        defer_unblock(sim, state, unblock_ts, card, "client_request")
 
 
 _HANDLERS["fraud_step"] = _on_fraud_step

@@ -392,7 +392,11 @@ def app_adoption(client_ordinal: int) -> datetime | None:
     дефект данных, а часть жизни: остаются люди, которые ходят
     в отделение.
 
-    Дата установки всегда попадает ВНУТРЬ окна наблюдения.
+    Срок установки отсчитывается от прихода в банк, а не от начала
+    окна: давний клиент входит в окно уже с приложением. Прежде
+    все давние клиенты ставили его в первые месяцы окна, и сессии
+    в начале выгрузки росли рампой, которой у банка нет. От
+    горизонта планирования срок не зависит.
     """
 
     settings = params_module.active().defects
@@ -411,23 +415,9 @@ def app_adoption(client_ordinal: int) -> datetime | None:
     if rng.random() >= min(0.995, probability):
         return None
 
-    # Раньше начала наблюдения приложения быть не может, как и
-    # раньше того дня, когда человек стал клиентом.
-    start = max(config.HISTORY_START, persona.relationship_start)
+    offset = int(rng.integers(0, max(1, settings.app_adoption_days)))
 
-    # Восьмая часть окна на то, чтобы установить: у большинства
-    # это случается вскоре после начала отношений с банком. При
-    # половине окна давний клиент в среднем полгода жил без
-    # приложения, и начало ленты было тоньше из-за этой даты, а не
-    # из-за поведения.
-    span_days = max(1, (config.PLANNING_END - start).days)
-
-    offset = int(rng.integers(0, max(1, span_days // 8)))
-
-    adopted = start + timedelta(days=offset)
-
-    if adopted >= config.PLANNING_END:
-        adopted = start
+    adopted = persona.relationship_start + timedelta(days=offset)
 
     return adopted.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -449,10 +439,9 @@ def consent_date(client_ordinal: int) -> datetime | None:
 
     start = persona.relationship_start
 
+    # Дата за горизонтом означает «ещё не дал»: в выгрузку она не
+    # попадёт, а продление горизонта её не перепишет.
     given = start + timedelta(days=int(rng.integers(0, 200)))
-
-    if given >= config.PLANNING_END:
-        return None
 
     return given.replace(hour=0, minute=0, second=0, microsecond=0)
 

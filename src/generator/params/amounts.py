@@ -170,4 +170,13 @@ class AmountParams:
     subscription_sigma: float = 0.50
     subscription_stop_share: float = 0.30
     subscription_price_change_share: float = 0.28
+
+    # Через сколько месяцев в среднем подписка начинается (у той,
+    # что появляется позже начала окна), кончается и меняет цену:
+    # задержки экспоненциальные и от горизонта планирования не
+    # зависят (синтетическое допущение; средние близки к прежним
+    # равномерным срокам на окне 2024-01 … 2026-09).
+    subscription_mean_months: dict = field(
+        default_factory=lambda: {"start": 12, "stop": 14, "change": 12}
+    )
     subscription_price_change: tuple = (0.08, 0.30)

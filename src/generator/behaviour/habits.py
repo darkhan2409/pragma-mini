@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -74,6 +75,9 @@ class Subscription:
     # Час продления: у сервиса он свой и держится месяцами — время
     # оформления или ночное окно биллинга сервиса.
     hour: int = 3
+    # Поселение, в каталоге которого подписка оформлена: после
+    # переезда точка ищется там, а не в новом городе.
+    settlement: str = ""
 
 
 @dataclass(frozen=True)
@@ -300,7 +304,11 @@ def _subscriptions(persona: Persona, settlement: str) -> tuple:
     result: list[Subscription] = []
 
     first_month = cal.month_index(config.HISTORY_START)
-    last_month = cal.month_index(config.PLANNING_END)
+
+    means = params_module.active().amounts.subscription_mean_months
+
+    def later(rng, mean: float) -> int:
+        return int(-math.log(1.0 - rng.random()) * mean)
 
     # Сервис подписки выбирается без повторов: одна и та же подписка
     # дважды — это два списания «Spotify» в месяц с разными суммами.
@@ -330,18 +338,18 @@ def _subscriptions(persona: Persona, settlement: str) -> tuple:
         start_month = first_month
 
         if item_rng.random() < 0.35:
-            start_month = first_month + int(item_rng.integers(1, max(2, last_month - first_month - 2)))
+            start_month = first_month + 1 + later(item_rng, means["start"])
 
         end_month = None
 
         if item_rng.random() < settings.subscription_stop_share:
-            end_month = start_month + int(item_rng.integers(2, max(3, last_month - start_month)))
+            end_month = start_month + 2 + later(item_rng, means["stop"])
 
         change_month = None
         amount_after = amount
 
         if item_rng.random() < settings.subscription_price_change_share:
-            change_month = start_month + int(item_rng.integers(3, max(4, last_month - start_month)))
+            change_month = start_month + 3 + later(item_rng, means["change"])
             direction = 1.0 if item_rng.random() < 0.75 else -1.0
             amount_after = int(
                 amount * (1.0 + direction * item_rng.uniform(*settings.subscription_price_change))
@@ -366,6 +374,7 @@ def _subscriptions(persona: Persona, settlement: str) -> tuple:
                 start_month=start_month,
                 end_month=end_month,
                 change_month=change_month,
+                settlement=settlement,
             )
         )
 

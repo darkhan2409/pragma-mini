@@ -17,7 +17,8 @@ from src.generator.world import products as catalog_module
 # карта незаметно выпала бы из правил CORE и Loyal.
 #
 # Отдельно: этапы PRAGMA не читают truth/ — служебную правду генератора
-# для оценки (CLAUDE.md).
+# для оценки (CLAUDE.md), а стадии CAPP не использует ни PRAGMA, ни
+# генератор: стадия — разрез результата, не вход и не цель.
 # ============================================================
 
 
@@ -65,21 +66,25 @@ def test_pragma_stages_never_read_truth():
     assert offenders == []
 
 
-def test_pragma_never_sees_lifecycle_metadata():
+def test_pragma_and_the_generator_never_use_the_lifecycle():
     """
-    Стадия, прежняя стадия и причины переходов — метаданные задач
-    churn_baseline. Вход PRAGMA, набор и downstream их не читают.
+    Стадии CAPP считает churn_baseline для анализа после прогноза. Ни вход
+    PRAGMA, ни набор, ни downstream, ни генератор их не читают: генератор
+    моделирует поведение, а не подгоняется под стадии.
     """
 
-    names = re.compile(
-        r"lifecycle_tasks|churn\.lifecycle|current_stage|previous_active_stage|at_risk_reason|"
-        r"at_risk_previous_stage|first_at_risk_at"
-    )
+    imports = re.compile(r"from churn\b|import churn\b|churn\.lifecycle|churn/lifecycle")
+    fields = re.compile(r"\bstage_at\b|current_stage|previous_stage|stage_since|at_risk_reason|transition_reason")
 
-    offenders = [
-        str(path.relative_to(ROOT))
-        for path in sorted((ROOT / "src").rglob("*.py"))
-        if not path.is_relative_to(ROOT / "src" / "generator") and names.search(path.read_text(encoding="utf-8"))
-    ]
+    offenders = []
+    for path in sorted((ROOT / "src").rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        name = str(path.relative_to(ROOT))
+        if imports.search(text):
+            offenders.append(name)
+        # У генератора своё скрытое состояние клиента (behaviour/
+        # engagement.py), с бизнес-стадиями CAPP оно не связано.
+        if not path.is_relative_to(ROOT / "src" / "generator") and fields.search(text):
+            offenders.append(name)
 
     assert offenders == []
