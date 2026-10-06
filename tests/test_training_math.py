@@ -70,6 +70,9 @@ def tiny(**overrides) -> MlmConfig:
         # Без процесса подготовки: он стоил бы секунд на каждую
         # эпоху каждого теста. Путь с ним проверяется отдельно.
         loader_workers=0,
+        # В синтетическом мире нет ключа event_type, цели [USR] не из
+        # чего строиться; её проверяет test_recent_types.
+        usr_aux_weight=0.0,
     )
 
     base.update(overrides)

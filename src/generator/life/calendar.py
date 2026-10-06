@@ -251,6 +251,16 @@ def hour_weights(ts: datetime, night_segment: bool = False) -> tuple:
     return tuple(value / total for value in boosted)
 
 
+def earlier_same_day(ts: datetime, delta: timedelta) -> datetime:
+    """
+    На delta раньше, но не раньше полуночи того же дня. Действие,
+    которое готовит событие дня, не может уйти в прошлые сутки: те
+    уже выполнены, и при другом конце окна прошлое разошлось бы.
+    """
+
+    return max(ts - delta, ts.replace(hour=0, minute=0, second=0, microsecond=0))
+
+
 def month_start(ts: datetime) -> datetime:
     return datetime(ts.year, ts.month, 1)
 

@@ -74,9 +74,6 @@ def _expire_cards(sim, state: ClientState, day: datetime) -> None:
 
         moment = day.replace(hour=12, minute=int(stable_hash(card.card_id) % 60))
 
-        if moment >= config.HISTORY_END:
-            continue
-
         _reissue_card(state, card, moment, reason="expiry")
 
 
@@ -976,16 +973,19 @@ def _update_profile(
         if item.product_family == "credit_card"
     )
 
+    # Анкета — к своему моменту: договоры и проводки с более
+    # поздним временем в состоянии уже есть, решение о них принято
+    # раньше.
     used = -sum(
-        account.balance
+        min(0, state.ledger.balance_at(account.account_id, moment))
         for account in state.ledger.accounts.values()
-        if account.kind == ACCOUNT_CREDIT_CARD and account.balance < 0
+        if account.kind == ACCOUNT_CREDIT_CARD
     )
 
     values.update(
         {
             "relationship_months": persona.relationship_months_at(day),
-            "contracts_count": len(state.contracts),
+            "contracts_count": sum(1 for item in state.contracts.values() if item.opened_at <= moment),
             "active_contracts": len(open_contracts),
             "holds_credit_card": any(item.product_family == "credit_card" for item in open_contracts),
             "holds_debit_card": any(item.product_family == "debit_card" for item in open_contracts),

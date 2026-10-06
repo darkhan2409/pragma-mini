@@ -18,7 +18,7 @@ from .world.dictionaries import MCC_TRANSFER
 from .world.relationships import _external
 from .life import stress as stress_module
 from .rng import COMPONENT_OUTCOME, NS_SESSION, event_rng, stable_hash
-from .simulate import ClientState, _transfer_id, in_window
+from .simulate import ClientState, _transfer_id
 from .world.dictionaries import (
     BANNER_OFFERS,
     BANNER_OFFER_FAMILY,
@@ -57,9 +57,6 @@ def _on_session(sim, state: ClientState, ts: datetime, payload: dict) -> None:
     shown_offers: set = set()
 
     for position, step in enumerate(session.steps):
-
-        if step.ts >= config.HISTORY_END:
-            break
 
         rng = event_rng(
             NS_SESSION,
@@ -108,9 +105,8 @@ def _on_session(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         transfer_pair = None
         deposit_amount = 0
 
-        # Момент денежного следствия выбирается ЗАРАНЕЕ: только
-        # так можно проверить, что оно поместится в окно, ещё до
-        # того как операция объявлена успешной.
+        # Момент денежного следствия выбирается ЗАРАНЕЕ, до розыгрыша
+        # исхода.
         money_ts = step.ts + timedelta(seconds=int(rng.integers(5, 60)))
 
         if operation in ("login", "biometry_login"):
@@ -125,10 +121,6 @@ def _on_session(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             elif not state.ledger.payment_sources(step.ts, target_bill["amount"]):
                 feasible = False
                 insufficient = True
-            elif not in_window(money_ts):
-                # Списание выпадает за конец выгрузки: показывать
-                # успех нечем.
-                feasible = False
 
         if operation == "card_unblock":
             target_card = next(
@@ -169,14 +161,14 @@ def _on_session(sim, state: ClientState, ts: datetime, payload: dict) -> None:
                 feasible = False
             else:
                 # Пополнение это тот же перевод себе: две стороны,
-                # вторая секундой позже. Проверяется и она.
+                # вторая секундой позже.
                 deposit_amount = _topup_amount(state, step.ts, rng)
                 sources = [
                     item
                     for item in state.ledger.payment_sources(step.ts, deposit_amount)
                     if item.account_id != target_deposit.account_id
                 ]
-                if not sources or not in_window(step.ts + timedelta(seconds=1)):
+                if not sources:
                     feasible = False
                     insufficient = not sources
 
@@ -195,12 +187,6 @@ def _on_session(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             elif not state.ledger.payment_sources(step.ts, transfer_amount):
                 feasible = False
                 insufficient = True
-
-            # Зачисление второй ноги датируется секундой позже. На
-            # самом краю окна её уже не записать, и операция не
-            # должна показывать успех: денег за ним не будет.
-            if not in_window(step.ts + timedelta(seconds=1)):
-                feasible = False
 
             if operation == "transfer_own" and feasible:
 
@@ -411,14 +397,10 @@ def _pay_bill_in_app(
     Оплата счёта внутри сессии.
 
     moment — момент самого списания, выбранный ДО розыгрыша
-    исхода операции. Раньше он разыгрывался здесь, и на краю
-    окна выгрузки списание выпадало за HISTORY_END: операция
-    показывала успех, денег за ним не было, а счёт всё равно
-    уходил из open_bills.
+    исхода операции. Списание за концом окна проводится так же, как
+    любое другое, и только не попадает в выгрузку: состояние до
+    конца окна не зависит от того, где окно кончается.
     """
-
-    if not in_window(moment):
-        return
 
     sources = state.ledger.payment_sources(moment, bill["amount"])
 
@@ -667,12 +649,10 @@ def _transfer_in_app(
 
     # Получатель — клиент этого банка: перевод внутренний, и
     # зачисление видно в его ленте, как у планового перевода.
-    # Обе ноги или ни одной: на краю окна зачисление уже не
-    # попадает в выгрузку.
     other = sim.clients.get(counterpart.client_ordinal) if counterpart.client_ordinal is not None else None
     target = other.primary_card_account(ts) if other is not None else None
 
-    if target is not None and in_window(ts + timedelta(seconds=1)):
+    if target is not None:
 
         sent = _emit_money(
             state, ts, "p2p_out", account.account_id, amount, "debit", target.account_id, body,
@@ -754,19 +734,17 @@ def _own_transfer(
     Перевод себе — две разные стороны: для этого и нужны
     credit_event_type и credit_contract_id.
 
-    Возвращает, состоялся ли перевод. Ложь значит, что вторая
-    нога не поместилась в окно выгрузки: зачисление датируется
-    секундой позже списания, и на самом краю окна его уже некуда
-    записать. Половина перевода хуже, чем его отсутствие —
-    деньги ушли бы со счёта и не пришли ни на какой другой.
-    Вызывающий обязан свериться с ответом: остаток вклада,
-    статус договора и прочее состояние меняются только при
-    состоявшемся переводе.
+    Возвращает, состоялся ли перевод: до начала окна его нет, без
+    денег на счёте списания — тоже. Вызывающий обязан свериться с
+    ответом: остаток вклада, статус договора и прочее состояние
+    меняются только при состоявшемся переводе. Вторая нога на самом
+    краю окна (секундой позже первой) проводится, но в выгрузку не
+    попадает — так же, как всё за концом окна.
     """
 
     credit_ts = ts + timedelta(seconds=1)
 
-    if not in_window(ts) or not in_window(credit_ts):
+    if ts < config.HISTORY_START:
         return False
 
     # Денег на счёте списания нет — перевода не будет вовсе.

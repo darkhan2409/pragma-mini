@@ -3,11 +3,14 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from churn.activity import is_client_action
+from churn.activity import is_client_action, is_target_action, is_visit
 
 
 def frame(**fields) -> pd.DataFrame:
-    columns = ["type", "reason", "channel", "direction", "counterparty", "migration_reason", "change_source"]
+    columns = [
+        "type", "reason", "channel", "direction", "counterparty", "migration_reason", "change_source",
+        "operation", "status",
+    ]
     row = {name: fields.get(name) for name in columns}
     return pd.DataFrame([row])
 
@@ -21,9 +24,9 @@ CASES = [
     ({"type": "p2p_out"}, True),
     ({"type": "cash_withdrawal", "channel": "atm"}, True),
     ({"type": "cash_deposit", "channel": "atm"}, True),
+    ({"type": "cash_deposit", "reason": "cash_deposit", "channel": "atm"}, True),
     ({"type": "bill_payment", "channel": "app"}, True),
     ({"type": "bill_payment", "channel": "branch"}, True),
-    ({"type": "loan_payment", "channel": "ecom"}, True),
     ({"type": "deposit_topup", "direction": "debit", "channel": "ecom"}, True),
     ({"type": "deposit_withdrawal", "reason": "early_closure", "direction": "debit"}, True),
     ({"type": "transfer_in", "reason": "transfer", "counterparty": "Own account"}, True),
@@ -37,6 +40,13 @@ CASES = [
     ({"type": "product_closed", "reason": "early_closure"}, True),
     ({"type": "product_migrated", "migration_reason": "successor_offer"}, True),
     ({"type": "profile_change", "change_source": "client"}, True),
+    # обязательства: взнос по кредиту и пополнение под платёж или выписку
+    # (решение владельца 2026-10-06)
+    ({"type": "loan_payment", "channel": "ecom"}, False),
+    ({"type": "loan_payment", "channel": "app"}, False),
+    ({"type": "cash_deposit", "reason": "payment_topup", "channel": "atm"}, False),
+    ({"type": "cash_deposit", "reason": "card_statement", "channel": "atm"}, False),
+    ({"type": "transfer_in", "reason": "payment_topup", "counterparty": "Own account"}, False),
     # банк, автоматика, третьи лица
     ({"type": "purchase", "reason": "subscription", "channel": "ecom"}, False),
     ({"type": "purchase", "reason": "insurance_premium", "channel": "system"}, False),
@@ -98,3 +108,53 @@ def test_every_generator_type_is_classified() -> None:
     # Все 55 типов выгрузки встречаются в таблице хотя бы раз.
     types = {fields["type"] for fields, _ in CASES}
     assert len(types) == 55
+
+
+VISITS = [
+    ({"type": "app_operation", "operation": "login", "status": "success"}, True),
+    ({"type": "app_operation", "operation": "biometry_login", "status": "success"}, True),
+    # неудачный вход — действие клиента, но не визит
+    ({"type": "app_operation", "operation": "login", "status": "failed"}, False),
+    ({"type": "app_operation", "operation": "login", "status": None}, False),
+    # прочие события приложения — действие, но не визит
+    ({"type": "app_operation", "operation": "card_view", "status": "success"}, False),
+    ({"type": "app_screen"}, False),
+    ({"type": "banner_clicked"}, False),
+]
+
+
+@pytest.mark.parametrize(("fields", "expected"), VISITS)
+def test_a_visit_is_only_a_successful_login(fields: dict, expected: bool) -> None:
+    assert bool(is_visit(frame(**fields))[0]) is expected
+
+
+TARGETS = [
+    ({"type": "purchase", "reason": "purchase", "channel": "pos"}, True),
+    ({"type": "app_operation", "operation": "login", "status": "success"}, True),
+    # продукт по заявке клиента — целевое действие, хотя не действие клиента
+    ({"type": "product_opened", "reason": "application_approved"}, True),
+    # карта при регистрации и автоматическая активация — дело банка
+    ({"type": "product_opened", "reason": "opened"}, False),
+    ({"type": "card_activated"}, False),
+    ({"type": "loan_payment", "channel": "ecom"}, False),
+]
+
+
+@pytest.mark.parametrize(("fields", "expected"), TARGETS)
+def test_target_action_is_a_client_action_or_an_applied_product(fields: dict, expected: bool) -> None:
+    events = frame(**fields)
+    assert bool(is_target_action(events, is_client_action(events))[0]) is expected
+
+
+def test_visit_action_and_target_action_are_different_sets() -> None:
+    rows = [fields for fields, _ in VISITS + TARGETS]
+    events = pd.concat([frame(**fields) for fields in rows], ignore_index=True)
+    action = is_client_action(events)
+    visit = is_visit(events)
+    target = is_target_action(events, action)
+
+    # Визит — всегда действие; действие — не всегда визит; целевое
+    # действие шире действия на открытие продукта по заявке.
+    assert (action | ~visit).all()
+    assert (action & ~visit).any()
+    assert (target & ~action).any()

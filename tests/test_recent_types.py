@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 from src.mlm.inputs import IGNORE
 from src.mlm.model import RECENCY_CAP_DAYS, RECENT_DAYS, RecentTypes, pack
-from src.mlm.settings import checkpoint_path
+from src.mlm.settings import MlmConfig, checkpoint_path
 from src.mlm.train import load_trained, train
 
 from tests import world
@@ -132,6 +132,17 @@ def test_a_masked_event_type_is_read_from_its_label():
     masked = replace(data, value_ids=hidden, labels=labels)
 
     assert torch.equal(recent.targets(masked), recent.targets(data))
+
+
+def test_the_target_is_on_by_default_and_old_checkpoints_keep_their_weight():
+    """
+    С 2026-10-06 цель [USR] — часть эталона. Чекпойнт хранит свой вес,
+    и B0 с весом 0 загружается без головы.
+    """
+
+    assert MlmConfig().usr_aux_weight == 1.0
+    assert MlmConfig.from_dict({}).usr_aux_weight == 1.0
+    assert MlmConfig.from_dict({"usr_aux_weight": 0.0}).usr_aux_weight == 0.0
 
 
 def test_the_auxiliary_head_learns_and_travels_in_the_checkpoint(stage, monkeypatch):

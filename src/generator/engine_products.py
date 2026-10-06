@@ -478,9 +478,6 @@ def _on_adoption(sim, state: ClientState, ts: datetime, payload: dict) -> None:
     if channel == "app" and app_adopted:
         decision_ts = _funnel(state, application, ts, approved, reason, rng)
 
-    if decision_ts >= config.HISTORY_END:
-        return
-
     application.decision = "approved" if approved else "rejected"
     application.decided_at = decision_ts
     application.reject_reason = reason
@@ -505,9 +502,6 @@ def _on_adoption(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         return
 
     open_ts = decision_ts + timedelta(seconds=int(rng.integers(*settings.disbursement_delay_seconds)))
-
-    if open_ts >= config.HISTORY_END:
-        return
 
     contract = sim._open_contract(
         state,
@@ -972,7 +966,7 @@ def _fraud_transfer(state: ClientState, account, ts, amount, episode, step, rng)
     subject = "transfer"
 
     if episode.kind == "account_takeover" and step.kind == "strike":
-        _emit_takeover_login(state, ts - timedelta(minutes=4))
+        _emit_takeover_login(state, cal.earlier_same_day(ts, timedelta(minutes=4)))
 
     counterpart = f"cp_fraud_{stable_hash(state.client_id, ts.toordinal()) % 10 ** 8:08d}"
 
@@ -1019,7 +1013,7 @@ def _emit_takeover_login(state: ClientState, ts: datetime) -> None:
     Вход с нового устройства перед захватом доступа.
     """
 
-    if ts < config.HISTORY_START or ts >= config.HISTORY_END:
+    if ts < config.HISTORY_START:
         return
 
     if state.app_adopted_at is None or ts < state.app_adopted_at:
@@ -1096,9 +1090,6 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
         return
 
     alert_ts = ts + timedelta(minutes=episode.detect_delay_minutes)
-
-    if alert_ts >= config.HISTORY_END:
-        return
 
     # Тревожность считается от доли месячного дохода, а не от
     # подсказки шага: у пробной покупки подсказка это сумма в
@@ -1237,22 +1228,21 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
 
             back_ts = case.resolved_at + timedelta(days=int(rng.integers(*settings.chargeback_delay_days)))
 
-            if back_ts < config.HISTORY_END:
-                _emit_money(
-                    state, back_ts, "chargeback", account.account_id, amount, "credit",
-                    f"merchant:{event.payload.get('merchant_id')}"
-                    if event.payload.get("merchant_id")
-                    else "external:merchant",
-                    {
-                        "channel": "system",
-                        "card_id": event.payload.get("card_id"),
-                        **{
-                            name: event.payload.get(name)
-                            for name in merchant_catalog.MERCHANT_PAYLOAD_FIELDS
-                        },
-                        "reason": "dispute_resolved",
+            _emit_money(
+                state, back_ts, "chargeback", account.account_id, amount, "credit",
+                f"merchant:{event.payload.get('merchant_id')}"
+                if event.payload.get("merchant_id")
+                else "external:merchant",
+                {
+                    "channel": "system",
+                    "card_id": event.payload.get("card_id"),
+                    **{
+                        name: event.payload.get(name)
+                        for name in merchant_catalog.MERCHANT_PAYLOAD_FIELDS
                     },
-                )
+                    "reason": "dispute_resolved",
+                },
+            )
 
     # --- судьба заблокированной карты ---
 
@@ -1269,18 +1259,16 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
 
             reissue_ts = decision_ts + timedelta(days=int(rng.integers(*settings.reissue_delay_days)))
 
-            if reissue_ts < config.HISTORY_END:
-                _reissue_card(state, card, reissue_ts)
+            _reissue_card(state, card, reissue_ts)
 
         return
 
     unblock_ts = decision_ts + timedelta(hours=int(rng.integers(*settings.unblock_delay_hours)))
 
-    if unblock_ts < config.HISTORY_END:
-        # Причина нейтральная: прежняя строка «confirmed_by_client»
-        # была прямым пересказом скрытого ответа клиента и
-        # переживала бы правку самого fraud_decision.
-        unblock_card(state, unblock_ts, card, "fraud_check_closed")
+    # Причина нейтральная: прежняя строка «confirmed_by_client»
+    # была прямым пересказом скрытого ответа клиента и
+    # переживала бы правку самого fraud_decision.
+    unblock_card(state, unblock_ts, card, "fraud_check_closed")
 
 
 def _reissue_card(state: ClientState, card, ts: datetime, reason: str = "fraud_reissue") -> None:
@@ -1339,7 +1327,7 @@ def _emit_case(state: ClientState, case) -> None:
         )
     )
 
-    if case.updated_at is not None and case.updated_at < config.HISTORY_END:
+    if case.updated_at is not None:
         state.emit(
             state.factory.make(
                 "case_updated",
@@ -1348,14 +1336,13 @@ def _emit_case(state: ClientState, case) -> None:
             )
         )
 
-    if case.resolved_at < config.HISTORY_END:
-        state.emit(
-            state.factory.make(
-                "case_resolved",
-                case.resolved_at,
-                dict(body, status="resolved", resolution=case.resolution),
-            )
+    state.emit(
+        state.factory.make(
+            "case_resolved",
+            case.resolved_at,
+            dict(body, status="resolved", resolution=case.resolution),
         )
+    )
 
 
 # ============================================================
@@ -1570,7 +1557,7 @@ def _on_support_check(sim, state: ClientState, ts: datetime, payload: dict) -> N
             ),
             None,
         )
-        if card is not None and case.resolved_at < config.HISTORY_END:
+        if card is not None:
             unblock_card(state, case.resolved_at, card, "support_resolution")
 
     if case.resolution == "record_corrected":
@@ -1713,8 +1700,7 @@ def _on_card_block_request(sim, state: ClientState, ts: datetime, payload: dict)
 
         reissue_ts = ts + timedelta(days=int(rng.integers(*settings.card_lost_reissue_delay_days)))
 
-        if reissue_ts < config.HISTORY_END:
-            _reissue_card(state, card, reissue_ts, reason="lost_or_stolen")
+        _reissue_card(state, card, reissue_ts, reason="lost_or_stolen")
 
         return
 
@@ -1727,7 +1713,7 @@ def _on_card_block_request(sim, state: ClientState, ts: datetime, payload: dict)
         hours=int(rng.integers(2, max(3, 24 * max(1, days or 1))))
     )
 
-    if unblock_ts < config.HISTORY_END and card.blocked_until is not None and unblock_ts < card.blocked_until:
+    if card.blocked_until is not None and unblock_ts < card.blocked_until:
         unblock_card(state, unblock_ts, card, "client_request")
 
 

@@ -110,6 +110,17 @@ class Ledger:
         account = self.accounts.get(account_id)
         return account.available if account else 0
 
+    def balance_at(self, account_id: str, ts: datetime) -> int:
+        """
+        Остаток к моменту ts: без проводок, датированных ts и позже.
+        Проводка с будущим временем делается сразу, когда решение
+        принято, и остаток счёта уже её содержит.
+        """
+
+        later = sum(amount for _, amount in self.signed_moves(account_id, ts, datetime.max))
+
+        return self.balance(account_id) - later
+
     def visible_accounts(self, ts: datetime | None = None) -> list:
         return [
             account

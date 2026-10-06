@@ -9,6 +9,7 @@ from .finance import deposits as deposit_rules
 from .finance import loans as loan_rules
 from .finance.ledger import NON_PAYMENT_KINDS
 from .finance.entities import CONTRACT_CLOSED
+from .life import calendar as cal
 from .life import stress as stress_module
 from .rng import NS_LOAN, NS_REPAY, keyed_rng, stable_hash
 from .simulate import ClientState
@@ -242,7 +243,7 @@ def _topup_before_payment(state: ClientState, ts: datetime, amount: int, rng) ->
         # Наличных и другого банка не хватило: остаётся вклад, если
         # его условия разрешают снятие. Это отдельная операция с
         # проверкой условий, а не платёж со вклада напрямую.
-        return _withdraw_from_deposit(state, ts - timedelta(minutes=12), account, shortfall)
+        return _withdraw_from_deposit(state, cal.earlier_same_day(ts, timedelta(minutes=12)), account, shortfall)
 
     hidden = sources[0]
 
@@ -250,7 +251,7 @@ def _topup_before_payment(state: ClientState, ts: datetime, amount: int, rng) ->
 
     _emit_money(
         state,
-        ts - timedelta(minutes=12),
+        cal.earlier_same_day(ts, timedelta(minutes=12)),
         "cash_deposit" if from_cash else "transfer_in",
         account.account_id,
         shortfall,
@@ -262,7 +263,10 @@ def _topup_before_payment(state: ClientState, ts: datetime, amount: int, rng) ->
             # ни в другом случае.
             "channel": "atm" if from_cash else "system",
             "counterparty": "Own account",
-            "reason": "cash_deposit" if from_cash else "transfer",
+            # Пополнение под платёж — обслуживание долга, а не
+            # действие по своей воле: своя причина отличает его в
+            # RAW от обычного взноса и перевода.
+            "reason": "payment_topup",
             "mcc": MCC_CASH if from_cash else MCC_TRANSFER,
             "merchant_country": "KZ",
         },

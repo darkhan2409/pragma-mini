@@ -48,7 +48,6 @@ from .simulate import (
     CommunitySimulation,
     _money,
     _transfer_id,
-    in_window,
 )
 from .world.dictionaries import (
     MCC_CASH,
@@ -905,11 +904,11 @@ def _emit_money(
 
     event = state.factory.make(event_type, ts, body)
 
-    # За концом окна проводки нет. Строку туда всё равно не
-    # записать, а остаток она бы изменила — и следующий срез
-    # увидел бы деньги, которых выгрузка не показывает. До
-    # НАЧАЛА окна проводка, наоборот, нужна: там мир жил.
-    if status == "approved" and account is not None and ts < config.HISTORY_END:
+    # Проводка делается при любом конце окна: от него зависит только,
+    # попадёт ли строка в выгрузку. Иначе прошлое у края окна зависело
+    # бы от того, где окно кончается. Анкета на конец окна берёт
+    # остатки к своему моменту (Ledger.balance_at).
+    if status == "approved" and account is not None:
 
         # Вторая нога перевода между своими счетами денег не
         # двигает: проводка первой ноги уже изменила оба остатка.
@@ -1347,7 +1346,7 @@ def _schedule_refunds(sim, state: ClientState, event) -> None:
 
         moment = plan["ts"]
 
-        if not (config.HISTORY_START <= moment < config.HISTORY_END):
+        if moment < config.HISTORY_START:
             continue
 
         if moment.toordinal() == event.event_time.toordinal():
@@ -1607,13 +1606,6 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
         if target is None:
             internal = False
-
-    # Обе ноги перевода или ни одной. Зачисление получателю
-    # датируется секундой позже, и на самом краю окна оно уже не
-    # попадает в выгрузку: у перевода осталась бы одна сторона, а
-    # деньги ушли бы в никуда.
-    if internal and not in_window(ts + timedelta(seconds=1)):
-        internal = False
 
     if internal:
 
