@@ -133,8 +133,12 @@ def _read_json(path: Path, what: str) -> dict:
         raise GenerationError(f"{what} {path.name} нечитаем: {error}") from error
 
 
-def _batch_marker(out: Path, index: int) -> Path:
-    return out / PARTS_DIR / f"batch-{index:05d}.json"
+def _job_marker(out: Path, batch: int, job: int) -> Path:
+    return out / PARTS_DIR / f"job-{batch:05d}-{job:03d}.json"
+
+
+def _part(out: Path, name: str, batch: int, job: int) -> Path:
+    return out / PARTS_DIR / f"{name}-{batch:05d}-{job:03d}.parquet"
 
 
 # ============================================================
@@ -183,16 +187,22 @@ def _build_params(params_path: str | None, catalog_scale: float | None,
 
 def _run_batch(job: tuple) -> tuple:
     """
-    Пакет сообществ: симуляция и запись своих part-файлов.
+    Задание воркера: сообщества одной пачки (сейчас одно), симуляция
+    и запись своих part-файлов.
+
+    Задание мельче пачки: пачка (chunk_clients) задаёт только
+    раскладку итоговой таблицы — одну группу строк, — а считать её
+    можно по частям. Иначе на 1000 клиентах было 4 задания, и из 12
+    ядер работали 4.
     """
 
-    batch_index, community_ids, total_clients, out_dir = job
+    batch_index, job_index, community_ids, total_clients, out_dir = job
 
     from .engine import run_community
 
     out = Path(out_dir)
 
-    parts = {name: out / PARTS_DIR / f"{name}-{batch_index:05d}.parquet" for name in TABLES}
+    parts = {name: _part(out, name, batch_index, job_index) for name in TABLES}
 
     parts["events"].parent.mkdir(parents=True, exist_ok=True)
 
@@ -245,16 +255,17 @@ def _run_batch(job: tuple) -> tuple:
     # собираются из маркеров, поэтому продолженный прогон знает
     # и про те пачки, которых сам не считал.
     _write_json(
-        _batch_marker(out, batch_index),
+        _job_marker(out, batch_index, job_index),
         {
             "batch": batch_index,
+            "job": job_index,
             "communities": list(community_ids),
             "counts": counts,
             "sha256": digests,
         },
     )
 
-    return batch_index, counts
+    return batch_index, job_index, counts
 
 
 # ============================================================
@@ -262,9 +273,11 @@ def _run_batch(job: tuple) -> tuple:
 # ============================================================
 
 
-def _merge_parts(out: Path, name: str, batches: int, digests: dict[int, str]) -> int:
+def _merge_parts(out: Path, name: str, jobs: list[int], digests: dict[tuple, str]) -> int:
     """
-    Склейка part-файлов в итоговую таблицу.
+    Склейка part-файлов в итоговую таблицу: jobs[b] — сколько заданий
+    у пачки b. Части пачки идут подряд в одну группу строк, как если
+    бы пачку считало одно задание.
 
     Пишется во временный файл и переименовывается: прерванная
     склейка не оставляет обрезанной таблицы на месте настоящей.
@@ -281,35 +294,41 @@ def _merge_parts(out: Path, name: str, batches: int, digests: dict[int, str]) ->
     writer = None
     rows = 0
 
-    for index in range(batches):
+    for index, count in enumerate(jobs):
 
-        part = out / PARTS_DIR / f"{name}-{index:05d}.parquet"
+        pieces = []
 
-        # Каждая пачка пишет каждую таблицу, пусть и пустую, а
-        # маркер появляется после всех частей. Части нет при
-        # маркере — черновик испорчен, и молча собрать датасет
-        # короче обещанного нельзя.
-        if not part.exists():
-            raise GenerationError(
-                f"пачка {index}: маркер есть, а части {part.name} нет — "
-                "черновик повреждён, прогон нужно начать заново"
-            )
+        for job in range(count):
 
-        # Число строк содержимого не описывает: часть той же
-        # длины с другими значениями прошла бы незамеченной.
-        # Сверяется подпись, которую маркер поставил при записи.
-        actual = _file_sha256(part)
+            part = _part(out, name, index, job)
 
-        if actual != digests[index]:
-            raise GenerationError(
-                f"пачка {index}: содержимое {part.name} не совпадает с подписью "
-                "маркера — черновик повреждён, прогон нужно начать заново"
-            )
+            # Каждое задание пишет каждую таблицу, пусть и пустую, а
+            # маркер появляется после всех частей. Части нет при
+            # маркере — черновик испорчен, и молча собрать датасет
+            # короче обещанного нельзя.
+            if not part.exists():
+                raise GenerationError(
+                    f"пачка {index}, задание {job}: маркер есть, а части {part.name} нет — "
+                    "черновик повреждён, прогон нужно начать заново"
+                )
 
-        # Одна группа строк на часть, как при записи пачки целиком:
-        # части пишутся по сообществам, а итоговая раскладка — и с
-        # ней sha256 выгрузки — от этого зависеть не должна.
-        table = pq.read_table(part).combine_chunks()
+            # Число строк содержимого не описывает: часть той же
+            # длины с другими значениями прошла бы незамеченной.
+            # Сверяется подпись, которую маркер поставил при записи.
+            actual = _file_sha256(part)
+
+            if actual != digests[index, job]:
+                raise GenerationError(
+                    f"пачка {index}, задание {job}: содержимое {part.name} не совпадает "
+                    "с подписью маркера — черновик повреждён, прогон нужно начать заново"
+                )
+
+            pieces.append(pq.read_table(part))
+
+        # Одна группа строк на пачку: части пишутся по сообществам и
+        # заданиям, а итоговая раскладка — и с ней sha256 выгрузки — от
+        # этого зависеть не должна.
+        table = pa.concat_tables(pieces).combine_chunks()
 
         if writer is None:
             writer = pq.ParquetWriter(temporary, table.schema, compression="zstd")
@@ -363,6 +382,9 @@ def _run_card(
         "history_end": config.HISTORY_END.isoformat(),
         "registration_end": config.REGISTRATION_END.isoformat(),
         "generation_config_sha256": settings.fingerprint(),
+        # Черновик из заданий по сообществу: прежний, по пачкам,
+        # этой версией не продолжается.
+        "job": "community",
     }
 
 
@@ -424,9 +446,11 @@ def generate_dataset(
         for start in range(0, community_count, per_batch)
     ]
 
+    # Задание — одно сообщество; пачка остаётся единицей раскладки.
     jobs = [
-        (index, community_ids, total_clients, str(out))
+        (index, job, (community_id,), total_clients, str(out))
         for index, community_ids in enumerate(batches)
+        for job, community_id in enumerate(community_ids)
     ]
 
     card = _run_card(settings, seed, rng_module.current_world_seed(),
@@ -455,10 +479,10 @@ def generate_dataset(
     _write_json(run_path, card)
 
     if resume:
-        # Готова та пачка, у которой есть маркер. Существование
+        # Готово то задание, у которого есть маркер. Существование
         # part-файла ничего не значит: его мог оставить прогон,
         # прерванный на середине записи.
-        jobs = [job for job in jobs if not _batch_marker(out, job[0]).exists()]
+        jobs = [job for job in jobs if not _job_marker(out, job[0], job[1]).exists()]
 
     done = 0
 
@@ -466,7 +490,7 @@ def generate_dataset(
         nonlocal done
         done += 1
         if not quiet:
-            print(f"batches: {done}/{len(jobs)}")
+            print(f"jobs: {done}/{len(jobs)}")
 
     if workers <= 1 or len(jobs) <= 1:
         _worker_init(seed, params_path, catalog_scale, community_size, world_seed, horizon)
@@ -491,41 +515,44 @@ def generate_dataset(
                     "сохранены маркерами: продолжите с --resume и меньшим --workers"
                 ) from error
 
-    # Итог собирается из маркеров ВСЕХ пачек, а не из того, что
+    # Итог собирается из маркеров ВСЕХ заданий, а не из того, что
     # посчитал текущий прогон: продолженная сборка обязана дать
     # тот же манифест, что и сборка без остановки.
     counts = {name: 0 for name in TABLES}
 
     # Подписи частей, обещанные маркерами: по ним сверяется
     # содержимое каждой готовой части перед склейкой.
-    digests: dict[str, dict[int, str]] = {name: {} for name in TABLES}
+    digests: dict[str, dict[tuple, str]] = {name: {} for name in TABLES}
 
-    for index in range(len(batches)):
+    for index, community_ids in enumerate(batches):
 
-        marker = _batch_marker(out, index)
+        for job in range(len(community_ids)):
 
-        if not marker.exists():
-            raise GenerationError(
-                f"пачка {index} не завершена: без её маркера датасет собирать нельзя"
-            )
+            marker = _job_marker(out, index, job)
 
-        record = _read_json(marker, "маркер пачки")
+            if not marker.exists():
+                raise GenerationError(
+                    f"пачка {index}, задание {job} не завершено: без его маркера "
+                    "датасет собирать нельзя"
+                )
 
-        promised = record.get("sha256")
+            record = _read_json(marker, "маркер задания")
 
-        if not isinstance(promised, dict):
-            raise GenerationError(
-                f"маркер пачки {index} без подписей частей: черновик собран "
-                "прежней версией генератора, продолжить его нельзя"
-            )
+            promised = record.get("sha256")
 
-        for name in counts:
-            counts[name] += int(record["counts"][name])
-            digests[name][index] = str(promised[name])
+            if not isinstance(promised, dict):
+                raise GenerationError(
+                    f"маркер задания {index}-{job} без подписей частей: черновик собран "
+                    "прежней версией генератора, продолжить его нельзя"
+                )
+
+            for name in counts:
+                counts[name] += int(record["counts"][name])
+                digests[name][index, job] = str(promised[name])
 
     for name in TABLES:
 
-        merged = _merge_parts(out, name, len(batches), digests[name])
+        merged = _merge_parts(out, name, [len(item) for item in batches], digests[name])
 
         # Склеенное обязано сойтись с обещанным маркерами: иначе
         # манифест назовёт строки, которых в файле нет.

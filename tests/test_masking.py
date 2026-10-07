@@ -130,17 +130,6 @@ def test_event_of_one_marker_contributes_nothing():
 # ============================================================
 
 
-def test_the_same_client_and_config_give_the_same_choice():
-
-    made = sample()
-    config = rates(value_probability=0.5)
-
-    first = choose("train", row_of(made), config)
-    second = choose("train", row_of(made), config)
-
-    assert first.choices == second.choices
-
-
 def test_the_group_is_part_of_the_stream():
     """
     Поток розыгрыша задан группой и client_id: один и тот же

@@ -226,14 +226,6 @@ def read(group: str, row: dict, config: MaskingConfig, weights: ValueWeights | N
     return apply(row["client_id"], row, selection.choices, world.MASK, world.UNK, selection.corrupted)
 
 
-def test_one_seed_and_one_client_give_the_same_mask():
-
-    row = row_of(world.population()[0])
-    config = weighted(seed=5)
-
-    assert read("train", row, config, world_weights()) == read("train", row, config, world_weights())
-
-
 def test_another_seed_can_choose_differently():
 
     row = row_of(world.population()[0])

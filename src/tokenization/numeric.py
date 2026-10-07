@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from bisect import bisect_right
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -173,13 +174,7 @@ def locate(buckets: tuple[Bucket, ...], value: float) -> tuple[str, Bucket | Non
     о смысле нуля, а не по наблюдениям.
     """
 
-    number = float(value)
-
-    if math.isnan(number) or math.isinf(number):
-        raise BucketsError(
-            f"значение {value!r} не число: такие значения обязан отбрасывать препроцессинг, "
-            "до словаря они доходить не должны"
-        )
+    number = _number(value)
 
     if not buckets:
         return FOUND_UNKNOWN, None
@@ -193,6 +188,70 @@ def locate(buckets: tuple[Bucket, ...], value: float) -> tuple[str, Bucket | Non
             return FOUND_BUCKET, bucket
 
     return FOUND_UNKNOWN, None
+
+
+def _number(value: object) -> float:
+
+    number = float(value)
+
+    if math.isnan(number) or math.isinf(number):
+        raise BucketsError(
+            f"значение {value!r} не число: такие значения обязан отбрасывать препроцессинг, "
+            "до словаря они доходить не должны"
+        )
+
+    return number
+
+
+class Scale:
+    """
+    Диапазоны одной шкалы, подготовленные к поиску: ответ тот же, что
+    у locate(buckets, value), но обычный диапазон ищется двоичным
+    поиском по нижним границам.
+
+    Это верно только для сплошной шкалы: обычные диапазоны подряд,
+    первый открыт снизу, последний сверху, каждый начинается там,
+    где кончился предыдущий, и границы не убывают. Тогда значение лежит в последнем
+    диапазоне, чей minimum <= значения, — его и находит bisect_right,
+    и это тот же первый диапазон, который принял бы перебор. Шкала
+    не сплошная — поиск перебором, как в locate.
+    """
+
+    def __init__(self, buckets: tuple[Bucket, ...]):
+
+        self.buckets = tuple(buckets)
+        self.zero = next((bucket for bucket in self.buckets if bucket.zero), None)
+        self.ordinary = tuple(bucket for bucket in self.buckets if not bucket.zero)
+
+        ordinary = self.ordinary
+
+        edges = [bucket.minimum for bucket in ordinary[1:]]
+
+        solid = (
+            bool(ordinary)
+            and ordinary[0].minimum is None
+            and ordinary[-1].maximum is None
+            and all(previous.maximum is not None and previous.maximum == following.minimum
+                    for previous, following in zip(ordinary, ordinary[1:]))
+            and all(lower <= upper for lower, upper in zip(edges, edges[1:]))
+        )
+
+        self.edges: list[float] | None = edges if solid else None
+
+    def locate(self, value: object) -> Bucket | None:
+        """
+        Диапазон значения или None (неизвестное).
+        """
+
+        if self.edges is None:
+            return locate(self.buckets, value)[1]
+
+        number = _number(value)
+
+        if self.zero is not None and number == 0.0:
+            return self.zero
+
+        return self.ordinary[bisect_right(self.edges, number)]
 
 
 def quantile_boundaries(values: list[float], bins: int, algorithm: str) -> tuple[float, ...]:
@@ -522,6 +581,7 @@ __all__ = [
     "SOURCE_TRAIN",
     "Bucket",
     "BucketsError",
+    "Scale",
     "bucket_name",
     "build_bucket_list",
     "build_buckets",

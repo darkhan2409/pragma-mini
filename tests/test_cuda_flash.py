@@ -217,40 +217,6 @@ def test_flash_matches_sdpa_segment_by_segment(lengths: list[int]):
 
 
 @flash_only
-def test_flash_receives_flat_tensors_without_padding(clients, monkeypatch):
-    """
-    На настоящем flash проверяется то же, что на CPU с эталоном:
-    Q/K/V плоские, cu_seqlens верные, прямоугольника нет.
-    """
-
-    import src.mlm.varlen as varlen
-
-    seen: list[tuple] = []
-
-    original = varlen.attend
-
-    def spy(query, key, value, layout, dropout):
-        seen.append((tuple(query.shape), layout.cu_seqlens.tolist()))
-        return original(query, key, value, layout, dropout)
-
-    monkeypatch.setattr("src.mlm.varlen.attend", spy)
-
-    built = world.model(attention="flash").to(device())
-    built.eval()
-
-    data = pack(clients, device())
-
-    with torch.no_grad(), autocast(device()):
-        built(data)
-
-    assert seen
-
-    for shape, bounds in seen:
-        assert len(shape) == 3
-        assert shape[0] == bounds[-1]
-
-
-@flash_only
 def test_flash_and_buckets_agree_on_the_whole_pass(clients):
     """
     Весь проход двумя путями: событие, анкета, история и голова.

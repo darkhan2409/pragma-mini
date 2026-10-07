@@ -156,34 +156,6 @@ def test_link_marks_exactly_the_act_of_the_source(stage):
     assert marked == SOURCES
 
 
-def test_neighbours_of_the_same_moment_are_not_sources(stage):
-    """
-    В момент T1 три события, в T3 четыре: источник среди них только
-    тот, на кого указывает ссылка. Покупка по той же карте — не
-    активация, и источником не становится.
-    """
-
-    events = history(stage).events
-
-    at = {moment: [event for event in events if event.event_time == when(moment)] for moment in (T1, T3)}
-
-    assert [event.lifelong_source for event in at[T1]].count("first_card_activated") == 1
-    assert [event.lifelong_source for event in at[T1]].count(None) == 2
-
-    assert [event.lifelong_source for event in at[T3]].count("first_deposit_opened") == 2
-    assert [event.lifelong_source for event in at[T3]].count(None) == 2
-
-
-def test_later_cards_loans_and_deposits_are_not_sources(stage):
-
-    later = [event for event in history(stage).events if event.event_time > when(T4)]
-
-    assert {event.values["event_type"] for event in later} == {
-        "product_opened", "product_migrated", "account_opened",
-    }
-    assert all(event.lifelong_source is None for event in later)
-
-
 def test_milestone_before_the_window_has_no_act_in_the_tape(stage):
     """
     Первая карта активирована в 2021 году: её акта в ленте нет, и

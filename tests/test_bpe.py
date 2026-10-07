@@ -12,11 +12,10 @@ from src.tokenization.text import BYTES, PROBES, check_roundtrip, train_bpe
 # ИДЕЯ
 # ============================================================
 #
-# Разбиение текста обязано быть обратимым при любом алфавите: и у
-# байтового, и у символьного decode(pieces(x)) == x на любой строке,
-# включая невиданные символы, пробельные последовательности и текст,
-# похожий на служебный токен. Символьный алфавит — без подменённых
-# символов в кусках (Ġ): пробел остаётся пробелом, а невиданный
+# Разбиение текста обязано быть обратимым: decode(pieces(x)) == x на
+# любой строке, включая невиданные символы, пробельные
+# последовательности и текст, похожий на служебный токен. В кусках нет
+# подменённых символов (Ġ): пробел остаётся пробелом, а невиданный
 # символ кодируется своими байтами, а не теряется.
 # ============================================================
 
@@ -35,10 +34,9 @@ def stats() -> SimpleNamespace:
     })
 
 
-@pytest.mark.parametrize("alphabet", ["bytes", "characters"])
-def test_both_alphabets_are_lossless(alphabet: str):
+def test_the_split_is_lossless():
 
-    model = train_bpe(stats(), BpeConfig(vocab_size=600, alphabet=alphabet), tuple(NAMES))
+    model = train_bpe(stats(), BpeConfig(vocab_size=600), tuple(NAMES))
 
     extra = ["Coffee Магнум", "Кофе 🌿 北京", "Қазпошта", "<0x41> literal", "a b"]
 
@@ -47,7 +45,7 @@ def test_both_alphabets_are_lossless(alphabet: str):
 
 def test_character_pieces_keep_plain_text_and_fall_back_to_bytes():
 
-    model = train_bpe(stats(), BpeConfig(vocab_size=600, alphabet="characters"), tuple(NAMES))
+    model = train_bpe(stats(), BpeConfig(vocab_size=600), tuple(NAMES))
 
     vocab = model.vocab()
 
@@ -64,10 +62,11 @@ def test_character_pieces_keep_plain_text_and_fall_back_to_bytes():
     assert "<0x41>" not in [model.piece(index) for index in model.pieces("<0x41>")]
 
 
-def test_characters_alphabet_is_the_default_and_unknown_alphabets_are_refused():
+def test_a_config_with_the_removed_alphabet_is_refused():
+    """
+    Байтовый алфавит удалён: конфиг, который его просит, отвергается,
+    а не обучается молча на символах.
+    """
 
-    assert BpeConfig().alphabet == "characters"
-    assert BpeConfig.from_dict({"alphabet": "bytes"}).alphabet == "bytes"
-
-    with pytest.raises(ConfigError, match="alphabet"):
-        BpeConfig.from_dict({"alphabet": "words"})
+    with pytest.raises(ConfigError, match="неизвестные поля BPE"):
+        BpeConfig.from_dict({"alphabet": "bytes"})

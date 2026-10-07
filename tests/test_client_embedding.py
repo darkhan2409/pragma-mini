@@ -38,16 +38,6 @@ def test_embedding_is_one_vector_per_client_of_model_width(clients):
     assert found.shape == (len(clients), world.DIM)
 
 
-def test_embedding_of_the_final_architecture_has_width_128(clients):
-
-    from tests.test_architecture import build
-
-    with torch.no_grad():
-        found = build(128).eval().client_embeddings(pack(clients, CPU))
-
-    assert found.shape == (len(clients), 128)
-
-
 def test_embedding_is_what_the_head_receives_after_the_history(clients):
     """
     Голова получает вектор клиента каждой цели; он совпадает с

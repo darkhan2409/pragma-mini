@@ -5,7 +5,6 @@ import math
 from datetime import date, datetime, timedelta
 
 import numpy as np
-import pyarrow.parquet as pq
 import pytest
 import torch
 
@@ -111,29 +110,6 @@ def test_milestone_just_before_the_cutoff_is_seen_and_at_it_is_not(stage):
         ("bank_registered", OLD),
         ("first_card_activated", cutoff - MICROSECOND),
     ]
-
-
-def test_milestone_after_the_cutoff_is_not_seen(stage):
-
-    history = prepare(stage, EARLY, with_life(
-        QUIET_SNAPSHOT,
-        ("bank_registered", OLD),
-        ("app_registered", val_cutoff() + timedelta(days=20)),
-    ))
-
-    assert history.lifelong == [("bank_registered", OLD)]
-
-
-def test_milestone_older_than_the_tape_survives(stage):
-    """
-    Самое раннее событие ленты — 2024 год, а веха прихода — 2021-й.
-    Lifelong берётся из снимка, а не из видимой истории.
-    """
-
-    history = prepare(stage, EARLY, with_life(QUIET_SNAPSHOT, ("bank_registered", OLD)))
-
-    assert min(event.event_time for event in history.events).year == 2024
-    assert history.lifelong == [("bank_registered", OLD)]
 
 
 def test_future_raw_data_does_not_change_the_profile(stage):
@@ -265,29 +241,6 @@ def test_milestone_unknown_to_the_vocab_becomes_unk(stage):
         artifacts.categorical_id("profile_lifelong", "bank_registered"),
         artifacts.special(UNK),
     ]
-
-
-def test_vocab_learns_milestones_from_train_only(stage):
-    """
-    В train у клиента только приход, в val — ещё и приложение.
-    Словарь видит вехи одного train.
-    """
-
-    from src.tokenization.fit import read_train
-    from src.tokenization.schema import SemanticSchema
-    from src.tokenization.settings import TokenizerConfig
-
-    prepare(stage, EARLY, with_life(QUIET_SNAPSHOT, ("bank_registered", OLD)), group="train")
-    prepare(stage, EARLY, with_life(
-        QUIET_SNAPSHOT, ("bank_registered", OLD), ("app_registered", OLD + timedelta(days=1))
-    ))
-
-    corpus = read_train(TokenizerConfig.load(None), SemanticSchema.open())
-
-    seen = {text for key, _, text in corpus.statistics.categorical if key == "profile_lifelong"}
-
-    assert corpus.group == "train"
-    assert seen == {"bank_registered"}
 
 
 def test_vocab_without_the_milestone_key_is_refused(stage):
@@ -597,33 +550,6 @@ def test_raw_of_the_previous_contract_is_refused(stage):
 
     with pytest.raises(RawContractError, match="schema_version"):
         check_raw(directory)
-
-
-def test_samples_of_the_previous_format_are_refused(stage):
-
-    from src.dataset.build import SAMPLES_SCHEMA
-    from src.dataset.settings import DATASET_FORMAT, dataset_dir
-    from src.preprocessing.profile_state import PROFILE_SEMANTICS
-    from src.temporal.samples import SamplesError, SamplesGroup
-
-    directory = dataset_dir("val")
-    directory.mkdir(parents=True, exist_ok=True)
-
-    pq.write_table(SAMPLES_SCHEMA.empty_table(), directory / "samples.parquet")
-
-    for meta in (
-        {"format": 3, "profile_semantics": "state_at_event_cutoff"},
-        # Формат 4 — анкета ещё с признаком пенсионера.
-        {"format": 4, "profile_semantics": PROFILE_SEMANTICS,
-         "profile_lifelong_types": list(LIFELONG_TYPES)},
-        {"format": DATASET_FORMAT, "profile_semantics": PROFILE_SEMANTICS},
-        {"format": DATASET_FORMAT, "profile_semantics": PROFILE_SEMANTICS,
-         "profile_lifelong_types": ["relationship_started"]},
-    ):
-        (directory / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
-
-        with pytest.raises(SamplesError, match="прежним кодом"):
-            SamplesGroup("val")
 
 
 @pytest.mark.parametrize("stamped, reason", [

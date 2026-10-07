@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -97,22 +98,52 @@ class Counters:
     unknown: int = 0
 
 
-def _row(sample: Sample) -> dict:
-    return {
-        "client_id": sample.client_id,
-        "key_ids": sample.key_ids.tolist(),
-        "value_ids": sample.value_ids.tolist(),
-        "positions": sample.positions.tolist(),
-        "event_starts": sample.event_starts.tolist(),
-        "event_lengths": sample.event_lengths.tolist(),
-        "event_time": sample.event_time.tolist(),
-        "calendar": sample.calendar.tolist(),
-        "target_event_mask": sample.target_event_mask.tolist(),
-        "profile_key_ids": sample.profile_key_ids.tolist(),
-        "profile_value_ids": sample.profile_value_ids.tolist(),
-        "profile_positions": sample.profile_positions.tolist(),
-        "profile_time": sample.profile_time.tolist(),
-    }
+# Наибольшее смещение колонки-списка: они int32.
+OFFSET_LIMIT = int(np.iinfo(np.int32).max)
+
+
+def _table(samples: list[Sample]) -> pa.Table:
+    """
+    Примеры одной таблицей схемы SAMPLES_SCHEMA. Колонка-список это
+    плоские значения всех примеров и смещения их границ — прямо из
+    массивов примера, без списков Python на каждое число.
+    """
+
+    if not samples:
+        return SAMPLES_SCHEMA.empty_table()
+
+    columns = [pa.array([sample.client_id for sample in samples], type=pa.string())]
+
+    for field in SAMPLES_SCHEMA:
+
+        if field.name == "client_id":
+            continue
+
+        parts = [getattr(sample, field.name) for sample in samples]
+
+        offsets = np.zeros(len(parts) + 1, dtype=np.int64)
+        np.cumsum([part.size for part in parts], out=offsets[1:])
+
+        # Смещения list<…> — int32. Длиннее пачка в одну колонку не
+        # помещается, и её раскладывает прежний путь: from_pylist по
+        # спискам.
+        if offsets[-1] > OFFSET_LIMIT:
+            return pa.Table.from_pylist(
+                [{name: sample.client_id if name == "client_id" else getattr(sample, name).tolist()
+                  for name in SAMPLES_SCHEMA.names} for sample in samples],
+                schema=SAMPLES_SCHEMA,
+            )
+
+        flat = np.concatenate(parts)
+
+        # NaT в profile_time — пустое время токена анкеты, null.
+        mask = np.isnat(flat) if np.issubdtype(flat.dtype, np.datetime64) else None
+
+        values = pa.array(flat, type=field.type.value_type, mask=mask)
+
+        columns.append(pa.ListArray.from_arrays(pa.array(offsets, type=pa.int32()), values))
+
+    return pa.Table.from_arrays(columns, schema=SAMPLES_SCHEMA)
 
 
 def _count_unknown(artifacts: FrozenArtifacts, sample: Sample, counters: Counters) -> None:
@@ -170,7 +201,7 @@ def build_group(
 
     writer: pq.ParquetWriter | None = None
 
-    batch: list[dict] = []
+    batch: list[Sample] = []
 
     try:
         for client in source.clients():
@@ -214,7 +245,7 @@ def build_group(
 
             _count_unknown(artifacts, sample, counters)
 
-            batch.append(_row(sample))
+            batch.append(sample)
 
             if len(batch) >= config.row_group_samples:
                 writer = _write(directory, writer, batch)
@@ -274,12 +305,12 @@ def build_group(
     }
 
 
-def _write(directory: Path, writer: pq.ParquetWriter | None, rows: list[dict]) -> pq.ParquetWriter:
+def _write(directory: Path, writer: pq.ParquetWriter | None, samples: list[Sample]) -> pq.ParquetWriter:
     """
     Одна группа строк файла примеров.
     """
 
-    table = pa.Table.from_pylist(rows, schema=SAMPLES_SCHEMA)
+    table = _table(samples)
 
     if writer is None:
         directory.mkdir(parents=True, exist_ok=True)

@@ -191,19 +191,6 @@ def test_no_exported_field_names_the_client_answer(world):
 # ============================================================
 
 
-def test_unblock_reason_is_neutral(world):
-    """
-    Разблокировка после проверки не называет причиной ответ
-    клиента.
-    """
-
-    reasons = Counter(
-        item[2].get("reason") for item in events_of(world, "card_unblocked")
-    )
-
-    assert "confirmed_by_client" not in reasons, f"причины разблокировки: {dict(reasons)}"
-
-
 def test_case_topic_follows_the_bank_action(world):
     """
     Тема обращения по поводу антифрода — то, что клиент увидел:

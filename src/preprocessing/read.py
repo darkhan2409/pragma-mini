@@ -4,7 +4,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from .calendar import calendar_features
@@ -18,7 +20,7 @@ from .keys import (
     profile_change_keys,
 )
 from .profile_state import INCLUDED_FIELDS, profile_at, typed_profile_value
-from .projection import EVENT_TYPE_FIELD, model_event
+from .projection import EVENT_TYPE_FIELD, SEMANTIC_PAYLOAD_FIELDS, model_event
 from .settings import PreprocessingConfig, group_dir, raw_group_dir
 
 
@@ -193,6 +195,11 @@ class Group:
 
         self._index: dict[str, tuple[int, int]] | None = None
 
+        # Можно ли обойти ленту потоком (_stream): внутри каждой группы
+        # строк клиенты по возрастанию id, и строки клиента подряд.
+        # Узнаётся вместе с индексом.
+        self._sorted_runs: bool = False
+
         self._edges: list[int] = [0]
 
         for number in range(self._events.num_row_groups):
@@ -213,6 +220,14 @@ class Group:
 
         position = 0
 
+        # Поток возможен, если строки клиента идут подряд (один блок на
+        # клиента во всей ленте) и внутри каждой группы строк блоки
+        # по возрастанию id. Препроцессинг так и пишет; чужая лента
+        # уходит на чтение по адресу.
+        runs = 0
+        ascending = True
+        previous: str | None = None
+
         for number in range(self._events.num_row_groups):
 
             column = (
@@ -221,13 +236,22 @@ class Group:
                 .to_pylist()
             )
 
+            inside: str | None = None
+
             for offset, client_id in enumerate(column):
                 start, count = index.get(client_id, (position + offset, 0))
                 index[client_id] = (start, count + 1)
+                if client_id != previous:
+                    runs += 1
+                    previous = client_id
+                if inside is not None and (client_id is None or client_id < inside):
+                    ascending = False
+                inside = client_id if client_id is not None else inside
 
             position += len(column)
 
         self._index = index
+        self._sorted_runs = ascending and runs == len(index) and None not in index
 
         return index
 
@@ -269,43 +293,33 @@ class Group:
         if client_id not in self._profile_rows and client_id not in self._addresses():
             raise ReadError(f"клиента {client_id!r} нет в группе {self.group}")
 
-        table = self.events_table(client_id)
+        return self._build(client_id, cutoff, self.events_table(client_id))
 
-        # Лента клиента целиком нужна только откату анкеты: он
-        # снимает изменения с временем >= cutoff. В события
-        # примера из неё не попадает ничего позже cutoff.
-        all_rows = table.to_pylist()
+    def _build(self, client_id: str, cutoff: datetime, table: pa.Table) -> ClientHistory:
+        """
+        История клиента из его строк ленты (все строки, как в ленте).
+        """
 
-        rows = [row for row in all_rows if row["event_time"] < cutoff]
+        column = table.column("event_time")
+        times = column.to_pylist()
 
-        # Календарь считается по местному времени банка: перевод
-        # пояса живёт внутри calendar_features и наружу не
-        # выходит. Само event_time ниже кладётся как есть, в UTC.
-        calendars = (
-            calendar_features([row["event_time"] for row in rows], self.timezone)
-            if rows
-            else []
-        )
+        # События — строки раньше cutoff; строки с cutoff и позже
+        # нужны только откату анкеты: он снимает изменения, которых
+        # на cutoff ещё не было. В события из них не попадает ничего.
+        #
+        # Обычно вся лента клиента раньше cutoff (финальный cutoff это
+        # конец выгрузки): тогда раньше cutoff и её максимум. Пустое
+        # время сюда не проходит — его сравнение с cutoff остаётся
+        # ошибкой, как и было.
+        if not times or (column.null_count == 0 and pc.max(column).as_py() < cutoff):
+            head, moments, later = table, times, []
+        else:
+            before = [index for index, moment in enumerate(times) if moment < cutoff]
+            later = [index for index, moment in enumerate(times) if moment >= cutoff]
+            head = table.take(pa.array(before, pa.int64()))
+            moments = [times[index] for index in before]
 
-        events: list[ClientEvent] = []
-        notes: list[str] = []
-
-        for index, row in enumerate(rows):
-
-            values, problems = event_values(row, row["source"])
-
-            notes.extend(problems)
-
-            events.append(
-                ClientEvent(
-                    client_id=row["client_id"],
-                    event_time=row["event_time"],
-                    source=row["source"],
-                    values=values,
-                    calendar=tuple(float(value) for value in calendars[index]),
-                    lifelong_source=row[LIFELONG_SOURCE_COLUMN],
-                )
-            )
+        events, notes = client_events(head, moments, self.timezone)
 
         snapshot = self._profile_rows.get(client_id)
 
@@ -317,7 +331,10 @@ class Group:
                 f"as_of {snapshot['as_of'].isoformat()}"
             )
 
-        state = profile_at(snapshot, all_rows, cutoff, self.timezone)
+        # Откат смотрит только на строки с cutoff и позже, в порядке ленты.
+        rest = table.take(pa.array(later, pa.int64())).to_pylist() if later else []
+
+        state = profile_at(snapshot, rest, cutoff, self.timezone)
 
         notes.extend(state.notes)
 
@@ -349,15 +366,280 @@ class Group:
     ):
         """
         Клиенты по одному, в устойчивом порядке.
+
+        Обход всей группы (clients не задан) читает каждую группу строк
+        ленты ОДИН раз: history по одному клиенту читает всю его группу
+        строк, и при 64 клиентах на группу лента читалась бы 64 раза.
+        Порядок клиентов и сами истории те же, что у history.
         """
+
+        if clients is None:
+            self._addresses()
+            if self._sorted_runs:
+                yield from self._stream(cutoff)
+                return
 
         for client_id in (clients if clients is not None else self.client_ids):
             yield self.history(client_id, cutoff)
+
+    def _stream(self, cutoff: datetime):
+        """
+        Истории клиентов анкеты в порядке self.client_ids, а строки —
+        курсором по каждой группе строк: внутри группы клиенты по
+        возрастанию id, поэтому группы сливаются, как отсортированные
+        отрезки. Клиент, разрезанный границей куска или группы строк,
+        собирается целиком; клиент ленты без анкеты пропускается, как
+        и в history-обходе.
+        """
+
+        path = self.directory / EVENTS_FILE
+
+        cursors = [_ClientCursor(path, number) for number in range(self._events.num_row_groups)]
+
+        empty = self._events.schema_arrow.empty_table()
+
+        for client_id in self.client_ids:
+
+            pieces: list[pa.Table] = []
+
+            for cursor in cursors:
+                cursor.skip_before(client_id)
+                pieces.extend(cursor.take(client_id))
+
+            table = pa.concat_tables(pieces) if pieces else empty
+
+            yield self._build(client_id, cutoff, table)
+
+
+class _ClientCursor:
+    """
+    Курсор по одной группе строк ленты: блоки клиентов по порядку,
+    кусками фиксированного размера. Вся группа в памяти не лежит.
+    """
+
+    BATCH_ROWS = 2048
+
+    def __init__(self, path: Path, row_group: int):
+        self._batches = pq.ParquetFile(path).iter_batches(batch_size=self.BATCH_ROWS, row_groups=[row_group])
+        self._rest: pa.Table | None = None
+        self._next()
+
+    def _next(self) -> None:
+        """Следующий непустой кусок в _rest или None, если группа кончилась."""
+        for batch in self._batches:
+            if batch.num_rows:
+                self._rest = pa.Table.from_batches([batch])
+                return
+        self._rest = None
+
+    @property
+    def head(self) -> str | None:
+        return None if self._rest is None else self._rest.column("client_id")[0].as_py()
+
+    def _block(self) -> pa.Table:
+        """Строки клиента head в начале _rest; _rest сдвигается за них."""
+
+        head = self.head
+        column = self._rest.column("client_id")
+        others = pc.indices_nonzero(pc.not_equal(column, head))
+
+        if len(others):
+            end = others[0].as_py()
+            block, self._rest = self._rest.slice(0, end), self._rest.slice(end)
+            return block
+
+        block = self._rest
+        self._next()
+        return block
+
+    def take(self, client_id: str) -> list[pa.Table]:
+        """Все строки клиента, если он сейчас в начале курсора."""
+
+        pieces: list[pa.Table] = []
+
+        while self.head == client_id:
+            pieces.append(self._block())
+
+        return pieces
+
+    def skip_before(self, client_id: str) -> None:
+        """Пропустить клиентов ленты с id меньше client_id (их нет в анкете)."""
+
+        while self.head is not None and self.head < client_id:
+            self._block()
 
 
 # ============================================================
 # ЗНАЧЕНИЯ ПОД СМЫСЛОВЫМИ КЛЮЧАМИ
 # ============================================================
+
+
+# Смысловой ключ поля по (имя, источник): key_for — чистая функция
+# реестра ключей, а спрашивают её на каждое поле каждого события.
+# Запоминается только найденный ключ: ошибка повторяется каждый раз.
+_KEYS: dict[tuple[str, str], str] = {}
+
+
+def _key(name: str, source: str) -> str:
+
+    key = _KEYS.get((name, source))
+
+    if key is None:
+        key = _KEYS[(name, source)] = key_for(name, source).key
+
+    return key
+
+
+def client_events(table: pa.Table, times: list[datetime], timezone) -> tuple[list[ClientEvent], list[str]]:
+    """
+    События из строк ленты (times — их event_time) и заметки о
+    неразобранных значениях профиля.
+
+    Значения собираются по колонкам: из 62 колонок ленты у строки
+    заполнены единицы, и словарь на каждую строку целиком не
+    строится. Ответ тот же, что у построчного разбора
+    (client_events_by_rows): ключи событий в том же порядке —
+    тип, затем поля в порядке проекции, затем изменение профиля.
+    Ошибку данных воспроизводит построчный разбор: какое поле и
+    какая строка названы в ней первыми, решает он.
+    """
+
+    if not times:
+        return [], []
+
+    try:
+        values, notes = _values_by_columns(table)
+    except (ValueError, KeyError):
+        return client_events_by_rows(table.to_pylist(), timezone)
+
+    # Календарь считается по местному времени банка: перевод
+    # пояса живёт внутри calendar_features и наружу не
+    # выходит. Само event_time ниже кладётся как есть, в UTC.
+    calendars = calendar_features(times, timezone).tolist()
+
+    client_ids = table.column("client_id").to_pylist()
+    sources = table.column("source").to_pylist()
+    marks = table.column(LIFELONG_SOURCE_COLUMN).to_pylist()
+
+    events = [
+        ClientEvent(
+            client_id=client_ids[index],
+            event_time=times[index],
+            source=sources[index],
+            values=values[index],
+            calendar=tuple(calendars[index]),
+            lifelong_source=marks[index],
+        )
+        for index in range(len(times))
+    ]
+
+    return events, notes
+
+
+def _values_by_columns(table: pa.Table) -> tuple[list[dict[str, object]], list[str]]:
+    """
+    event_values каждой строки, собранные по колонкам.
+    """
+
+    count = table.num_rows
+    names = set(table.column_names)
+    sources = table.column("source").to_pylist()
+
+    # Тип у model_event идёт первым, даже пустой.
+    type_key = DIRECT_KEYS[EVENT_TYPE_FIELD].key
+    values: list[dict[str, object]] = [{type_key: kind} for kind in table.column(EVENT_TYPE_FIELD).to_pylist()]
+
+    def present(name: str) -> tuple[list[int], list]:
+        """Строки с заполненным полем и его значения в них."""
+
+        if name not in names:
+            return [], []
+
+        column = table.column(name)
+
+        if column.null_count == count:
+            return [], []
+
+        if column.null_count == 0:
+            return list(range(count)), column.to_pylist()
+
+        rows = np.flatnonzero(pc.is_valid(column).to_numpy(zero_copy_only=False)).tolist()
+
+        return rows, pc.drop_null(column).to_pylist()
+
+    for name in SEMANTIC_PAYLOAD_FIELDS:
+
+        if name == EVENT_TYPE_FIELD or name in DYNAMIC_FIELDS:
+            continue
+
+        rows, items = present(name)
+
+        if not rows:
+            continue
+
+        keys = {source: _key(name, source) for source in {sources[index] for index in rows}}
+
+        for index, value in zip(rows, items):
+            values[index][keys[sources[index]]] = value
+
+    # Изменение профиля дописывается после полей строки, как
+    # values.update(changed) в event_values.
+    notes: list[str] = []
+
+    rows, names_changed = present("field_name")
+
+    if rows:
+
+        old = table.column("old_value").to_pylist() if "old_value" in names else None
+        new = table.column("new_value").to_pylist() if "new_value" in names else None
+
+        for index, field_name in zip(rows, names_changed):
+
+            changed, problems = _profile_change_values({
+                "field_name": field_name,
+                "old_value": None if old is None else old[index],
+                "new_value": None if new is None else new[index],
+            })
+
+            values[index].update(changed)
+            notes.extend(problems)
+
+    return values, notes
+
+
+def client_events_by_rows(rows: list[dict], timezone) -> tuple[list[ClientEvent], list[str]]:
+    """
+    Тот же разбор построчно: эталон для client_events и путь, на
+    котором ошибка данных называет свою строку и своё поле.
+    """
+
+    calendars = (
+        calendar_features([row["event_time"] for row in rows], timezone).tolist()
+        if rows
+        else []
+    )
+
+    events: list[ClientEvent] = []
+    notes: list[str] = []
+
+    for index, row in enumerate(rows):
+
+        values, problems = event_values(row, row["source"])
+
+        notes.extend(problems)
+
+        events.append(
+            ClientEvent(
+                client_id=row["client_id"],
+                event_time=row["event_time"],
+                source=row["source"],
+                values=values,
+                calendar=tuple(calendars[index]),
+                lifelong_source=row[LIFELONG_SOURCE_COLUMN],
+            )
+        )
+
+    return events, notes
 
 
 def event_values(row: dict, source: str) -> tuple[dict[str, object], list[str]]:
@@ -382,7 +664,7 @@ def event_values(row: dict, source: str) -> tuple[dict[str, object], list[str]]:
             # Смысл задаёт field_name, разбор ниже.
             continue
 
-        values[key_for(name, source).key] = value
+        values[_key(name, source)] = value
 
     changed, notes = _profile_change_values(fields)
 
@@ -452,6 +734,8 @@ __all__ = [
     "ClientHistory",
     "Group",
     "ReadError",
+    "client_events",
+    "client_events_by_rows",
     "event_values",
     "profile_values",
 ]

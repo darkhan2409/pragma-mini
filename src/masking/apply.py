@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from .choose import Choice, NONE, Value
+import numpy as np
+
+from .choose import REASONS, Choice, NONE, Selection, Value
 
 
 # ============================================================
@@ -103,8 +105,63 @@ def apply(client_id: str, row: dict, choices: list[Choice], mask: int,
     }
 
 
+# Код причины -> её имя (те же строки, что у Choice.reason).
+_REASON_NAMES = np.array(REASONS, dtype=object)
+
+
+def apply_selection(client_id: str, row: dict, selection: Selection, mask: int, unknown: int) -> dict:
+    """
+    То же, что apply по selection.choices и selection.corrupted, но
+    массивами: value_ids и labels — int64, reason — список строк.
+
+    Значение, вышедшее за строку, или наложение — ошибка apply: тогда
+    её называет apply обходом, по тем же значениям в том же порядке.
+    """
+
+    source = np.asarray(row["value_ids"], dtype=np.int64)
+    width = source.size
+
+    found, spoiled = selection.found, selection.spoiled
+
+    # Как в apply: сначала выбранные, затем испорченный контекст.
+    starts = np.concatenate([found.start[selection.picked], spoiled.start])
+    lengths = np.concatenate([found.length[selection.picked], spoiled.length])
+
+    total = int(lengths.sum())
+
+    index = np.repeat(starts, lengths) + (np.arange(total, dtype=np.int64)
+                                          - np.repeat(np.cumsum(lengths) - lengths, lengths))
+
+    if (starts.size and (int(starts.min()) < 0 or int((starts + lengths).max()) > width)) or (
+            total and int(np.bincount(index, minlength=width).max()) > 1):
+        closed = apply(client_id, row, selection.choices, mask, unknown, selection.corrupted)
+        return {"value_ids": np.asarray(closed["value_ids"], dtype=np.int64),
+                "labels": np.asarray(closed["labels"], dtype=np.int64), "reason": closed["reason"]}
+
+    item = np.repeat(np.arange(starts.size, dtype=np.int64), lengths)
+
+    # [UNK] — у выбранного с unknown и у всего испорченного контекста.
+    spoils = np.concatenate([selection.unknown, np.ones(len(spoiled), dtype=bool)])[item]
+    reasons = np.concatenate([selection.reasons, np.zeros(len(spoiled), dtype=np.uint8)])[item]
+
+    value_ids = source.copy()
+    labels = np.full(width, IGNORE, dtype=np.int64)
+    codes = np.zeros(width, dtype=np.uint8)
+
+    value_ids[index[spoils]] = unknown
+
+    closed = index[~spoils]
+
+    value_ids[closed] = mask
+    labels[closed] = source[closed]
+    codes[closed] = reasons[~spoils]
+
+    return {"value_ids": value_ids, "labels": labels, "reason": _REASON_NAMES[codes].tolist()}
+
+
 __all__ = [
     "IGNORE",
     "MaskError",
     "apply",
+    "apply_selection",
 ]

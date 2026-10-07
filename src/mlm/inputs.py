@@ -4,12 +4,13 @@ from dataclasses import dataclass
 from typing import Iterable, Iterator, NamedTuple
 
 import numpy as np
+import pyarrow as pa
 import pyarrow.compute as pc
 from torch.utils.data import IterableDataset
 
 from src.dataset.settings import dataset_dir
 from src.embedding.inputs import CALENDAR_PER_EVENT
-from src.masking.apply import apply
+from src.masking.apply import apply_selection
 from src.masking.choose import choose
 from src.masking.settings import MaskingConfig
 from src.masking.weights import ValueWeights, WeightsError, load_value_weights
@@ -167,16 +168,6 @@ class Source:
         # Порядок групп строк прохода: по умолчанию — порядок файла.
         self.order = list(range(self.count))
 
-    def shuffle(self, seed: int) -> None:
-        """
-        Проход по группам строк в перестановке, заданной seed.
-
-        Клиенты внутри группы и их маска не меняются: маска
-        разыгрывается по строке, а не по месту в проходе.
-        """
-
-        self.order = np.random.default_rng(seed).permutation(self.count).tolist()
-
     def _open(self) -> None:
 
         try:
@@ -215,7 +206,7 @@ class Source:
             )
 
         try:
-            rows = self._samples.row_group(index, columns=INPUT_COLUMNS).to_pylist()
+            rows = _rows(self._samples.row_group(index, columns=INPUT_COLUMNS))
         except TemporalError as error:
             raise InputError(str(error)) from error
 
@@ -259,10 +250,7 @@ class Source:
 
         selection = choose(self.group, row, self.masking, self.weights)
 
-        return apply(
-            row["client_id"], row, selection.choices, self.mask_id, self.unknown_id,
-            selection.corrupted,
-        )
+        return apply_selection(row["client_id"], row, selection, self.mask_id, self.unknown_id)
 
     def _client(self, index: int, row: dict, masked: dict) -> Client:
 
@@ -290,6 +278,39 @@ class Source:
         _check(client, _bools(row["target_event_mask"]), self.mask_id)
 
         return client
+
+
+def _rows(table: pa.Table) -> list[dict]:
+    """
+    Строки группы как Table.to_pylist, но колонка-список чисел — срезы
+    массива numpy по её границам: ни одного объекта Python на токен.
+    event_time и колонки с пустыми местами — как to_pylist: время
+    событий клиента остаётся списком datetime (его читают оценка на T и
+    диагностика).
+    """
+
+    columns: dict[str, list] = {}
+
+    for name in table.column_names:
+
+        column = table.column(name).combine_chunks()
+
+        flat = column.flatten() if pa.types.is_list(column.type) else None
+
+        if name == "event_time" or flat is None or column.null_count or flat.null_count:
+            columns[name] = column.to_pylist()
+            continue
+
+        offsets = column.offsets.to_numpy()
+        offsets = offsets - offsets[0]
+
+        # Своя копия: массивы клиента, как и прежде, можно менять, а
+        # не смотрят в буфер Arrow только для чтения.
+        values = flat.to_numpy(zero_copy_only=False, writable=True)
+
+        columns[name] = [values[first:last] for first, last in zip(offsets[:-1].tolist(), offsets[1:].tolist())]
+
+    return [dict(zip(columns, row)) for row in zip(*columns.values())]
 
 
 def _weights(masking: MaskingConfig) -> ValueWeights | None:

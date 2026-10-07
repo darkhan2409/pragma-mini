@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from operator import itemgetter
 
 from src.preprocessing.canonical.events import normalize_text
 from src.preprocessing.keys import PROFILE_LIFELONG_KEY
@@ -52,6 +53,14 @@ from .specials import EVT, UNK, USR
 # ============================================================
 
 
+# Сколько разных строк помнит разбор текста (_text_value_ids).
+TEXT_CACHE_SIZE = 1 << 16
+
+_MISSING = object()
+
+_first = itemgetter(0)
+
+
 class EncodeError(ValueError):
     """
     Значение закодировать нельзя.
@@ -92,7 +101,7 @@ class EncodedRecord:
         входит: его ноль в разбор не попадает.
         """
 
-        return sum(1 for position in self.positions[self.content_start:] if position == 0)
+        return self.positions[self.content_start:].count(0)
 
     @property
     def content_start(self) -> int:
@@ -121,10 +130,16 @@ class EncodedRecord:
         номера его кусков.
         """
 
-        for position, value_id in enumerate(value_ids):
+        # Число и категория — один кусок: так чаще всего.
+        if len(value_ids) == 1:
             self.key_ids.append(key_id)
-            self.value_ids.append(value_id)
-            self.positions.append(position)
+            self.value_ids.append(value_ids[0])
+            self.positions.append(0)
+            return
+
+        self.key_ids.extend([key_id] * len(value_ids))
+        self.value_ids.extend(value_ids)
+        self.positions.extend(range(len(value_ids)))
 
     def check(self) -> None:
         """
@@ -150,11 +165,16 @@ class EncodedRecord:
         # идти подряд: позиция либо открывает значение, либо
         # продолжает предыдущую ровно на единицу. Первый токен с
         # positions = 3 не пройдёт ни одну из двух веток.
+        content = self.positions[self.content_start:]
+
+        # Одни нули — каждое значение из одного куска: обе ветки
+        # проходят на каждой позиции, и обходить их незачем.
+        if content.count(0) == len(content):
+            return
+
         expected = 0
 
-        for index in range(self.content_start, len(self.positions)):
-
-            position = self.positions[index]
+        for index, position in enumerate(content, self.content_start):
 
             if position != 0 and position != expected:
                 raise EncodeError(
@@ -177,42 +197,72 @@ def _text_value_ids(artifacts: FrozenArtifacts, key: str, value: object,
     if not isinstance(value, str):
         raise EncodeError(f"ключ {key} объявлен текстом, а значение пришло как {type(value).__name__}")
 
-    normalized = normalize_text(value)
+    if not artifacts.bpe.enabled:
+        return None if normalize_text(value) is None else [artifacts.special(UNK)]
 
-    if normalized is None:
+    # Нормализация и разбиение — чистые функции строки, а названия
+    # мерчантов и экранов повторяются: каждая разная строка
+    # разбирается один раз. Предел проверяется на каждом значении.
+    texts = artifacts.texts
+
+    ids = texts.get(value, _MISSING)
+
+    if ids is _MISSING:
+
+        normalized = normalize_text(value)
+
+        if normalized is None:
+            ids = None
+        else:
+            pieces = artifacts.bpe.pieces(normalized)
+            # Предел — до перевода кусков в номера, как без запаса.
+            _check_pieces(key, len(pieces), limit)
+            ids = tuple(artifacts.piece_id(piece) for piece in pieces)
+
+        # Память ограничена: переполненный запас начинается заново,
+        # ответ от этого не меняется.
+        if len(texts) >= TEXT_CACHE_SIZE:
+            texts.clear()
+
+        texts[value] = ids
+
+    if ids is None:
         return None
 
-    if not artifacts.bpe.enabled:
-        return [artifacts.special(UNK)]
+    _check_pieces(key, len(ids), limit)
 
-    pieces = artifacts.bpe.pieces(normalized)
+    return list(ids)
 
-    if len(pieces) > limit:
+
+def _check_pieces(key: str, count: int, limit: int) -> None:
+
+    if count > limit:
         raise EncodeError(
-            f"ключ {key}: значение разбилось на {len(pieces)} кусков при пределе {limit}. "
+            f"ключ {key}: значение разбилось на {count} кусков при пределе {limit}. "
             "Текст не обрезается: поднимите предел осознанно"
         )
 
-    return [artifacts.piece_id(piece) for piece in pieces]
-
 
 def _value_ids(artifacts: FrozenArtifacts, key: str, value: object,
-               limit: int, record: dict | None = None) -> list[int] | None:
+               limit: int, record: dict | None = None, kind: str | None = None) -> list[int] | None:
     """
     Значение одного ключа в общем пространстве ID. record — все
     значения записи: шкала числа может зависеть от соседнего ключа.
+    kind — уже известный artifacts.kind(key).
 
     None означает, что пары у этого ключа не будет.
     """
 
-    kind = artifacts.kind(key)
+    if kind is None:
+        kind = artifacts.kind(key)
 
     if kind == "text":
         return _text_value_ids(artifacts, key, value, limit)
 
     if kind == "categorical":
 
-        found = artifacts.categorical_id(key, value_text(value))
+        # Запись строки это она сама: value_text(str) == str.
+        found = artifacts.categorical_id(key, value if value.__class__ is str else value_text(value))
 
         return [artifacts.special(UNK) if found is None else found]
 
@@ -242,7 +292,9 @@ def encode_values(
     # Содержательным значением он при этом не становится.
     record.set_lead(lead, artifacts.special(lead))
 
-    emit: list[tuple[int, str, object]] = []
+    encoders = artifacts.encoders
+
+    emit: list[tuple[int, str, object, str]] = []
 
     for key, value in values.items():
 
@@ -250,17 +302,20 @@ def encode_values(
             # Поля нет — и пары нет.
             continue
 
-        key_id = artifacts.key_id(key)
+        encoder = encoders.get(key)
 
-        if key_id is None:
+        if encoder is None:
             record.unknown_keys.append(key)
             continue
 
-        emit.append((key_id, key, value))
+        emit.append((encoder[0], key, value, encoder[1]))
 
-    for key_id, key, value in sorted(emit, key=lambda item: item[0]):
+    # key_id у разных ключей разные: порядок полный.
+    emit.sort(key=_first)
 
-        ids = _value_ids(artifacts, key, value, limit, values)
+    for key_id, key, value, kind in emit:
+
+        ids = _value_ids(artifacts, key, value, limit, values, kind)
 
         if ids is None:
             continue
@@ -278,7 +333,9 @@ def encode_event(artifacts: FrozenArtifacts, event: ClientEvent, limit: int) -> 
     Одно событие: ведущий [EVT] и пары его значений.
     """
 
-    return encode_values(artifacts, event.model_values(), EVT, limit)
+    # Значения читаются, но не меняются (encode_values только
+    # смотрит в них), поэтому копия model_values не нужна.
+    return encode_values(artifacts, event.values, EVT, limit)
 
 
 def encode_profile(

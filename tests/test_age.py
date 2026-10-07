@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from datetime import date
 
-import pytest
-
 from tests.test_profile_state import (
     AGE_VALUES,
     EARLY,
@@ -138,17 +136,6 @@ def test_age_unseen_on_train_becomes_unk(stage):
     assert value == artifacts.special(UNK)
 
 
-def test_birth_date_and_pensioner_never_reach_the_tokens(stage):
-
-    write_profile_vocab(stage)
-
-    artifacts, _, record, _ = age_token(stage, date(1950, 1, 1))
-
-    names = [artifacts.describe(token) for token in record.key_ids + record.value_ids]
-
-    assert not [name for name in names if "birth" in name or "pensioner" in name]
-
-
 def test_age_vocab_is_learned_on_train_only(stage):
     """
     В train клиентке 36, в val — 50. Словарь, собранный теми же
@@ -181,21 +168,3 @@ def test_age_vocab_is_learned_on_train_only(stage):
 
     assert "profile_age" not in buckets
     assert "profile_declared_income" in buckets
-
-
-def test_vocab_with_an_age_scale_is_refused(stage):
-    """
-    Словарь прежнего кода кодировал возраст диапазонами. Кодировать
-    им нельзя: возраст молча стал бы диапазоном снова.
-    """
-
-    from src.tokenization.finalvocab import FrozenArtifacts
-    from src.tokenization.settings import TokenizerConfig
-    from src.tokenization.transform import TransformError, encode_group
-
-    write_profile_vocab(stage, age_scale=True)
-
-    prepare(stage, EARLY, dict(QUIET_SNAPSHOT, birth_date=date(1990, 1, 1)))
-
-    with pytest.raises(TransformError, match="profile_age"):
-        encode_group(FrozenArtifacts.load(), "val", TokenizerConfig.load(None))

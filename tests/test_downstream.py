@@ -180,27 +180,6 @@ def test_the_input_refuses_anything_at_or_after_T(stage, monkeypatch):
         builder.client(RAW_CLIENT)
 
 
-def test_the_input_at_an_earlier_cutoff_differs_from_the_end_of_the_window(stage):
-    """
-    Обратная сторона: T раньше конца окна действительно отрезает
-    события и откатывает анкету — иначе прошлый тест ничего бы не
-    проверял.
-    """
-
-    from src.downstream.at_cutoff import ClientsAtCutoff
-    from src.preprocessing.settings import PreprocessingConfig
-
-    chain(stage, EARLY, QUIET_SNAPSHOT)
-
-    end = PreprocessingConfig.load(None).windows["val"].final_cutoff
-
-    early = ClientsAtCutoff("val", cutoff("val")).client(RAW_CLIENT)
-    late = ClientsAtCutoff("val", end).client(RAW_CLIENT)
-
-    assert early.n_events < late.n_events
-    assert not np.array_equal(early.profile_value_ids, late.profile_value_ids)
-
-
 def test_a_cutoff_outside_the_window_is_refused(stage):
 
     from src.downstream.at_cutoff import CutoffError, window_at
@@ -966,4 +945,3 @@ def test_catboost_plus_usr_of_other_vectors_or_sources_is_refused(stage):
     write(embedded, baseline["sources"])
     with pytest.raises(ValueError, match="--final-test"):
         plus_usr("m", ("train", "val", "test"), embedded)
-

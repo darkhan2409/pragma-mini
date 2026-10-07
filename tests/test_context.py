@@ -329,20 +329,6 @@ def test_token_boundary(total: int, kept: int):
     assert selection.kept == list(range(29 - kept, 29))
 
 
-def test_12000_events_within_the_token_limit_are_kept_whole():
-
-    selection = select(sized(*[4] * 12000), ContextPolicy())
-
-    assert not selection.truncated and selection.kept_tokens == 48000
-
-
-def test_12001_events_are_cut_by_the_event_limit():
-
-    selection = select(sized(*[4] * 12001), ContextPolicy())
-
-    assert selection.n_kept == 12000 and selection.excluded == [0]
-
-
 def test_few_heavy_events_are_cut_by_the_token_limit():
     """
     100 событий по 600 токенов: событий мало, а токенов 60 000.

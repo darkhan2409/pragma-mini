@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from operator import attrgetter
 from pathlib import Path
 from typing import Iterator
 
@@ -107,14 +108,16 @@ class TokenizedClient:
         return len(self.profile_key_ids)
 
 
-def event_type_of(artifacts: FrozenArtifacts, row: dict, event_type_key: int | None) -> str | None:
+def event_type_of(artifacts: FrozenArtifacts, row: dict, event_type_key: int | None,
+                  names: dict[int, str] | None = None) -> str | None:
     """
     Тип события из его же пар ключ/значение.
 
     Имя токена в финальном словаре это `value:<ключ>=<значение>`,
     поэтому тип читается без второй колонки рядом с данными.
     event_type_key — номер ключа типа (artifacts.key_id), None —
-    словарь его не знает.
+    словарь его не знает. names — готовый event_type_names(artifacts):
+    тот же ответ без разбора имени на каждом событии.
 
     Строка это одно событие, значит её нулевая позиция это
     маркер [EVT]. Разбор начинается со следующей: значение
@@ -122,26 +125,55 @@ def event_type_of(artifacts: FrozenArtifacts, row: dict, event_type_key: int | N
     значения, и на них смотреть незачем.
     """
 
+    return _event_type(artifacts, row["key_ids"], row["value_ids"], row["positions"], event_type_key, names)
+
+
+def event_type_names(artifacts: FrozenArtifacts) -> dict[int, str]:
+    """
+    Номер значения типа события -> сам тип: все `value:event_type=…`
+    словаря.
+    """
+
+    prefix = f"{VALUE_PREFIX}{EVENT_TYPE_KEY}="
+
+    return {token_id: name[len(prefix):] for token_id, name in artifacts.name_of.items() if name.startswith(prefix)}
+
+
+def _event_type(artifacts: FrozenArtifacts, key_ids: list[int], value_ids: list[int], positions: list[int],
+                event_type_key: int | None, names: dict[int, str] | None) -> str | None:
+
     if event_type_key is None:
         return None
 
-    positions = row["positions"]
+    # Первое место после маркера, где ключ — тип, а позиция открывает
+    # значение: то же, что обход всех позиций, но поиск ключа в C.
+    end = len(positions)
+    index = 0
 
-    for index in range(1, len(positions)):
+    while True:
 
-        if positions[index] != 0:
-            continue
+        try:
+            index = key_ids.index(event_type_key, index + 1, end)
+        except ValueError:
+            return None
 
-        if row["key_ids"][index] != event_type_key:
-            continue
+        if positions[index] == 0:
+            break
 
-        name = artifacts.describe(row["value_ids"][index])
+    value_id = value_ids[index]
 
-        prefix = f"{VALUE_PREFIX}{EVENT_TYPE_KEY}="
+    if names is not None:
+        found = names.get(value_id)
+        if found is not None:
+            return found
 
-        return name[len(prefix):] if name.startswith(prefix) else None
+    # Номер не тип события: describe остановит неизвестный номер, а
+    # имя другого вида типом не станет.
+    name = artifacts.describe(value_id)
 
-    return None
+    prefix = f"{VALUE_PREFIX}{EVENT_TYPE_KEY}="
+
+    return name[len(prefix):] if name.startswith(prefix) else None
 
 
 class TokenizedGroup:
@@ -199,6 +231,7 @@ class TokenizedGroup:
         self.client_ids: list[str] = sorted(self._profiles)
 
         self._event_type_key = artifacts.key_id(EVENT_TYPE_KEY)
+        self._event_types = event_type_names(artifacts)
 
     # --- чтение ---
 
@@ -222,7 +255,7 @@ class TokenizedGroup:
                 rows = pending[1]
                 pending = next(stream, None)
             else:
-                rows = []
+                rows = None
 
             yield self._client(client_id, rows)
 
@@ -233,36 +266,49 @@ class TokenizedGroup:
                 f"python -m src.tokenization.run encode {self.group}"
             )
 
-    def _client_rows(self) -> Iterator[tuple[str, list[dict]]]:
+    def _client_rows(self) -> Iterator[tuple[str, dict[str, list]]]:
         """
-        Строки событий по клиентам: строки одного клиента лежат
-        подряд, поэтому буфер нужен ровно на одного.
+        Строки событий по клиентам, колонками: строки одного клиента
+        лежат подряд, поэтому буфер нужен ровно на одного. Колонки, а
+        не словарь на строку: to_pylist строил бы его на каждое событие.
         """
 
         current: str | None = None
-        buffer: list[dict] = []
+        buffer: dict[str, list] | None = None
 
         for number in range(self._events.num_row_groups):
 
-            for row in self._events.read_row_group(number).to_pylist():
+            columns = self._events.read_row_group(number).to_pydict()
 
-                if row["client_id"] != current:
+            ids = columns["client_id"]
+
+            start = 0
+
+            for index in range(1, len(ids) + 1):
+
+                if index < len(ids) and ids[index] == ids[start]:
+                    continue
+
+                if ids[start] != current:
 
                     if current is not None:
                         yield current, buffer
 
-                    current = row["client_id"]
-                    buffer = []
+                    current = ids[start]
+                    buffer = None
 
-                buffer.append(row)
+                if buffer is None:
+                    buffer = {name: [] for name in columns}
+
+                for name, values in columns.items():
+                    buffer[name].extend(values[start:index])
+
+                start = index
 
         if current is not None:
             yield current, buffer
 
-    def _event_type(self, row: dict) -> str | None:
-        return event_type_of(self.artifacts, row, self._event_type_key)
-
-    def _client(self, client_id: str, rows: list[dict]) -> TokenizedClient:
+    def _client(self, client_id: str, rows: dict[str, list] | None) -> TokenizedClient:
 
         profile = self._profiles.get(client_id)
 
@@ -272,23 +318,29 @@ class TokenizedGroup:
                 "закодированная группа собрана не за один проход"
             )
 
+        # Списки берутся как прочитаны: to_pydict отдаёт свои, и больше
+        # их не держит никто.
         events = [
             TokenizedEvent(
-                event_time=row["event_time"],
-                event_type=self._event_type(row),
-                key_ids=list(row["key_ids"]),
-                value_ids=list(row["value_ids"]),
-                positions=list(row["positions"]),
-                calendar=list(row["calendar"]),
-                lifelong_source=row["lifelong_source"],
+                event_time=event_time,
+                event_type=_event_type(self.artifacts, key_ids, value_ids, positions, self._event_type_key,
+                                       self._event_types),
+                key_ids=key_ids,
+                value_ids=value_ids,
+                positions=positions,
+                calendar=calendar,
+                lifelong_source=source,
             )
-            for row in rows
-        ]
+            for event_time, key_ids, value_ids, positions, calendar, source in zip(
+                rows["event_time"], rows["key_ids"], rows["value_ids"], rows["positions"], rows["calendar"],
+                rows["lifelong_source"],
+            )
+        ] if rows else []
 
         # Порядок примера временной, и sort устойчив: события с
         # одинаковым временем остаются в том причинном порядке,
         # в каком их уложил препроцессинг.
-        events.sort(key=lambda item: item.event_time)
+        events.sort(key=attrgetter("event_time"))
 
         return TokenizedClient(
             client_id=client_id,
@@ -306,5 +358,6 @@ __all__ = [
     "TokenizedError",
     "TokenizedEvent",
     "TokenizedGroup",
+    "event_type_names",
     "event_type_of",
 ]

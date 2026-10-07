@@ -87,17 +87,27 @@ def select(events: list[EventStub], policy: ContextPolicy) -> Selection:
     Отбор по объявленной политике.
     """
 
-    _check_limits(events, policy)
+    return _split(events, len(events) - border([item.n_tokens for item in events], policy))
+
+
+def border(sizes: list[int], policy: ContextPolicy) -> int:
+    """
+    Сколько самых старых событий остаётся за границей примера; sizes —
+    токены событий по порядку истории. Оставшиеся — непрерывный хвост
+    sizes[border:], поэтому списков номеров для него не нужно.
+    """
+
+    _check_limits(sizes, policy)
 
     if policy.policy == POLICY_ALL:
 
-        if policy.max_events is not None and len(events) > policy.max_events:
+        if policy.max_events is not None and len(sizes) > policy.max_events:
             raise ContextError(
-                f"история из {len(events)} событий при политике all и пределе "
+                f"история из {len(sizes)} событий при политике all и пределе "
                 f"{policy.max_events}: выберите политику recent либо снимите предел"
             )
 
-        tokens = sum(item.n_tokens for item in events)
+        tokens = sum(sizes)
 
         if policy.max_tokens is not None and tokens > policy.max_tokens:
             raise ContextError(
@@ -105,15 +115,15 @@ def select(events: list[EventStub], policy: ContextPolicy) -> Selection:
                 f"{policy.max_tokens}: выберите политику recent либо снимите предел"
             )
 
-        return _split(events, len(events))
+        return 0
 
     if policy.policy == POLICY_RECENT:
-        return _split(events, _tail(events, policy))
+        return len(sizes) - _tail(sizes, policy)
 
     raise ContextError(f"неизвестная политика контекста {policy.policy!r}")
 
 
-def _tail(events: list[EventStub], policy: ContextPolicy) -> int:
+def _tail(sizes: list[int], policy: ContextPolicy) -> int:
     """
     Сколько последних событий помещается в оба предела: хвост растёт
     от самого свежего события, пока следующее не нарушило бы любой.
@@ -122,16 +132,16 @@ def _tail(events: list[EventStub], policy: ContextPolicy) -> int:
     keep = 0
     tokens = 0
 
-    for item in reversed(events):
+    for size in reversed(sizes):
 
         if policy.max_events is not None and keep == policy.max_events:
             break
 
-        if policy.max_tokens is not None and tokens + item.n_tokens > policy.max_tokens:
+        if policy.max_tokens is not None and tokens + size > policy.max_tokens:
             break
 
         keep += 1
-        tokens += item.n_tokens
+        tokens += size
 
     return keep
 
@@ -155,19 +165,23 @@ def _split(events: list[EventStub], keep: int) -> Selection:
     return selection
 
 
-def _check_limits(events: list[EventStub], policy: ContextPolicy) -> None:
+def _check_limits(sizes: list[int], policy: ContextPolicy) -> None:
     """
     Одна запись не бывает длиннее объявленного предела.
 
     Это ошибка настройки, а не повод обрезать значение: предел
     существует, чтобы о таком событии узнали, а не чтобы оно
-    молча потеряло половину полей.
+    молча потеряло половину полей. Номер события — его место в
+    истории (EventStub.index).
     """
 
-    for item in events:
-        if item.n_tokens > policy.max_event_tokens:
+    if not sizes or max(sizes) <= policy.max_event_tokens:
+        return
+
+    for number, size in enumerate(sizes):
+        if size > policy.max_event_tokens:
             raise ContextError(
-                f"событие {item.index} занимает {item.n_tokens} токенов при пределе "
+                f"событие {number} занимает {size} токенов при пределе "
                 f"{policy.max_event_tokens}: ничего не обрезается, поднимите предел осознанно"
             )
 
@@ -176,5 +190,6 @@ __all__ = [
     "ContextError",
     "EventStub",
     "Selection",
+    "border",
     "select",
 ]

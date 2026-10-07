@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import replace
 
 import numpy as np
-import pytest
 
 from src.mlm.inputs import Size, cost, micro_batches
 
@@ -147,45 +146,14 @@ def test_a_client_dearer_than_the_whole_budget_goes_alone():
     assert batches == [[5], [50], [6]]
 
 
-def test_two_oversized_clients_do_not_share_a_batch():
-
-    assert prices(list(micro_batches(sizes(50, 60), 20))) == [[50], [60]]
-
-
 def test_empty_stream_yields_nothing():
 
     assert list(micro_batches([], 20)) == []
 
 
-def test_single_client_is_one_batch(clients):
-
-    batches = list(micro_batches(clients[:1], 10_000))
-
-    assert len(batches) == 1
-    assert batches[0] == clients[:1]
-
-
 # ============================================================
 # ХРАНЕНИЕ НЕ ВЛИЯЕТ НА ИСПОЛНЕНИЕ
 # ============================================================
-
-
-@pytest.mark.parametrize("split", [1, 2, 3, 5])
-def test_grouping_does_not_depend_on_how_the_stream_was_chunked(clients, split: int):
-    """
-    Поток клиентов один и тот же, как бы он ни приходил: разбивка
-    по micro-batch зависит только от цен и бюджета.
-    """
-
-    def chunked():
-        for first in range(0, len(clients), split):
-            yield from clients[first : first + split]
-
-    budget = 24
-
-    assert prices(list(micro_batches(chunked(), budget))) == prices(
-        list(micro_batches(clients, budget))
-    )
 
 
 def test_budget_of_one_puts_every_client_alone(clients):

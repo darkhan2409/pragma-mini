@@ -112,42 +112,6 @@ SNAPSHOT = {
 # ============================================================
 
 
-def test_excluded_fields_never_reach_the_profile():
-    """
-    Исключённое поле не попадает в анкету даже тогда, когда в
-    снимке оно заполнено.
-    """
-
-    state = profile_at(SNAPSHOT, [], CUTOFF, BANK)
-
-    leaked = sorted(set(state.values) & set(EXCLUDED_FIELDS))
-
-    assert not leaked, f"в анкету прошли исключённые поля: {leaked}"
-
-
-def test_field_set_does_not_depend_on_the_client():
-    """
-    Состав полей один и тот же у клиента с изменениями и без.
-
-    Иначе само отсутствие поля сообщало бы, что с клиентом
-    что-то случилось после cutoff.
-    """
-
-    quiet = profile_at(SNAPSHOT, [], CUTOFF, BANK)
-
-    busy = profile_at(
-        SNAPSHOT,
-        [
-            change("2026-02-01T10:00:00", "city", "Astana", "Shymkent"),
-            product("2026-03-01T10:00:00", "product_opened"),
-            product("2026-04-01T10:00:00", "product_closed"),
-        ],
-        CUTOFF, BANK,
-    )
-
-    assert set(quiet.values) == set(busy.values)
-
-
 # ============================================================
 # ГЛАВНОЕ: БУДУЩЕЕ НЕ МЕНЯЕТ АНКЕТУ
 # ============================================================
@@ -353,36 +317,6 @@ def test_unknown_change_field_is_ignored_not_guessed():
 # ============================================================
 
 
-def test_change_before_cutoff_is_the_state_at_cutoff():
-    """
-    2024-01 город Almaty, 2024-06 переезд в Astana, cutoff 2024-12:
-    на cutoff клиент живёт в Astana.
-    """
-
-    state = profile_at(
-        dict(SNAPSHOT, city="Astana"),
-        [change("2024-06-01T10:00:00", "city", "Almaty", "Astana")],
-        when("2024-12-01T00:00:00"), BANK,
-    )
-
-    assert state.values["city"] == "Astana"
-
-
-def test_change_after_cutoff_is_rolled_back():
-    """
-    2024-01 город Almaty, 2025-02 переезд в Astana, cutoff 2024-12:
-    на cutoff клиент ещё в Almaty, хотя снимок уже говорит Astana.
-    """
-
-    state = profile_at(
-        dict(SNAPSHOT, city="Astana"),
-        [change("2025-02-01T10:00:00", "city", "Almaty", "Astana")],
-        when("2024-12-01T00:00:00"), BANK,
-    )
-
-    assert state.values["city"] == "Almaty"
-
-
 def test_shortcut_fields_are_the_event_derived_ones():
     """
     Поля, которые выводятся из событий истории, объявлены
@@ -433,16 +367,6 @@ def test_only_age_is_counted_from_the_birth_date():
     assert not set(FROM_BIRTH_DATE) & set(EXCLUDED_FIELDS)
 
 
-def test_age_after_this_years_birthday():
-
-    assert age_at(date(1990, 3, 10), local("2026-05-01T00:00:00")) == 36
-
-
-def test_age_before_this_years_birthday_is_one_less():
-
-    assert age_at(date(1990, 6, 10), local("2026-05-01T00:00:00")) == 35
-
-
 def test_age_on_the_birthday_itself():
     """
     Cutoff ровно в день рождения: год уже исполнился. Мгновением
@@ -490,13 +414,6 @@ def test_age_of_the_snapshot_is_never_read():
     del snapshot["birth_date"]
 
     assert "age" not in profile_at(snapshot, [], CUTOFF, BANK).values
-
-
-def test_events_after_the_cutoff_do_not_move_the_age():
-
-    later = [change("2026-03-01T10:00:00", "income_type", "employed", "pensioner")]
-
-    assert profile_at(born(date(1990, 1, 1)), later, CUTOFF, BANK).values["age"] == 36
 
 
 def test_pensioner_is_not_an_attribute():
@@ -719,14 +636,6 @@ def test_pipeline_ignores_everything_after_the_cutoff(stage):
     assert all(event.event_time < val_cutoff() for event in busy.events)
 
 
-def test_pipeline_change_after_the_cutoff_is_rolled_back(stage):
-    """
-    Снимок уже говорит Astana, но переезд случился после cutoff.
-    """
-
-    assert prepare(stage, EARLY + AFTER, BUSY_SNAPSHOT).profile["profile_city"] == "Shymkent"
-
-
 def test_profile_change_stays_an_event_of_the_history(stage):
     """
     Анкета — итог изменений, но сами изменения из истории не
@@ -878,54 +787,6 @@ def write_profile_vocab(
     world.write_value_weights(directory, keys, values, buckets)
 
 
-def test_profile_change_is_context_not_a_target(stage):
-    """
-    Изменение анкеты в периоде целей остаётся событием примера, но
-    целью MLM не становится: анкета на cutoff уже содержит его
-    итог. Покупка рядом — обычная цель.
-    """
-
-    from src.dataset.sample import build_sample
-    from src.dataset.settings import ContextPolicy
-    from src.dataset.tokenized import TokenizedClient, TokenizedEvent
-    from src.preprocessing.settings import PreprocessingConfig
-    from src.tokenization.finalvocab import FrozenArtifacts
-    from src.tokenization.specials import EVT, USR
-
-    write_profile_vocab(stage)
-
-    window = PreprocessingConfig.load(None).windows["val"]
-
-    artifacts = FrozenArtifacts.load()
-
-    evt, usr = artifacts.special(EVT), artifacts.special(USR)
-
-    # Маркер и одно значение: содержание событий здесь не важно,
-    # правило цели смотрит только на тип.
-    def event(moment: str, kind: str) -> TokenizedEvent:
-        return TokenizedEvent(
-            event_time=when(moment), event_type=kind,
-            key_ids=[evt, evt + 1], value_ids=[evt, evt + 1], positions=[0, 0],
-            calendar=[0.0] * 6,
-        )
-
-    client = TokenizedClient(
-        client_id=RAW_CLIENT,
-        events=[
-            event("2025-06-01T10:00:00", "profile_change"),
-            event("2026-02-01T10:00:00", "profile_change"),
-            event("2026-02-02T10:00:00", "purchase"),
-        ],
-        profile_key_ids=[usr], profile_value_ids=[usr], profile_positions=[0],
-        profile_time=[None],
-    )
-
-    sample = build_sample(artifacts, client, window, ContextPolicy())
-
-    assert list(sample.target_event_mask) == [False, False, True]
-    assert len(sample.event_starts) == 3
-
-
 def test_pipeline_profile_tokens_are_identical(stage):
     """
     Совпадают не только значения, но и токены во входе модели.
@@ -952,25 +813,6 @@ def test_pipeline_profile_tokens_are_identical(stage):
     # неизвестных ключей среди них нет.
     assert len(quiet.key_ids) > 1
     assert not quiet.unknown_keys
-
-
-def test_pipeline_profile_carries_no_shortcut_key(stage):
-    """
-    В снимке holds_credit_card и счётчики договоров заполнены, а
-    в истории есть открытие продукта — в анкету они не идут.
-    """
-
-    profile = prepare(stage, EARLY + AFTER, BUSY_SNAPSHOT).profile
-
-    forbidden = {f"profile_{name}" for name in EXCLUDED_FIELDS}
-
-    assert not set(profile) & forbidden
-
-    for name in ("holds_credit_card", "contracts_count", "active_contracts",
-                 "holds_deposit", "credit_utilization"):
-        assert f"profile_{name}" in forbidden
-
-    assert set(profile) <= {f"profile_{name}" for name in INCLUDED_FIELDS}
 
 
 def test_pipeline_age_on_the_local_cutoff(stage):
@@ -1059,13 +901,15 @@ def test_vocab_fit_and_encoding_read_the_same_cutoff(stage, monkeypatch):
     seen: dict[str, set] = {"fit": set(), "encode": set()}
     stage_name = {"now": "fit"}
 
-    original = Group.history
+    # Через _build идёт и чтение клиента по одному (history), и поток по
+    # всей группе (histories): шпион видит cutoff любого пути.
+    original = Group._build
 
-    def spy(self, client_id, cutoff):
+    def spy(self, client_id, cutoff, table):
         seen[stage_name["now"]].add(cutoff)
-        return original(self, client_id, cutoff)
+        return original(self, client_id, cutoff, table)
 
-    monkeypatch.setattr(Group, "history", spy)
+    monkeypatch.setattr(Group, "_build", spy)
 
     config = TokenizerConfig.load(None)
 

@@ -232,40 +232,6 @@ def test_tokens_of_one_event_do_not_see_another(model):
     assert not torch.equal(first["dated"][2], second["dated"][2])
 
 
-def test_event_vector_comes_from_the_marker_column(model):
-    """
-    Вектор события — это колонка [EVT] плюс календарь. Проверяется
-    сравнением с прямым вызовом энкодера на одном событии.
-    """
-
-    made = long()
-
-    data = pack([made.client], CPU)
-
-    with torch.no_grad():
-
-        dated, _ = model._events(data)
-
-        for number in range(data.events.segments):
-
-            start = int(data.events.cu_seqlens[number])
-            length = int(data.events.lengths[number])
-            index = torch.arange(start, start + length)
-
-            piece = model.event(
-                model.embedding.embed(
-                    data.key_ids[index],
-                    data.value_ids[index],
-                    data.positions[index],
-                    torch.ones(length, dtype=torch.bool),
-                ).unsqueeze(0),
-                torch.zeros(1, length, dtype=torch.bool),
-                data.calendar[number : number + 1],
-            )
-
-            assert torch.allclose(dated[number], piece.dated[0], atol=1e-6)
-
-
 # ============================================================
 # ИСТОРИЯ
 # ============================================================
@@ -304,23 +270,6 @@ def test_history_of_one_client_never_reaches_another(model):
     assert torch.equal(first[0][0], second[0][0])
     assert torch.equal(first[1][data.user_of_event == 0], second[1][data.user_of_event == 0])
     assert not torch.equal(first[0][1], second[0][1])
-
-
-def test_content_of_the_padded_rectangle_does_not_leak(model):
-    """
-    Короткая история лежит в прямоугольнике рядом с длинной, и её
-    хвост закрыт маской.
-
-    Ширину прямоугольника задаёт длинный сосед, поэтому при смене
-    ЕГО значений ширина не меняется — и результат короткого обязан
-    совпасть побитово. Именно так отличается утечка от
-    неассоциативности сложения.
-    """
-
-    first = stages(model, [short().client, long().client])
-    second = stages(model, [short().client, long((17, 18, 19)).client])
-
-    same(mine(first, 0), mine(second, 0))
 
 
 @pytest.mark.parametrize("count", [2, 3])

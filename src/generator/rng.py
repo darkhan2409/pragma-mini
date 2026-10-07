@@ -69,10 +69,13 @@ def state_key() -> tuple:
     переприсваивает глобалы.
     """
 
+    # Значения уже int и str: так их пишет configure. Ключ строится на
+    # каждое обращение к кэшу (миллионы раз за прогон), поэтому без
+    # повторных приведений.
     return (
-        int(_STATE["seed"]),
-        int(_STATE["world_seed"]),
-        str(_STATE["fingerprint"]),
+        _STATE["seed"],
+        _STATE["world_seed"],
+        _STATE["fingerprint"],
         config.HISTORY_START,
         config.HISTORY_END,
         config.REGISTRATION_END,
@@ -234,17 +237,33 @@ _UNIT = float(2 ** 64)
 _BELOW_ONE = math.nextafter(1.0, 0.0)
 
 
+# Упаковка ключа и номера розыгрыша — те же «<Nq» и «<q», но формат
+# разобран заранее: потоков за прогон десятки миллионов.
+_KEY_PACKERS: dict[int, struct.Struct] = {}
+_INDEX_PACKER = struct.Struct("<q")
+
+
+def _key_packer(length: int) -> struct.Struct:
+
+    packer = _KEY_PACKERS.get(length)
+
+    if packer is None:
+        packer = _KEY_PACKERS[length] = struct.Struct(f"<{length}q")
+
+    return packer
+
+
 class KeyedRandom:
 
     __slots__ = ("_prefix", "_index")
 
     def __init__(self, key: Sequence[int]) -> None:
-        self._prefix = struct.pack(f"<{len(key)}q", *key)
+        self._prefix = _key_packer(len(key)).pack(*key)
         self._index = 0
 
     def random(self) -> float:
         digest = hashlib.blake2b(
-            self._prefix + struct.pack("<q", self._index),
+            self._prefix + _INDEX_PACKER.pack(self._index),
             digest_size=8,
         ).digest()
 
@@ -253,6 +272,38 @@ class KeyedRandom:
         value = int.from_bytes(digest, "little") / _UNIT
 
         return value if value < 1.0 else _BELOW_ONE
+
+    def randoms(self, count: int) -> np.ndarray:
+        """
+        count розыгрышей подряд одним массивом: те же числа, что дали бы
+        count вызовов random(). Тот же blake2b тех же байтов; uint64
+        в double переводится с тем же округлением, а деление на 2**64
+        точное.
+        """
+
+        first = self._index
+        self._index = first + count
+
+        # Хеш префикса считается один раз, номер дописывается к его
+        # копии: blake2b(prefix) + update(номер) — тот же хеш, что от
+        # склеенных байтов.
+        seeded = hashlib.blake2b(self._prefix, digest_size=8)
+        pack = _INDEX_PACKER.pack
+
+        digests = []
+
+        for index in range(first, first + count):
+            state = seeded.copy()
+            state.update(pack(index))
+            digests.append(state.digest())
+
+        raw = b"".join(digests)
+
+        values = np.frombuffer(raw, dtype="<u8").astype(np.float64) / _UNIT
+
+        values[values >= 1.0] = _BELOW_ONE
+
+        return values
 
     def integers(self, low: int, high: int | None = None) -> int:
         if high is None:
@@ -371,7 +422,8 @@ def keyed_rng(*key: int) -> KeyedRandom:
     Неймспейсы мира берут world_seed, остальные — seed популяции.
     """
 
-    root = current_world_seed() if key and key[0] in WORLD_NAMESPACES else current_seed()
+    # Значения в _STATE уже int (configure): без лишних приведений.
+    root = _STATE["world_seed"] if key and key[0] in WORLD_NAMESPACES else _STATE["seed"]
 
     return KeyedRandom((root, *key))
 

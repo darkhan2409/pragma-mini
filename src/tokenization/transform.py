@@ -140,14 +140,12 @@ class Counters:
     max_event_tokens: int = 0
 
 
-def _count_unknown(artifacts: FrozenArtifacts, record, counters: Counters) -> None:
+def _count_unknown(unknown: int, record, counters: Counters) -> None:
     """
-    Сколько значений словарь не знает.
+    Сколько значений словарь не знает. unknown — номер [UNK].
     """
 
-    unknown = artifacts.special(UNK)
-
-    counters.unknown += sum(1 for value_id in record.value_ids if value_id == unknown)
+    counters.unknown += record.value_ids.count(unknown)
 
 
 def group_window(group: str):
@@ -192,20 +190,32 @@ def encode_group(
 
     counters = Counters()
 
+    unknown = artifacts.special(UNK)
+
     events_writer = TableWriter(directory / EVENTS_FILE, EVENTS_SCHEMA)
     profile_writer = TableWriter(directory / PROFILE_FILE, PROFILE_SCHEMA)
+
+    # Строки клиента копятся колонками и пишутся одной таблицей:
+    # группа строк — один клиент. Датасет читает группу строк
+    # целиком и держит в памяти ровно одного клиента; пачка
+    # клиентов в одной группе строк это обещание сломала бы.
+    events = _columns(EVENTS_SCHEMA)
+    profiles = _columns(PROFILE_SCHEMA)
+
+    # Один проход по ленте: группа строк читается один раз, а
+    # клиенты и их истории те же и в том же порядке, что у
+    # history(client_id, cutoff).
+    histories = source.histories(cutoff)
 
     try:
         for client_id in source.client_ids:
 
             try:
-                history = source.history(client_id, cutoff)
+                history = next(histories)
             except (ReadError, KeysError) as error:
                 raise TransformError(f"клиент {client_id}: {error}") from error
 
             counters.clients += 1
-
-            rows: list[dict] = []
 
             for event in history.events:
 
@@ -216,7 +226,7 @@ def encode_group(
                         f"клиент {client_id}, событие {event.event_time.isoformat()}: {error}"
                     ) from error
 
-                _count_unknown(artifacts, record, counters)
+                _count_unknown(unknown, record, counters)
 
                 counters.events += 1
                 counters.values += record.n_values
@@ -226,21 +236,15 @@ def encode_group(
                 for key in record.unknown_keys:
                     counters.unknown_keys[key] = counters.unknown_keys.get(key, 0) + 1
 
-                rows.append(
-                    {
-                        "client_id": history.client_id,
-                        "event_time": event.event_time,
-                        "key_ids": record.key_ids,
-                        "value_ids": record.value_ids,
-                        "positions": record.positions,
-                        "calendar": list(event.calendar),
-                        "lifelong_source": event.lifelong_source,
-                    }
-                )
+                events["client_id"].append(history.client_id)
+                events["event_time"].append(event.event_time)
+                events["key_ids"].append(record.key_ids)
+                events["value_ids"].append(record.value_ids)
+                events["positions"].append(record.positions)
+                events["calendar"].append(event.calendar)
+                events["lifelong_source"].append(event.lifelong_source)
 
-            if rows:
-                events_writer.write(pa.Table.from_pylist(rows, schema=EVENTS_SCHEMA))
-            else:
+            if not history.events:
                 counters.silent_clients += 1
 
             # --- профиль ---
@@ -250,7 +254,7 @@ def encode_group(
             except EncodeError as error:
                 raise TransformError(f"клиент {client_id}, анкета: {error}") from error
 
-            _count_unknown(artifacts, record, counters)
+            _count_unknown(unknown, record, counters)
 
             if record.n_values:
                 counters.profiles += 1
@@ -260,20 +264,14 @@ def encode_group(
             counters.values += record.n_values
             counters.tokens += record.n_tokens
 
-            profile_writer.write(
-                pa.Table.from_pylist(
-                    [
-                        {
-                            "client_id": history.client_id,
-                            "key_ids": record.key_ids,
-                            "value_ids": record.value_ids,
-                            "positions": record.positions,
-                            "time": times,
-                        }
-                    ],
-                    schema=PROFILE_SCHEMA,
-                )
-            )
+            profiles["client_id"].append(history.client_id)
+            profiles["key_ids"].append(record.key_ids)
+            profiles["value_ids"].append(record.value_ids)
+            profiles["positions"].append(record.positions)
+            profiles["time"].append(times)
+
+            _flush(events_writer, events)
+            _flush(profile_writer, profiles)
 
     finally:
         events_rows = events_writer.close()
@@ -315,6 +313,24 @@ def encode_group(
         "unknown_values": counters.unknown,
         "unknown_keys": dict(sorted(counters.unknown_keys.items())),
     }
+
+
+def _columns(schema: pa.Schema) -> dict[str, list]:
+    return {name: [] for name in schema.names}
+
+
+def _flush(writer: TableWriter, columns: dict[str, list]) -> None:
+    """
+    Накопленные строки — одной таблицей в файл (from_pydict это
+    from_pylist без словаря на строку), колонки — с нуля. Строк
+    нет — нет и записи.
+    """
+
+    if columns[writer.schema.names[0]]:
+        writer.write(pa.Table.from_pydict(columns, schema=writer.schema))
+
+    for values in columns.values():
+        values.clear()
 
 
 def check_vocab(artifacts: FrozenArtifacts) -> None:

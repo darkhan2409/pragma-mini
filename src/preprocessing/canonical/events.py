@@ -17,9 +17,8 @@ from ..rawdata import (
     RawContractError,
     RawDataset,
     RawManifest,
+    event_times,
     event_types_of,
-    iter_event_types,
-    parse_event_time,
     parse_payloads,
 )
 from ..settings import PreprocessingConfig
@@ -109,9 +108,43 @@ def normalize_text(value: str | None) -> str | None:
     return text.casefold() or None
 
 
+def normalize_column(column: pa.Array | pa.ChunkedArray) -> pa.Array:
+    """
+    normalize_text каждого значения колонки. Названия повторяются, и
+    нормализуется каждое РАЗНОЕ значение один раз: та же функция над
+    словарём колонки, затем раскладка по строкам.
+    """
+
+    if isinstance(column, pa.ChunkedArray):
+        column = column.combine_chunks()
+
+    encoded = pc.dictionary_encode(column)
+
+    dictionary = pa.array([normalize_text(value) for value in encoded.dictionary.to_pylist()], pa.string())
+
+    return dictionary.take(encoded.indices)
+
+
 # ============================================================
 # ПАЧКИ КЛИЕНТОВ
 # ============================================================
+
+
+def _client_codes(column: pa.Array | pa.ChunkedArray) -> np.ndarray:
+    """
+    Номер значения client_id у каждой строки: равные id — равные
+    номера. Сравнивать номера дешевле, чем строки Python; пустой
+    client_id (его останавливает проверка RAW) сравнивается как
+    раньше, строками.
+    """
+
+    if isinstance(column, pa.ChunkedArray):
+        column = column.combine_chunks()
+
+    if column.null_count:
+        return np.asarray(column.to_pylist(), dtype=object)
+
+    return pc.dictionary_encode(column).indices.to_numpy()
 
 
 def _client_runs(client_id: np.ndarray) -> list[tuple[int, int]]:
@@ -130,9 +163,13 @@ def _client_runs(client_id: np.ndarray) -> list[tuple[int, int]]:
     return [(int(lo), int(hi)) for lo, hi in zip(starts, ends)]
 
 
-def iter_client_batches(raw: RawDataset, batch_clients: int) -> Iterator[pa.Table]:
+def iter_client_batches(raw: RawDataset, batch_clients: int, seen: set | None = None) -> Iterator[pa.Table]:
     """
     Пачки строк ленты, содержащие только целых клиентов.
+
+    seen — множество, в которое складываются клиенты ленты по мере
+    обхода (его же проверка разорванной ленты); передав своё,
+    вызывающий знает клиентов без второго прохода по файлу.
 
     Клиент, чей блок обрывается на границе row group, переносится
     в следующую пачку: делить его нельзя, иначе версии и ссылки
@@ -146,7 +183,7 @@ def iter_client_batches(raw: RawDataset, batch_clients: int) -> Iterator[pa.Tabl
 
     carry: pa.Table | None = None
     offset = 0
-    seen: set = set()
+    seen = set() if seen is None else seen
 
     for group_index, chunk in raw.iter_row_groups("events"):
 
@@ -159,9 +196,7 @@ def iter_client_batches(raw: RawDataset, batch_clients: int) -> Iterator[pa.Tabl
 
         table = chunk if carry is None else pa.concat_tables([carry, chunk])
 
-        client_id = np.asarray(table.column("client_id").to_pylist(), dtype=object)
-
-        runs = _client_runs(client_id)
+        runs = _client_runs(_client_codes(table.column("client_id")))
 
         if not runs:
             carry = None
@@ -176,7 +211,7 @@ def iter_client_batches(raw: RawDataset, batch_clients: int) -> Iterator[pa.Tabl
         if head.num_rows == 0:
             continue
 
-        head_runs = _client_runs(np.asarray(head.column("client_id").to_pylist(), dtype=object))
+        head_runs = _client_runs(_client_codes(head.column("client_id")))
 
         for start in range(0, len(head_runs), batch_clients):
             window = head_runs[start : start + batch_clients]
@@ -196,11 +231,11 @@ def _refuse_split_clients(batch: pa.Table, seen: set) -> None:
     Клиент не может начаться заново после другого клиента.
     """
 
-    client_id = np.asarray(batch.column("client_id").to_pylist(), dtype=object)
+    column = batch.column("client_id")
 
-    for lo, _hi in _client_runs(client_id):
+    for lo, _hi in _client_runs(_client_codes(column)):
 
-        client = client_id[lo]
+        client = column[lo].as_py()
 
         if client in seen:
             raise CanonicalError(
@@ -218,13 +253,22 @@ def _refuse_split_clients(batch: pa.Table, seen: set) -> None:
 
 @dataclass
 class ParsedBatch:
+    # Колонки payload, строки сгруппированы по типу события.
     table: pa.Table
+    # Тип события каждой строки (ключ type payload) в ИСХОДНОМ порядке,
+    # разобранный один раз на пачку: им же пользуется пометка вех.
+    event_type: pa.Array
+    # Исходный номер каждой строки table: table[i] — строка positions[i]
+    # пачки.
+    positions: np.ndarray
 
 
 def parse_batch(manifest: RawManifest, batch: pa.Table, payload_names: list[str]) -> ParsedBatch:
     """
-    Типизированные колонки payload для всей пачки, в исходном
-    порядке строк.
+    Типизированные колонки payload для всей пачки, сгруппированные по
+    типу события, и исходный номер каждой строки. В исходный порядок
+    широкая таблица не переставляется: сортировка этапа и так
+    переставит строки, и номер строки входит в неё последним ключом.
     """
 
     rows = batch.num_rows
@@ -232,7 +276,11 @@ def parse_batch(manifest: RawManifest, batch: pa.Table, payload_names: list[str]
     columns = {name: field_type for name, field_type in payload_columns(manifest)}
 
     if rows == 0:
-        return ParsedBatch(pa.table({name: pa.nulls(0, columns[name]) for name in payload_names}))
+        return ParsedBatch(
+            pa.table({name: pa.nulls(0, columns[name]) for name in payload_names}),
+            pa.array([], pa.string()),
+            np.zeros(0, dtype=np.int64),
+        )
 
     order: list[np.ndarray] = []
     pieces: list[pa.Table] = []
@@ -243,34 +291,42 @@ def parse_batch(manifest: RawManifest, batch: pa.Table, payload_names: list[str]
     # получает выдуманный тип.
     event_type_column = event_types_of(batch.column("payload"))
 
-    for event_type, _ in iter_event_types(batch):
+    payload = batch.column("payload")
+    raw_rows = batch.column("raw_row")
 
-        mask = (
-            pc.equal(event_type_column, event_type)
-            if event_type is not None
-            else pc.is_null(event_type_column)
-        )
-        indices = np.asarray(pc.indices_nonzero(mask).to_pylist(), dtype=np.int64)
+    # Строки по типам одной устойчивой сортировкой номера типа, а не
+    # маской на каждый тип: группы те же, строки внутри типа — в
+    # исходном порядке, типы — в порядке первого появления. Берётся
+    # только payload: остальные колонки пачки разбору не нужны.
+    encoded = pc.dictionary_encode(event_type_column)
+    code_of = {name: code for code, name in enumerate(encoded.dictionary.to_pylist())}
+    codes = pc.fill_null(encoded.indices, -1).to_numpy()
+    grouped = np.argsort(codes, kind="stable")
+    bounds = codes[grouped]
 
-        rows_of_type = batch.filter(mask)
+    for event_type in pc.unique(event_type_column).to_pylist():
+
+        code = -1 if event_type is None else code_of[event_type]
+        lo, hi = np.searchsorted(bounds, [code, code + 1])
+        indices = grouped[lo:hi].astype(np.int64)
 
         info = manifest.catalogue.get(event_type) if event_type is not None else None
 
         if info is None:
-            row = rows_of_type.column("raw_row")[0].as_py()
+            row = raw_rows[int(indices[0])].as_py()
             raise CanonicalError(
                 f"строка {row}: тип события {event_type!r} не объявлен каталогом ключей; "
                 "разобрать такую запись нечем"
             )
 
-        parsed = parse_payloads(info, rows_of_type.column("payload"))
+        parsed = parse_payloads(info, payload.take(pa.array(indices)))
 
         # Любое расхождение с контрактом останавливает этап:
         # журнала отказов больше нет, и молча принять строку
         # нельзя.
         if parsed.by_row:
             local = min(parsed.by_row)
-            row = rows_of_type.column("raw_row")[local].as_py()
+            row = raw_rows[int(indices[local])].as_py()
             raise CanonicalError(
                 f"строка {row}, событие {event_type}: "
                 + "; ".join(parsed.by_row[local])
@@ -290,13 +346,7 @@ def parse_batch(manifest: RawManifest, batch: pa.Table, payload_names: list[str]
         order.append(indices)
         pieces.append(piece)
 
-    stacked = pa.concat_tables(pieces)
-
-    positions = np.concatenate(order)
-    inverse = np.empty(rows, dtype=np.int64)
-    inverse[positions] = np.arange(positions.size, dtype=np.int64)
-
-    return ParsedBatch(stacked.take(pa.array(inverse)))
+    return ParsedBatch(pa.concat_tables(pieces), event_type_column, np.concatenate(order))
 
 
 # ============================================================
@@ -340,27 +390,33 @@ _SOURCE_KINDS: dict[str, tuple[str, ...]] = {
 }
 
 
+# Типы строк, которые бывают источниками вех.
+_SOURCE_TYPES = pa.array(sorted(_SOURCE_KINDS), pa.string())
+
+
 def lifelong_sources(
     batch: pa.Table,
-    event_types: list[str | None],
-    moments: list[datetime],
+    event_types: pa.Array,
+    moments: pa.Array,
     milestones: dict[str, list[dict]],
     period_start: datetime,
 ) -> pa.Array:
     """
     Тип вехи у каждой строки её акта-источника, у остальных null.
 
-    milestones — вехи анкеты по client_id, как в выгрузке.
+    milestones — вехи анкеты по client_id, как в выгрузке; moments —
+    моменты строк в UTC (timestamp), в Python переводится только
+    момент строки-источника.
     """
 
-    client_ids = batch.column("client_id").to_pylist()
+    clients = batch.column("client_id")
     payloads = batch.column("payload")
     raw_rows = batch.column("raw_row")
 
     # (клиент, тип вехи, source_id) -> момент вехи.
     wanted: dict[tuple[str, str, str], datetime] = {
         (client_id, item["type"], item["source_id"]): item["event_time"]
-        for client_id in set(client_ids)
+        for client_id in set(pc.unique(clients).to_pylist())
         for item in milestones.get(client_id, ())
         if item["source_id"] is not None
     }
@@ -368,18 +424,23 @@ def lifelong_sources(
     marks: list[str | None] = [None] * batch.num_rows
     found: set[tuple[str, str, str]] = set()
 
-    for row, event_type in enumerate(event_types):
+    # Обходятся только строки типов-источников, по порядку: у прочих
+    # строк источника вехи не бывает, и прежний обход их пропускал.
+    candidates = pc.indices_nonzero(pc.is_in(event_types, value_set=_SOURCE_TYPES)).to_numpy()
 
-        kinds = _SOURCE_KINDS.get(event_type)
+    for row, client_id, event_type in zip(
+        candidates.tolist(),
+        clients.take(candidates).to_pylist(),
+        event_types.take(candidates).to_pylist(),
+    ):
 
-        if not kinds:
-            continue
+        kinds = _SOURCE_KINDS[event_type]
 
         payload = json.loads(payloads[row].as_py())
 
         for kind in kinds:
 
-            link = (client_ids[row], kind, payload.get(LIFELONG_SOURCE_FIELD[kind]))
+            link = (client_id, kind, payload.get(LIFELONG_SOURCE_FIELD[kind]))
 
             if link not in wanted:
                 continue
@@ -389,10 +450,12 @@ def lifelong_sources(
             if marks[row] is not None:
                 raise CanonicalError(f"{where}: источник сразу двух вех, {marks[row]} и {kind}")
 
-            if moments[row] != wanted[link]:
+            moment = moments[row].as_py()
+
+            if moment != wanted[link]:
                 raise CanonicalError(
                     f"{where}: источник вехи {kind} ({link[2]}) записан в "
-                    f"{moments[row].isoformat()}, а веха — в {wanted[link].isoformat()}"
+                    f"{moment.isoformat()}, а веха — в {wanted[link].isoformat()}"
                 )
 
             marks[row] = kind
@@ -446,25 +509,30 @@ def build_batch(
     # Время выгрузки строкой приводится к UTC здесь и больше
     # нигде: дальше по конвейеру ездит нормализованный момент.
     try:
-        moments = [parse_event_time(text) for text in batch.column("event_time").to_pylist()]
+        moments = event_times(batch.column("event_time"))
     except RawContractError as error:
         raise CanonicalError(str(error)) from error
 
     # --- состав строки ---
 
+    # Строки собираются в порядке разобранного payload (по типам):
+    # конверт, время и пометка вех переставляются к нему, а не широкая
+    # таблица payload к исходному порядку.
+    grouped = pa.array(parsed.positions)
+
     columns: dict[str, pa.Array | pa.ChunkedArray] = {
-        name: batch.column(name) for name in ENVELOPE_NAMES if name != "event_time"
+        name: batch.column(name).take(grouped) for name in ENVELOPE_NAMES if name != "event_time"
     }
 
-    columns["event_time"] = pa.array(moments, type=TS_UTC)
+    columns["event_time"] = moments.cast(TS_UTC).take(grouped)
 
     columns[LIFELONG_SOURCE_COLUMN] = lifelong_sources(
         batch,
-        event_types_of(batch.column("payload")).to_pylist(),
+        parsed.event_type,
         moments,
         milestones,
         manifest.period_start,
-    )
+    ).take(grouped)
 
     for name in payload_names:
 
@@ -473,7 +541,7 @@ def build_batch(
         # Нормализованный текст ложится в само поле: исходное
         # написание рядом не хранится.
         if name in NORMALIZED_FIELDS:
-            column = pa.array([normalize_text(value) for value in column.to_pylist()], pa.string())
+            column = normalize_column(column)
 
         columns[name] = column
 
@@ -482,7 +550,7 @@ def build_batch(
     if table.num_rows != rows:
         raise CanonicalError(f"пачка собрана из {table.num_rows} строк вместо {rows}")
 
-    return BatchResult(table.take(_order(table, manifest.event_type_priority)))
+    return BatchResult(table.take(_order(table, manifest.event_type_priority, parsed.positions)))
 
 
 # Колонка приоритета существует только на время сортировки.
@@ -490,9 +558,10 @@ def build_batch(
 # ключом: ключи приходят из каталога payload, а там такие
 # имена не объявляются.
 _PRIORITY = "__type_priority"
+_POSITION = "__row_position"
 
 
-def _order(table: pa.Table, priority: dict[str, int]) -> pa.Array:
+def _order(table: pa.Table, priority: dict[str, int], positions: np.ndarray) -> pa.Array:
     """
     Устойчивый порядок строк внутри клиента:
 
@@ -514,6 +583,11 @@ def _order(table: pa.Table, priority: dict[str, int]) -> pa.Array:
     Порядок зависит только от самих данных: ни номера строки в
     RAW, ни другого служебного ключа рядом нет, и два прогона
     одной выгрузки дают один файл.
+
+    Строки table идут по типам событий, positions — их номера в
+    исходной пачке. Номер — последний ключ: при равенстве всех
+    смысловых полей строки остаются в исходном порядке, то есть
+    порядок тот же, что у устойчивой сортировки исходной пачки.
     """
 
     leading = ["client_id", "event_time", _PRIORITY, TYPE_KEY, "source"]
@@ -527,15 +601,19 @@ def _order(table: pa.Table, priority: dict[str, int]) -> pa.Array:
 
     unknown = len(priority)
 
+    # Приоритет типа: номер типа в справочнике -> его приоритет; тип
+    # вне справочника и пустой тип получают unknown. То же, что
+    # priority.get(name, unknown), но без перевода колонки в Python.
+    names = list(priority)
+    position = pc.index_in(table.column(TYPE_KEY), value_set=pa.array(names, pa.string()))
+    ranks = pa.array([priority[name] for name in names] + [unknown], pa.int16())
+
     ranked = table.append_column(
         _PRIORITY,
-        pa.array(
-            [priority.get(name, unknown) for name in table.column(TYPE_KEY).to_pylist()],
-            pa.int16(),
-        ),
-    )
+        ranks.take(pc.fill_null(position, len(names))),
+    ).append_column(_POSITION, pa.array(positions, pa.int64()))
 
-    keys = [(name, "ascending", "at_end") for name in leading + rest]
+    keys = [(name, "ascending", "at_end") for name in leading + rest + [_POSITION]]
 
     return pc.sort_indices(ranked, sort_keys=keys)
 
@@ -551,6 +629,7 @@ __all__ = [
     "canonical_schema",
     "iter_client_batches",
     "lifelong_sources",
+    "normalize_column",
     "normalize_text",
     "parse_batch",
 ]

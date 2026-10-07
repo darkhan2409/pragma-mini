@@ -133,31 +133,11 @@ class MlmConfig:
     # влияет: порядок и маски те же.
     loader_workers: int = 1
 
-    # Softmax головы только по значениям ключа цели (candidate_table)
-    # вместо всего словаря; сглаживание меток — внутри них же.
-    restricted_softmax: bool = False
-
     # Вес вспомогательной цели [USR] (model.RecentTypes): log-счётчики
     # типов событий за 7/30/90 дней и log-давность последнего события
     # каждого типа. 0 — цели нет, как у B0: без неё [USR] почти не
     # знает давности (аудит 2026-10-05, E1′).
     usr_aux_weight: float = 1.0
-
-    # Давность события до точки отсчёта слагаемым к его вектору перед
-    # энкодером истории и свой вектор у слота [USR]
-    # (model.RecencyEmbedding). Без неё время входит только поворотом
-    # Q и K в TimeRoPE.
-    recency_embedding: bool = False
-
-    # Новая перестановка групп строк train на каждую эпоху (seed из
-    # seed и номера эпохи). Без неё каждая эпоха — одна и та же
-    # «пила» от коротких клиентов окна к длинным.
-    shuffle_row_groups: bool = False
-
-    # У значений события под маской event ключ во входе закрыт
-    # ([MASK]), а голова получает ключ цели запросом
-    # (Model.hide_event_keys): видимые ключи выдают тип события.
-    hide_event_keys: bool = False
 
     def validate(self) -> None:
 
@@ -247,11 +227,7 @@ class MlmConfig:
             "early_stopping_patience": self.early_stopping_patience,
             "early_stopping_min_delta": self.early_stopping_min_delta,
             "loader_workers": self.loader_workers,
-            "restricted_softmax": self.restricted_softmax,
             "usr_aux_weight": self.usr_aux_weight,
-            "recency_embedding": self.recency_embedding,
-            "shuffle_row_groups": self.shuffle_row_groups,
-            "hide_event_keys": self.hide_event_keys,
         }
 
     @staticmethod
@@ -286,11 +262,7 @@ class MlmConfig:
                 data.get("early_stopping_min_delta", base.early_stopping_min_delta)
             ),
             loader_workers=int(data.get("loader_workers", base.loader_workers)),
-            restricted_softmax=bool(data.get("restricted_softmax", base.restricted_softmax)),
             usr_aux_weight=float(data.get("usr_aux_weight", base.usr_aux_weight)),
-            recency_embedding=bool(data.get("recency_embedding", base.recency_embedding)),
-            shuffle_row_groups=bool(data.get("shuffle_row_groups", base.shuffle_row_groups)),
-            hide_event_keys=bool(data.get("hide_event_keys", base.hide_event_keys)),
         )
 
         config.validate()

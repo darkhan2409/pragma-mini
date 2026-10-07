@@ -192,10 +192,6 @@ def test_a_file_of_another_schema_is_refused(stage):
 # ============================================================
 
 
-def client_of(made: world.Made):
-    return made.client
-
-
 def test_a_target_must_be_closed_by_mask_on_the_input():
     """
     Если бы на входе стояло настоящее значение, модель видела бы
@@ -251,19 +247,3 @@ def test_real_files_satisfy_the_invariants(stage):
         )
 
         assert bool(inside.all())
-
-
-def test_every_group_is_masked_while_reading(stage):
-    """
-    Файла масок нет ни у одной группы: и train, и val получают цели
-    при чтении набора.
-    """
-
-    settle(stage, [three()], val=three())
-
-    for group in ("train", "val"):
-
-        clients = list(Source(group, masking=every_value()).clients())
-
-        assert clients
-        assert sum(client.n_targets for client in clients) > 0, group

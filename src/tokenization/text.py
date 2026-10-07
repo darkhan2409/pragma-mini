@@ -22,19 +22,12 @@ from .settings import BPE_FILE, BpeConfig, TokenizerConfig, vocab_path
 # counterparty. Новых текстовых полей ради BPE не придумывается,
 # а структурированный код текстом не становится.
 #
-# Алфавит полный, два способа (BpeConfig.alphabet):
-#
-#   characters  (по умолчанию) символы train-текстов, пробел —
-#               обычный символ куска (« Алматы», а не «ĠÐĲÐ»...).
-#               Невиданный символ кодируется своими байтами <0xNN>
-#               (byte fallback).
-#   bytes       прежний: 256 байт ByteLevel лежат в словаре с самого
-#               начала. Пробел и любая не-ASCII буква видны в кусках
-#               подменёнными символами (Ġ, Ã…).
-#
-# В обоих невиданная казахская буква, эмодзи или китайский
-# иероглиф кодируются и раскодируются без потерь и без
-# переобучения, а незнакомое название — кусками знакомых.
+# Алфавит полный: символы train-текстов, пробел — обычный символ
+# куска (« Алматы», а не «ĠÐĲÐ»...). Невиданный символ кодируется
+# своими байтами <0xNN> (byte fallback): невиданная казахская
+# буква, эмодзи или китайский иероглиф кодируются и раскодируются
+# без потерь и без переобучения, а незнакомое название — кусками
+# знакомых.
 #
 # Нормализация не своя: берётся та же функция, что делает
 # нормализованную копию текста в canonical. Двух правил
@@ -201,32 +194,7 @@ def train_bpe(stats: FitStatistics, config: BpeConfig, keys: tuple[str, ...]) ->
     # предупреждение в логе только мешает.
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-    from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
-
-    rows = corpus_rows(stats, keys)
-
-    if config.alphabet == "characters":
-        return _train_characters(rows, config)
-
-    model = Tokenizer(models.BPE(unk_token=None))
-
-    model.pre_tokenizer = pre_tokenizers.ByteLevel(
-        add_prefix_space=config.add_prefix_space,
-        use_regex=config.use_regex,
-    )
-    model.decoder = decoders.ByteLevel()
-
-    trainer = trainers.BpeTrainer(
-        vocab_size=config.vocab_size,
-        min_frequency=config.min_frequency,
-        initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
-        special_tokens=[],
-        show_progress=False,
-    )
-
-    model.train_from_iterator(_iterator(rows), trainer=trainer)
-
-    return BpeModel(tokenizer=model)
+    return _train_characters(corpus_rows(stats, keys), config)
 
 
 # Разбиение по словам до слияний — то же, что у ByteLevel с

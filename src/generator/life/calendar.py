@@ -153,11 +153,40 @@ def next_business_day(ts: datetime) -> datetime:
 # ============================================================
 
 
+# Множитель категории зависит только от категории, даты и региона
+# при тех же параметрах, а спрашивают его десятки категорий у каждого
+# клиента каждый день. Кэш живёт один день (память) и сбрасывается со
+# сменой параметров (прогоны в одном процессе).
+_FACTORS: dict = {}
+_FACTORS_OF: list = [None, None]
+
+
 def category_factor(category: str, ts: datetime, region: str | None = None) -> float:
     """
     Множитель интенсивности категории: месяц, выходные,
     праздничное окно, зимний регион.
     """
+
+    settings = params_module.active()
+    day = ts.date()
+
+    if _FACTORS_OF[0] is not settings or _FACTORS_OF[1] != day:
+        _FACTORS.clear()
+        _FACTORS_OF[0] = settings
+        _FACTORS_OF[1] = day
+
+    key = (category, region)
+
+    value = _FACTORS.get(key)
+
+    if value is None:
+        value = _category_factor(category, ts, region)
+        _FACTORS[key] = value
+
+    return value
+
+
+def _category_factor(category: str, ts: datetime, region: str | None) -> float:
 
     settings = params_module.active().seasonality
 

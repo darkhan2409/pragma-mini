@@ -332,44 +332,28 @@ def default_numeric_encoders() -> dict[str, NumericEncoder]:
 # ------------------------------------------------------------
 
 
-# Из чего растут куски BPE (BpeConfig.alphabet).
-BPE_ALPHABETS = ("bytes", "characters")
-
-
 @dataclass(frozen=True)
 class BpeConfig:
     """
     BPE текстовых полей, обучение только на разрешённых train-текстах.
 
-    alphabet — из чего растут куски:
-      characters  символы train-текстов, пробел — обычный символ;
-                  невиданный символ кодируется своими байтами
-                  (byte fallback, 256 кусков <0xNN>), поэтому любое
-                  название по-прежнему разбивается без потерь;
-      bytes       прежний вариант, 256 байт (ByteLevel): пробел и
-                  не-ASCII выглядят в кусках как Ġ и Ã…. Офлайн
-                  (волна 4) границы кусков у них совпадают на 99.5%
-                  вхождений merchant_name и на 100% counterparty.
+    Куски растут из символов train-текстов, пробел — обычный символ;
+    невиданный символ кодируется своими байтами (byte fallback, 256
+    кусков <0xNN>), поэтому любое название разбивается без потерь.
     vocab_size — всего кусков, включая алфавит и байты.
     """
 
     vocab_size: int = 4096
     min_frequency: int = 2
-    # Пробел перед первым куском не добавляется: иначе decode
-    # вернул бы не тот текст, что подавали.
-    add_prefix_space: bool = False
     # Разбиение по словам до слияний: без него куски склеиваются
     # через пробел и перестают быть частями слова.
     use_regex: bool = True
-    alphabet: str = "characters"
 
     def as_dict(self) -> dict:
         return {
             "vocab_size": self.vocab_size,
             "min_frequency": self.min_frequency,
-            "add_prefix_space": self.add_prefix_space,
             "use_regex": self.use_regex,
-            "alphabet": self.alphabet,
         }
 
     @staticmethod
@@ -382,20 +366,11 @@ class BpeConfig:
 
         base = BpeConfig()
 
-        config = BpeConfig(
+        return BpeConfig(
             vocab_size=int(data.get("vocab_size", base.vocab_size)),
             min_frequency=int(data.get("min_frequency", base.min_frequency)),
-            add_prefix_space=bool(data.get("add_prefix_space", base.add_prefix_space)),
             use_regex=bool(data.get("use_regex", base.use_regex)),
-            alphabet=str(data.get("alphabet", base.alphabet)),
         )
-
-        if config.alphabet not in BPE_ALPHABETS:
-            raise ConfigError(
-                f"alphabet BPE обязан быть одним из {list(BPE_ALPHABETS)}, получено {config.alphabet!r}"
-            )
-
-        return config
 
 
 # ------------------------------------------------------------

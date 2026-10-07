@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import Mapping
+
+import numpy as np
 
 from src.preprocessing.artifacts import read_json
 from src.tokenization.finalvocab import vocabulary_digest
@@ -212,6 +215,89 @@ class ValueWeights:
                 for item in payload["keys"].values()
             },
         )
+
+    @cached_property
+    def _singles(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Для поиска массивом: известные ключи по возрастанию и их
+        key_weight; значения из одного куска — код (ключ << 32 | токен)
+        по возрастанию и value_weight.
+        """
+
+        known = sorted(self.keys)
+
+        codes = sorted(
+            ((key << 32) | tokens[0], value)
+            for key, (_, table) in self.keys.items()
+            for tokens, value in table.items()
+            if len(tokens) == 1
+        )
+
+        return (
+            np.array(known, dtype=np.int64),
+            np.array([self.keys[key][0] for key in known], dtype=np.float64),
+            np.array([code for code, _ in codes], dtype=np.int64),
+            np.array([value for _, value in codes], dtype=np.float64),
+        )
+
+    def probabilities(self, key_ids: np.ndarray, starts: np.ndarray, lengths: np.ndarray,
+                      value_ids: np.ndarray, config: MaskingConfig) -> np.ndarray:
+        """
+        probability каждого значения разом: значение — токены
+        value_ids[start:start + length] ключа key_id.
+
+        Формула та же и в том же порядке действий:
+        ((value_probability · scale) · key_weight) · value_weight, затем
+        границы. Значение из одного куска ищется в таблице массивом, из
+        нескольких — probability по одному. Нечисловой вес (у min и max
+        Python и numpy он ведёт себя по-разному) — тоже по одному.
+        """
+
+        out = np.empty(key_ids.size, dtype=np.float64)
+
+        base = config.value_probability
+
+        if base <= 0.0:
+            out[:] = 0.0
+            return out
+
+        known, key_weights, codes, values = self._singles
+
+        single = np.flatnonzero(lengths == 1)
+
+        keys = key_ids[single]
+
+        present = np.zeros(keys.size, dtype=bool)
+        weight = np.zeros(keys.size, dtype=np.float64)
+
+        if known.size:
+            place = np.minimum(np.searchsorted(known, keys), known.size - 1)
+            present = known[place] == keys
+            weight = key_weights[place]
+
+        value_weight = np.full(keys.size, VALUE_WEIGHT_MAX, dtype=np.float64)
+
+        if codes.size:
+            wanted = (keys << 32) | value_ids[starts[single]]
+            spot = np.minimum(np.searchsorted(codes, wanted), codes.size - 1)
+            hit = codes[spot] == wanted
+            value_weight[hit] = values[spot[hit]]
+
+        raw = np.where(present, (base * self.scale) * weight * value_weight, base)
+
+        if bool(np.isfinite(raw).all()):
+            out[single] = np.minimum(config.max_value_probability, np.maximum(config.min_value_probability, raw))
+        else:
+            single = np.zeros(0, dtype=np.int64)
+
+        rest = np.setdiff1d(np.arange(key_ids.size), single, assume_unique=True)
+
+        for index in rest.tolist():
+            start = int(starts[index])
+            tokens = tuple(value_ids[start:start + int(lengths[index])].tolist())
+            out[index] = self.probability(int(key_ids[index]), tokens, config)
+
+        return out
 
     def probability(self, key_id: int, tokens: tuple[int, ...], config: MaskingConfig) -> float:
         """

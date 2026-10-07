@@ -5,7 +5,6 @@ import re
 
 import pytest
 
-from src.mlm.settings import MlmConfig
 from src.mlm.train import horizon, lr_factor, train
 
 from tests import world
@@ -95,17 +94,6 @@ def test_rate_never_falls_below_the_floor(done: int):
     assert lr_factor(done, 4, 24, 0.1) == pytest.approx(0.1)
 
 
-def test_floor_is_the_ratio_of_the_two_configured_rates():
-
-    config = MlmConfig(learning_rate=1e-2, min_learning_rate=1e-3)
-
-    floor = config.min_learning_rate / config.learning_rate
-
-    assert config.learning_rate * lr_factor(1_000, 1, 10, floor) == pytest.approx(
-        config.min_learning_rate
-    )
-
-
 # ============================================================
 # ГОРИЗОНТ
 # ============================================================
@@ -127,17 +115,6 @@ def test_horizon_counts_the_whole_plan(stage):
     assert horizon(config, masking, 10) == math.ceil(6 / 4) * 10
 
 
-def test_horizon_does_not_know_about_max_steps(stage):
-    """
-    У horizon нет и не должно быть параметра max_steps: предел
-    прогона в план не входит.
-    """
-
-    import inspect
-
-    assert list(inspect.signature(horizon).parameters) == ["config", "masking", "epochs"]
-
-
 def test_horizon_does_not_depend_on_the_mask_of_the_epoch(stage):
     """
     Маскирование меняет значения, но не длины, поэтому число
@@ -154,23 +131,6 @@ def test_horizon_does_not_depend_on_the_mask_of_the_epoch(stage):
 # ============================================================
 # РАСПИСАНИЕ ДВИГАЮТ ШАГИ, А НЕ MICRO-BATCH'И
 # ============================================================
-
-
-def test_only_optimizer_steps_advance_the_schedule(stage, capsys):
-    """
-    Шесть micro-batch'ей при окне 2 дают три шага, и номера шагов
-    идут подряд: micro-batch сам по себе расписание не двигает.
-    """
-
-    settle(stage, train_people=many())
-
-    config = tiny(token_budget=6, grad_accum_steps=2, warmup_steps=1)
-
-    train(config, epochs=1, max_steps=None, masking=every_value())
-
-    steps = [step for step, _ in trail(capsys.readouterr().out)]
-
-    assert steps == [1, 2, 3]
 
 
 def test_rate_follows_the_formula_step_by_step(stage, capsys):

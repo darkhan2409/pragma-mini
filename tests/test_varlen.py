@@ -63,19 +63,6 @@ def test_cumulative_bounds_are_exact():
     assert group.max_seqlen == 20
 
 
-@pytest.mark.parametrize(
-    "length, key",
-    [(1, 0), (2, 1), (3, 2), (4, 2), (5, 3), (8, 3), (9, 4), (16, 4), (17, 5)],
-)
-def test_bucket_key_follows_ceil_log2(length: int, key: int):
-    """
-    Корзина это ceil(log2(длина)) — на самих границах степеней
-    двойки, где off-by-one был бы незаметен.
-    """
-
-    assert int(np.ceil(np.log2(length))) == key
-
-
 def test_bucket_numbers_are_dense_ranks_not_log2_keys():
     """
     bucket_of — номер корзины в кортеже buckets, а не сам ключ

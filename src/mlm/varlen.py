@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import cached_property
 
 import numpy as np
 import torch
@@ -117,18 +118,83 @@ class VarlenLayout:
 
     bucket_of и row_of говорят, где сегмент лежит в раскладке:
     номер корзины и строка внутри неё.
+
+    Корзины нужны только проходу без flash-attn (корзины SDPA), а
+    flash-attn берёт группы. Поэтому матрицы корзин (index, mask) и
+    их перенос на устройство строятся при первом обращении к buckets:
+    на пути flash их нет вовсе. Сами корзины от этого не меняются.
     """
 
     cu_seqlens: torch.Tensor   # [S + 1]
     lengths: torch.Tensor      # [S]
-    buckets: tuple
-    bucket_of: np.ndarray      # [S]
-    row_of: np.ndarray         # [S]
     groups: tuple              # вызовы flash-attn, по порядку сегментов
+
+    # Длины и границы сегментов на CPU и устройство — для корзин.
+    sizes: np.ndarray = field(repr=False, compare=False)
+    edges: np.ndarray = field(repr=False, compare=False)
+    device: torch.device = field(repr=False, compare=False)
 
     @property
     def segments(self) -> int:
         return int(self.lengths.numel())
+
+    @cached_property
+    def _keys(self) -> tuple[np.ndarray, list[np.ndarray]]:
+        """
+        Корзина сегмента — ceil(log2(длина)); сегменты каждой корзины
+        по возрастанию корзины.
+        """
+
+        keys = np.ceil(np.log2(self.sizes)).astype(np.int64) if self.sizes.size else self.sizes
+
+        return keys, [np.nonzero(keys == key)[0] for key in np.unique(keys)]
+
+    @cached_property
+    def bucket_of(self) -> np.ndarray:  # [S]
+
+        bucket_of = np.zeros(self.sizes.size, dtype=np.int64)
+
+        for number, segments in enumerate(self._keys[1]):
+            bucket_of[segments] = number
+
+        return bucket_of
+
+    @cached_property
+    def row_of(self) -> np.ndarray:  # [S]
+
+        row_of = np.zeros(self.sizes.size, dtype=np.int64)
+
+        for segments in self._keys[1]:
+            row_of[segments] = np.arange(segments.size)
+
+        return row_of
+
+    @cached_property
+    def buckets(self) -> tuple:
+
+        buckets: list[Bucket] = []
+
+        for segments in self._keys[1]:
+
+            width = int(self.sizes[segments].max())
+
+            steps = np.arange(width, dtype=np.int64)[None, :]
+
+            mask = steps < self.sizes[segments][:, None]
+
+            starts = self.edges[segments][:, None]
+
+            index = np.where(mask, starts + steps, starts)
+
+            buckets.append(
+                Bucket(
+                    segments=torch.as_tensor(segments, device=self.device),
+                    index=torch.as_tensor(index, device=self.device),
+                    mask=torch.as_tensor(mask, device=self.device),
+                )
+            )
+
+        return tuple(buckets)
 
     @staticmethod
     def build(lengths: np.ndarray, device: torch.device, what: str) -> "VarlenLayout":
@@ -147,38 +213,6 @@ class VarlenLayout:
         cu = np.zeros(lengths.size + 1, dtype=np.int64)
         np.cumsum(lengths, out=cu[1:])
 
-        keys = np.ceil(np.log2(lengths)).astype(np.int64) if lengths.size else lengths
-
-        bucket_of = np.zeros(lengths.size, dtype=np.int64)
-        row_of = np.zeros(lengths.size, dtype=np.int64)
-
-        buckets: list[Bucket] = []
-
-        for number, key in enumerate(np.unique(keys)):
-
-            segments = np.nonzero(keys == key)[0]
-
-            width = int(lengths[segments].max())
-
-            steps = np.arange(width, dtype=np.int64)[None, :]
-
-            mask = steps < lengths[segments][:, None]
-
-            starts = cu[segments][:, None]
-
-            index = np.where(mask, starts + steps, starts)
-
-            bucket_of[segments] = number
-            row_of[segments] = np.arange(segments.size)
-
-            buckets.append(
-                Bucket(
-                    segments=torch.as_tensor(segments, device=device),
-                    index=torch.as_tensor(index, device=device),
-                    mask=torch.as_tensor(mask, device=device),
-                )
-            )
-
         groups = tuple(
             Group(
                 rows=int(cu[last] - cu[first]),
@@ -191,10 +225,10 @@ class VarlenLayout:
         return VarlenLayout(
             cu_seqlens=torch.as_tensor(cu, device=device),
             lengths=torch.as_tensor(lengths, device=device),
-            buckets=tuple(buckets),
-            bucket_of=bucket_of,
-            row_of=row_of,
             groups=groups,
+            sizes=lengths,
+            edges=cu,
+            device=device,
         )
 
 

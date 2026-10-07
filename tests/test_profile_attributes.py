@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import json
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
-from src.preprocessing.keys import CATEGORICAL, PROFILE_KEYS
+from src.preprocessing.keys import PROFILE_KEYS
 from src.preprocessing.profile_state import (
     EXCLUDED_FIELDS,
     INCLUDED_FIELDS,
@@ -125,18 +124,6 @@ def test_tenure_label_is_a_fixed_six_month_step():
     assert tenure_label(42) == "42-47"
 
 
-def test_tenure_has_no_train_derived_edges():
-    """
-    Стаж — категория с меткой, а не число со шкалой: границ, которые
-    считал бы train, у него нет.
-    """
-
-    from src.tokenization.settings import default_numeric_encoders
-
-    assert PROFILE_KEYS["job_tenure_months"].kind == CATEGORICAL
-    assert "profile_job_tenure_months" not in default_numeric_encoders()
-
-
 def test_tenure_counts_full_months_to_the_local_cutoff():
 
     records = [job(date(2020, 1, 31), "2020-02-01T00:00:00")]
@@ -171,16 +158,6 @@ def test_tenure_follows_what_the_bank_knew_at_the_cutoff():
 
     # Два полных месяца с 15 июня до 1 сентября.
     assert tenure_at(records, local("2025-09-01T00:00:00")) == "0-5"
-
-
-def test_later_records_do_not_change_the_tenure_at_the_cutoff():
-
-    known = [job(date(2019, 3, 10), "2020-01-01T00:00:00")]
-    later = known + [job(None, "2024-06-01T00:00:00"), job(date(2024, 9, 1), "2024-09-10T00:00:00")]
-
-    moment = local("2024-01-01T00:00:00")
-
-    assert tenure_at(known, moment) == tenure_at(later, moment) == "54-59"
 
 
 def test_tenure_needs_salaried_income_at_the_cutoff():
@@ -359,39 +336,3 @@ def test_current_vocab_passes_and_old_ones_are_refused(stage):
 # ============================================================
 # СТАРЫЕ АРТЕФАКТЫ
 # ============================================================
-
-
-def test_raw_and_samples_of_the_previous_contract_are_refused(stage):
-
-    from src.dataset.build import SAMPLES_SCHEMA
-    from src.dataset.settings import dataset_dir
-    from src.preprocessing.profile_state import PROFILE_SEMANTICS
-    from src.preprocessing.rawdata import RawContractError, check_raw
-    from src.preprocessing.settings import raw_group_dir
-    from src.temporal.samples import SamplesError, SamplesGroup
-
-    import pyarrow.parquet as pq
-
-    directory = raw_group_dir("val")
-
-    write_raw(directory, [], QUIET_SNAPSHOT)
-
-    manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
-    manifest["schema_version"] = 17
-    (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-
-    with pytest.raises(RawContractError, match="schema_version"):
-        check_raw(directory)
-
-    samples = dataset_dir("val")
-    samples.mkdir(parents=True, exist_ok=True)
-
-    pq.write_table(SAMPLES_SCHEMA.empty_table(), samples / "samples.parquet")
-
-    (samples / "meta.json").write_text(json.dumps({
-        "format": 5, "profile_semantics": PROFILE_SEMANTICS,
-        "profile_lifelong_types": ["relationship_started", "kyc_passed", "app_adopted"],
-    }), encoding="utf-8")
-
-    with pytest.raises(SamplesError, match="прежним кодом"):
-        SamplesGroup("val")

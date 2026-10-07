@@ -2,14 +2,11 @@ from __future__ import annotations
 
 import dataclasses
 
-import numpy as np
 import pytest
-import torch
 
 from src.masking.apply import IGNORE, apply
 from src.masking.choose import KEY, NONE, choose, values_of
 from src.masking.settings import ConfigError, MaskingConfig
-from src.mlm.model import pack
 
 from tests import world
 from tests.test_masking import rates, row_of
@@ -19,22 +16,13 @@ from tests.test_masking import rates, row_of
 # ИДЕЯ
 # ============================================================
 #
-# Две настройки против подсказок, которые делают MLM задачей
-# копирования:
-#
-#   key_context_corruption_probability (маска, по умолчанию 0.5)
-#       значение ключа, выбранного механизмом key, в событии вне
-#       целей независимо портится в [UNK] — целиком, без метки.
-#       Цели и их розыгрыш от настройки не меняются ни на бит;
-#   hide_event_keys (модель, эксперимент волны 4, по умолчанию
-#       выключен)              у значений события под маской event
-#       ключ во входе закрыт: энкодеры не различают такие события
-#       по набору ключей. Какой ключ предсказывать, голова узнаёт
-#       запросом — ключом цели.
+# Настройка против подсказки, которая делает MLM задачей
+# копирования, — key_context_corruption_probability (маска, по
+# умолчанию 0.5): значение ключа, выбранного механизмом key, в
+# событии вне целей независимо портится в [UNK] — целиком, без
+# метки. Цели и их розыгрыш от настройки не меняются ни на бит.
 # ============================================================
 
-
-CPU = torch.device("cpu")
 
 A, B, C = world.KEY_A, world.KEY_B, world.KEY_C
 
@@ -245,103 +233,3 @@ def test_train_val_and_test_read_the_context_through_one_implementation(stage):
         layer = EmbeddingSource(group, masking=config).batch(0).model
 
         assert layer.value_ids[0, :read_back.n_tokens].tolist() == read_back.value_ids.tolist(), group
-
-
-# ============================================================
-# КЛЮЧИ СОБЫТИЯ ПОД МАСКОЙ EVENT
-# ============================================================
-
-
-def masked_event(second_key: int) -> world.Made:
-    """
-    Второе событие закрыто механизмом event целиком; у его второго
-    значения ключ second_key.
-    """
-
-    made = world.make(
-        "h-1",
-        [
-            [(A, [10], False), (B, [11], False)],
-            [(A, [12], True), (second_key, [13], True)],
-            [(A, [15], False)],
-        ],
-        [(A, [20])],
-    )
-
-    reason = ["event" if value == "value" else value for value in made.client.reason]
-
-    return dataclasses.replace(made.client, reason=reason)
-
-
-def encoded(model, one) -> tuple[torch.Tensor, ...]:
-    with torch.no_grad():
-        return model._encode(pack([one], CPU))
-
-
-def test_pack_marks_the_values_of_an_event_masked_event():
-
-    data = pack([masked_event(B)], CPU)
-
-    expected = np.asarray(masked_event(B).reason, dtype=object) == "event"
-
-    assert torch.equal(data.event_masked, torch.as_tensor(expected))
-    assert int(data.event_masked.sum()) == 2
-
-
-def test_with_hidden_keys_the_encoders_do_not_see_the_keys_of_the_masked_event():
-
-    model = world.model().eval()
-
-    visible = [encoded(model, masked_event(key)) for key in (B, C)]
-
-    assert not torch.equal(visible[0][2], visible[1][2]), "без закрытия ключ виден"
-
-    model.hide_event_keys(world.MASK)
-
-    hidden = [encoded(model, masked_event(key)) for key in (B, C)]
-
-    for one, other in zip(*hidden):
-        assert torch.equal(one, other)
-
-
-def test_the_head_is_asked_for_the_key_of_its_target():
-
-    model = world.model().eval()
-    model.hide_event_keys(world.MASK)
-
-    with torch.no_grad():
-        losses = [model(pack([masked_event(key)], CPU)).loss for key in (B, C)]
-
-    assert not torch.equal(losses[0], losses[1])
-
-
-def test_readouts_have_no_masked_event_and_do_not_change():
-
-    model = world.model().eval()
-    plain = world.population("r")[1].client
-
-    with torch.no_grad():
-        before = model.readouts(pack([plain], CPU))
-        model.hide_event_keys(world.MASK)
-        after = model.readouts(pack([plain], CPU))
-
-    for name in before:
-        assert torch.equal(before[name], after[name]), name
-
-
-def test_a_trained_model_loads_with_its_keys_hidden(stage):
-
-    from src.mlm.settings import checkpoint_path
-    from src.mlm.train import load_trained, train
-
-    from tests.test_scheduler import many
-    from tests.test_training_math import every_value, settle, tiny
-
-    settle(stage, train_people=many())
-
-    train(tiny(token_budget=6, hide_event_keys=True), epochs=1, max_steps=None, masking=every_value())
-
-    model, state = load_trained(checkpoint_path(), CPU)
-
-    assert state["config"]["hide_event_keys"] is True
-    assert model.hidden_key == world.MASK

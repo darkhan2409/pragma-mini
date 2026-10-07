@@ -3,14 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 
 from src.preprocessing.artifacts import read_json
 
 from .categorical import load_value_vocab
 from .keyvocab import load_key_vocab
-from .numeric import Bucket, BucketsError, FOUND_BUCKET, load_buckets, locate, read_buckets
+from .numeric import Bucket, BucketsError, Scale, load_buckets, read_buckets
 from .scan import value_text
 from .settings import BPE_FILE, FINAL_VOCAB_FILE, VOCAB_DIR, vocab_path
 from .specials import SPECIAL_TOKENS, load_special_tokens
@@ -185,6 +186,51 @@ def vocabulary_digest(directory: Path | None = None) -> str:
 # ------------------------------------------------------------
 
 
+# Шкала ключа без диапазонов (или условия, которого train не видел):
+# число проверяется, ответ — неизвестное.
+_EMPTY_SCALE = Scale(())
+_NO_SCALE: tuple[str | None, dict[str | None, Scale]] = (None, {None: _EMPTY_SCALE})
+
+
+def _scales_of(artifacts) -> dict[str, tuple[str | None, dict[str | None, Scale]]]:
+    """
+    Ключ -> (split_by, шкала каждого условия) для artifacts.buckets.
+
+    Собирается один раз и запоминается на самом объекте вместе с
+    buckets, из которых собрана: bucket_id по-прежнему читает только
+    buckets, и другой buckets на том же объекте соберёт шкалы заново.
+    Диапазоны условия идут в том же порядке, что в файле; без
+    split_by шкала одна — все диапазоны ключа.
+    """
+
+    memo = vars(artifacts)
+    found = memo.get("_scales")
+
+    if found is not None and found[0] is artifacts.buckets:
+        return found[1]
+
+    out: dict[str, tuple[str | None, dict[str | None, Scale]]] = {}
+
+    for key, buckets in artifacts.buckets.items():
+
+        split = buckets[0].split_by if buckets else None
+
+        if split is None:
+            out[key] = (None, {None: Scale(buckets)})
+            continue
+
+        groups: dict[str | None, list[Bucket]] = {}
+
+        for bucket in buckets:
+            groups.setdefault(bucket.when, []).append(bucket)
+
+        out[key] = (split, {when: Scale(tuple(items)) for when, items in groups.items()})
+
+    memo["_scales"] = (artifacts.buckets, out)
+
+    return out
+
+
 @dataclass
 class FrozenArtifacts:
     """
@@ -203,9 +249,23 @@ class FrozenArtifacts:
     bpe_ids: tuple[int, ...]
     name_of: dict[int, str]
 
+    # Текст -> номера его кусков (encode._text_value_ids): нормализация
+    # и BPE это чистые функции строки, а словарь заморожен.
+    texts: dict[str, tuple[int, ...] | None] = field(default_factory=dict, repr=False, compare=False)
+
     @property
     def size(self) -> int:
         return len(self.vocab)
+
+    @cached_property
+    def encoders(self) -> dict[str, tuple[int, str]]:
+        """
+        Ключ -> (key_id, kind) для всех ключей словаря: то же, что
+        key_id и kind, но одним поиском на значение. Словарь заморожен,
+        поэтому собирается один раз.
+        """
+
+        return {key: (token_id, self.kind(key)) for key, token_id in self.keys.items()}
 
     def special(self, name: str) -> int:
 
@@ -234,7 +294,10 @@ class FrozenArtifacts:
         return "text"
 
     def categorical_id(self, key: str, value: str) -> int | None:
-        return self.values.get(key, {}).get(value)
+
+        values = self.values.get(key)
+
+        return None if values is None else values.get(value)
 
     def bucket_id(self, key: str, value: float, record: dict | None = None) -> int | None:
         """
@@ -245,9 +308,9 @@ class FrozenArtifacts:
         ищется среди диапазонов значения условия в этой записи.
         """
 
-        buckets = self.buckets.get(key, ())
+        split, scales = _scales_of(self).get(key, _NO_SCALE)
 
-        split = buckets[0].split_by if buckets else None
+        condition = None
 
         if split is not None:
 
@@ -257,11 +320,9 @@ class FrozenArtifacts:
             condition = record.get(split)
             condition = None if condition is None else value_text(condition)
 
-            buckets = tuple(bucket for bucket in buckets if bucket.when == condition)
+        bucket = scales.get(condition, _EMPTY_SCALE).locate(value)
 
-        found, bucket = locate(buckets, value)
-
-        return bucket.token_id if found == FOUND_BUCKET and bucket is not None else None
+        return None if bucket is None else bucket.token_id
 
     def piece_id(self, local: int) -> int:
         """

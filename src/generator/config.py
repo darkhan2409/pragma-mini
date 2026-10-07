@@ -878,24 +878,24 @@ class DatasetGroup:
 
 DATASETS: dict[str, DatasetGroup] = {
     "train": DatasetGroup(
-        clients=7000,
+        clients=8500,
         history_start=datetime(2024, 1, 1),
         history_end=datetime(2026, 1, 1),
-        seed=541,
+        seed=561,
         registration_end=datetime(2026, 1, 1),
     ),
     "val": DatasetGroup(
-        clients=1000,
+        clients=1500,
         history_start=datetime(2024, 1, 1),
         history_end=datetime(2026, 5, 1),
-        seed=641,
+        seed=662,
         registration_end=datetime(2026, 5, 1),
     ),
     "test": DatasetGroup(
-        clients=1000,
+        clients=1500,
         history_start=datetime(2024, 1, 1),
         history_end=datetime(2026, 9, 1),
-        seed=741,
+        seed=763,
         registration_end=datetime(2026, 9, 1),
     ),
 }

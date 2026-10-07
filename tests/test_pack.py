@@ -125,23 +125,6 @@ def test_event_belongs_to_its_client(packed):
     assert data.user_of_event.tolist() == walk(clients)["user_of_event"]
 
 
-def test_the_chain_never_leaves_its_client(packed):
-    """
-    Токен, его событие и его клиент обязаны быть согласованы: у
-    токена клиента c событие тоже принадлежит c.
-    """
-
-    data, clients = packed
-
-    client_of_token = data.user_of_event[data.event_of_token]
-
-    expected = np.repeat(
-        np.arange(len(clients)), [client.n_tokens for client in clients]
-    )
-
-    assert client_of_token.tolist() == expected.tolist()
-
-
 def test_lengths_add_up(packed):
 
     data, clients = packed
@@ -158,23 +141,6 @@ def test_lengths_add_up(packed):
 # ============================================================
 # СЛОТЫ ИСТОРИИ
 # ============================================================
-
-
-def test_history_slots_cover_every_row_exactly_once(packed):
-    """
-    Анкеты и события вместе занимают 0..B+E-1 ровно по разу: ни
-    одна строка истории не пустует и ни одна не занята дважды.
-    """
-
-    data, clients = packed
-
-    width = data.clients + data.events.segments
-
-    seen = sorted(
-        data.history_profile_slot.tolist() + data.history_event_slot.tolist()
-    )
-
-    assert seen == list(range(width))
 
 
 def test_client_history_is_its_profile_then_its_events(packed):

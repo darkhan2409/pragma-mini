@@ -149,6 +149,97 @@ def profile_time_log(
     return out.tolist()
 
 
+def time_logs(starts: np.ndarray, moments: np.ndarray, cutoff: datetime | None) -> np.ndarray | None:
+    """
+    time_log всех клиентов группы строк разом. moments — event_time
+    подряд целыми микросекундами UTC, starts — границы клиентов
+    (n + 1 смещение).
+
+    Значения те же, что у time_log: расстояние считается целыми
+    микросекундами, а log_age — по свежему массиву каждого клиента,
+    как там. None — у кого-то события не по времени или позже cutoff:
+    ошибку назовёт time_log по клиентам.
+    """
+
+    out = np.empty(moments.size, dtype=np.float32)
+
+    anchor = None if cutoff is None else int(_utc_naive([cutoff])[0].astype(np.int64))
+
+    for first, last in zip(starts[:-1].tolist(), starts[1:].tolist()):
+
+        if first == last:
+            continue
+
+        own = moments[first:last]
+
+        if own.size > 1 and bool((own[1:] < own[:-1]).any()):
+            return None
+
+        delta = (int(own[-1]) if anchor is None else anchor) - own
+
+        if int(delta.min()) < 0:
+            return None
+
+        out[first:last] = log_age(delta).astype(np.float32)
+
+    return out
+
+
+def profile_time_logs(starts: np.ndarray, moments: np.ndarray, dated: np.ndarray,
+                      cutoff: datetime) -> np.ndarray | None:
+    """
+    profile_time_log всех клиентов разом: moments — время токенов
+    анкеты целыми микросекундами UTC, dated — у кого оно есть. None —
+    веха не раньше cutoff: ошибку назовёт profile_time_log.
+    """
+
+    out = np.zeros(moments.size, dtype=np.float32)
+
+    anchor = int(_utc_naive([cutoff])[0].astype(np.int64))
+
+    for first, last in zip(starts[:-1].tolist(), starts[1:].tolist()):
+
+        where = np.flatnonzero(dated[first:last]) + first
+
+        if where.size == 0:
+            continue
+
+        delta = anchor - moments[where]
+
+        if int(delta.min()) <= 0:
+            return None
+
+        out[where] = log_age(delta).astype(np.float32)
+
+    return out
+
+
+def checks_hold(starts: np.ndarray, positions: np.ndarray, anchor: str) -> bool:
+    """
+    Условия check у всех клиентов разом. False — пусть check по
+    клиентам назовёт нарушение.
+    """
+
+    if not bool(np.isfinite(positions).all()) or bool((positions < 0.0).any()):
+        return False
+
+    # Внутри клиента позиции не растут; на границе клиентов — можно.
+    rising = positions[1:] > positions[:-1]
+
+    inner = starts[1:-1]
+    rising[inner[(inner > 0) & (inner < positions.size)] - 1] = False
+
+    if bool(rising.any()):
+        return False
+
+    if anchor == "last_event":
+        ends = starts[1:][starts[1:] > starts[:-1]] - 1
+        if bool((positions[ends] != 0.0).any()):
+            return False
+
+    return True
+
+
 def check(client_id: str, event_time_log: list[float], n_events: int, anchor: str) -> None:
     """
     Инварианты временных позиций при точке отсчёта anchor.
@@ -214,7 +305,10 @@ __all__ = [
     "TemporalError",
     "check",
     "check_profile",
+    "checks_hold",
     "log_age",
     "profile_time_log",
+    "profile_time_logs",
     "time_log",
+    "time_logs",
 ]

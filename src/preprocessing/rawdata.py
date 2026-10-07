@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.json as pj
@@ -173,6 +174,148 @@ class RawContractError(ValueError):
     RAW не соответствует контракту: нет файла, ключа манифеста,
     неверная версия схемы.
     """
+
+
+# Момент события в слое: микросекунды UTC.
+TIMESTAMP_UTC = pa.timestamp("us", tz="UTC")
+
+# Строгая запись времени — та, что пишет генератор: секунды, при
+# миллисекундах три знака, смещение ±ЧЧ:ММ. ASCII фиксированной длины:
+# ГГГГ-ММ-ДДTчч:мм:сс±ЧЧ:ММ (25 байт) или ГГГГ-ММ-ДДTчч:мм:сс.мсс±ЧЧ:ММ (29).
+_SHORT_TIME, _LONG_TIME = 25, 29
+
+_MONTH_DAYS = np.array([0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31], dtype=np.int64)
+
+
+def _digits(block: np.ndarray, positions: list[int]) -> np.ndarray:
+    """Число из цифр block в позициях positions (по строкам)."""
+    value = np.zeros(block.shape[0], dtype=np.int64)
+    for position in positions:
+        value = value * 10 + (block[:, position].astype(np.int64) - 48)
+    return value
+
+
+def strict_event_times(column: pa.Array | pa.ChunkedArray) -> pa.Array | None:
+    """
+    Моменты колонки event_time в UTC одним векторным разбором — или
+    None, если хоть одна строка не в строгой записи или с недопустимым
+    значением. Тогда колонку разбирает parse_event_time построчно, с
+    той же ошибкой, что и раньше.
+
+    Принимается только то, что parse_event_time принимает с тем же
+    моментом: строгая запись, месяц, день месяца с учётом високосных
+    лет, час до 23, минута и секунда до 59, смещение до 23:59 и годы
+    1900–2200 (у крайних лет перевод в UTC в Python переполняется).
+    Всё прочее — даже допустимое для fromisoformat, например 24:00, —
+    уходит на построчный разбор.
+
+    Разбор идёт по байтам буфера строк: запись строгого вида — ASCII
+    фиксированной длины, и проверка цифр и разделителей по позициям
+    равносильна проверке по символам.
+    """
+
+    if isinstance(column, pa.ChunkedArray):
+        column = column.combine_chunks()
+
+    count = len(column)
+
+    if count == 0:
+        return pa.array([], TIMESTAMP_UTC)
+
+    if column.null_count or not pa.types.is_string(column.type):
+        return None
+
+    offsets = np.frombuffer(column.buffers()[1], dtype=np.int32)[column.offset: column.offset + count + 1]
+    data = np.frombuffer(column.buffers()[2], dtype=np.uint8) if column.buffers()[2] is not None else np.zeros(0, np.uint8)
+
+    starts = offsets[:-1].astype(np.int64)
+    lengths = np.diff(offsets).astype(np.int64)
+
+    long = lengths == _LONG_TIME
+
+    if not bool(((lengths == _SHORT_TIME) | long).all()):
+        return None
+
+    # Первые 19 байт (дата и время) и последние 6 (смещение) у обеих
+    # длин на своих местах; миллисекунды — байты 19..22 длинной записи.
+    if bool((lengths == lengths[0]).all()) and bool((starts == starts[0] + lengths[0] * np.arange(count)).all()):
+        # Все записи одной длины и лежат подряд: буфер — матрица байтов
+        # без копии.
+        block = data[starts[0]: starts[0] + lengths[0] * count].reshape(count, int(lengths[0]))
+        head, tail = block[:, :19], block[:, -6:]
+        middle = block[:, 19:23] if lengths[0] == _LONG_TIME else block[:, 15:19]
+    else:
+        # Длины вперемешку: байты собираются по индексам кусками, чтобы
+        # матрица индексов не росла с группой строк.
+        parts = [[], [], []]
+        for lo in range(0, count, 1 << 16):
+            begin, size = starts[lo: lo + (1 << 16)], lengths[lo: lo + (1 << 16)]
+            parts[0].append(data[begin[:, None] + np.arange(19)])
+            parts[1].append(data[(begin + size - 6)[:, None] + np.arange(6)])
+            parts[2].append(data[begin[:, None] + np.minimum(np.arange(19, 23), size[:, None] - 1)])
+        head, tail, middle = (np.concatenate(item) for item in parts)
+
+    def is_digit(block: np.ndarray) -> np.ndarray:
+        return ((block >= 48) & (block <= 57)).all(axis=1)
+
+    shape = (
+        is_digit(head[:, [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18]])
+        & (head[:, 4] == 45) & (head[:, 7] == 45) & (head[:, 10] == 84)
+        & (head[:, 13] == 58) & (head[:, 16] == 58)
+        & ((tail[:, 0] == 43) | (tail[:, 0] == 45)) & (tail[:, 3] == 58)
+        & is_digit(tail[:, [1, 2, 4, 5]])
+        & np.where(long, (middle[:, 0] == 46) & is_digit(middle[:, 1:4]), True)
+    )
+
+    if not bool(shape.all()):
+        return None
+
+    year, month, day = _digits(head, [0, 1, 2, 3]), _digits(head, [5, 6]), _digits(head, [8, 9])
+    hour, minute, second = _digits(head, [11, 12]), _digits(head, [14, 15]), _digits(head, [17, 18])
+    millis = np.where(long, _digits(middle, [1, 2, 3]), 0)
+
+    sign = np.where(tail[:, 0] == 45, -1, 1)
+    offset_hours, offset_minutes = _digits(tail, [1, 2]), _digits(tail, [4, 5])
+
+    leap = (year % 4 == 0) & ((year % 100 != 0) | (year % 400 == 0))
+    month_ok = (month >= 1) & (month <= 12)
+    days_in_month = _MONTH_DAYS[np.where(month_ok, month, 0)] + ((month == 2) & leap)
+
+    valid = (
+        (year >= 1900) & (year <= 2200) & month_ok
+        & (day >= 1) & (day <= days_in_month)
+        & (hour <= 23) & (minute <= 59) & (second <= 59)
+        & (offset_hours <= 23) & (offset_minutes <= 59)
+    )
+
+    if not bool(valid.all()):
+        return None
+
+    # Дни от 1970-01-01 по григорианскому календарю (days_from_civil).
+    shifted = year - (month <= 2)
+    era = shifted // 400
+    year_of_era = shifted - era * 400
+    day_of_year = (153 * (month + np.where(month > 2, -3, 9)) + 2) // 5 + day - 1
+    day_of_era = year_of_era * 365 + year_of_era // 4 - year_of_era // 100 + day_of_year
+    days = era * 146097 + day_of_era - 719468
+
+    seconds = days * 86400 + hour * 3600 + minute * 60 + second - sign * (offset_hours * 3600 + offset_minutes * 60)
+
+    return pa.array(seconds * 1_000_000 + millis * 1000, TIMESTAMP_UTC)
+
+
+def event_times(column: pa.Array | pa.ChunkedArray) -> pa.Array:
+    """
+    Моменты колонки event_time в UTC: векторно, а если запись не
+    строгая — построчно parse_event_time, с теми же ошибками.
+    """
+
+    fast = strict_event_times(column)
+
+    if fast is not None:
+        return fast
+
+    return pa.array([parse_event_time(text) for text in column.to_pylist()], TIMESTAMP_UTC)
 
 
 # ============================================================
@@ -774,8 +917,11 @@ def check_raw(raw_dir: Path) -> "RawDataset":
 
         client_id = chunk.column("client_id")
 
+        # or_kleene, а не or_: у null правая часть тоже null, и обычное
+        # «или» давало null вместо истины — пустой client_id проходил
+        # проверку и всплывал только в canonical.
         empty = pc.indices_nonzero(
-            pc.or_(pc.is_null(client_id), pc.equal(pc.utf8_trim_whitespace(client_id), ""))
+            pc.or_kleene(pc.is_null(client_id), pc.equal(pc.utf8_trim_whitespace(client_id), ""))
         ).to_pylist()
 
         if empty:
@@ -783,12 +929,14 @@ def check_raw(raw_dir: Path) -> "RawDataset":
 
         # Время разбирается сразу здесь: нечитаемая строка или
         # запись без смещения останавливает этап до того, как
-        # хоть что-то будет записано.
-        for index, text in enumerate(chunk.column("event_time").to_pylist()):
-            try:
-                parse_event_time(text)
-            except RawContractError as error:
-                _fail(f"events.parquet, строка {offset + index}: {error}")
+        # хоть что-то будет записано. Строгая запись проверяется
+        # векторно; иначе — построчно, с номером первой плохой строки.
+        if strict_event_times(chunk.column("event_time")) is None:
+            for index, text in enumerate(chunk.column("event_time").to_pylist()):
+                try:
+                    parse_event_time(text)
+                except RawContractError as error:
+                    _fail(f"events.parquet, строка {offset + index}: {error}")
 
         unknown = sorted(
             {
@@ -810,8 +958,11 @@ def check_raw(raw_dir: Path) -> "RawDataset":
         offset += rows
 
     # --- профиль: одна строка на клиента ---
+    #
+    # Профиль читается один раз на обе проверки.
+    profile = raw.read("profile", columns=["client_id", "as_of", "lifelong", "employment"])
 
-    holders = raw.read("profile", columns=["client_id"]).column("client_id")
+    holders = profile.column("client_id")
 
     empty = pc.indices_nonzero(pc.is_null(holders)).to_pylist()
 
@@ -830,12 +981,12 @@ def check_raw(raw_dir: Path) -> "RawDataset":
             + "); профиль это одна итоговая строка на клиента"
         )
 
-    _check_profile_moments(raw, manifest)
+    _check_profile_moments(profile, manifest)
 
     return raw
 
 
-def _check_profile_moments(raw: "RawDataset", manifest: RawManifest) -> None:
+def _check_profile_moments(table: pa.Table, manifest: RawManifest) -> None:
     """
     Момент снимка и вехи анкеты.
 
@@ -848,8 +999,6 @@ def _check_profile_moments(raw: "RawDataset", manifest: RawManifest) -> None:
     """
 
     columns = ("client_id", "as_of", "lifelong", "employment")
-
-    table = raw.read("profile", columns=list(columns))
 
     boundary = manifest.period_end
 
@@ -931,19 +1080,6 @@ def _check_employment(where: str, as_of: datetime, items: list | None) -> None:
         _fail(f"{where}: записи о работе не по времени")
 
 
-def iter_event_types(table: pa.Table) -> Iterator[tuple[str, pa.Table]]:
-    """
-    Строки row group по типам событий, в порядке первого
-    появления типа. Порядок строк внутри типа сохраняется.
-    """
-
-    types = event_types_of(table.column("payload"))
-
-    for event_type in pc.unique(types).to_pylist():
-        mask = pc.equal(types, event_type) if event_type is not None else pc.is_null(types)
-        yield event_type, table.filter(mask)
-
-
 __all__ = [
     "DTYPE_MAP",
     "ENVELOPE_SCHEMA",
@@ -959,9 +1095,11 @@ __all__ = [
     "SourceInfo",
     "TABLE_FILES",
     "TYPE_KEY",
+    "TIMESTAMP_UTC",
     "check_raw",
+    "event_times",
     "event_types_of",
-    "iter_event_types",
     "parse_payloads",
     "read_manifest",
+    "strict_event_times",
 ]

@@ -683,16 +683,7 @@ def load_trained(path: Path, device, attention_backend: str | None = None):
     if config.usr_aux_weight > 0.0:
         attach_recent(model, config)
 
-    if config.recency_embedding:
-        attach_recency(model, config)
-
     model.load_state_dict(state["model_state_dict"])
-
-    if config.restricted_softmax:
-        restrict(model)
-
-    if config.hide_event_keys:
-        hide_keys(model)
 
     return model.eval(), state
 
@@ -710,56 +701,15 @@ def attach_recent(model, config: MlmConfig) -> None:
     model.attach_recent(recent_types(FrozenArtifacts.load(), int(model.embedding.dim), config.seed + 1))
 
 
-def attach_recency(model, config: MlmConfig) -> None:
-    """
-    Давность события слагаемым перед энкодером истории. Свой seed —
-    seed головы плюс два: остальные веса от неё не зависят.
-    """
-
-    from .model import RecencyEmbedding
-
-    model.attach_recency(RecencyEmbedding(int(model.embedding.dim), config.seed + 2))
-
-
-def hide_keys(model) -> None:
-    """
-    Ключи событий под маской event закрываются тем же [MASK], что и
-    их значения.
-    """
-
-    from src.tokenization.specials import MASK, load_special_tokens
-
-    model.hide_event_keys(load_special_tokens()[MASK])
-
-
-def restrict(model) -> None:
-    """
-    Кандидаты значения по ключу из текущего словаря — тем же, под
-    который модель собрана (его отпечаток сверен при загрузке).
-    """
-
-    from src.tokenization.finalvocab import FrozenArtifacts
-
-    from .model import candidate_table
-
-    model.restrict(*candidate_table(FrozenArtifacts.load()))
-
-
 def train_source(config: MlmConfig, masking: MaskingConfig, epoch: int):
     """
-    Источник train эпохи: её маска и, с shuffle_row_groups, её
-    перестановка групп строк. Одна и та же эпоха даёт тот же
+    Источник train эпохи: её маска. Одна и та же эпоха даёт тот же
     поток — на этом стоят resume и горизонт cosine.
     """
 
     from .inputs import Source
 
-    source = Source("train", masking=for_epoch(masking, epoch))
-
-    if config.shuffle_row_groups:
-        source.shuffle(stable_hash("order", config.seed, epoch) % (2 ** 31))
-
-    return source
+    return Source("train", masking=for_epoch(masking, epoch))
 
 
 def for_epoch(masking: MaskingConfig, epoch: int) -> MaskingConfig:
@@ -806,22 +756,17 @@ def horizon(config: MlmConfig, masking: MaskingConfig, epochs: int) -> int:
 
     Число micro-batch'ей эпохи считается по длинам клиентов, без
     масок и модели: разбиение от маски не зависит. Окно без целей
-    шага не делает, поэтому это верхняя оценка. С перестановкой
-    групп строк упаковка у каждой эпохи своя, и эпохи считаются
-    по одной.
+    шага не делает, поэтому это верхняя оценка. Порядок групп строк
+    у всех эпох один, поэтому шагов у каждой эпохи столько же, сколько
+    у первой.
     """
 
     from .inputs import micro_batches
 
-    def steps(epoch: int) -> int:
-        sizes = train_source(config, masking, epoch).sizes()
-        count = sum(1 for _ in micro_batches(sizes, config.token_budget))
-        return math.ceil(count / config.grad_accum_steps)
+    sizes = train_source(config, masking, 1).sizes()
+    count = sum(1 for _ in micro_batches(sizes, config.token_budget))
 
-    if not config.shuffle_row_groups:
-        return steps(1) * epochs
-
-    return sum(steps(epoch) for epoch in range(1, epochs + 1))
+    return math.ceil(count / config.grad_accum_steps) * epochs
 
 
 def resumed_horizon(state: dict, path: Path) -> tuple[int, int]:
@@ -1024,17 +969,8 @@ def train(
             "attention_backend=sdpa"
         ) from error
 
-    if config.restricted_softmax:
-        restrict(model)
-
-    if config.hide_event_keys:
-        hide_keys(model)
-
     if config.usr_aux_weight > 0.0:
         attach_recent(model, config)
-
-    if config.recency_embedding:
-        attach_recency(model, config)
 
     # Модель целиком на устройстве и учится целиком: таблица
     # эмбеддингов, три энкодера и голова.
@@ -1714,9 +1650,7 @@ __all__ = [
     "lr_factor",
     "main",
     "origin_problems",
-    "attach_recency",
     "attach_recent",
-    "restrict",
     "resumed_horizon",
     "run_training",
     "save_checkpoint",

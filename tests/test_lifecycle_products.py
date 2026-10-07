@@ -16,9 +16,9 @@ from src.generator.world import products as catalog_module
 # совпадать с каталогом генератора — иначе дебетовая или премиальная
 # карта незаметно выпала бы из правил CORE и Loyal.
 #
-# Отдельно: этапы PRAGMA не читают truth/ — служебную правду генератора
-# для оценки (CLAUDE.md), а стадии CAPP не использует ни PRAGMA, ни
-# генератор: стадия — разрез результата, не вход и не цель.
+# Отдельно: стадии CAPP не использует ни PRAGMA, ни генератор: стадия —
+# разрез результата, не вход и не цель. Что truth/ никто вне генератора
+# не читает, проверяет tests/test_generator_isolation.py.
 # ============================================================
 
 
@@ -51,19 +51,6 @@ def test_the_lifecycle_product_reference_matches_the_generator_catalog():
     assert products.families() == generator
     assert products.PREMIUM <= set(generator)
     assert {generator[item] for item in products.PREMIUM} == {products.DEBIT_CARD}
-
-
-def test_pragma_stages_never_read_truth():
-
-    pattern = re.compile(r"""["'/]truth\b""")
-
-    offenders = [
-        str(path.relative_to(ROOT))
-        for path in sorted((ROOT / "src").rglob("*.py"))
-        if not path.is_relative_to(ROOT / "src" / "generator") and pattern.search(path.read_text(encoding="utf-8"))
-    ]
-
-    assert offenders == []
 
 
 def test_pragma_and_the_generator_never_use_the_lifecycle():

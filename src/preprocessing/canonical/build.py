@@ -3,10 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-import pyarrow.compute as pc
-
 from ..artifacts import TableWriter
-from ..rawdata import RawDataset, check_raw
+from ..rawdata import check_raw
 from ..settings import PreprocessingConfig
 from .events import build_batch, canonical_schema, iter_client_batches
 from .schema import payload_columns
@@ -111,7 +109,12 @@ def build_group(
         zip(profile.column("client_id").to_pylist(), profile.column("lifelong").to_pylist())
     )
 
-    for batch in iter_client_batches(raw, config.batch_clients):
+    # Клиенты ленты собираются обходом пачек (им же проверяется, что
+    # клиент не разорван): отдельного прохода по файлу ради числа
+    # клиентов нет.
+    events_clients: set = set()
+
+    for batch in iter_client_batches(raw, config.batch_clients, events_clients):
 
         result = build_batch(raw, config, batch, payload_names, schema, milestones)
 
@@ -119,28 +122,13 @@ def build_group(
 
     events_rows = events_writer.close()
 
+    # Клиенты выгрузки: и те, у кого есть события, и те, у кого есть
+    # только анкета. В файл список не пишется: это число для терминала.
     return CanonicalResult(
         outputs=[out_dir / EVENTS_FILE],
         events_rows=events_rows,
-        clients=len(_clients(raw)),
+        clients=len(events_clients | milestones.keys()),
     )
-
-
-def _clients(raw: RawDataset) -> set[str]:
-    """
-    Клиенты выгрузки: и те, у кого есть события, и те, у кого
-    есть только анкета. В файл список не пишется: это число
-    для терминала.
-    """
-
-    ids: set[str] = set()
-
-    ids.update(raw.read("profile", ["client_id"]).column("client_id").to_pylist())
-
-    for _, chunk in raw.iter_row_groups("events", ["client_id"]):
-        ids.update(pc.unique(chunk.column("client_id")).to_pylist())
-
-    return ids
 
 
 def _clear(out_dir: Path) -> None:

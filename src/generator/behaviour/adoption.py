@@ -73,6 +73,66 @@ class EligibilityError(Exception):
     """Каталог требует условия, которого генератор не проверяет."""
 
 
+@dataclass(frozen=True)
+class _Requirements:
+    min_age: int
+    max_age: int | None
+    requires_app: bool
+    requires_pension: bool
+    requires_children: bool
+    requires_loan: bool
+    min_assets: int | None
+    min_existing_loans: int
+    income_months: int
+    min_amount: int
+    regions: object
+
+
+# Условия версии читаются из её eligibility один раз: eligible
+# спрашивают миллионы раз за прогон, а условия версии не меняются.
+# Ключ — id версии, рядом сама версия: id переиспользуется только
+# после её смерти, а версии живут в каталоге.
+_REQUIREMENTS: dict[int, tuple] = {}
+
+
+def _requirements(view: ProductView, version: Version) -> _Requirements:
+
+    hit = _REQUIREMENTS.get(id(version))
+
+    if hit is not None and hit[0] is version:
+        return hit[1]
+
+    eligibility = version.eligibility or {}
+
+    unknown = sorted(set(eligibility) - SUPPORTED_ELIGIBILITY)
+
+    if unknown:
+        raise EligibilityError(
+            f"{view.code}: условие {unknown} объявлено в каталоге, но не проверяется"
+        )
+
+    max_age = eligibility.get("max_age")
+    min_assets = eligibility.get("min_assets")
+
+    requirements = _Requirements(
+        min_age=int(eligibility.get("min_age", 0)),
+        max_age=None if max_age is None else int(max_age),
+        requires_app=bool(eligibility.get("requires_app")),
+        requires_pension=bool(eligibility.get("requires_pension")),
+        requires_children=bool(eligibility.get("requires_children")),
+        requires_loan=bool(eligibility.get("requires_loan")),
+        min_assets=int(min_assets) if min_assets else None,
+        min_existing_loans=int(eligibility.get("min_existing_loans", 0)),
+        income_months=int(eligibility.get("income_months", 0)),
+        min_amount=int(eligibility.get("min_amount", 0)),
+        regions=eligibility.get("regions"),
+    )
+
+    _REQUIREMENTS[id(version)] = (version, requirements)
+
+    return requirements
+
+
 def eligible(
     persona: Persona,
     view: ProductView,
@@ -109,55 +169,48 @@ def eligible(
     if active_contracts >= rules["max_active_contracts"]:
         return False
 
-    eligibility = version.eligibility or {}
+    need = _requirements(view, version)
 
-    unknown = sorted(set(eligibility) - SUPPORTED_ELIGIBILITY)
-
-    if unknown:
-        raise EligibilityError(
-            f"{view.code}: условие {unknown} объявлено в каталоге, но не проверяется"
-        )
-
-    if age < int(eligibility.get("min_age", 0)):
+    if age < need.min_age:
         return False
 
-    if eligibility.get("max_age") is not None and age > int(eligibility["max_age"]):
+    if need.max_age is not None and age > need.max_age:
         return False
 
-    if eligibility.get("requires_app") and not has_app:
+    if need.requires_app and not has_app:
         return False
 
-    if eligibility.get("requires_pension") and not persona.is_pensioner_at(ts):
+    if need.requires_pension and not persona.is_pensioner_at(ts):
         return False
 
-    if eligibility.get("requires_children") and persona.children <= 0:
+    if need.requires_children and persona.children <= 0:
         return False
 
-    if eligibility.get("requires_loan") and open_loans <= 0:
+    if need.requires_loan and open_loans <= 0:
         return False
 
-    if eligibility.get("min_assets") and assets < int(eligibility["min_assets"]):
+    if need.min_assets is not None and assets < need.min_assets:
         return False
 
     # Рефинансируют НЕСКОЛЬКО кредитов в один. Раньше здесь
     # стояла та же проверка, что и у requires_loan, и человек с
     # единственным кредитом получал рефинансирование — то есть
     # ровно то, чего условие не разрешает.
-    if open_loans < int(eligibility.get("min_existing_loans", 0)):
+    if open_loans < need.min_existing_loans:
         return False
 
     # Стаж подтверждаемого дохода. Раньше вместо него стоял срок
     # отношений с банком, и это разные вещи: клиент мог держать
     # здесь счёт пять лет, а работу найти вчера.
-    if income_months < int(eligibility.get("income_months", 0)):
+    if income_months < need.income_months:
         return False
 
     # Минимальная сумма договора: продукт с порогом не открывают
     # на сумму ниже порога.
-    if amount is not None and amount < int(eligibility.get("min_amount", 0)):
+    if amount is not None and amount < need.min_amount:
         return False
 
-    regions = eligibility.get("regions")
+    regions = need.regions
 
     if regions and persona.region not in regions and persona.settlement not in regions:
         return False
@@ -192,21 +245,21 @@ def eligible(
     # --- общие правила банка ---
 
     if view.family == "debit_card":
+        catalog = product_catalog.catalog()
         cards = sum(
             count
             for code, count in held_families.items()
-            if product_catalog.catalog().has(code)
-            and product_catalog.catalog().view(code).family == "debit_card"
+            if catalog.has(code) and catalog.view(code).family == "debit_card"
         )
         if cards >= rules["max_debit_cards_total"]:
             return False
 
     if view.family == "cash_loan":
+        catalog = product_catalog.catalog()
         loans = sum(
             count
             for code, count in held_families.items()
-            if product_catalog.catalog().has(code)
-            and product_catalog.catalog().view(code).family == "cash_loan"
+            if catalog.has(code) and catalog.view(code).family == "cash_loan"
         )
         if loans >= rules["max_active_cash_loans"]:
             return False
@@ -244,6 +297,51 @@ def adoption_curve(view: ProductView, ts: datetime) -> float:
     return float(min(1.0, base + (1.0 - base) * min(1.0, elapsed / ramp)))
 
 
+# Что о продукте зависит только от момента — продаётся ли он, какая
+# версия, базовый вес и кривая принятия, возраст версии, — одинаково у
+# всех клиентов, кого спрашивают на этот момент: планы дня всех
+# клиентов сообщества спрашивают на полночь. Кэш на один момент;
+# сбрасывается со сменой момента, каталога или параметров.
+_OFFERABLE: list = [None, None, None, ()]
+
+
+def _offerable(ts: datetime) -> tuple:
+
+    catalog = product_catalog.catalog()
+    settings = params_module.active()
+
+    if _OFFERABLE[0] is catalog and _OFFERABLE[1] is settings and _OFFERABLE[2] == ts:
+        return _OFFERABLE[3]
+
+    rates = settings.products.adoption["base_rate_per_year"]
+
+    rows = []
+
+    for view in catalog.views.values():
+
+        if view.family == "service":
+            continue
+
+        if not view.sellable_at(ts):
+            continue
+
+        version = view.version_at(ts)
+
+        base = float(rates.get(view.family, 0.1))
+
+        rows.append((
+            view,
+            version,
+            base,
+            adoption_curve(view, ts) if base > 0.0 else 0.0,
+            (ts - view.version_start(version)).days,
+        ))
+
+    _OFFERABLE[:] = [catalog, settings, ts, tuple(rows)]
+
+    return _OFFERABLE[3]
+
+
 def candidates(
     persona: Persona,
     ts: datetime,
@@ -260,22 +358,11 @@ def candidates(
     Продукты, которые сейчас можно предложить клиенту.
     """
 
-    settings = params_module.active().products
-    adoption = settings.adoption
-
-    catalog = product_catalog.catalog()
+    adoption = params_module.active().products.adoption
 
     result: list[Candidate] = []
 
-    for view in catalog.views.values():
-
-        if view.family == "service":
-            continue
-
-        if not view.sellable_at(ts):
-            continue
-
-        version = view.version_at(ts)
+    for view, version, base, curve, row_age in _offerable(ts):
 
         if not eligible(
             persona, view, version, ts, held_codes, held_families,
@@ -283,12 +370,12 @@ def candidates(
         ):
             continue
 
-        weight = float(adoption["base_rate_per_year"].get(view.family, 0.1))
+        weight = base
 
         if weight <= 0.0:
             continue
 
-        weight *= adoption_curve(view, ts)
+        weight *= curve
 
         trait_rule = adoption.get("trait_factor", {}).get(view.family)
 
@@ -306,8 +393,6 @@ def candidates(
 
         # Ранние последователи: цифровые клиенты берут новинки
         # раньше остальных.
-        row_age = (ts - view.version_start(version)).days
-
         if row_age < 180:
             weight *= 1.0 + (adoption.get("early_adopter_digital_factor", 2.0) - 1.0) * persona.trait(
                 "digital_affinity", ts

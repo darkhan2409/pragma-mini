@@ -77,15 +77,17 @@ def value_type(value: object) -> str:
     raise ScanError(f"значение типа {type(value).__name__} смысловым слоем не объявлено: {value!r}")
 
 
-def value_text(value: object) -> str:
+def value_text(value: object, kind: str | None = None) -> str:
     """
     Запись значения, по которой оно хранится и сравнивается.
 
     Обратима внутри своего типа: float через repr, булево
-    словом, всё остальное как есть.
+    словом, всё остальное как есть. kind — уже известный
+    value_type(value), чтобы не определять его второй раз.
     """
 
-    kind = value_type(value)
+    if kind is None:
+        kind = value_type(value)
 
     if kind == TYPE_BOOL:
         return "true" if value else "false"
@@ -265,20 +267,32 @@ class FitStatistics:
 
 def _note_key(stats: FitStatistics, key: str, kind: str, client_id: str) -> None:
 
-    counter = stats.key_counter(key)
+    counter = stats.key_counts.get(key)
+
+    if counter is None:
+        counter = stats.key_counts[key] = KeyCounter()
+
     counter.events += 1
 
     if counter.last_client != client_id:
         counter.last_client = client_id
         counter.clients += 1
 
-    stats.key_types.setdefault(key, set()).add(kind)
+    kinds = stats.key_types.get(key)
+
+    if kinds is None:
+        kinds = stats.key_types[key] = set()
+
+    kinds.add(kind)
 
 
-def _add_categorical(stats: FitStatistics, key: str, value: object, client_id: str) -> None:
+def _add_categorical(stats: FitStatistics, key: str, value: object, client_id: str,
+                     kind: str | None = None) -> None:
 
-    kind = value_type(value)
-    entry_key = (key, kind, value_text(value))
+    if kind is None:
+        kind = value_type(value)
+
+    entry_key = (key, kind, value_text(value, kind))
 
     entry = stats.categorical.get(entry_key)
 
@@ -323,9 +337,10 @@ def _add_text(stats: FitStatistics, key: str, value: object, client_id: str) -> 
 
 
 def _add_numeric(stats: FitStatistics, key: str, value: object, unit: str, client_id: str,
-                 sample_k: int, distinct_cap: int) -> None:
+                 sample_k: int, distinct_cap: int, kind: str | None = None) -> None:
 
-    kind = value_type(value)
+    if kind is None:
+        kind = value_type(value)
 
     if kind not in (TYPE_INT, TYPE_FLOAT):
         raise ScanError(f"ключ {key} объявлен числом, а значение пришло как {kind}: {value!r}")
@@ -386,10 +401,14 @@ def scan(
 
             stats.event_types[event_type] = stats.event_types.get(event_type, 0) + 1
 
-            values = event.model_values()
+            # Значения события только читаются: копия, которую отдаёт
+            # model_values, здесь не нужна (tests/test_tokenizer_fit_scan.py).
+            values = event.values
 
             unit_prefix = f"{client_id}\x1f{number}\x1f"
 
+            # Порядок ключей на артефакты не влияет, но решает, какую из
+            # нескольких ошибок одного события scan назовёт первой.
             for key, value in sorted(values.items()):
 
                 info = schema.keys.get(key)
@@ -400,10 +419,12 @@ def scan(
 
                 stats.values += 1
 
-                _note_key(stats, key, value_type(value), client_id)
+                kind = value_type(value)
+
+                _note_key(stats, key, kind, client_id)
 
                 if info.value_kind == NUMERIC:
-                    _add_numeric(stats, key, value, unit_prefix + key, client_id, sample_k, distinct_cap)
+                    _add_numeric(stats, key, value, unit_prefix + key, client_id, sample_k, distinct_cap, kind)
                     if key in splits:
                         condition = values.get(splits[key])
                         name = (key, None if condition is None else value_text(condition))
@@ -411,7 +432,7 @@ def scan(
                             float(value), unit_prefix + key, client_id
                         )
                 elif info.value_kind == CATEGORICAL:
-                    _add_categorical(stats, key, value, client_id)
+                    _add_categorical(stats, key, value, client_id, kind)
                 elif info.value_kind == TEXT:
                     _add_text(stats, key, value, client_id)
                 else:

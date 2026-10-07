@@ -224,8 +224,10 @@ def model_event(row: dict) -> ModelEvent:
 
     fields: dict = {EVENT_TYPE_FIELD: row[EVENT_TYPE_FIELD]}
 
+    get = row.get
+
     for name in SEMANTIC_PAYLOAD_FIELDS:
-        value = row.get(name)
+        value = get(name)
         if value is not None:
             fields[name] = value
 

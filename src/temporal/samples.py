@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -12,7 +13,15 @@ from src.dataset.lineage import lineage
 from src.preprocessing.artifacts import read_json
 from src.dataset.settings import META_FILE, SAMPLES_FILE, TIME_ANCHORS, dataset_dir
 
-from .position import check, check_profile, profile_time_log, time_log
+from .position import (
+    check,
+    check_profile,
+    checks_hold,
+    profile_time_log,
+    profile_time_logs,
+    time_log,
+    time_logs,
+)
 
 
 # ============================================================
@@ -219,27 +228,91 @@ class TemporalGroup(SamplesGroup):
 
         if events:
 
-            positions = []
+            # Вся группа строк массивами; что-то не сошлось — обход по
+            # клиентам называет ошибку (он же и считает, если вдруг не
+            # она).
+            flat = _flat_moments(table.column("event_time"))
 
-            for client_id, moments in zip(clients, table.column("event_time").to_pylist()):
-                value = time_log(client_id, moments, cutoff)
-                check(client_id, value, len(moments), self.anchor)
-                positions.append(value)
+            values = None
 
-            table = table.append_column(TIME_LOG, pa.array(positions, type=TIME_LOG.type))
+            if flat is not None and bool(flat[2].all()):
+                starts, moments, _ = flat
+                values = time_logs(starts, moments, cutoff)
+                if values is not None and not checks_hold(starts, values, self.anchor):
+                    values = None
+
+            if values is not None:
+                column = pa.ListArray.from_arrays(pa.array(starts, type=pa.int32()), pa.array(values))
+
+            else:
+
+                positions = []
+
+                for client_id, moments in zip(clients, table.column("event_time").to_pylist()):
+                    value = time_log(client_id, moments, cutoff)
+                    check(client_id, value, len(moments), self.anchor)
+                    positions.append(value)
+
+                column = pa.array(positions, type=TIME_LOG.type)
+
+            table = table.append_column(TIME_LOG, column)
 
         if profile:
 
-            ages = []
+            flat = _flat_moments(table.column("profile_time"))
 
-            for client_id, times in zip(clients, table.column("profile_time").to_pylist()):
-                value = profile_time_log(client_id, times, self.cutoff)
-                check_profile(client_id, value, times)
-                ages.append(value)
+            values = None
 
-            table = table.append_column(PROFILE_TIME_LOG, pa.array(ages, type=PROFILE_TIME_LOG.type))
+            if flat is not None:
+                starts, moments, dated = flat
+                values = profile_time_logs(starts, moments, dated, self.cutoff)
+                # У недатированного токена ровно ноль, у вехи — конечное
+                # положительное расстояние.
+                if values is not None and not (bool((values[~dated] == 0.0).all())
+                                               and bool(np.isfinite(values[dated]).all())
+                                               and bool((values[dated] > 0.0).all())):
+                    values = None
+
+            if values is not None:
+                column = pa.ListArray.from_arrays(pa.array(starts, type=pa.int32()), pa.array(values))
+
+            else:
+
+                ages = []
+
+                for client_id, times in zip(clients, table.column("profile_time").to_pylist()):
+                    value = profile_time_log(client_id, times, self.cutoff)
+                    check_profile(client_id, value, times)
+                    ages.append(value)
+
+                column = pa.array(ages, type=PROFILE_TIME_LOG.type)
+
+            table = table.append_column(PROFILE_TIME_LOG, column)
 
         return table
+
+
+def _flat_moments(column: pa.ChunkedArray) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """
+    Колонка списков времени: границы клиентов, моменты целыми
+    микросекундами UTC подряд и есть ли момент. None — пустой список
+    вместо списка: такой строку разбирает обход по клиентам.
+    """
+
+    lists = column.combine_chunks() if isinstance(column, pa.ChunkedArray) else column
+
+    if lists.null_count:
+        return None
+
+    offsets = lists.offsets.to_numpy().astype(np.int64)
+    starts = offsets - offsets[0]
+
+    values = lists.flatten()
+
+    dated = values.is_valid().to_numpy(zero_copy_only=False)
+    moments = values.cast(pa.int64()).fill_null(0).to_numpy()
+
+    return starts, moments, dated
 
 
 __all__ = [

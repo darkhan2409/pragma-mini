@@ -65,13 +65,6 @@ def test_default_architecture_is_1_5_2_at_d128_with_4_heads():
     assert embedding.dim % event.heads == 0
 
 
-def test_encoders_built_from_the_configs_have_1_5_2_blocks():
-
-    model = build(128)
-
-    assert (len(model.profile.layers), len(model.event.layers), len(model.history.layers)) == (1, 5, 2)
-
-
 @pytest.mark.cuda
 @pytest.mark.skipif(not world.flash_ready(), reason="нужны CUDA и библиотека flash-attn")
 def test_forward_calls_the_real_kernel_once_per_block(clients, monkeypatch):

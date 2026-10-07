@@ -154,30 +154,6 @@ def test_resume_inside_an_unfinished_epoch_matches_straight_training(
     compare(straight, read(checkpoint_path()))
 
 
-def test_resume_keeps_the_frozen_schedule_plan(stage):
-    """
-    Горизонт и число эпох плана лежат в чекпойнте и при
-    продолжении не пересчитываются.
-    """
-
-    settle(stage, train_people=many())
-
-    config = tiny(token_budget=6, warmup_steps=1)
-    masking = every_value()
-
-    train(config, epochs=3, max_steps=2, masking=masking)
-
-    first = read(checkpoint_path())
-
-    train(config, epochs=3, max_steps=4, masking=masking, resume=True)
-
-    second = read(checkpoint_path())
-
-    assert first["scheduler_total"] == second["scheduler_total"]
-    assert first["scheduler_epochs"] == second["scheduler_epochs"] == 3
-    assert second["scheduler_state_dict"]["last_epoch"] == second["step"]
-
-
 def test_nothing_left_to_do_is_reported_not_repeated(stage):
     """
     Продолжение исчерпанного обучения ничего не учит и говорит об

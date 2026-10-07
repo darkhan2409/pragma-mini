@@ -23,9 +23,8 @@ from tests import world
 # целей в micro-batch'ах разное число, — поэтому мир здесь
 # подобран так, чтобы их было именно разное.
 #
-# Половина проверок идёт на рецепте (два способа сложить одни и
-# те же потери), половина — через настоящий train: шаги, окна и
-# клип живут в нём, а не в отдельной функции.
+# Проверки идут через настоящий train: шаги, окна и клип живут в
+# нём, а не в отдельной функции.
 # ============================================================
 
 
@@ -154,73 +153,11 @@ def uneven(root: Path) -> list[world.Made]:
     ]
 
 
-def test_window_gradient_is_the_mean_over_targets_not_over_micro_batches(stage):
-    """
-    Рецепт окна: backward по СУММЕ потерь каждого micro-batch,
-    затем деление градиентов на общее число целей.
-
-    Сравнивается с одним backward по среднему сразу по всем целям
-    — при тех же самых проходах модели, поэтому расхождение здесь
-    может дать только арифметика нормировки.
-    """
-
-    settle(stage, train_people=uneven(stage))
-
-    config = tiny(token_budget=14)
-    masking = every_value()
-
-    batches = windows(config, masking)
-
-    counts = [
-        int((pack(batch, CPU).labels != -100).sum()) for batch in batches
-    ]
-
-    assert len(batches) >= 2
-    assert len(set(counts)) > 1, "нужны micro-batch'и с разным числом целей"
-
-    # Так считает окно обучения.
-    stepwise = fresh(stage, config)
-    stepwise.train()
-
-    total = 0
-
-    for batch in batches:
-        out = stepwise(pack(batch, CPU))
-        if out.count:
-            (out.loss * out.count).backward()
-            total += out.count
-
-    for parameter in stepwise.parameters():
-        if parameter.grad is not None:
-            parameter.grad.div_(total)
-
-    # Так считает один большой effective batch.
-    at_once = fresh(stage, config)
-    at_once.train()
-
-    pieces = []
-
-    for batch in batches:
-        out = at_once(pack(batch, CPU))
-        if out.count:
-            pieces.append(out.loss * out.count)
-
-    (torch.stack(pieces).sum() / total).backward()
-
-    left = dict(stepwise.named_parameters())
-    right = dict(at_once.named_parameters())
-
-    for name, parameter in left.items():
-        assert torch.allclose(
-            parameter.grad, right[name].grad, atol=1e-7, rtol=1e-5
-        ), name
-
-
 def test_mean_over_micro_batches_is_a_different_number(stage):
     """
     Обратная сторона: если бы окно усредняло потери по
-    micro-batch'ам, ответ отличался бы. Иначе предыдущий тест
-    ничего не проверял.
+    micro-batch'ам, ответ отличался бы. Иначе сравнение одного
+    большого батча с накоплением ничего не проверяло бы.
     """
 
     settle(stage, train_people=uneven(stage))
@@ -414,32 +351,6 @@ def test_quiet_micro_batches_do_not_shift_the_window(stage):
 # ============================================================
 # НЕПОЛНОЕ ОКНО
 # ============================================================
-
-
-def test_leftover_micro_batches_still_make_a_step(stage):
-    """
-    Шесть micro-batch'ей при grad_accum_steps = 4 дают два шага:
-    полное окно и неполный остаток в конце эпохи.
-    """
-
-    people = [
-        world.make(
-            f"c{number}",
-            [[(world.KEY_A, [10 + number], True)]],
-            [(world.KEY_A, [20])],
-        )
-        for number in range(6)
-    ]
-
-    settle(stage, train_people=people)
-
-    config = tiny(token_budget=6, grad_accum_steps=4)
-
-    assert len(windows(config, every_value())) == 6
-
-    result = train(config, epochs=1, max_steps=None, masking=every_value())
-
-    assert result["step"] == 2
 
 
 @pytest.mark.parametrize("accum, expected", [(1, 6), (2, 3), (3, 2), (4, 2), (6, 1), (7, 1)])

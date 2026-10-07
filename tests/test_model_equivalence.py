@@ -458,15 +458,14 @@ def test_the_model_takes_its_loss_in_pieces(monkeypatch, clients):
 # ============================================================
 
 
-@pytest.mark.parametrize("attention", ["sdpa", "flash"])
-def test_attention_choice_does_not_change_the_trainable_weights(attention: str):
+def test_attention_choice_does_not_change_the_trainable_weights():
     """
     Выбор бэкенда — это способ счёта, а не другая модель:
     varlen-помощники своих весов не заводят.
     """
 
     base = world.model(attention="sdpa").state_dict()
-    other = world.model(attention=attention).state_dict()
+    other = world.model(attention="flash").state_dict()
 
     assert list(base) == list(other)
 

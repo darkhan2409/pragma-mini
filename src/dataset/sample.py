@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
+from itertools import accumulate, chain
+from zoneinfo import ZoneInfo
 
 import numpy as np
+import pyarrow as pa
 
 from src.preprocessing.keys import PROFILE_LIFELONG_KEY
 from src.preprocessing.settings import GroupWindow
 from src.tokenization.finalvocab import FrozenArtifacts
 from src.tokenization.specials import PAD
 
-from .context import EventStub, Selection, select
+from .context import border
 from .settings import ContextPolicy
 from .targets import can_be_target, eligible
 from .tokenized import TokenizedClient
@@ -137,28 +140,10 @@ class Sample:
 
         # События лежат подряд и покрывают все токены, а значения
         # внутри события разбираются по positions следом за его
-        # маркером.
-        covered = 0
-
-        for start, length in zip(self.event_starts.tolist(), self.event_lengths.tolist()):
-
-            if start != covered:
-                raise SampleError(f"{self.client_id}: событие начинается в {start}, а покрыто {covered}")
-
-            if length < 1:
-                raise SampleError(f"{self.client_id}: событие без единого токена")
-
-            # Маркер: одинаковый код в обоих слотах на нулевой
-            # позиции внутри события.
-            if self.key_ids[start] != self.value_ids[start] or self.positions[start] != 0:
-                raise SampleError(f"{self.client_id}: событие начинается не с маркера")
-
-            _check_positions(self.client_id, "событие", self.positions, start + 1, start + length)
-
-            covered += length
-
-        if covered != self.n_tokens:
-            raise SampleError(f"{self.client_id}: границы покрывают {covered} токенов из {self.n_tokens}")
+        # маркером. Целиком это проверяется векторно; если что-то не
+        # сошлось, обход по событиям называет первое нарушение.
+        if not _events_hold(self):
+            _check_events(self)
 
         _check_record(self.client_id, "профиль", self.profile_key_ids, self.profile_value_ids,
                       self.profile_positions)
@@ -183,6 +168,79 @@ class Sample:
                     f"{self.client_id}: в {name} встретился [PAD]. Он существует только для "
                     "выравнивания batch и в сохранённом примере невозможен"
                 )
+
+
+def _events_hold(sample: Sample) -> bool:
+    """
+    Все условия обхода _check_events разом, массивами: события
+    подряд от нуля и покрывают все токены, у каждого хотя бы один
+    токен, маркер на месте, а positions внутри события — ноль или
+    предыдущая плюс один, и первое значение начинается с нуля.
+
+    True — нарушений нет; False — пусть обход назовёт первое.
+    """
+
+    starts = sample.event_starts.astype(np.int64)
+    lengths = sample.event_lengths.astype(np.int64)
+
+    if starts.size == 0:
+        return sample.n_tokens == 0
+
+    expected = np.zeros(starts.size, dtype=np.int64)
+    np.cumsum(lengths[:-1], out=expected[1:])
+
+    if not (np.array_equal(starts, expected) and bool((lengths >= 1).all())
+            and int(lengths.sum()) == sample.n_tokens):
+        return False
+
+    positions = sample.positions.astype(np.int64)
+
+    if not (np.array_equal(sample.key_ids[starts], sample.value_ids[starts])
+            and bool((positions[starts] == 0).all())):
+        return False
+
+    # Внутри события позиция — ноль или предыдущая плюс один; у
+    # первого значения события только ноль (перед ним маркер, его
+    # ноль в разбор не входит).
+    good = positions == 0
+    good[1:] |= positions[1:] == positions[:-1] + 1
+
+    first = starts[lengths >= 2] + 1
+    good[first] = positions[first] == 0
+
+    # Маркеры проверены выше и значениями не являются.
+    good[starts] = True
+
+    return bool(good.all())
+
+
+def _check_events(sample: Sample) -> None:
+    """
+    Обход событий по одному: та же проверка, что _events_hold, с
+    названием первого нарушения.
+    """
+
+    covered = 0
+
+    for start, length in zip(sample.event_starts.tolist(), sample.event_lengths.tolist()):
+
+        if start != covered:
+            raise SampleError(f"{sample.client_id}: событие начинается в {start}, а покрыто {covered}")
+
+        if length < 1:
+            raise SampleError(f"{sample.client_id}: событие без единого токена")
+
+        # Маркер: одинаковый код в обоих слотах на нулевой
+        # позиции внутри события.
+        if sample.key_ids[start] != sample.value_ids[start] or sample.positions[start] != 0:
+            raise SampleError(f"{sample.client_id}: событие начинается не с маркера")
+
+        _check_positions(sample.client_id, "событие", sample.positions, start + 1, start + length)
+
+        covered += length
+
+    if covered != sample.n_tokens:
+        raise SampleError(f"{sample.client_id}: границы покрывают {covered} токенов из {sample.n_tokens}")
 
 
 def _check_profile_time(sample: Sample, artifacts: FrozenArtifacts, cutoff: datetime) -> None:
@@ -269,14 +327,14 @@ def build_sample(
     Пример из закодированной истории клиента.
     """
 
-    flags = [eligible(item.event_time, window) for item in client.events]
+    events = client.events
 
-    stubs = [
-        EventStub(index=number, n_tokens=item.n_tokens, eligible=flags[number])
-        for number, item in enumerate(client.events)
-    ]
+    flags = [eligible(item.event_time, window) for item in events]
 
-    selection: Selection = select(stubs, policy)
+    sizes = [len(item.key_ids) for item in events]
+
+    # Оставшиеся — непрерывный хвост истории events[cut:].
+    cut = border(sizes, policy)
 
     if client.profile_tokens > policy.max_profile_tokens:
         raise SampleError(
@@ -284,62 +342,42 @@ def build_sample(
             f"{client.profile_tokens} токенов при пределе {policy.max_profile_tokens}"
         )
 
-    key_ids: list[int] = []
-    value_ids: list[int] = []
-    positions: list[int] = []
-    event_starts: list[int] = []
-    event_lengths: list[int] = []
-    calendar: list[float] = []
-    moments: list[datetime] = []
-    target_mask: list[bool] = []
+    kept = events[cut:]
+    lengths = sizes[cut:]
 
-    for position in selection.kept:
-
-        item = client.events[position]
-
-        start = len(key_ids)
-
-        event_starts.append(start)
-        event_lengths.append(item.n_tokens)
-
-        key_ids.extend(item.key_ids)
-        value_ids.extend(item.value_ids)
-        positions.extend(item.positions)
-
+    for item in kept:
         if len(item.calendar) != 6:
             raise SampleError(
                 f"клиент {client.client_id}, событие {item.event_time.isoformat()}: "
                 f"календарь из {len(item.calendar)} чисел вместо шести"
             )
 
-        calendar.extend(item.calendar)
-        moments.append(item.event_time)
-        # Период целей решает, где цели разрешены; тип — может ли
-        # событие ей быть. Изменение анкеты и событие-источник вехи
-        # (пометка по ссылке вехи) остаются контекстом.
-        target_mask.append(
-            flags[position]
-            and can_be_target(item.event_type)
-            and item.lifelong_source is None
-        )
+    # Период целей решает, где цели разрешены; тип — может ли
+    # событие ей быть. Изменение анкеты и событие-источник вехи
+    # (пометка по ссылке вехи) остаются контекстом.
+    target_mask = [
+        flag and can_be_target(item.event_type) and item.lifelong_source is None
+        for flag, item in zip(flags[cut:], kept)
+    ]
 
     sample = Sample(
         client_id=client.client_id,
-        key_ids=_ints(key_ids),
-        value_ids=_ints(value_ids),
-        positions=_ints(positions),
-        event_starts=_ints(event_starts),
-        event_lengths=_ints(event_lengths),
-        event_time=_utc_moments(moments),
-        calendar=np.asarray(calendar, dtype=np.float32),
+        key_ids=_ints(chain.from_iterable(item.key_ids for item in kept)),
+        value_ids=_ints(chain.from_iterable(item.value_ids for item in kept)),
+        positions=_ints(chain.from_iterable(item.positions for item in kept)),
+        # Событие начинается там, где кончились предыдущие.
+        event_starts=_ints(list(accumulate(lengths, initial=0))[:-1]),
+        event_lengths=_ints(lengths),
+        event_time=_utc_moments([item.event_time for item in kept]),
+        calendar=np.asarray(list(chain.from_iterable(item.calendar for item in kept)), dtype=np.float32),
         target_event_mask=np.asarray(target_mask, dtype=bool),
         profile_key_ids=_ints(client.profile_key_ids),
         profile_value_ids=_ints(client.profile_value_ids),
         profile_positions=_ints(client.profile_positions),
         profile_time=_utc_moments(client.profile_time),
-        truncated=selection.truncated,
-        excluded_events=selection.n_excluded,
-        excluded_eligible=selection.excluded_eligible,
+        truncated=cut > 0,
+        excluded_events=cut,
+        excluded_eligible=sum(flags[:cut]),
     )
 
     sample.check(artifacts, window.final_cutoff)
@@ -348,7 +386,14 @@ def build_sample(
 
 
 def _ints(values) -> np.ndarray:
-    return np.asarray(list(values), dtype=np.int32)
+    """
+    Новый массив int32 из списка, кортежа, массива или итератора.
+    """
+
+    if not isinstance(values, (list, tuple, np.ndarray)):
+        values = list(values)
+
+    return np.array(values, dtype=np.int32)
 
 
 def _utc_moments(moments) -> np.ndarray:
@@ -359,10 +404,23 @@ def _utc_moments(moments) -> np.ndarray:
     явно, чтобы никто не пересчитал его вторично.
     """
 
+    moments = list(moments)
+
+    # Все моменты в UTC (или их нет) — перевод делает Arrow: тот же
+    # отсчёт от эпохи UTC, но без объекта на каждый момент. pyarrow
+    # отдаёт пояс ZoneInfo("UTC"), datetime сам — timezone.utc.
+    if all(moment is None or moment.tzinfo is _ZONE or moment.tzinfo is timezone.utc for moment in moments):
+        return pa.array(moments, type=_UTC).to_numpy(zero_copy_only=False).astype("datetime64[us]")
+
     return np.asarray(
         [None if moment is None else moment.replace(tzinfo=None) for moment in moments],
         dtype="datetime64[us]",
     )
+
+
+_UTC = pa.timestamp("us", tz="UTC")
+
+_ZONE = ZoneInfo("UTC")
 
 
 __all__ = [

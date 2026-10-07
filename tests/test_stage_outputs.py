@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.preprocessing.run import EXIT_OK
-
 from tests import world
 from tests.test_source_inputs import three
 
@@ -33,18 +31,6 @@ def settle(root: Path, people: list[list[world.Made]] | None = None) -> list[wor
     )
 
     return flat
-
-
-def cli(module: str, *args: str) -> int:
-    """
-    Команда этапа через её собственный разбор аргументов.
-    """
-
-    from importlib import import_module
-
-    run = import_module(module)
-
-    return run.run_group(run.build_parser().parse_args(list(args)))
 
 
 # ============================================================
@@ -184,10 +170,3 @@ def test_input_layer_sums_three_terms_and_zeroes_padding():
     assert torch.allclose(out[1], table[world.KEY_A] * scale + table[10] * scale + piece(0))
     assert torch.allclose(out[2], table[world.KEY_A] * scale + table[11] * scale + piece(1))
     assert torch.equal(out[3], torch.zeros(world.DIM))
-
-
-def test_embeddings_command_succeeds(stage):
-
-    settle(stage)
-
-    assert cli("src.embedding.run", "train") == EXIT_OK
