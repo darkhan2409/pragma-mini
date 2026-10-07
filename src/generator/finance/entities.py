@@ -98,10 +98,14 @@ class Card:
     blocks: list = field(default_factory=list)
 
     def is_blocked_at(self, ts: datetime) -> bool:
+        return self.block_started(ts) is not None
+
+    def block_started(self, ts: datetime) -> datetime | None:
+        """Начало блокировки, действующей в момент ts."""
         for started, ended in self.blocks:
             if started <= ts and (ended is None or ts < ended):
-                return True
-        return False
+                return started
+        return None
 
     def releasable(self) -> bool:
         """

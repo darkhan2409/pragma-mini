@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pyarrow.parquet as pq
 import pytest
 
 from src.generator import emit, engine
+from src.generator.finance.cards import CLIENT_BLOCK_REASONS
 
 
 # ============================================================
@@ -110,7 +111,7 @@ def world(tmp_path_factory) -> dict:
         for state in captured
     }
 
-    return {"rows": rows, "hidden": hidden}
+    return {"rows": rows, "hidden": hidden, "states": captured}
 
 
 def events_of(world: dict, kind: str) -> list[tuple]:
@@ -293,3 +294,53 @@ def test_alert_precedes_decision_precedes_case(world):
         assert alerts[0] < decisions[0], f"{client}: решение раньше тревоги"
 
     assert checked, "нет клиентов с полной парой тревога/решение"
+
+
+def test_a_blocked_card_is_tried_at_most_once_per_bank_block(world):
+    """
+    Заблокированной картой клиент не платит месяцами. Свою заморозку
+    и потерю он знает и платит иначе; о блокировке банком узнаёт с
+    первого отказа. Прежде навсегда заблокированная карта давала
+    отказы по нескольку в день, и каждый копил недовольство.
+    """
+
+    bank_blocks = 0
+
+    for state in world["states"]:
+
+        # Блокировка банком ложится в ленту через секунды после
+        # решения, клиентская — в тот же момент.
+        reasons = {
+            (event.payload["card_id"], event.event_time): event.payload["reason"]
+            for event in state.events
+            if event.event_type == "card_blocked"
+        }
+
+        bank_blocks += sum(reason not in CLIENT_BLOCK_REASONS for reason in reasons.values())
+
+        tries: Counter = Counter()
+
+        for event in state.events:
+
+            if event.payload.get("decline_reason") != "card_blocked":
+                continue
+
+            card = state.cards[event.payload["card_id"]]
+
+            started = next(
+                begin for begin, end in card.blocks
+                if begin <= event.event_time and (end is None or event.event_time < end)
+            )
+
+            reason = next(
+                reason for (card_id, when), reason in reasons.items()
+                if card_id == card.card_id and started <= when <= started + timedelta(minutes=1)
+            )
+
+            assert reason not in CLIENT_BLOCK_REASONS, (state.client_id, card.card_id, reason)
+
+            tries[(card.card_id, started)] += 1
+
+        assert all(count == 1 for count in tries.values()), (state.client_id, dict(tries))
+
+    assert bank_blocks, "блокировок банком в прогоне нет: проверять нечего"

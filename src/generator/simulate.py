@@ -133,6 +133,9 @@ class ClientState:
     cases: list = field(default_factory=list)
     support_last_by_cause: dict = field(default_factory=dict)
     fraud_disputes: set = field(default_factory=set)
+    # Блокировки банком, о которых клиент уже узнал по отказу:
+    # (карта, начало блокировки).
+    noticed_blocks: set = field(default_factory=set)
 
     # --------------------------------------------------------
 
@@ -214,6 +217,32 @@ class ClientState:
             return False
 
         self.decline_count += 1
+
+        return True
+
+    def tries_blocked(self, card: Card, ts: datetime) -> bool:
+        """
+        Пробует ли клиент заплатить заблокированной картой.
+
+        Свою заморозку и потерю клиент знает и платит иначе. О
+        блокировке банком он узнаёт с первого отказа и дальше этой
+        картой не пробует. Прежде каждая покупка в точке упиралась
+        в заблокированную карту, и навсегда заблокированная давала
+        отказы месяцами, по нескольку в день (scratch 2026-10-07).
+        """
+
+        started = card.block_started(ts)
+
+        # Причину карта помнит только у текущей блокировки.
+        if started is None or card.blocked_at != started or card.block_reason in card_rules.CLIENT_BLOCK_REASONS:
+            return False
+
+        key = (card.card_id, started)
+
+        if key in self.noticed_blocks:
+            return False
+
+        self.noticed_blocks.add(key)
 
         return True
 

@@ -168,7 +168,7 @@ def test_the_export_carries_the_generator_version_and_its_truth(raw):
 
     manifest = json.loads((raw / "manifest.json").read_text(encoding="utf-8"))
 
-    assert manifest["generator_version"] == config.GENERATOR_VERSION == "1.0.0"
+    assert manifest["generator_version"] == config.GENERATOR_VERSION == "1.0.1"
 
     for name in ("transitions", "states"):
         assert manifest[f"{name}_rows"] == pq.ParquetFile(raw / "truth" / f"{name}.parquet").metadata.num_rows

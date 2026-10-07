@@ -6,6 +6,10 @@ from .. import params as params_module
 from .entities import CARD_ACTIVE, CARD_BLOCKED, CARD_CLOSED, Card, CardCreditState
 
 
+# Блокировки, которые ставит сам клиент: о них он знает.
+CLIENT_BLOCK_REASONS = ("client_freeze", "lost_or_stolen")
+
+
 # ============================================================
 # КАРТЫ
 # ============================================================

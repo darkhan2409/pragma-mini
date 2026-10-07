@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 from .. import config
 from .. import params as params_module
+from ..finance.cards import CLIENT_BLOCK_REASONS
 from ..rng import NS_ENGAGEMENT, keyed_rng, stable_hash
 from ..truth import transition
 
@@ -62,9 +63,6 @@ _TIE = 6
 
 # Потоки с персональной чувствительностью к доле банка.
 _STREAMS = ("purchases", "transfers", "inbound", "cash", "ties")
-
-# Чем клиент сам блокирует карту: это не опыт с банком.
-_CLIENT_BLOCKS = ("client_freeze", "lost_or_stolen")
 
 # Исход обращения, который снимает часть недовольства.
 _GOOD_RESOLUTIONS = frozenset(
@@ -226,7 +224,8 @@ def note(state, event) -> None:
     elif kind == "application_decision" and payload.get("decision") == "rejected":
         add = weights["rejected"]
 
-    elif kind == "card_blocked" and payload.get("reason") not in _CLIENT_BLOCKS:
+    # Карту, которую клиент блокирует сам, он опытом с банком не считает.
+    elif kind == "card_blocked" and payload.get("reason") not in CLIENT_BLOCK_REASONS:
         add = weights["card_block"]
 
     elif kind == "fee_charge" and payload.get("reason") == "early_closure":

@@ -1369,24 +1369,25 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     if not choice.outlet.is_online and card is None:
 
-        blocked = any(
-            item.account_id == account.account_id and item.is_blocked_at(ts)
-            for item in state.cards.values()
+        blocked = next(
+            (
+                item for item in state.cards.values()
+                if item.account_id == account.account_id and item.is_blocked_at(ts)
+            ),
+            None,
         )
 
-        if blocked:
-            body["card_id"] = next(
-                (item.card_id for item in state.cards.values() if item.account_id == account.account_id),
-                None,
-            )
+        if blocked is not None and state.tries_blocked(blocked, ts):
+            body["card_id"] = blocked.card_id
             _decline(state, ts, "purchase", account.account_id, amount, "debit", body,
                      "card_blocked")
             _touch_client(state, ts)
             return
 
         # Пригодной карты нет — новая ещё не активирована после
-        # выпуска или перевыпуска. Платят наличными или другой
-        # картой: банк этой покупки не видит. Раньше в ленте
+        # выпуска или перевыпуска, или клиент знает, что карта
+        # заблокирована. Платят наличными или другой картой: банк
+        # этой покупки не видит. Раньше в ленте
         # оставалась покупка в точке без карты.
         hidden = state.ledger.hidden_sources(amount)
 
