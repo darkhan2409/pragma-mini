@@ -134,20 +134,25 @@ class InputEmbedding(nn.Module):
         key_ids: torch.Tensor,
         value_ids: torch.Tensor,
         positions: torch.Tensor,
-        mask: torch.Tensor,
+        mask: torch.Tensor | None,
     ) -> torch.Tensor:
         """
         Векторы одной последовательности: [.., d].
 
         События и анкета проходят здесь одним и тем же кодом:
         разница только в том, какие массивы поданы.
+
+        mask None — заполнителя нет (плоский путь flash): умножение
+        на одни единицы ничего не меняет и только читает [.., d].
         """
 
         visible = (~self.marker_of(key_ids)).unsqueeze(-1)
 
         rest = (self.table(value_ids) * self.scale + self.pieces_of(positions)) * visible
 
-        return (self.table(key_ids) * self.scale + rest) * mask.unsqueeze(-1)
+        out = self.table(key_ids) * self.scale + rest
+
+        return out if mask is None else out * mask.unsqueeze(-1)
 
 
 __all__ = [

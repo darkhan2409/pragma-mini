@@ -6,7 +6,7 @@ import torch
 
 from src.masking.settings import MaskingConfig
 from src.mlm.inputs import Prefetch, Source
-from src.mlm.model import hits, hits_in_pieces, pack
+from src.mlm.model import hits, pack
 from src.mlm.settings import checkpoint_path
 from src.mlm.train import train
 
@@ -112,10 +112,10 @@ def test_a_source_travels_by_its_paths_not_by_the_settings(stage):
     ]
 
 
-def test_hits_in_pieces_equal_hits_on_the_full_logits(monkeypatch):
+def test_hits_of_loss_pieces_equal_hits_on_the_full_logits(monkeypatch):
     """
-    Куски по две цели вместо 2048: сумма по кускам та же, что по
-    полным логитам.
+    Куски по две цели вместо 2048: счёт, сложенный кусками потерь,
+    тот же, что по полным логитам.
     """
 
     import src.mlm.model as model_module
@@ -133,10 +133,6 @@ def test_hits_in_pieces_equal_hits_on_the_full_logits(monkeypatch):
         full = model.head(token, event_rows, client_rows, model.embedding.weight)
 
     assert targets.numel() > 2, "нужно несколько кусков"
-
-    pieces = hits_in_pieces(model.head, token, event_rows, client_rows, model.embedding.weight, targets)
-
-    assert pieces == hits(full, targets)
 
     with torch.no_grad():
         out = model(data, logits=False)

@@ -213,18 +213,27 @@ class VarlenLayout:
         cu = np.zeros(lengths.size + 1, dtype=np.int64)
         np.cumsum(lengths, out=cu[1:])
 
+        edges = _group_edges(lengths)
+
+        group_cu = {
+            number: (cu[first:last + 1] - cu[first]).astype(np.int32)
+            for number, (first, last) in enumerate(edges)
+        }
+
+        moved = to_device({"cu": cu, "lengths": lengths} | group_cu, device)
+
         groups = tuple(
             Group(
                 rows=int(cu[last] - cu[first]),
-                cu_seqlens=torch.as_tensor((cu[first:last + 1] - cu[first]).astype(np.int32), device=device),
+                cu_seqlens=moved[number],
                 max_seqlen=int(lengths[first:last].max(initial=0)),
             )
-            for first, last in _group_edges(lengths)
+            for number, (first, last) in enumerate(edges)
         )
 
         return VarlenLayout(
-            cu_seqlens=torch.as_tensor(cu, device=device),
-            lengths=torch.as_tensor(lengths, device=device),
+            cu_seqlens=moved["cu"],
+            lengths=moved["lengths"],
             groups=groups,
             sizes=lengths,
             edges=cu,
@@ -257,6 +266,49 @@ def _group_edges(lengths: np.ndarray) -> list[tuple[int, int]]:
         edges.append(max(fits, edges[-1] + 1))
 
     return list(zip(edges, edges[1:]))
+
+
+# Выравнивание поля в общем буфере переноса, в элементах: срез
+# начинается на границе 64 байт и у float32, и у int64, и векторные
+# ядра читают его как отдельный тензор.
+ALIGN = 16
+
+
+def to_device(arrays: dict, device: torch.device) -> dict:
+    """
+    Массивы NumPy на устройство одним переносом на тип.
+
+    Каждый перенос из обычной памяти синхронен: десятки мелких
+    массивов micro-batch стоили дороже самих данных. Здесь массивы
+    одного типа копируются в общий буфер (на CUDA — закреплённый,
+    перенос асинхронный), и каждое поле — срез перенесённого
+    буфера своей формы. Значения те же до бита.
+    """
+
+    out = {}
+
+    for dtype in dict.fromkeys(array.dtype for array in arrays.values()):
+
+        names = [name for name, array in arrays.items() if array.dtype == dtype]
+        starts = np.cumsum([0] + [-(-arrays[name].size // ALIGN) * ALIGN for name in names])
+
+        buffer = torch.empty(
+            int(starts[-1]), dtype=torch.from_numpy(np.empty(0, dtype)).dtype,
+            pin_memory=device.type == "cuda",
+        )
+        flat = buffer.numpy()
+
+        for name, start in zip(names, starts):
+            flat[start:start + arrays[name].size] = arrays[name].reshape(-1)
+
+        # Закреплённый буфер не освобождается до конца переноса:
+        # аллокатор CUDA держит его до события потока.
+        moved = buffer.to(device, non_blocking=True)
+
+        for name, start in zip(names, starts):
+            out[name] = moved[start:start + arrays[name].size].view(arrays[name].shape)
+
+    return out
 
 
 def assemble(parts: list[torch.Tensor], indices: list[torch.Tensor], count: int,
@@ -434,8 +486,9 @@ def history_block_varlen(
 
     Формула та же, что у Block.forward: поворачиваются только Q и
     K тем же TimeRoPE.rotate. cos и sin [N, размер] считаются в
-    fp32 один раз на все блоки и приводятся к типу активаций
-    только внутри поворота.
+    fp32 один раз на все блоки и приходят уже в типе активаций
+    (под autocast — в его типе); поворот приводит их, только если
+    тип другой.
     """
 
     count, dim = x.shape
@@ -472,4 +525,5 @@ __all__ = [
     "flash_available",
     "history_block_varlen",
     "resolve_backend",
+    "to_device",
 ]

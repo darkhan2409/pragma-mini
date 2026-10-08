@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import cached_property
 
 import numpy as np
 import torch
@@ -25,6 +26,7 @@ from .varlen import (
     encoder_layer_varlen,
     history_block_varlen,
     resolve_backend,
+    to_device,
 )
 
 
@@ -130,9 +132,21 @@ class PackedBatch:
     target_client: torch.Tensor   # номер клиента в micro-batch
     target_place: torch.Tensor    # номер токена внутри клиента
     target_local: torch.Tensor    # номер события внутри клиента
-    target_inside: torch.Tensor   # позиция внутри события
-    target_bucket: torch.Tensor   # корзина его события
-    target_row: torch.Tensor      # строка его события в корзине
+
+    # Место цели в корзинах событий — только проходу SDPA; flash их
+    # не читает, поэтому они считаются при первом обращении.
+
+    @cached_property
+    def target_inside(self) -> torch.Tensor:  # позиция внутри события
+        return self.target_token - self.events.cu_seqlens[self.target_event]
+
+    @cached_property
+    def target_bucket(self) -> torch.Tensor:  # корзина его события
+        return torch.as_tensor(self.events.bucket_of, device=self.target_event.device)[self.target_event]
+
+    @cached_property
+    def target_row(self) -> torch.Tensor:     # строка его события в корзине
+        return torch.as_tensor(self.events.row_of, device=self.target_event.device)[self.target_event]
 
 
 @dataclass(frozen=True)
@@ -151,9 +165,11 @@ class Predicted:
     event: torch.Tensor     # [M] номер его события у клиента
     client: torch.Tensor    # [M] номер клиента в micro-batch
 
-    # (угадано первым, попало в первые 5) — у прохода без логитов;
-    # с логитами их считает вызывающий по logits.
-    hits: tuple[int, int] | None = None
+    # (угадано первым, попало в первые 5) — у прохода без логитов,
+    # числами на устройстве: в число Python их переводит читатель, и
+    # синхронизации посреди прохода нет. С логитами их считает
+    # вызывающий по logits.
+    hits: tuple[torch.Tensor | int, torch.Tensor | int] | None = None
 
     # Вспомогательная потеря [USR] (RecentTypes), связанная с графом;
     # None — цели нет.
@@ -198,7 +214,7 @@ def pack(clients: list[Client], device: torch.device) -> PackedBatch:
             )
 
     def join(name: str, dtype) -> np.ndarray:
-        return np.concatenate([getattr(client, name) for client in clients]).astype(dtype)
+        return np.concatenate([getattr(client, name) for client in clients], dtype=dtype)
 
     tokens_per_client = np.array([client.n_tokens for client in clients], dtype=np.int64)
     events_per_client = np.array([client.n_events for client in clients], dtype=np.int64)
@@ -230,46 +246,41 @@ def pack(clients: list[Client], device: torch.device) -> PackedBatch:
 
     # Цели и их владельцы: токен -> событие -> клиент.
     first_token = np.concatenate([[0], np.cumsum(tokens_per_client)[:-1]]).astype(np.int64)
-    event_start = np.concatenate([[0], np.cumsum(event_lengths)[:-1]]).astype(np.int64)
 
     target_token = np.nonzero(labels != IGNORE)[0]
     target_event = event_of_token[target_token]
     target_client = user_of_event[target_event]
 
-    def tensor(values: np.ndarray) -> torch.Tensor:
-        return torch.as_tensor(values, device=device)
-
     return PackedBatch(
         clients=size,
-        key_ids=tensor(join("key_ids", np.int64)),
-        value_ids=tensor(join("value_ids", np.int64)),
-        positions=tensor(join("positions", np.int64)),
-        labels=tensor(labels),
         events=events,
-        event_of_token=tensor(event_of_token),
-        event_time_log=tensor(event_time_log),
-        calendar=tensor(
-            np.concatenate([client.calendar for client in clients]).astype(np.float32)
-            .reshape(-1, CALENDAR_PER_EVENT)
-        ),
-        user_of_event=tensor(user_of_event),
-        profile_key_ids=tensor(join("profile_key_ids", np.int64)),
-        profile_value_ids=tensor(join("profile_value_ids", np.int64)),
-        profile_positions=tensor(join("profile_positions", np.int64)),
-        profile_time_log=tensor(join("profile_time_log", np.float32)),
         profiles=profiles,
         history=history,
-        history_profile_slot=tensor(history_profile_slot),
-        history_event_slot=tensor(history_event_slot),
-        history_positions=tensor(history_positions),
-        target_token=tensor(target_token),
-        target_event=tensor(target_event),
-        target_client=tensor(target_client),
-        target_place=tensor(target_token - first_token[target_client]),
-        target_local=tensor(target_event - first_event[target_client]),
-        target_inside=tensor(target_token - event_start[target_event]),
-        target_bucket=tensor(events.bucket_of[target_event]),
-        target_row=tensor(events.row_of[target_event]),
+        **to_device(
+            {
+                "key_ids": join("key_ids", np.int64),
+                "value_ids": join("value_ids", np.int64),
+                "positions": join("positions", np.int64),
+                "labels": labels,
+                "event_of_token": event_of_token,
+                "event_time_log": event_time_log,
+                "calendar": join("calendar", np.float32).reshape(-1, CALENDAR_PER_EVENT),
+                "user_of_event": user_of_event,
+                "profile_key_ids": join("profile_key_ids", np.int64),
+                "profile_value_ids": join("profile_value_ids", np.int64),
+                "profile_positions": join("profile_positions", np.int64),
+                "profile_time_log": join("profile_time_log", np.float32),
+                "history_profile_slot": history_profile_slot,
+                "history_event_slot": history_event_slot,
+                "history_positions": history_positions,
+                "target_token": target_token,
+                "target_event": target_event,
+                "target_client": target_client,
+                "target_place": target_token - first_token[target_client],
+                "target_local": target_event - first_event[target_client],
+            },
+            device,
+        ),
     )
 
 
@@ -318,6 +329,8 @@ def mlm_loss(
     weight: torch.Tensor,
     targets: torch.Tensor,
     smoothing: float,
+    count: int | None = None,
+    hits: list | None = None,
 ) -> torch.Tensor:
     """
     Кросс-энтропия по размеченным позициям: среднее по целям.
@@ -336,9 +349,18 @@ def mlm_loss(
     Ноль на пустом наборе возвращается СВЯЗАННЫМ С ГРАФОМ:
     torch.tensor(0.0) оборвал бы цепочку, и backward на клиенте
     без целей упал бы. Приём взят из эталона дословно.
+
+    count — число целей, если вызывающий его знает: подсчёт по
+    меткам синхронизировал бы CPU с GPU. Числом Python: деление на
+    тензор на устройстве округлялось бы иначе.
+
+    hits — список, куда каждый кусок кладёт (угадано первым, попало
+    в первые 5) по своим же логитам: отдельный проход головы ради
+    счёта не нужен.
     """
 
-    count = int((targets != IGNORE).sum())
+    if count is None:
+        count = int((targets != IGNORE).sum())
 
     if count == 0:
         return head(token, event, client, weight).sum() * 0.0
@@ -346,7 +368,7 @@ def mlm_loss(
     pieces = zip(*(part.split(TARGETS_PER_CHUNK) for part in (token, event, client, targets)))
 
     total = sum(
-        checkpoint(_piece_loss, head, *piece, weight, smoothing, use_reentrant=False)
+        checkpoint(_piece_loss, head, *piece, weight, smoothing, hits, use_reentrant=False)
         for piece in pieces
     )
 
@@ -361,42 +383,24 @@ def _piece_loss(
     targets: torch.Tensor,
     weight: torch.Tensor,
     smoothing: float,
+    hits: list | None,
 ) -> torch.Tensor:
 
-    return F.cross_entropy(
-        head(token, event, client, weight), targets,
-        ignore_index=IGNORE, label_smoothing=smoothing, reduction="sum",
+    logits = head(token, event, client, weight)
+
+    loss = F.cross_entropy(
+        logits, targets, ignore_index=IGNORE, label_smoothing=smoothing, reduction="sum",
     )
 
+    # Счёт стоит после потерь: пересчёт checkpoint в backward
+    # останавливается на последнем сохранённом тензоре и сюда не
+    # доходит, а граф и случайность от счёта не меняются.
+    if hits is not None:
+        with torch.no_grad():
+            top = logits.topk(min(5, logits.shape[-1]), dim=-1).indices
+            hits.append(((top[:, 0] == targets).sum(), (top == targets[:, None]).any(dim=-1).sum()))
 
-def hits_in_pieces(
-    head: Mlm,
-    token: torch.Tensor,
-    event: torch.Tensor,
-    client: torch.Tensor,
-    weight: torch.Tensor,
-    targets: torch.Tensor,
-    k: int = 5,
-) -> tuple[int, int]:
-    """
-    То же, что hits по полным логитам, но кусками по
-    TARGETS_PER_CHUNK и без графа: логиты [M, словарь] целиком не
-    живут ни одного мгновения. Счёт копится на устройстве, и
-    синхронизация одна.
-    """
-
-    first = five = targets.new_zeros(())
-
-    with torch.no_grad():
-
-        for piece in zip(*(part.split(TARGETS_PER_CHUNK) for part in (token, event, client, targets))):
-            logits = head(piece[0], piece[1], piece[2], weight)
-            labels = piece[3]
-            top = logits.topk(min(k, logits.shape[-1]), dim=-1).indices
-            first = first + (top[:, 0] == labels).sum()
-            five = five + (top == labels[:, None]).any(dim=-1).sum()
-
-    return int(first), int(five)
+    return loss
 
 
 def hits(logits: torch.Tensor, targets: torch.Tensor, k: int = 5) -> tuple[int, int]:
@@ -468,43 +472,55 @@ class RecentTypes(nn.Module):
 
         from src.temporal.position import TIME_SCALE
 
+        # Все выборки плотные, без nonzero: он синхронизировал бы CPU с
+        # GPU посреди прохода. Лишнее пишется в запасную ячейку, которая
+        # потом отрезается, или прибавляется нулём: счётчики — целые
+        # числа, а минимум от порядка не зависит, поэтому результат тот
+        # же до бита.
+
         # Исходное значение каждого токена: у закрытого маской — метка.
         original = torch.where(data.labels != IGNORE, data.labels, data.value_ids)
 
-        typed = torch.nonzero(
-            (data.key_ids == self.event_type_key) & (data.positions == 0), as_tuple=True
-        )[0]
+        typed = (data.key_ids == self.event_type_key) & (data.positions == 0)
 
         device = data.event_time_log.device
+        events = data.events.segments
 
-        kind = torch.full((data.events.segments,), -1, dtype=torch.long, device=device)
-        kind[data.event_of_token[typed]] = self.type_of_value[original[typed]]
+        kind = torch.full((events + 1,), -1, dtype=torch.long, device=device)
+        kind[torch.where(typed, data.event_of_token, events)] = torch.where(
+            typed, self.type_of_value[original], -1
+        )
+        kind = kind[:events]
 
         # Давность до точки отсчёта — из той же шкалы, что видит
         # энкодер истории: seconds = 8·expm1(позиция / 8).
         days = TIME_SCALE * torch.expm1(data.event_time_log.float() / TIME_SCALE) / 86_400.0
 
         known = kind >= 0
-        windows = torch.tensor(RECENT_DAYS, dtype=days.dtype, device=device)
-        inside = (days[:, None] <= windows[None, :]) & known[:, None]          # [E, W]
+        inside = torch.stack([days <= window for window in RECENT_DAYS], dim=1) & known[:, None]  # [E, W]
 
         counts = torch.zeros(data.clients, len(RECENT_DAYS), self.types, dtype=torch.float32, device=device)
-        event, window = torch.nonzero(inside, as_tuple=True)
         counts.index_put_(
-            (data.user_of_event[event], window, kind[event]),
-            torch.ones_like(event, dtype=torch.float32), accumulate=True,
+            (
+                data.user_of_event[:, None].expand_as(inside),
+                torch.arange(len(RECENT_DAYS), device=device).expand_as(inside),
+                kind.clamp(min=0)[:, None].expand_as(inside),
+            ),
+            inside.float(), accumulate=True,
         )
 
         # Давность типа — у самого свежего его события; без событий
         # типа — предел.
-        recency = torch.full((data.clients, self.types), RECENCY_CAP_DAYS, dtype=torch.float32, device=device)
-        chosen = torch.nonzero(known, as_tuple=True)[0]
-        recency.view(-1).scatter_reduce_(
-            0, data.user_of_event[chosen] * self.types + kind[chosen],
-            days[chosen].clamp(max=RECENCY_CAP_DAYS), reduce="amin",
+        cells = data.clients * self.types
+        recency = torch.full((cells + 1,), RECENCY_CAP_DAYS, dtype=torch.float32, device=device)
+        recency.scatter_reduce_(
+            0, torch.where(known, data.user_of_event * self.types + kind, cells),
+            days.clamp(max=RECENCY_CAP_DAYS), reduce="amin",
         )
 
-        return torch.cat([counts, recency.unsqueeze(1)], dim=1).log1p()
+        return torch.cat(
+            [counts, recency[:cells].view(data.clients, 1, self.types)], dim=1
+        ).log1p()
 
     def forward(self, data: "PackedBatch", usr: torch.Tensor) -> torch.Tensor:
 
@@ -597,19 +613,28 @@ class Model(nn.Module):
             if logits else None
         )
 
-        scored = None if logits else hits_in_pieces(
-            self.head, token_vectors, event_rows, client_rows, self.embedding.weight, targets,
+        # aux строится до потерь MLM, как и прежде: граф прохода тот же.
+        aux = self.recent(data, client_vectors) if self.recent is not None else None
+
+        # Без логитов счёт top-1/top-5 кладут куски потерь.
+        scored = None if logits else []
+
+        # Цели pack — только размеченные позиции: их число известно
+        # без подсчёта на устройстве.
+        loss = mlm_loss(
+            self.head, token_vectors, event_rows, client_rows,
+            self.embedding.weight, targets, self.label_smoothing,
+            count=targets.numel(), hits=scored,
         )
 
         return Predicted(
             logits=full,
-            hits=scored,
-            aux=self.recent(data, client_vectors) if self.recent is not None else None,
-            targets=targets,
-            loss=mlm_loss(
-                self.head, token_vectors, event_rows, client_rows,
-                self.embedding.weight, targets, self.label_smoothing,
+            hits=None if scored is None else (
+                sum(first for first, _ in scored), sum(five for _, five in scored)
             ),
+            aux=aux,
+            targets=targets,
+            loss=loss,
             place=data.target_place,
             event=data.target_local,
             client=data.target_client,
@@ -720,10 +745,7 @@ class Model(nn.Module):
 
         encoder = self.event
 
-        x = self.embedding.embed(
-            data.key_ids, data.value_ids, data.positions,
-            torch.ones_like(data.key_ids, dtype=torch.bool),
-        )
+        x = self.embedding.embed(data.key_ids, data.value_ids, data.positions, None)
 
         for layer in encoder.layers:
             x = encoder_layer_varlen(layer, x, data.events)
@@ -750,11 +772,10 @@ class Model(nn.Module):
         encoder = self.profile
 
         x = self.embedding.embed(
-            data.profile_key_ids, data.profile_value_ids, data.profile_positions,
-            torch.ones_like(data.profile_key_ids, dtype=torch.bool),
+            data.profile_key_ids, data.profile_value_ids, data.profile_positions, None,
         )
 
-        cos, sin = encoder.rope.angles(data.profile_time_log)
+        cos, sin = _activation_type(encoder.rope.angles(data.profile_time_log), x)
 
         for block in encoder.layers:
             x = history_block_varlen(block, encoder.rope, x, cos, sin, data.profiles)
@@ -778,7 +799,7 @@ class Model(nn.Module):
 
         x = self._history_input(data, profile, dated)
 
-        cos, sin = encoder.rope.angles(data.history_positions)
+        cos, sin = _activation_type(encoder.rope.angles(data.history_positions), x)
 
         for block in encoder.layers:
             x = history_block_varlen(block, encoder.rope, x, cos, sin, data.history)
@@ -1010,6 +1031,21 @@ def recent_types(artifacts, dim: int, seed: int) -> RecentTypes:
     return RecentTypes(dim, type_of_value, key, seed)
 
 
+def _activation_type(angles: tuple[torch.Tensor, ...], x: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    """
+    cos и sin в типе, в котором блоки повернут Q и K: под autocast —
+    в его типе, иначе как есть. Углы считаются в fp32, а приведение
+    делается один раз на энкодер, а не четырежды в каждом блоке.
+    """
+
+    device = x.device.type
+
+    if not torch.is_autocast_enabled(device):
+        return angles
+
+    return tuple(angle.to(torch.get_autocast_dtype(device)) for angle in angles)
+
+
 @contextmanager
 def _seeded(seed: int):
     """
@@ -1036,7 +1072,6 @@ __all__ = [
     "RecentTypes",
     "recent_types",
     "hits",
-    "hits_in_pieces",
     "load_model",
     "mlm_loss",
     "pack",

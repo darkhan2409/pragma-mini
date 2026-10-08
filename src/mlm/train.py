@@ -311,10 +311,18 @@ class Scores:
 
         first, five = out.hits if out.hits is not None else hits(out.logits, out.targets, 5)
 
-        self.loss_sum += out.loss.item() * out.count
-        self.targets += out.count
-        self.top1 += first
-        self.top5 += five
+        self.record(out.loss.item(), out.count, first, five)
+
+    def record(self, loss: float, count: int, first, five) -> None:
+        """
+        Прибавить micro-batch по уже прочитанному loss: цикл обучения
+        читает его с устройства один раз и для окна, и для счёта.
+        """
+
+        self.loss_sum += loss * count
+        self.targets += count
+        self.top1 += int(first)
+        self.top5 += int(five)
 
     def share(self, value: float) -> float | None:
         return value / self.targets if self.targets else None
@@ -360,9 +368,11 @@ def target_losses(logits, targets) -> tuple[np.ndarray, np.ndarray]:
     первым ответом.
 
     Кусками по TARGETS_PER_CHUNK: fp32-копия [M, словарь] целиком
-    заняла бы сотни мегабайт.
+    заняла бы сотни мегабайт. Куски склеиваются на устройстве, и на
+    CPU переезжают два массива на micro-batch, а не два на кусок.
     """
 
+    import torch
     import torch.nn.functional as F
 
     from .model import TARGETS_PER_CHUNK
@@ -373,10 +383,10 @@ def target_losses(logits, targets) -> tuple[np.ndarray, np.ndarray]:
         logits.detach().split(TARGETS_PER_CHUNK), targets.split(TARGETS_PER_CHUNK)
     ):
         scores = piece.float()
-        nll.append(F.cross_entropy(scores, labels, reduction="none").cpu().numpy())
-        first.append((scores.argmax(dim=-1) == labels).cpu().numpy())
+        nll.append(F.cross_entropy(scores, labels, reduction="none"))
+        first.append(scores.argmax(dim=-1) == labels)
 
-    return np.concatenate(nll).astype(np.float64), np.concatenate(first)
+    return torch.cat(nll).cpu().numpy().astype(np.float64), torch.cat(first).cpu().numpy()
 
 
 @dataclass
@@ -410,37 +420,50 @@ class Detail:
         nll, first = target_losses(out.logits, out.targets)
 
         # Цели идут в порядке pack: клиент за клиентом, внутри — по
-        # номеру токена. В том же порядке берутся и их признаки.
-        chosen = [client.labels != IGNORE for client in clients]
+        # номеру токена. В том же порядке берутся и их признаки — только
+        # на позициях целей и целыми кодами, а имя группы подставляется
+        # один раз. Код однозначно задаёт имя, поэтому подмножество
+        # каждой группы и порядок в нём те же, что при сравнении строк,
+        # и суммы те же до бита.
+        places = [np.flatnonzero(client.labels != IGNORE) for client in clients]
+        counts = [where.size for where in places]
+
+        reasons = [client.reason[place] for client, where in zip(clients, places) for place in where]
+        bins = [events_bin(client.n_events) for client in clients]
+
+        def coded(names: list[str]) -> tuple[np.ndarray, list[str]]:
+            known = list(dict.fromkeys(names))
+            number = {name: code for code, name in enumerate(known)}
+            return np.fromiter((number[name] for name in names), np.int64, len(names)), known
+
+        reason_codes, reason_names = coded(reasons)
+        bin_codes, bin_names = coded(bins)
 
         labels = {
-            "reason": np.concatenate(
-                [np.asarray(client.reason, dtype=object)[mask] for client, mask in zip(clients, chosen)]
+            "reason": (reason_codes, reason_names),
+            "events": (np.repeat(bin_codes, counts), bin_names),
+            "key": (
+                np.concatenate([client.key_ids[where] for client, where in zip(clients, places)]), key_names
             ),
-            "events": np.concatenate(
-                [
-                    np.full(int(mask.sum()), events_bin(client.n_events), dtype=object)
-                    for client, mask in zip(clients, chosen)
-                ]
-            ),
-            "key": key_names[
-                np.concatenate([client.key_ids[mask] for client, mask in zip(clients, chosen)])
-            ],
         }
 
-        for kind, names in labels.items():
+        for kind, (codes, names) in labels.items():
 
-            if len(names) != len(nll):
+            if len(codes) != len(nll):
                 raise ValueError(
-                    f"целей в проходе {len(nll)}, а признаков «{kind}» {len(names)}: "
+                    f"целей в проходе {len(nll)}, а признаков «{kind}» {len(codes)}: "
                     "порядок целей pack разошёлся с клиентами"
                 )
 
             table = self.groups.setdefault(kind, {})
 
-            for name in np.unique(names):
-                mask = names == name
-                row = table.setdefault(str(name), [0, 0.0, 0])
+            for code in np.unique(codes):
+
+                if names[code] is None:
+                    raise ValueError(f"признак «{kind}» цели с кодом {code} без имени в словаре")
+
+                mask = codes == code
+                row = table.setdefault(str(names[code]), [0, 0.0, 0])
                 row[0] += int(mask.sum())
                 row[1] += float(nll[mask].sum())
                 row[2] += int(first[mask].sum())
@@ -1156,6 +1179,11 @@ def train(
     window_targets = 0
     window_loss = 0.0
 
+    # Выходы прохода окна с целями: их числа читаются в close_window
+    # после нормы градиента. Чтение сразу после backward ждало бы
+    # конца backward на GPU, и шаг стоял бы, пока CPU готовит клип.
+    window_outs: list = []
+
     # Токены событий и анкет окна — для скорости в телеметрии.
     window_tokens = 0
 
@@ -1200,6 +1228,16 @@ def train(
             # Норма ДО клипа: по ней видно, как часто и насколько клип
             # режет шаг.
             norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm))
+
+            # Те же числа и тот же порядок сложения, что при чтении
+            # сразу после прохода.
+            for out in window_outs:
+                if out.aux is not None:
+                    epoch_aux.append(float(out.aux.detach()))
+                value = out.loss.item()
+                window_loss += value * out.count
+                epoch_scores.record(value, out.count, *out.hits)
+
             loss = window_loss / window_targets
 
             if not (math.isfinite(norm) and math.isfinite(loss)):
@@ -1245,6 +1283,7 @@ def train(
         optimizer.zero_grad(set_to_none=True)
 
         window_batches, window_targets, window_loss, window_tokens = 0, 0, 0.0, 0
+        window_outs.clear()
 
         epoch_wait += window_wait
         window_wait, window_started = 0.0, time.perf_counter()
@@ -1335,17 +1374,9 @@ def train(
                 objective = out.loss
                 if out.aux is not None:
                     objective = objective + config.usr_aux_weight * out.aux
-                    epoch_aux.append(float(out.aux.detach()))
                 (objective * out.count).backward()
                 window_targets += out.count
-                window_loss += out.loss.item() * out.count
-
-            epoch_scores.add(out)
-
-            # Логиты [M, словарь] нужны только счёту точности. Без
-            # del они жили бы до конца следующего прохода модели,
-            # поверх его собственных.
-            del out
+                window_outs.append(out)
 
             if window_batches == config.grad_accum_steps:
                 close_window()
