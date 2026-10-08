@@ -28,7 +28,7 @@ from .settings import WEIGHTS_FILE, EmbeddingConfig, embeddings_dir
 # таблицу, и снимок векторов устарел бы на первом же шаге. Стоил
 # же он гигабайты памяти при сборке и сотни мегабайт на диске.
 #
-# Набор группы всё равно читается целиком: Source считает время,
+# Набор группы всё равно читается целиком: Source.rows считает время,
 # разыгрывает маску и сверяет маркеры по каждому батчу, и веса не
 # кладутся рядом с входом, который модель прочитать не сможет.
 # ============================================================
@@ -67,10 +67,10 @@ def build_group(
 
     for number in range(source.count):
 
-        model = source.batch(number).model
+        rows = source.rows(number)
 
-        clients += model.clients
-        tokens += int(model.token_mask.sum()) + int(model.profile_token_mask.sum())
+        clients += len(rows)
+        tokens += sum(len(row["key_ids"]) + len(row["profile_key_ids"]) for row in rows)
 
     weights_path = directory / WEIGHTS_FILE
 

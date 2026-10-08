@@ -18,10 +18,11 @@ def test_the_replay_lives_the_same_world_when_arrivals_end_before_the_planning_h
     from src.generator import config as generator_config
     from src.generator import emit
 
+    # Два сообщества — два задания повтора: проверяется и их склейка.
     group = "val"
     settings = replace(
         generator_config.DATASETS[group],
-        clients=32,
+        clients=64,
         history_start=datetime(2025, 11, 1),
         history_end=datetime(2026, 1, 1),
         registration_end=datetime(2026, 1, 1),

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+import pytest
+
 from tests import world
 from tests.test_source_inputs import three
 
@@ -10,11 +13,12 @@ from tests.test_source_inputs import three
 # ИДЕЯ
 # ============================================================
 #
-# Этап 06 выравнивает группу строк набора в памяти и пишет только
-# веса входного слоя и отметку происхождения. Проверяется не то,
-# что файл появился, а то, что в нём: веса — ровно розыгрыш слоя по
-# seed, сверены все батчи и все настоящие токены, заполнитель —
-# только справа и только в памяти.
+# Этап 06 сверяет каждую группу строк набора — время, маску и
+# маркеры — и пишет только веса входного слоя и отметку
+# происхождения. Проверяется не то, что файл появился, а то, что в
+# нём: веса — ровно розыгрыш слоя по seed, сверены все батчи и все
+# настоящие токены, маска — та же, что у прежнего обхода apply, а
+# испорченный маркер останавливает этап до записи весов.
 # ============================================================
 
 
@@ -34,50 +38,86 @@ def settle(root: Path, people: list[list[world.Made]] | None = None) -> list[wor
 
 
 # ============================================================
-# ВХОД СЛОЯ ЭМБЕДДИНГОВ — ВЫРАВНИВАНИЕ В ПАМЯТИ
+# ВХОД СЛОЯ ЭМБЕДДИНГОВ — СВЕРКА
 # ============================================================
 
 
-def test_embedding_input_pads_a_row_group_on_the_right_only(stage):
+def old_visible(self, row: dict) -> list[int]:
     """
-    Набор хранит клиентов без заполнителя; слой считает [B, T] и
-    [B, P]. Группа строк дополняется до самого длинного клиента:
-    настоящее слева, маска — ровно «номер меньше длины», хвост —
-    только [PAD], смещение пустого события — конец последовательности.
+    Видимые значения прежним обходом apply — эталон, дословно.
+    """
+
+    from src.masking.apply import apply
+    from src.masking.choose import choose
+    from src.tokenization.specials import MASK, UNK
+
+    selection = choose(self.group, row, self.masking, self._weights)
+
+    masked = apply(
+        row["client_id"], row, selection.choices,
+        self._specials[MASK], self._specials[UNK], selection.corrupted,
+    )
+
+    return masked["value_ids"]
+
+
+def test_visible_values_are_the_values_of_the_old_apply(stage, monkeypatch):
+    """
+    Маска массивами (apply_selection) даёт слою те же значения, что
+    прежний обход apply, и маскер в этих батчах действительно работал.
     """
 
     from src.embedding.inputs import Source
 
-    people = settle(stage)
+    settle(stage)
 
-    loaded = Source("train").batch(0)
-    model = loaded.model
-    batch = people[:2]
+    new = [[row["visible_value_ids"].tolist() for row in Source("train").rows(number)] for number in range(2)]
 
-    width = max(made.client.n_tokens for made in batch)
-    profile = max(made.client.profile_n_tokens for made in batch)
-    events = max(made.client.n_events for made in batch)
+    monkeypatch.setattr(Source, "_visible", old_visible)
 
-    assert model.key_ids.shape == (2, width)
-    assert model.profile_key_ids.shape == (2, profile)
+    old = [[list(row["visible_value_ids"]) for row in Source("train").rows(number)] for number in range(2)]
 
-    for row, made in enumerate(batch):
+    assert new == old
+    assert any(world.MASK in values for batch in new for values in batch)
 
-        client = made.client
-        n, p = client.n_tokens, client.profile_n_tokens
 
-        assert model.token_mask[row].tolist() == [True] * n + [False] * (width - n)
-        assert model.profile_token_mask[row].tolist() == [True] * p + [False] * (profile - p)
+def test_a_spoiled_marker_stops_the_stage_before_the_weights(stage, monkeypatch):
+    """
+    Маркер, который маскер испортил в слоте значения, останавливает
+    этап: отказ называет батч, клиента и позицию, а весов рядом с
+    таким входом не остаётся.
+    """
 
-        assert model.key_ids[row, :n].tolist() == client.key_ids.tolist()
-        assert model.key_ids[row, n:].tolist() == [world.PAD] * (width - n)
-        assert model.value_ids[row, n:].tolist() == [world.PAD] * (width - n)
-        assert model.profile_value_ids[row, :p].tolist() == client.profile_value_ids.tolist()
+    from src.embedding.build import build_group
+    from src.embedding.inputs import InputError, Source
+    from src.embedding.settings import WEIGHTS_FILE, EmbeddingConfig, embeddings_dir
 
-        structure = loaded.rows[row]
+    settle(stage)
 
-        assert structure["event_starts"] == client.event_starts.tolist() + [n] * (events - client.n_events)
-        assert structure["event_mask"] == [True] * client.n_events + [False] * (events - client.n_events)
+    first = Source("train").rows(1)[0]
+    position = int(np.flatnonzero(np.asarray(first["key_ids"]) == world.EVT)[0])
+
+    visible = Source._visible
+
+    def spoiled(self, row: dict) -> np.ndarray:
+        values = np.array(visible(self, row))
+        values[int(np.flatnonzero(np.asarray(row["key_ids"]) == world.EVT)[0])] = world.PAD
+        return values
+
+    monkeypatch.setattr(Source, "_visible", spoiled)
+
+    with pytest.raises(InputError) as error:
+        Source("train").rows(1)
+
+    assert str(error.value) == (
+        f"батч 1, клиент {first['client_id']}, позиция {position}: "
+        f"маркер {world.EVT} в слоте ключа, но {world.PAD} в слоте значения"
+    )
+
+    with pytest.raises(InputError, match="маркер"):
+        build_group("train", EmbeddingConfig(dim=world.DIM, seed=world.SEED))
+
+    assert not (embeddings_dir("train") / WEIGHTS_FILE).exists()
 
 
 # ============================================================

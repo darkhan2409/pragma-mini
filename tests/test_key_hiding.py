@@ -230,6 +230,6 @@ def test_train_val_and_test_read_the_context_through_one_implementation(stage):
         assert read_back.reason == expected["reason"], group
         assert world.UNK in read_back.value_ids.tolist(), group
 
-        layer = EmbeddingSource(group, masking=config).batch(0).model
+        (row,) = EmbeddingSource(group, masking=config).rows(0)
 
-        assert layer.value_ids[0, :read_back.n_tokens].tolist() == read_back.value_ids.tolist(), group
+        assert row["visible_value_ids"].tolist() == read_back.value_ids.tolist(), group

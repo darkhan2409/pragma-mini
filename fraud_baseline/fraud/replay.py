@@ -163,22 +163,25 @@ def replay(group: str, workers: int, raw_dir: Path = RAW_DIR) -> tuple[pd.DataFr
         generator_config.HISTORY_END.isoformat(),
         generator_config.REGISTRATION_END.isoformat(),
     )
-    params = emit._build_params(None, None, None)
-    per_batch = max(1, card["chunk_clients"] // params.relationships.community_size)
+    # Одно задание — одно сообщество, как у emit: лента клиента от
+    # разбиения на задания не зависит, хеш считается по клиенту, а
+    # строки потом упорядочиваются по RAW. Мелкие задания грузят
+    # процессы ровнее, чем пачки по chunk_clients.
     count = communities.community_count(settings.clients)
-    jobs = [(tuple(range(start, min(start + per_batch, count))), settings.clients) for start in range(0, count, per_batch)]
+    jobs = [((community_id,), settings.clients) for community_id in range(count)]
 
     captured: list[dict] = []
     digests: dict[str, str] = {}
     initargs = (settings.seed, generator_config.WORLD_SEED, horizon)
+    step = max(1, len(jobs) // 10)
     with Pool(processes=max(1, min(workers, len(jobs))), initializer=_install, initargs=initargs) as pool:
         for done, (rows, hashes) in enumerate(pool.imap_unordered(_run, jobs), start=1):
             captured.extend(rows)
             if set(hashes) & set(digests):
-                raise RuntimeError("клиент встретился в двух пачках повтора")
+                raise RuntimeError("клиент встретился в двух заданиях повтора")
             digests.update(hashes)
-            if done % 5 == 0 or done == len(jobs):
-                print(f"replay {group}: {done}/{len(jobs)} пачек", flush=True)
+            if done % step == 0 or done == len(jobs):
+                print(f"replay {group}: {done}/{len(jobs)} сообществ", flush=True)
 
     columns = ["client_id", "event_time", "source", "payload", "episode_kind", "step_kind"]
     return pd.DataFrame(captured, columns=columns), digests
