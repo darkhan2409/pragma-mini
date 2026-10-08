@@ -6,7 +6,7 @@ from datetime import timedelta
 import numpy as np
 import pytest
 
-from src.dataset.context import ContextError, EventStub, select
+from src.dataset.context import ContextError, border
 from src.dataset.settings import (
     MAX_EVENTS,
     POLICY_ALL,
@@ -34,17 +34,14 @@ from tests.test_profile_state import (
 # отдельно сохранённых старых событий. Проверяется:
 #
 #   границы       11999 и 12000 не режутся, 12001 и 20300 — режутся;
-#   хвост         первым остаётся бывший n-11999-й (по счёту с 1),
-#                 последний не меняется, порядок тот же;
+#   хвост         за границей — самые старые события, остаётся
+#                 непрерывный хвост sizes[border:]: первым бывший
+#                 n-11999-й (по счёту с 1), последний не меняется;
 #   пример        все массивы событий собраны из оставшихся
 #                 заново, маска целей — их, анкета не тронута;
 #   оценка        в val и test потеря события периода целей
 #                 останавливает сборку, train резать можно.
 # ============================================================
-
-
-def stubs(count: int) -> list[EventStub]:
-    return [EventStub(index=number, n_tokens=2, eligible=False) for number in range(count)]
 
 
 def test_default_is_the_last_12000_events():
@@ -56,41 +53,34 @@ def test_default_is_the_last_12000_events():
 @pytest.mark.parametrize("count", [11999, 12000, 12001, 20300])
 def test_long_history_keeps_its_last_12000_events(count: int):
 
-    selection = select(stubs(count), ContextPolicy())
+    # За границей — самые старые n - 12000 событий. Остаётся хвост
+    # sizes[border:]: первым бывший (n - 11999)-й по счёту с единицы,
+    # то есть индекс n - 12000, последним — прежний последний.
+    cut = border([2] * count, ContextPolicy())
 
-    kept = min(count, 12000)
-
-    assert selection.n_kept == kept
-    assert selection.truncated == (count > 12000)
-    assert selection.n_excluded == count - kept
-
-    # Первым остаётся бывший (n - 11999)-й по счёту с единицы, то
-    # есть индекс n - 12000; последний — прежний последний; между
-    # ними ни пропуска, ни перестановки.
-    assert selection.kept[0] == count - kept
-    assert selection.kept[-1] == count - 1
-    assert selection.kept == list(range(count - kept, count))
-    assert selection.excluded == list(range(count - kept))
+    assert cut == max(0, count - 12000)
+    assert count - cut == min(count, 12000)
 
 
-def test_excluded_events_of_the_target_period_are_counted():
+def test_the_oldest_events_go_beyond_the_border():
 
-    events = [EventStub(index=number, n_tokens=3, eligible=number % 2 == 0) for number in range(10)]
+    # Десять событий по 3 токена при пределе 6 событий: за границей
+    # четыре самых старых (12 токенов), остаются 18 токенов. Сколько
+    # из выпавших лежало в периоде целей, считает сборка примера.
+    sizes = [3] * 10
 
-    selection = select(events, ContextPolicy(max_events=6))
+    cut = border(sizes, ContextPolicy(max_events=6))
 
-    assert selection.excluded == [0, 1, 2, 3]
-    assert selection.excluded_eligible == 2
-    assert selection.excluded_tokens == 12
-    assert selection.kept_tokens == 18
+    assert cut == 4
+    assert (sum(sizes[:cut]), sum(sizes[cut:])) == (12, 18)
 
 
 def test_policy_all_refuses_a_history_beyond_its_declared_limit():
 
-    select(stubs(5), ContextPolicy(policy=POLICY_ALL, max_events=None))
+    assert border([2] * 5, ContextPolicy(policy=POLICY_ALL, max_events=None)) == 0
 
     with pytest.raises(ContextError, match="политике all"):
-        select(stubs(6), ContextPolicy(policy=POLICY_ALL, max_events=5))
+        border([2] * 6, ContextPolicy(policy=POLICY_ALL, max_events=5))
 
 
 def test_recent_without_a_limit_is_a_configuration_error():
@@ -301,10 +291,6 @@ def test_train_may_lose_old_targets_to_the_limit(stage):
 # ============================================================
 
 
-def sized(*sizes: int) -> list[EventStub]:
-    return [EventStub(index=number, n_tokens=size, eligible=False) for number, size in enumerate(sizes)]
-
-
 def test_default_token_limit_is_58000():
 
     from src.dataset.settings import MAX_TOKENS
@@ -320,13 +306,9 @@ def test_token_boundary(total: int, kept: int):
     58 000 проходят целиком, 58 001 теряет ровно самое старое.
     """
 
-    events = sized(total - 28 * 2000, *[2000] * 28)
+    sizes = [total - 28 * 2000] + [2000] * 28
 
-    selection = select(events, ContextPolicy())
-
-    assert selection.n_kept == kept
-    assert selection.truncated == (kept < 29)
-    assert selection.kept == list(range(29 - kept, 29))
+    assert len(sizes) - border(sizes, ContextPolicy()) == kept
 
 
 def test_few_heavy_events_are_cut_by_the_token_limit():
@@ -335,11 +317,12 @@ def test_few_heavy_events_are_cut_by_the_token_limit():
     Остаются последние 96 (57 600), 97-е дало бы 58 200.
     """
 
-    selection = select(sized(*[600] * 100), ContextPolicy())
+    sizes = [600] * 100
 
-    assert selection.n_kept == 96
-    assert selection.kept_tokens == 57600
-    assert selection.kept == list(range(4, 100))
+    cut = border(sizes, ContextPolicy())
+
+    assert cut == 4
+    assert sum(sizes[cut:]) == 57600
 
 
 def test_both_limits_exceeded_the_stricter_one_wins():
@@ -348,11 +331,12 @@ def test_both_limits_exceeded_the_stricter_one_wins():
     60 000 токенов, поэтому решает предел токенов: 11 600 событий.
     """
 
-    selection = select(sized(*[5] * 13000), ContextPolicy())
+    sizes = [5] * 13000
 
-    assert selection.n_kept == 11600
-    assert selection.kept_tokens == 58000
-    assert selection.kept == list(range(1400, 13000))
+    cut = border(sizes, ContextPolicy())
+
+    assert cut == 1400
+    assert sum(sizes[cut:]) == 58000
 
 
 def test_the_kept_tail_is_the_freshest_and_every_event_is_whole():
@@ -364,14 +348,11 @@ def test_the_kept_tail_is_the_freshest_and_every_event_is_whole():
 
     sizes = [(number * 37) % 900 + 100 for number in range(400)]
 
-    selection = select(sized(*sizes), ContextPolicy())
+    cut = border(sizes, ContextPolicy())
 
-    border = selection.kept[0]
-
-    assert selection.kept == list(range(border, 400))
-    assert selection.kept_tokens == sum(sizes[border:]) <= 58000
-    assert selection.kept_tokens + sizes[border - 1] > 58000
-    assert selection.excluded_tokens == sum(sizes[:border])
+    assert 0 < cut < len(sizes)
+    assert sum(sizes[cut:]) <= 58000
+    assert sum(sizes[cut:]) + sizes[cut - 1] > 58000
 
 
 def test_token_limit_configuration():
@@ -380,10 +361,10 @@ def test_token_limit_configuration():
         ContextPolicy(max_tokens=100).validate()
 
     assert ContextPolicy.from_dict({"max_tokens": None}).max_tokens is None
-    assert select(sized(*[600] * 100), ContextPolicy(max_tokens=None)).n_kept == 100
+    assert border([600] * 100, ContextPolicy(max_tokens=None)) == 0
 
     with pytest.raises(ContextError, match="токенов при политике all"):
-        select(sized(*[600] * 100), ContextPolicy(policy=POLICY_ALL, max_events=None))
+        border([600] * 100, ContextPolicy(policy=POLICY_ALL, max_events=None))
 
 
 def test_token_truncated_sample_keeps_masks_provenance_and_profile(stage):

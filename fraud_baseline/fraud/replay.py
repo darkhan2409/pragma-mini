@@ -149,13 +149,20 @@ def replay(group: str, workers: int, raw_dir: Path = RAW_DIR) -> tuple[pd.DataFr
         "seed": settings.seed,
         "world_seed": generator_config.WORLD_SEED,
         "total_clients": settings.clients,
+        "registration_end": generator_config.event_time_text(settings.registration_end),
     }
     differing = {key: (card.get(key), value) for key, value in expected.items() if card.get(key) != value}
     if differing:
         raise RuntimeError(f"генератор не тот, что сделал выгрузку {group}: {differing}")
 
-    generator_config.activate_horizon(settings.history_start, settings.history_end)
-    horizon = (generator_config.HISTORY_START.isoformat(), generator_config.HISTORY_END.isoformat())
+    # Последний приход в банк — часть горизонта, как у emit: он задаёт
+    # окно прихода клиентов, и без него повтор прожил бы другой мир.
+    generator_config.activate_horizon(settings.history_start, settings.history_end, settings.registration_end)
+    horizon = (
+        generator_config.HISTORY_START.isoformat(),
+        generator_config.HISTORY_END.isoformat(),
+        generator_config.REGISTRATION_END.isoformat(),
+    )
     params = emit._build_params(None, None, None)
     per_batch = max(1, card["chunk_clients"] // params.relationships.community_size)
     count = communities.community_count(settings.clients)

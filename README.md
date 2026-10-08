@@ -1169,7 +1169,9 @@ epoch=1 train_loss=2.4540 train_top1=0.6544 train_top5=0.8271 val_loss=2.1096 va
 слот анкеты, затем его события). Каждый энкодер считает свои сегменты по
 **корзинам длины** `ceil(log2(длина))`: прямоугольник с заполнителем есть только
 внутри корзины и только до её наибольшей длины, поэтому клиент с 6500 событиями
-не растягивает историю остальных. Голова считает все цели micro-batch сразу.
+не растягивает историю остальных. Голова считает все цели micro-batch сразу. На CUDA
+массивы micro-batch едут на устройство одним закреплённым буфером на тип, асинхронно
+(`varlen.to_device`); каждое поле — срез своего буфера.
 
 `grad_accum_steps` micro-batch'ей (по умолчанию 1) дают один шаг `AdamW`. `backward`
 идёт по сумме потерь целей каждого micro-batch, а перед шагом градиенты делятся на
@@ -1345,9 +1347,11 @@ stopping она не влияет.
   - среднее и сглаживание меток те же.
 - Проход обучения не строит полных логитов `[M, словарь]` (`Model.forward(…,
   logits=False)`): их граф жил бы весь backward ради одного счёта top-1/top-5, а это до
-  ~0.6 ГиБ на тяжёлом шаге. Счёт идёт кусками по тем же `TARGETS_PER_CHUNK` без графа
-  (`hits_in_pieces`) и приходит в `Predicted.hits`. validation логиты строит — по
-  ним разбор целей, — и отпускает до следующего прохода.
+  ~0.6 ГиБ на тяжёлом шаге. Счёт берётся из логитов тех же кусков потерь: `_piece_loss`
+  после кросс-энтропии берёт `topk` под `no_grad`, а пересчёт checkpoint в backward до него
+  не доходит. Он приходит в `Predicted.hits` числами на устройстве; цикл обучения читает
+  loss, aux и счёт окна после нормы градиента, и посреди прохода CPU не ждёт GPU.
+  validation логиты строит — по ним разбор целей, — и отпускает до следующего прохода.
 - Кэш аллокатора CUDA ограничен свободной памятью карты на старте минус 256 МиБ
   (`limit_cuda_memory`), а у 80% лимита аллокатор сам отдаёт свободные блоки. Без этого
   кэш кусков разного размера рос за эпохи до 4.4 ГиБ при 3.2 ГиБ свободных, и под WSL
@@ -1385,7 +1389,7 @@ stopping она не влияет.
 ```bash
 pip install -e .[dashboard]                         # один раз: streamlit
 python -m src.dashboard                             # http://localhost:8501
-python -m src.dashboard --run data/runs/w4-b0 --port 8502
+python -m src.dashboard --run data/runs/<имя> --port 8502
 ```
 
 Отдельный процесс Streamlit, который читает `telemetry.jsonl` каталога прогона, пока идёт
@@ -1408,7 +1412,7 @@ python -m src.dashboard --run data/runs/w4-b0 --port 8502
 ### Диагностика представления клиента
 
 ```bash
-python -m src.mlm.diagnostics --checkpoint data/runs/w4-b0/best_checkpoint.pt \
+python -m src.mlm.diagnostics --checkpoint data/runs/<имя>/best_checkpoint.pt \
     --group val --clients 300 --min-events 100 --out report.json
 ```
 
@@ -1434,9 +1438,9 @@ p10, p50, p90). Перестановка строк вместе с их мом�
 ## 13. Оценка на задачах
 
 ```bash
-python -m src.downstream.embed --checkpoint data/runs/w4-b0/best_checkpoint.pt --tag w4-b0  # векторы на T: train, val
-(cd churn_baseline && .venv/bin/python -m churn.plus_usr --embeddings ../data/13_downstream/w4-b0)
-python -m src.downstream.probe --tag w4-b0                                               # три сценария на val
+python -m src.downstream.embed --checkpoint data/runs/<имя>/best_checkpoint.pt --tag <тег>  # векторы на T: train, val
+(cd churn_baseline && .venv/bin/python -m churn.plus_usr --embeddings ../data/13_downstream/<тег>)
+python -m src.downstream.probe --tag <тег>                                                 # три сценария на val
 ```
 
 Ради чего модель учится: вектор клиента на момент T, собранный строго из прошлого, и

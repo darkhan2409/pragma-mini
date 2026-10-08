@@ -402,6 +402,77 @@ def test_flash_targets_need_no_bucket_fields():
 
 
 # ------------------------------------------------------------
+# на CUDA: закреплённый буфер и плотные выборки
+# ------------------------------------------------------------
+
+
+cuda_only = pytest.mark.skipif(not torch.cuda.is_available(), reason="нужна CUDA")
+
+
+@pytest.mark.cuda
+@cuda_only
+def test_one_transfer_per_type_on_cuda_keeps_every_array():
+    """
+    На CUDA буфер закреплённый, а перенос асинхронный. Долгое ядро
+    впереди на потоке держит первый перенос в очереди, пока второй
+    вызов берёт свой буфер: аллокатор не вправе отдать ему блок,
+    который ещё не скопирован. Значения — те, что были в массивах в
+    момент вызова, даже если массивы тут же переписаны.
+    """
+
+    cuda = torch.device("cuda")
+
+    def arrays(shift: int) -> dict:
+        return {
+            "long": np.arange(300_000, dtype=np.int64) + shift,
+            "empty": np.zeros(0, dtype=np.int64),
+            "table": (np.arange(180_000, dtype=np.float32) + shift).reshape(-1, 6),
+            "columns": (np.arange(24, dtype=np.int64) + shift).reshape(4, 6)[:, ::2],
+            "short": np.array([5, 7], dtype=np.int32) + shift,
+            "flags": (np.arange(9) + shift) % 3 == 0,
+        }
+
+    batches = [arrays(0), arrays(1000)]
+    expected = [{name: np.ascontiguousarray(array).copy() for name, array in batch.items()} for batch in batches]
+
+    torch.cuda.synchronize()
+    torch.cuda._sleep(200_000_000)
+
+    moved = [to_device(batch, cuda) for batch in batches]
+
+    for batch in batches:
+        for array in batch.values():
+            array[...] = 0
+
+    torch.cuda.synchronize()
+
+    for out, want in zip(moved, expected):
+
+        assert set(out) == set(want)
+
+        for name, array in want.items():
+            assert out[name].is_cuda and out[name].is_contiguous(), name
+            assert torch.equal(out[name].cpu(), torch.from_numpy(array)), name
+
+
+@pytest.mark.cuda
+@cuda_only
+def test_recent_targets_on_cuda_are_the_old_targets():
+    """
+    Плотные выборки на CUDA — накопление index_put_ и минимум
+    scatter_reduce — дают те же цели, что прежние nonzero, до бита.
+    """
+
+    cuda = torch.device("cuda")
+
+    recent = recent_head().to(cuda)
+    data = pack(world.clients(), cuda)
+
+    for batch in (data, adversarial(data)):
+        assert torch.equal(recent.targets(batch), old_targets(recent, batch))
+
+
+# ------------------------------------------------------------
 # цикл обучения
 # ------------------------------------------------------------
 

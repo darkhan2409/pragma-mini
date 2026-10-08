@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
 from .settings import POLICY_ALL, POLICY_RECENT, ContextPolicy
 
 
@@ -44,50 +42,6 @@ class ContextError(ValueError):
     """
     Историю нельзя уместить в объявленный предел.
     """
-
-
-@dataclass(frozen=True)
-class EventStub:
-    """
-    Всё, что нужно знать об одном событии, чтобы решить его
-    судьбу: место, размер и лежит ли оно в периоде целей.
-    """
-
-    index: int
-    n_tokens: int
-    eligible: bool
-
-
-@dataclass
-class Selection:
-    """
-    Что вошло в пример и что осталось за его границей.
-    """
-
-    kept: list[int] = field(default_factory=list)
-    excluded: list[int] = field(default_factory=list)
-
-    kept_tokens: int = 0
-    excluded_tokens: int = 0
-    excluded_eligible: int = 0
-
-    truncated: bool = False
-
-    @property
-    def n_kept(self) -> int:
-        return len(self.kept)
-
-    @property
-    def n_excluded(self) -> int:
-        return len(self.excluded)
-
-
-def select(events: list[EventStub], policy: ContextPolicy) -> Selection:
-    """
-    Отбор по объявленной политике.
-    """
-
-    return _split(events, len(events) - border([item.n_tokens for item in events], policy))
 
 
 def border(sizes: list[int], policy: ContextPolicy) -> int:
@@ -146,25 +100,6 @@ def _tail(sizes: list[int], policy: ContextPolicy) -> int:
     return keep
 
 
-def _split(events: list[EventStub], keep: int) -> Selection:
-    """
-    Последние keep событий остаются, более старые — за границей.
-    """
-
-    border = len(events) - keep
-
-    selection = Selection(
-        kept=[item.index for item in events[border:]],
-        excluded=[item.index for item in events[:border]],
-        kept_tokens=sum(item.n_tokens for item in events[border:]),
-        excluded_tokens=sum(item.n_tokens for item in events[:border]),
-        excluded_eligible=sum(1 for item in events[:border] if item.eligible),
-        truncated=border > 0,
-    )
-
-    return selection
-
-
 def _check_limits(sizes: list[int], policy: ContextPolicy) -> None:
     """
     Одна запись не бывает длиннее объявленного предела.
@@ -172,7 +107,7 @@ def _check_limits(sizes: list[int], policy: ContextPolicy) -> None:
     Это ошибка настройки, а не повод обрезать значение: предел
     существует, чтобы о таком событии узнали, а не чтобы оно
     молча потеряло половину полей. Номер события — его место в
-    истории (EventStub.index).
+    sizes, то есть в истории.
     """
 
     if not sizes or max(sizes) <= policy.max_event_tokens:
@@ -188,8 +123,5 @@ def _check_limits(sizes: list[int], policy: ContextPolicy) -> None:
 
 __all__ = [
     "ContextError",
-    "EventStub",
-    "Selection",
     "border",
-    "select",
 ]

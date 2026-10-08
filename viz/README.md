@@ -34,13 +34,14 @@ npm ci
 
 ```bash
 python viz/scripts/export_demo.py                            # код и данные конвейера
-python viz/scripts/export_demo.py --run data/runs/w4-b0      # + сводка прогона
-python viz/scripts/export_demo.py --run data/runs/w4-b0 \
-    --checkpoint data/runs/w4-b0/best_checkpoint.pt          # + числа обученной модели
+python viz/scripts/export_demo.py --run data/runs/<имя>     # + сводка прогона
+python viz/scripts/export_demo.py --run data/runs/<имя> \
+    --checkpoint data/runs/<имя>/best_checkpoint.pt         # + числа обученной модели
 ```
 
 Ещё есть `--group` (по умолчанию `train`), `--client` (по умолчанию `c000728448910`)
-и `--out`.
+и `--out`. Клиент по умолчанию — из прежней выгрузки (seed train 541): в выгрузке по нынешнему
+`DATASETS` его нет, и до нового выбора клиента `--client` задаётся явно.
 
 Что читает экспортер:
 

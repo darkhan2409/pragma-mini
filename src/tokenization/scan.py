@@ -257,13 +257,6 @@ class FitStatistics:
     profiles: int = 0
     limitations: dict[str, int] = field(default_factory=dict)
 
-    def key_counter(self, key: str) -> KeyCounter:
-        counter = self.key_counts.get(key)
-        if counter is None:
-            counter = KeyCounter()
-            self.key_counts[key] = counter
-        return counter
-
 
 def _note_key(stats: FitStatistics, key: str, kind: str, client_id: str) -> None:
 

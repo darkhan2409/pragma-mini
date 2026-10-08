@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 import random
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from importlib import import_module
 from types import SimpleNamespace
@@ -125,9 +125,38 @@ def extra_clients(world, real) -> list:
 # ------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class EventStub:
+
+    index: int
+    n_tokens: int
+    eligible: bool
+
+
+@dataclass
+class Selection:
+
+    kept: list[int] = field(default_factory=list)
+    excluded: list[int] = field(default_factory=list)
+
+    kept_tokens: int = 0
+    excluded_tokens: int = 0
+    excluded_eligible: int = 0
+
+    truncated: bool = False
+
+    @property
+    def n_kept(self) -> int:
+        return len(self.kept)
+
+    @property
+    def n_excluded(self) -> int:
+        return len(self.excluded)
+
+
 def old_select(events, policy):
 
-    from src.dataset.context import ContextError, Selection
+    from src.dataset.context import ContextError
     from src.dataset.settings import POLICY_ALL, POLICY_RECENT
 
     for item in events:
@@ -187,7 +216,6 @@ def old_ints(values) -> np.ndarray:
 
 def old_build_sample(artifacts, client, window, policy):
 
-    from src.dataset.context import EventStub
     from src.dataset.sample import Sample, SampleError
     from src.dataset.targets import can_be_target, eligible
 
@@ -419,7 +447,7 @@ def test_a_batch_too_long_for_int32_offsets_takes_the_old_path(world, monkeypatc
 
 def test_the_border_is_the_old_selection():
 
-    from src.dataset.context import EventStub, border, select
+    from src.dataset.context import border
     from src.dataset.settings import ContextPolicy
 
     rng = random.Random(3)
@@ -444,8 +472,6 @@ def test_the_border_is_the_old_selection():
                           max_tokens=tokens, max_event_tokens=limit),
         ):
             expected = outcome(old_select, stubs, policy)
-
-            assert outcome(select, stubs, policy) == expected
 
             if expected[0] == "ok":
                 assert border(sizes, policy) == expected[1].n_excluded

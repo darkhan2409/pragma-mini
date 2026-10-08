@@ -24,7 +24,7 @@ from src.tokenization.finalvocab import FrozenArtifacts, load_final_vocab, vocab
 # ============================================================
 #
 #   python viz/scripts/export_demo.py [--group train] [--client ID]
-#                                     [--run data/runs/w4-b0]
+#                                     [--run data/runs/<имя>]
 #                                     [--out viz/src/data/pragma_demo.json]
 #
 # Визуализация (viz/) не держит ни одного числа модели руками:
@@ -938,7 +938,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python viz/scripts/export_demo.py")
     parser.add_argument("--group", default="train")
     parser.add_argument("--client", default=DEFAULT_CLIENT)
-    parser.add_argument("--run", type=Path, default=None, help="каталог прогона, например data/runs/w4-b0")
+    parser.add_argument("--run", type=Path, default=None, help="каталог прогона, например data/runs/<имя>")
     parser.add_argument("--out", type=Path, default=ROOT / "viz" / "src" / "data" / "pragma_demo.json")
     parser.add_argument(
         "--checkpoint", type=Path, default=None,
