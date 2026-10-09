@@ -1,0 +1,16 @@
+{
+  "churn_active90": {
+    "train": {
+      "rows": 7689,
+      "churn_1": 394,
+      "churn_0": 7295,
+      "churn_rate": 0.0512420340746521
+    },
+    "val": {
+      "rows": 1366,
+      "churn_1": 77,
+      "churn_0": 1289,
+      "churn_rate": 0.05636896046852123
+    }
+  }
+}

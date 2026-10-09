@@ -1,0 +1,95 @@
+{
+  "val": {
+    "clients": 1500,
+    "client_digests_equal": true,
+    "marked_rows": 884,
+    "signature_rows": 884,
+    "signature_equals_marked": true,
+    "marked_without_signature": 0,
+    "signature_without_mark": 0,
+    "group": "val",
+    "steps": 884,
+    "fraud_1": 804,
+    "false_positive": 80,
+    "by_episode_kind": {
+      "account_takeover": 63,
+      "card_compromise": 456,
+      "false_positive": 80,
+      "social_engineering": 78,
+      "suspicious_transfer": 149,
+      "unusual_purchase": 58
+    },
+    "by_step_kind": {
+      "legitimate": 80,
+      "probe": 317,
+      "strike": 487
+    },
+    "by_type": {
+      "purchase": 594,
+      "transfer_out": 290
+    },
+    "seconds": 212.2
+  },
+  "test": {
+    "clients": 1500,
+    "client_digests_equal": true,
+    "marked_rows": 989,
+    "signature_rows": 989,
+    "signature_equals_marked": true,
+    "marked_without_signature": 0,
+    "signature_without_mark": 0,
+    "group": "test",
+    "steps": 989,
+    "fraud_1": 896,
+    "false_positive": 93,
+    "by_episode_kind": {
+      "account_takeover": 95,
+      "card_compromise": 524,
+      "false_positive": 93,
+      "social_engineering": 56,
+      "suspicious_transfer": 169,
+      "unusual_purchase": 52
+    },
+    "by_step_kind": {
+      "legitimate": 93,
+      "probe": 364,
+      "strike": 532
+    },
+    "by_type": {
+      "purchase": 669,
+      "transfer_out": 320
+    },
+    "seconds": 282.4
+  },
+  "train": {
+    "clients": 8498,
+    "client_digests_equal": true,
+    "marked_rows": 4213,
+    "signature_rows": 4213,
+    "signature_equals_marked": true,
+    "marked_without_signature": 0,
+    "signature_without_mark": 0,
+    "group": "train",
+    "steps": 4213,
+    "fraud_1": 3816,
+    "false_positive": 397,
+    "by_episode_kind": {
+      "account_takeover": 444,
+      "card_compromise": 2211,
+      "false_positive": 397,
+      "social_engineering": 347,
+      "suspicious_transfer": 569,
+      "unusual_purchase": 245
+    },
+    "by_step_kind": {
+      "legitimate": 397,
+      "probe": 1554,
+      "strike": 2262
+    },
+    "by_type": {
+      "purchase": 2853,
+      "transfer_out": 1360
+    },
+    "seconds": 1037.0
+  }
+}
