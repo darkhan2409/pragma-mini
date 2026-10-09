@@ -174,11 +174,13 @@ churn = 0   есть хотя бы одно
 
 ## Модель и оценка
 
-- CatBoost: `Logloss`, `eval_metric=PRAUC`, до 3000 деревьев, `learning_rate` 0.03, глубина 6,
+- CatBoost: `Logloss`, `eval_metric=Logloss` (PR-AUC — только кривая отчёта), до 3000 деревьев, `learning_rate` 0.03, глубина 6,
   `random_seed=42`, 8 потоков. Категориальные поля анкеты идут как `cat_features`.
 - Строки train задачи делятся на `inner_train` (80%) и `inner_holdout` (20%),
   стратифицированно по target, seed 42:
-  1. CatBoost учится на `inner_train` с ранней остановкой по `inner_holdout` (300 итераций);
+  1. CatBoost учится на `inner_train` с ранней остановкой по Logloss на `inner_holdout` (300 итераций).
+     Не по PR-AUC: на ~80 позитивах она скачет, и случайный пик на первых деревьях обрывал
+     обучение (2026-10-09: `plus_usr` остановился на 4 деревьях);
   2. по его прогнозам на том же `inner_holdout` выбирается порог — наибольший F1
      (`max F1 on train inner holdout`);
   3. CatBoost учится заново на всём train с числом деревьев лучшей модели — `best_iteration + 1`,
@@ -277,7 +279,8 @@ churn = 1. Хвост продолжения — 2 422 905 строк от 6879 
 - `reports/metrics.json` хранит по задаче:
   - `inner_train` и `inner_holdout` — строки, положительные и их долю;
   - `best_iteration`, `trees`, `threshold` и `threshold_rule`;
-  - `holdout_curve` — PR-AUC на `inner_holdout` после каждого дерева ранней остановки;
+  - `holdout_logloss` — Logloss на `inner_holdout` после каждого дерева ранней остановки (по нему
+    выбрана лучшая итерация), `holdout_curve` — PR-AUC тех же деревьев;
   - метрики групп;
   - sha256 обоих файлов строк;
   - `sources` по группам — отдельно `feature_history_events_sha256` (история признаков),

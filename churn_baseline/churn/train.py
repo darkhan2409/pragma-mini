@@ -27,9 +27,12 @@ from .target import TASKS, task_rows
 #
 #   1. строки train задачи делятся на inner_train (80%) и
 #      inner_holdout (20%), стратифицированно по target, seed 42.
-#      CatBoost учится на inner_train с ранней остановкой по
-#      inner_holdout; по прогнозам на том же inner_holdout выбирается
-#      порог — наибольший F1;
+#      CatBoost учится на inner_train с ранней остановкой по Logloss
+#      на inner_holdout; по прогнозам на том же inner_holdout
+#      выбирается порог — наибольший F1. Не по PR-AUC: на ~80
+#      позитивах inner_holdout она скачет, и случайный пик на первых
+#      деревьях обрывал обучение (plus_usr остановился на 4 деревьях);
+#      Logloss гладкий;
 #   2. CatBoost учится заново на всём train с числом деревьев лучшей
 #      модели шага 1 (best_iteration + 1: итерации считаются с нуля).
 #      Порог фиксируется с шага 1 и больше не пересчитывается.
@@ -48,7 +51,9 @@ from .target import TASKS, task_rows
 
 PARAMS = {
     "loss_function": "Logloss",
-    "eval_metric": "PRAUC",
+    "eval_metric": "Logloss",
+    # PR-AUC на inner_holdout — только для кривой в отчёте.
+    "custom_metric": ["PRAUC"],
     "iterations": 3000,
     "learning_rate": 0.03,
     "depth": 6,
@@ -62,7 +67,7 @@ PARAMS = {
 
 # Обучение на всём train: те же параметры без ранней остановки,
 # число деревьев задаётся явно.
-EARLY_STOPPING = ("eval_metric", "od_type", "od_wait", "use_best_model")
+EARLY_STOPPING = ("eval_metric", "custom_metric", "od_type", "od_wait", "use_best_model")
 
 # Доля строк train, отложенная для ранней остановки и порога.
 HOLDOUT = 0.2
@@ -161,9 +166,11 @@ def fit_task(rows: pd.DataFrame, columns: list[str], categorical: list[str]) -> 
 
     best = int(stopped.get_best_iteration())
     threshold = threshold_max_f1(y[held], stopped.predict_proba(held_pool)[:, 1])
-    # PR-AUC на inner_holdout после каждого дерева: по ней выбрана
-    # лучшая итерация.
-    curve = [round(float(value), 4) for value in stopped.get_evals_result()["validation"]["PRAUC"]]
+    # Logloss и PR-AUC на inner_holdout после каждого дерева: по
+    # Logloss выбрана лучшая итерация, PR-AUC — для отчёта.
+    evals = stopped.get_evals_result()["validation"]
+    losses = [round(float(value), 6) for value in evals["Logloss"]]
+    curve = [round(float(value), 4) for value in evals["PRAUC"]]
 
     params = {key: value for key, value in PARAMS.items() if key not in EARLY_STOPPING}
     model = CatBoostClassifier(**{**params, "iterations": best + 1})
@@ -182,6 +189,7 @@ def fit_task(rows: pd.DataFrame, columns: list[str], categorical: list[str]) -> 
         "best_iteration": best,
         "trees": int(model.tree_count_),
         "holdout_curve": curve,
+        "holdout_logloss": losses,
     }
 
 

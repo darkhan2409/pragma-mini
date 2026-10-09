@@ -153,7 +153,8 @@ def fitted(metrics: dict) -> dict:
     """
     Всё, что выбирается при обучении, по задачам.
     """
-    keys = ("threshold", "threshold_rule", "best_iteration", "trees", "inner_train", "inner_holdout", "holdout_curve")
+    keys = ("threshold", "threshold_rule", "best_iteration", "trees", "inner_train", "inner_holdout", "holdout_curve",
+            "holdout_logloss")
     return {task: {key: block[key] for key in keys} for task, block in metrics["tasks"].items()}
 
 
@@ -289,15 +290,17 @@ def test_log_loss_is_the_mean_cross_entropy_of_the_probability() -> None:
 
 def test_holdout_curve_is_the_early_stopping_curve(tmp_path, template) -> None:
     """
-    holdout_curve — PR-AUC на inner_holdout после каждого дерева
-    остановленной модели: лучшая итерация — её максимум, а кривая
-    тянется ещё od_wait деревьев после неё или до лимита.
+    holdout_logloss — Logloss на inner_holdout после каждого дерева
+    остановленной модели: лучшая итерация — его минимум, а кривая
+    тянется ещё od_wait деревьев после неё или до лимита. holdout_curve
+    — PR-AUC тех же деревьев.
     """
     raw = fresh(tmp_path, template)
     metrics = train(data_dir=tmp_path / "data", models_dir=tmp_path / "models", reports_dir=tmp_path / "reports",
                     raw_dir=raw, future_dir=tmp_path / "future")
     for block in metrics["tasks"].values():
-        curve = block["holdout_curve"]
-        assert curve[block["best_iteration"]] == max(curve)
-        assert len(curve) in (block["best_iteration"] + 1 + PARAMS["od_wait"], PARAMS["iterations"])
+        losses, curve = block["holdout_logloss"], block["holdout_curve"]
+        assert losses[block["best_iteration"]] == min(losses)
+        assert len(losses) in (block["best_iteration"] + 1 + PARAMS["od_wait"], PARAMS["iterations"])
+        assert len(curve) == len(losses)
         assert all(0.0 <= value <= 1.0 for value in curve)
