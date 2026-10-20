@@ -1114,7 +1114,7 @@ python -m src.mlm.train --out data/runs/имя      # прогон в своём
 
 ```
 [train] cuda: NVIDIA GeForce RTX 3050 Laptop GPU; CUDA 13.0, PyTorch 2.13.0+cu130, bf16 да
-[train] внимание flash (flash-attn 2.8.3.post1, активации bf16); d 128, голов 4; блоков: анкета 1, событие 5, история 2; параметров 2,387,712
+[train] внимание flash (flash-attn 2.8.3.post1, активации bf16); d 128, голов 4; блоков: анкета 1, событие 5, история 2; параметров 2,417,240
 ```
 
 Где что считается:
@@ -1139,7 +1139,7 @@ python -m src.mlm.train --out data/runs/имя      # прогон в своём
 целям `val`:
 
 ```
-epoch=1 train_loss=2.4540 train_top1=0.6544 train_top5=0.8271 val_loss=2.1096 val_top1=0.6997 val_top5=0.8872 val_targets=1302588 lr=2.75e-04 best_val_loss=2.1096 patience=0/3
+epoch=1 train_loss=2.4646 train_top1=0.6452 train_top5=0.8196 val_loss=2.1834 val_top1=0.6785 val_top5=0.8737 val_targets=1855205 lr=2.75e-04 best_val_loss=2.1834 patience=0/3
 ```
 
 Эпоха, прерванная `--max-steps`, validation не получает.
@@ -1175,7 +1175,7 @@ backward (по micro-batch'ам окна) -> grad /= цели окна -> clip_g
 В лог идёт строка на шаг, `lr` — с которым сделан этот шаг:
 
 ```
-epoch=1 step=2 loss=8.8893 targets=13119 micro_batches=1 lr=6.00e-06 grad_norm=4.155 wait=0.00s time=0.63s
+epoch=1 step=2 loss=8.7750 targets=6856 micro_batches=1 lr=6.00e-06 grad_norm=7.172 wait=0.00s time=0.38s
 ```
 
 `grad_norm` — норма градиента окна до клипа, `wait` — сколько цикл ждал данных
@@ -1268,8 +1268,8 @@ epoch=… train_loss=… train_top1=… train_top5=… val_loss=… val_top1=…
 Следом строка о времени, градиенте и памяти и строка разбивки `val`:
 
 ```
-[epoch 5] train 15.1 мин, из них ожидание данных 0.4 мин (3%), val 1.1 мин; шагов 3702, норма градиента средняя 0.511 наибольшая 5.788, клип 7.6%; пик CUDA allocated 1.96 ГиБ, reserved 2.23 ГиБ
-[epoch 5] val nll 0.8308; nll/top1 по механизму: event 0.984/0.714, key 0.684/0.790, value 0.819/0.749; по длине истории: 0-100 0.860/0.749, 100-300 0.804/0.759, 300-1000 0.801/0.770, 1000-3000 0.839/0.749, 3000+ 0.831/0.749
+[epoch 5] train 17.1 мин, из них ожидание данных 0.5 мин (3%), val 1.1 мин; шагов 4495, норма градиента средняя 1.123 наибольшая 7.761, клип 49.1%; пик CUDA allocated 1.94 ГиБ, reserved 2.07 ГиБ
+[epoch 5] val nll 0.9277; nll/top1 по механизму: event 1.120/0.690, key 0.736/0.785, value 0.910/0.719; по длине истории: 0-100 0.934/0.707, 100-300 0.900/0.734, 300-1000 0.859/0.752, 1000-3000 0.904/0.737, 3000+ 0.936/0.726
 ```
 
 **Разбивка `val`** (`history[…]["val_detail"]`): NLL **без** сглаживания меток и Top-1 по

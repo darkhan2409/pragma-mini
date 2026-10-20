@@ -41,7 +41,10 @@ from src.tokenization.finalvocab import FrozenArtifacts, load_final_vocab, vocab
 
 FORMAT = 1
 
-DEFAULT_CLIENT = "c000728448910"
+# Клиент train выгрузки seed 564: история с января 2024, есть все
+# COMPANION_TYPES и покупка в PREFERRED_MERCHANTS; из таких число
+# событий (1917) ближе всех к медиане train (1915.5).
+DEFAULT_CLIENT = "c205641491032"
 
 # Какую покупку показывать сквозным событием, если она есть у
 # клиента: узнаваемые названия из нескольких кусков BPE.
@@ -805,7 +808,10 @@ def model_facts(checkpoint: Path, group: str, row: dict, event_index: int, key_i
         "val_loss": _round(last.get("val", {}).get("loss") if isinstance(last, dict) else None),
         "attention": {
             "row_error": _round(error, 8),
-            "blocks": [[[_round(float(w), 6) for w in head] for head in block] for block in rows],
+            # 6 значащих цифр, а не 6 знаков после запятой: у длинной
+            # истории тысячи весов меньше 1e-6, округление до знаков
+            # обнулило бы их, и строка перестала бы суммироваться в 1.
+            "blocks": [[[float(f"{float(w):.6g}") for w in head] for head in block] for block in rows],
         },
         "mlm": {
             "event_index": event_index,

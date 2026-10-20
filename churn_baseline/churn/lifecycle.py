@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
-import numpy as np
 import pandas as pd
 
 from .activity import is_client_action, is_target_action, is_visit
