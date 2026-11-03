@@ -1,20 +1,24 @@
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import replace
 
 import numpy as np
+import pytest
 import torch
 import torch.nn.functional as F
 
+import src.mlm.model as model_module
 from src.mlm.inputs import IGNORE
 from src.mlm.model import RECENCY_CAP_DAYS, RECENT_DAYS, RecentTypes, pack
-from src.mlm.settings import MlmConfig, checkpoint_path
+from src.mlm.settings import RETIRED, TELEMETRY_FILE, ConfigError, MlmConfig, checkpoint_path, train_dir
 from src.mlm.train import aux_loss, load_trained, train
 
 from tests import world
+from tests.test_checkpoint_resume import compare, read
 from tests.test_scheduler import many
-from tests.test_training_math import CPU, every_value, settle, tiny
+from tests.test_training_math import CPU, every_value, fresh, settle, tiny, uneven, windows
 
 
 # ============================================================
@@ -154,6 +158,24 @@ def test_the_target_is_on_by_default_and_old_checkpoints_keep_their_weight():
     assert MlmConfig.from_dict({"usr_aux_weight": 0.0}).usr_aux_weight == 0.0
 
 
+def test_retired_aux_per_client_key_is_read_only_as_false():
+    """
+    Переключатель aux_per_client удалён (кандидат 1 аудита 2026-11-03 не
+    прошёл правило принятия), но ключ лежит в конфиге каждого чекпойнта кампании со
+    значением false и обязан читаться. true — ошибка: чекпойнт,
+    обученный с ним, этим кодом не воспроизвести.
+    """
+
+    assert RETIRED == {"aux_per_client": False}
+    assert MlmConfig.from_dict({"aux_per_client": False}) == MlmConfig.from_dict({})
+
+    with pytest.raises(ConfigError, match="aux_per_client"):
+        MlmConfig.from_dict({"aux_per_client": True})
+
+    assert "aux_per_client" not in MlmConfig().as_dict()
+    assert MlmConfig.from_dict(MlmConfig().as_dict()) == MlmConfig()
+
+
 def test_the_auxiliary_head_learns_and_travels_in_the_checkpoint(stage, monkeypatch):
 
     import src.mlm.model as model_module
@@ -173,3 +195,144 @@ def test_the_auxiliary_head_learns_and_travels_in_the_checkpoint(stage, monkeypa
 
     assert model.recent is not None
     assert torch.equal(model.recent.proj.weight, state["model_state_dict"]["recent.proj.weight"])
+
+
+# ============================================================
+# ШАГ С ЦЕЛЬЮ [USR]: ФОРМУЛА ЭТАЛОНА
+# ============================================================
+#
+# micro-batch с целями MLM делает backward((loss + w · aux) · count),
+# aux — средний квадрат ошибки по всем ячейкам micro-batch'а, и окно
+# делится на число своих целей. Формула прежнего кода повторяется
+# здесь руками и сравнивается через torch.equal.
+# ============================================================
+
+
+WEIGHT = 0.5
+
+
+def old_recent_forward(self: RecentTypes, data, usr: torch.Tensor) -> torch.Tensor:
+    """
+    RecentTypes.forward до 2026-11-03: среднее по всем ячейкам
+    micro-batch'а.
+    """
+
+    predicted = self.proj(usr).float().view(data.clients, len(RECENT_DAYS) + 1, self.types)
+
+    return F.mse_loss(predicted, self.targets(data))
+
+
+def test_window_step_is_the_reference_formula_bitwise(stage, monkeypatch):
+    """
+    Градиент шага окна из нескольких micro-batch'ей побитно равен прежней
+    формуле: (loss + w · mse) · count на micro-batch с целями и деление на
+    число целей окна.
+    """
+
+    monkeypatch.setattr(model_module, "recent_types", lambda artifacts, dim, seed: head(dim))
+
+    masking = every_value()
+
+    settle(stage, train_people=uneven(stage))
+
+    probe = tiny(token_budget=14)
+    config = tiny(token_budget=14, grad_accum_steps=len(windows(probe, masking)), usr_aux_weight=WEIGHT)
+
+    assert config.grad_accum_steps > 1
+
+    taken: list[list] = []
+    original = torch.nn.utils.clip_grad_norm_
+
+    def spy(parameters, max_norm, *args, **kwargs):
+        parameters = list(parameters)
+        taken.append([p.grad.clone() if p.grad is not None else None for p in parameters])
+        return original(parameters, max_norm, *args, **kwargs)
+
+    monkeypatch.setattr(torch.nn.utils, "clip_grad_norm_", spy)
+    train(config, epochs=1, max_steps=None, masking=masking)
+    monkeypatch.setattr(torch.nn.utils, "clip_grad_norm_", original)
+
+    assert len(taken) == 1, "тест рассчитан ровно на один шаг оптимизатора"
+
+    model = fresh(None, config)
+    model.attach_recent(head(int(model.embedding.dim)))
+    model.train()
+
+    targets = 0
+
+    with monkeypatch.context() as patch:
+
+        patch.setattr(RecentTypes, "forward", old_recent_forward)
+
+        for clients in windows(config, masking):
+            out = model(pack(clients, CPU), logits=False)
+            if out.count > 0:
+                ((out.loss + WEIGHT * out.aux) * out.count).backward()
+                targets += out.count
+
+    torch._foreach_div_([p.grad for p in model.parameters() if p.grad is not None], targets)
+
+    expected = list(model.parameters())
+
+    assert len(expected) == len(taken[0])
+    assert float(model.recent.proj.weight.grad.abs().max()) > 0
+
+    for parameter, grad in zip(expected, taken[0]):
+        assert torch.equal(grad, parameter.grad)
+
+
+def steps_telemetry() -> list[dict]:
+    """
+    Строки шагов без часов: время и ожидание у прогонов разные.
+    """
+
+    rows = [json.loads(line) for line in (train_dir() / TELEMETRY_FILE).read_text().splitlines()]
+
+    return [
+        {key: value for key, value in row.items() if key not in ("time", "seconds", "wait_seconds")}
+        for row in rows if row["kind"] == "step"
+    ]
+
+
+@pytest.mark.parametrize("dropout", [0.0, 0.2])
+def test_resume_mid_epoch_with_the_auxiliary_head(stage, monkeypatch, dropout: float):
+    """
+    grad_accum_steps=3, семь micro-batch'ей на эпоху: окна 3 + 3 + 1.
+    Остановка после первого окна второй эпохи и --resume: веса, AdamW
+    (с головой [USR]), расписание и телеметрия шагов те же, что без
+    остановки.
+    """
+
+    monkeypatch.setattr(model_module, "recent_types", lambda artifacts, dim, seed: head(dim))
+
+    people = many(7)
+    masking = every_value()
+
+    config = tiny(token_budget=6, grad_accum_steps=3, warmup_steps=2, usr_aux_weight=WEIGHT)
+
+    settle(stage, train_people=people, dropout=dropout)
+
+    assert len(windows(config, masking)) == 7
+
+    train(config, epochs=2, max_steps=None, masking=masking)
+
+    straight, straight_steps = read(checkpoint_path()), steps_telemetry()
+
+    assert straight["step"] == 6
+    assert [row["micro_batches"] for row in straight_steps] == [3, 3, 1] * 2
+
+    settle(stage, train_people=people, dropout=dropout)
+
+    train(config, epochs=2, max_steps=4, masking=masking)
+
+    paused = read(checkpoint_path())
+
+    assert paused["epoch_complete"] is False
+    assert paused["epoch"] == 2
+    assert paused["micro_batches_done"] == 3
+
+    train(config, epochs=2, max_steps=None, masking=masking, resume=True)
+
+    compare(straight, read(checkpoint_path()))
+
+    assert steps_telemetry() == straight_steps

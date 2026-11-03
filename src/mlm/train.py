@@ -7,7 +7,6 @@ import math
 import os
 import sys
 import time
-from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -87,13 +86,9 @@ if TYPE_CHECKING:
 # backward идёт по сумме потерь целей micro-batch, а перед шагом
 # градиенты делятся на число целей окна: шаг получает градиент
 # среднего по ВСЕМ целям окна, и цель в маленьком micro-batch
-# весит столько же, сколько в большом. Цель [USR] (E1′) у эталона
-# идёт в тот же backward средним по ячейкам micro-batch'а, умноженным
-# на число его целей; с aux_per_client окно собирается целиком до
-# прохода, MLM — среднее по целям окна, а E1′ окна — сумма по его
-# клиентам, делённая на среднее число клиентов на окно эпохи: вес
-# клиента за эпоху одинаков (aux_loss, client_aux,
-# clients_per_window). Затем норма градиента
+# весит столько же, сколько в большом. Цель [USR] (E1′) идёт в тот
+# же backward средним по ячейкам micro-batch'а (aux_loss), умноженным
+# на число его целей. Затем норма градиента
 # ограничивается max_grad_norm, делается шаг AdamW и шаг
 # расписания LR. step — шаг оптимизатора, --max-steps ограничивает
 # именно их.
@@ -752,8 +747,8 @@ def hide_keys(model) -> None:
 def train_source(config: MlmConfig, masking: MaskingConfig, epoch: int):
     """
     Источник train эпохи: её маска и, при shuffle_order, её порядок.
-    Одна и та же эпоха даёт тот же поток — на этом стоят resume, K
-    эпохи и горизонт cosine.
+    Одна и та же эпоха даёт тот же поток — на этом стоят resume и
+    горизонт cosine.
 
     Порядок берётся из MlmConfig.seed, а не из seed маскирования:
     реплика шумового пола меняет seed головы, и порядок у неё свой.
@@ -817,67 +812,6 @@ def aux_loss(errors: torch.Tensor) -> torch.Tensor:
     import torch.nn.functional as F
 
     return F.mse_loss(errors, torch.zeros_like(errors))
-
-
-def client_aux(errors: torch.Tensor) -> torch.Tensor:
-    """
-    Средний квадрат ошибок [USR] каждого клиента: [B] из [B, окна + 1,
-    типы].
-    """
-
-    return errors.square().mean(dim=(1, 2))
-
-
-def optimizer_windows(batches: Iterable[list], size: int) -> Iterator[list[list]]:
-    """
-    micro-batch'и списками по окну оптимизатора: size штук, последний
-    список — хвост эпохи.
-
-    Окна считаются от начала эпохи, а не от места продолжения: resume
-    пропускает micro_batches_done micro-batch'ей и попадает в те же
-    окна с теми же клиентами.
-    """
-
-    window = []
-
-    for clients in batches:
-
-        window.append(clients)
-
-        if len(window) == size:
-            yield window
-            window = []
-
-    if window:
-        yield window
-
-
-def clients_per_window(config: MlmConfig, masking: MaskingConfig, epoch: int) -> float:
-    """
-    K эпохи для aux_per_client — среднее число клиентов на окно
-    оптимизатора: клиенты эпохи / окна эпохи.
-
-    Член E1′ окна — w · Σ aux_клиента / K. Одно K на всю эпоху даёт
-    каждому клиенту эпохи вес w/K, каким бы ни был состав его окна, и
-    сохраняет масштаб: в среднем по окнам C = K. Деление на клиентов
-    самого окна (C) этого не даёт: при grad_accum_steps=1 окно с одним
-    длинным клиентом весило бы столько же, сколько окно с десятью
-    короткими (аудит 2026-11-02, Н1в).
-
-    Считается по длинам, той же упаковкой, что horizon, до первого
-    прохода эпохи; продолжение эпохи считает то же число.
-    """
-
-    from .inputs import micro_batches
-
-    sizes = train_source(config, masking, epoch).sizes()
-    counts = [len(batch) for batch in micro_batches(sizes, config.token_budget)]
-
-    # У пустой эпохи нет ни одного прохода, и K не читается.
-    if not counts:
-        return 0.0
-
-    return sum(counts) / math.ceil(len(counts) / config.grad_accum_steps)
 
 
 def horizon(config: MlmConfig, masking: MaskingConfig, epochs: int) -> int:
@@ -1301,7 +1235,7 @@ def train(
     window_targets = 0
     window_loss = 0.0
 
-    # Выходы проходов окна, давших backward: их числа читаются в close_window
+    # Выходы прохода окна с целями: их числа читаются в close_window
     # после нормы градиента. Чтение сразу после backward ждало бы
     # конца backward на GPU, и шаг стоял бы, пока CPU готовит клип.
     window_outs: list = []
@@ -1328,12 +1262,9 @@ def train(
         градиент среднего по всем целям окна: цель одного
         micro-batch весит столько же, сколько цель другого. Клип
         стоит после деления: ограничивается норма именно этого
-        среднего. С aux_per_client каждый backward уже поделён на
-        цели окна и K эпохи, и деления здесь нет. Окно без целей MLM
-        шага не делает — ни оптимизатора, ни расписания: weight decay
-        AdamW иначе сдвинул бы веса без обучающего сигнала. Так и с
-        aux_per_client: E1′ такого окна отбрасывается (на эталоне
-        таких окон нет).
+        среднего. Окно без целей шага не делает — ни оптимизатора,
+        ни расписания: weight decay AdamW иначе сдвинул бы веса без
+        обучающего сигнала.
 
         Нечисловые loss или норма градиента останавливают обучение
         до optimizer.step: один такой шаг сделал бы нечисловыми все
@@ -1345,29 +1276,20 @@ def train(
 
         if window_targets > 0:
 
-            if not config.aux_per_client:
-                torch._foreach_div_(
-                    [parameter.grad for parameter in model.parameters() if parameter.grad is not None],
-                    window_targets,
-                )
+            torch._foreach_div_(
+                [parameter.grad for parameter in model.parameters() if parameter.grad is not None],
+                window_targets,
+            )
 
             # Норма ДО клипа: по ней видно, как часто и насколько клип
             # режет шаг.
             norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm))
 
             # Те же числа и тот же порядок сложения, что при чтении
-            # сразу после прохода. aux эпохи — среднее по micro-batch'ам
-            # у эталона и по клиентам с aux_per_client.
+            # сразу после прохода.
             for out in window_outs:
                 if out.aux is not None:
-                    if config.aux_per_client:
-                        epoch_aux.extend(client_aux(out.aux.detach()).tolist())
-                    else:
-                        epoch_aux.append(float(aux_loss(out.aux.detach())))
-                # С aux_per_client в окне бывают проходы без целей MLM:
-                # у них есть только E1′.
-                if out.count == 0:
-                    continue
+                    epoch_aux.append(float(aux_loss(out.aux.detach())))
                 value = out.loss.item()
                 window_loss += value * out.count
                 epoch_scores.record(value, out.count, *out.hits)
@@ -1477,80 +1399,45 @@ def train(
         # до следующего — ожидание данных (чтение, маска, сборка).
         ready = started
 
-        batches = micro_batches(source.clients(), config.token_budget)
+        for clients in micro_batches(source.clients(), config.token_budget):
 
-        # С aux_per_client окно собирается списком до прохода: T нужно
-        # уже первому backward. У эталона окно — по одному
-        # micro-batch'у за раз, как прежде.
-        if config.aux_per_client:
-            groups = optimizer_windows(batches, config.grad_accum_steps)
-            per_window = clients_per_window(config, masking, epoch)
-        else:
-            groups = ([clients] for clients in batches)
+            window_wait += time.perf_counter() - ready
 
-        for group in groups:
-
-            if config.aux_per_client:
-                planned_targets = sum(client.n_targets for clients in group for client in clients)
-
-            for clients in group:
-
-                window_wait += time.perf_counter() - ready
-
-                if done < skip:
-                    done += 1
-                    ready = time.perf_counter()
-                    continue
-
-                # Предел считает шаги оптимизатора. Проверка стоит перед
-                # новым micro-batch'ем: окно к этому моменту пустое,
-                # потому что шаг закрывает окно.
-                if max_steps is not None and step >= max_steps:
-                    stopped = True
-                    break
-
-                # Один проход модели на весь micro-batch. На CUDA — под
-                # bf16 autocast; backward ниже идёт уже вне него, а веса и
-                # AdamW остаются fp32.
-                # Без полных логитов: счёт top-1/top-5 приходит кусками.
-                with autocast(device):
-                    out = model(pack(clients, device), logits=False)
-
-                window_batches += 1
-                window_tokens += sum(client.n_tokens + client.profile_n_tokens for client in clients)
+            if done < skip:
                 done += 1
-
-                if config.aux_per_client:
-
-                    # MLM — среднее по T целям окна, E1′ — сумма по клиентам
-                    # на K клиентов окна в среднем по эпохе: каждый backward
-                    # нормируется сразу, и close_window не делит.
-                    objective = None
-                    if out.count > 0:
-                        objective = out.loss * out.count / planned_targets
-                    if out.aux is not None:
-                        aux = config.usr_aux_weight * client_aux(out.aux).sum() / per_window
-                        objective = aux if objective is None else objective + aux
-                    if objective is not None:
-                        objective.backward()
-                        window_outs.append(out)
-                    window_targets += out.count
-
-                elif out.count > 0:
-                    objective = out.loss
-                    if out.aux is not None:
-                        objective = objective + config.usr_aux_weight * aux_loss(out.aux)
-                    (objective * out.count).backward()
-                    window_targets += out.count
-                    window_outs.append(out)
-
-                if window_batches == config.grad_accum_steps:
-                    close_window()
-
                 ready = time.perf_counter()
+                continue
 
-            if stopped:
+            # Предел считает шаги оптимизатора. Проверка стоит перед
+            # новым micro-batch'ем: окно к этому моменту пустое,
+            # потому что шаг закрывает окно.
+            if max_steps is not None and step >= max_steps:
+                stopped = True
                 break
+
+            # Один проход модели на весь micro-batch. На CUDA — под
+            # bf16 autocast; backward ниже идёт уже вне него, а веса и
+            # AdamW остаются fp32.
+            # Без полных логитов: счёт top-1/top-5 приходит кусками.
+            with autocast(device):
+                out = model(pack(clients, device), logits=False)
+
+            window_batches += 1
+            window_tokens += sum(client.n_tokens + client.profile_n_tokens for client in clients)
+            done += 1
+
+            if out.count > 0:
+                objective = out.loss
+                if out.aux is not None:
+                    objective = objective + config.usr_aux_weight * aux_loss(out.aux)
+                (objective * out.count).backward()
+                window_targets += out.count
+                window_outs.append(out)
+
+            if window_batches == config.grad_accum_steps:
+                close_window()
+
+            ready = time.perf_counter()
 
         skip = 0
 

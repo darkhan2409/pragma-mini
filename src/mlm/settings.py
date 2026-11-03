@@ -74,6 +74,13 @@ class ConfigError(ValueError):
     """
 
 
+# Удалённые переключатели: ключ остаётся читаемым со старым значением,
+# потому что он лежит в конфиге каждого чекпойнта кампании. Другое
+# значение — ошибка: код этого режима удалён, и такой чекпойнт им не
+# воспроизвести. as_dict ключ не пишет.
+RETIRED: dict[str, Any] = {"aux_per_client": False}
+
+
 @dataclass(frozen=True)
 class MlmConfig:
     """
@@ -138,19 +145,6 @@ class MlmConfig:
     # каждого типа. 0 — цели нет, как у B0: без неё [USR] почти не
     # знает давности (аудит 2026-10-05, E1′).
     usr_aux_weight: float = 1.0
-
-    # Нормировка цели [USR] в окне оптимизатора. False — как у
-    # эталона: среднее по ячейкам micro-batch'а, умноженное на число
-    # его целей MLM, так что вес клиента около 1/(клиентов в его
-    # micro-batch'е) и шаг зависит от разбиения окна (аудит
-    # 2026-11-02, Н1). True — член E1′ окна w · Σ aux_клиента / K, где
-    # K — среднее число клиентов на окно эпохи (клиенты эпохи / окна
-    # эпохи): у каждого клиента эпохи вес w/K, шаг не зависит от
-    # разбиения окна, и micro-batch без целей MLM тоже учит голову
-    # [USR]. Деление на клиентов самого окна этого не дало бы: при
-    # grad_accum_steps=1 окно с одним длинным клиентом весило бы
-    # столько же, сколько окно с десятью короткими.
-    aux_per_client: bool = False
 
     # Порядок прохода train. False — порядок файла у каждой эпохи, как
     # у эталона. True — каждая эпоха переставляет группы строк и
@@ -257,7 +251,6 @@ class MlmConfig:
             "early_stopping_min_delta": self.early_stopping_min_delta,
             "loader_workers": self.loader_workers,
             "usr_aux_weight": self.usr_aux_weight,
-            "aux_per_client": self.aux_per_client,
             "shuffle_order": self.shuffle_order,
             "hide_event_keys": self.hide_event_keys,
         }
@@ -267,7 +260,15 @@ class MlmConfig:
 
         base = MlmConfig()
 
-        unknown = set(data) - set(base.as_dict())
+        for key, retired in RETIRED.items():
+            if key in data and data[key] != retired:
+                raise ConfigError(
+                    f"переключатель {key} удалён из кода (кандидат не прошёл правило принятия 2026-11-03): "
+                    f"читается только {retired!r}, получено {data[key]!r}; чекпойнт, "
+                    f"обученный с {key}={data[key]!r}, этим кодом не воспроизвести"
+                )
+
+        unknown = set(data) - set(base.as_dict()) - set(RETIRED)
 
         if unknown:
             raise ConfigError(f"неизвестные ключи конфига головы: {sorted(unknown)}")
@@ -295,7 +296,6 @@ class MlmConfig:
             ),
             loader_workers=int(data.get("loader_workers", base.loader_workers)),
             usr_aux_weight=float(data.get("usr_aux_weight", base.usr_aux_weight)),
-            aux_per_client=bool(data.get("aux_per_client", base.aux_per_client)),
             shuffle_order=bool(data.get("shuffle_order", base.shuffle_order)),
             hide_event_keys=bool(data.get("hide_event_keys", base.hide_event_keys)),
         )
@@ -363,6 +363,7 @@ __all__ = [
     "ATTENTION_BACKENDS",
     "DEVICES",
     "EPOCHS_DIR",
+    "RETIRED",
     "TELEMETRY_FILE",
     "TRAIN_DIR",
     "ConfigError",

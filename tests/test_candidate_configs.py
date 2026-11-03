@@ -36,7 +36,6 @@ GROUPS = (
 )
 
 TRAIN = {
-    "train-aux-per-client.json": "aux_per_client",
     "train-shuffle.json": "shuffle_order",
     "train-hide-keys.json": "hide_event_keys",
 }
