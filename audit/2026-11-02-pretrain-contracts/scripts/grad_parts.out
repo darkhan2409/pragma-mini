@@ -1,0 +1,7 @@
+# python grad_parts.py 3 6000  (clients with n_events <= 400, CPU fp32, SDPA, train mode)
+init mb0 clients=3 targets=1374 mlm_loss=8.748 aux=8.391 |g_mlm|=2.897 |g_aux|=6.646 |g_both|=7.240
+init mb1 clients=5 targets=1505 mlm_loss=8.824 aux=8.105 |g_mlm|=2.854 |g_aux|=6.535 |g_both|=7.138
+init mb2 clients=4 targets=1896 mlm_loss=8.756 aux=8.537 |g_mlm|=3.254 |g_aux|=6.731 |g_both|=7.535
+epoch_05 mb0 clients=3 targets=1374 mlm_loss=1.847 aux=0.058 |g_mlm|=0.642 |g_aux|=0.279 |g_both|=0.702
+epoch_05 mb1 clients=5 targets=1505 mlm_loss=2.054 aux=0.140 |g_mlm|=0.926 |g_aux|=0.491 |g_both|=1.044
+epoch_05 mb2 clients=4 targets=1896 mlm_loss=1.915 aux=0.036 |g_mlm|=0.967 |g_aux|=0.268 |g_both|=1.011

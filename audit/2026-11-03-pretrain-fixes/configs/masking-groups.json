@@ -1,0 +1,10 @@
+{
+  "field_groups": [
+    ["direction", "transaction_amount"],
+    ["app_domain", "firebase_screen", "operation"],
+    ["campaign_code", "offer", "template", "purpose"],
+    ["is_online", "operation_channel"],
+    ["mcc", "merchant_category", "merchant_name"]
+  ],
+  "event_type_event_only": true
+}

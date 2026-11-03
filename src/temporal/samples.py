@@ -12,6 +12,7 @@ from src.dataset.build import SAMPLES_SCHEMA
 from src.dataset.lineage import lineage
 from src.preprocessing.artifacts import read_json
 from src.dataset.settings import META_FILE, SAMPLES_FILE, TIME_ANCHORS, dataset_dir
+from src.tokenization.finalvocab import VocabError, vocabulary_digest
 
 from .position import (
     check,
@@ -84,7 +85,10 @@ class SamplesGroup:
     Файл примеров по стандартному пути.
     """
 
-    def __init__(self, group: str, directory: Path | None = None):
+    # vocab_dir — каталог словаря для сверки отпечатка, по умолчанию
+    # data/03_vocab. Процесс подготовки данных передаёт его путём: в
+    # новом процессе глобалы каталогов снова указывают на data/.
+    def __init__(self, group: str, directory: Path | None = None, vocab_dir: Path | None = None):
 
         self.group = group
         self.directory = Path(directory) if directory is not None else dataset_dir(group)
@@ -140,6 +144,27 @@ class SamplesGroup:
                 f"набор собран прежним кодом: выполните python -m src.dataset.run {group} заново"
             )
 
+        # Номера токенов принадлежат словарю, под который набор
+        # собран: под другим словарём они читались бы молча как
+        # другие токены. Набор, собранный до записи отпечатка (эталон
+        # на диске), ключа не несёт и принимается: сверять не с чем.
+        recorded = self.meta.get("vocabulary")
+
+        if recorded is not None:
+
+            try:
+                digest = vocabulary_digest(vocab_dir)
+            except VocabError as error:
+                raise SamplesError(str(error)) from error
+
+            if recorded != digest:
+                raise SamplesError(
+                    f"{meta_path}: набор собран под словарь {recorded}, а текущий словарь "
+                    f"{vocab_dir or 'data/03_vocab'} — {digest}: выполните "
+                    f"python -m src.tokenization.run encode {group} и "
+                    f"python -m src.dataset.run {group} заново"
+                )
+
         # Момент, на который собрана анкета: от него считается
         # давность вех.
         self.cutoff = datetime.fromisoformat(self.meta["events_cutoff"])
@@ -170,9 +195,9 @@ class TemporalGroup(SamplesGroup):
     Набор группы с временными позициями, посчитанными при чтении.
     """
 
-    def __init__(self, group: str, directory: Path | None = None):
+    def __init__(self, group: str, directory: Path | None = None, vocab_dir: Path | None = None):
 
-        super().__init__(group, directory)
+        super().__init__(group, directory, vocab_dir)
 
         anchor = self.meta.get("time_anchor")
 

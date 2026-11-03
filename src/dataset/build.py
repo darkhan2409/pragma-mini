@@ -273,6 +273,10 @@ def build_group(
         "context": config.context.as_dict(),
         # От чего читатель набора считает время событий.
         "time_anchor": config.time_anchor,
+        # Словарь, номерами которого записаны примеры: отпечаток
+        # из meta 04, уже сверенный TokenizedGroup с текущим. По нему
+        # читатель отвергает набор, собранный под прежний словарь.
+        "vocabulary": source.meta["vocabulary"],
         "truncated_samples": counters.truncated,
         "excluded_events": counters.excluded_events,
         "samples": counters.samples,

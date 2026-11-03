@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from src.mlm.inputs import IGNORE
 from src.mlm.model import RECENCY_CAP_DAYS, RECENT_DAYS, RecentTypes, pack
 from src.mlm.settings import MlmConfig, checkpoint_path
-from src.mlm.train import load_trained, train
+from src.mlm.train import aux_loss, load_trained, train
 
 from tests import world
 from tests.test_scheduler import many
@@ -102,14 +102,23 @@ def test_empty_windows_and_unseen_types_are_targets_too():
 
 
 def test_loss_is_the_mean_squared_error_against_the_targets():
+    """
+    Проход отдаёт ошибки по ячейкам; свёртка эталона — их средний
+    квадрат по всем клиентам, типам и целям.
+    """
 
     recent = head()
     data = pack(world.clients(), CPU)
     usr = torch.randn(data.clients, world.DIM)
 
     predicted = recent.proj(usr).view(data.clients, len(RECENT_DAYS) + 1, recent.types)
+    expected = expected_targets(recent, data)
 
-    assert torch.allclose(recent(data, usr), F.mse_loss(predicted, expected_targets(recent, data)), atol=1e-6)
+    errors = recent(data, usr)
+
+    assert errors.shape == predicted.shape and errors.dtype == torch.float32
+    assert torch.allclose(errors, predicted - expected, atol=1e-5)
+    assert torch.allclose(aux_loss(errors), F.mse_loss(predicted, expected), atol=1e-6)
 
 
 def test_a_masked_event_type_is_read_from_its_label():

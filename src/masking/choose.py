@@ -7,7 +7,9 @@ import numpy as np
 
 from src.generator.rng import KeyedRandom, stable_hash
 
-from .settings import MaskingConfig
+from src.tokenization.schema import WEIGHT_PER_EVENT, SemanticSchema
+
+from .settings import EVENT_TYPE, ConfigError, MaskingConfig
 from .weights import ValueWeights, WeightsError
 
 
@@ -154,6 +156,57 @@ class Selection:
     @cached_property
     def corrupted(self) -> tuple[Value, ...]:
         return tuple(self.spoiled.as_list())
+
+
+@dataclass(frozen=True)
+class FieldGroups:
+    """
+    Группы полей конфига маски в номерах ключей текущего словаря.
+
+    of_key — номер группы по key_id, -1 у ключа вне групп; event_type —
+    key_id ключа event_type при event_type_event_only, иначе -1.
+    """
+
+    of_key: np.ndarray
+    event_type: int
+
+
+def field_groups(config: MaskingConfig, key_vocab: dict[str, int], schema: SemanticSchema) -> FieldGroups | None:
+    """
+    FieldGroups конфига по словарю ключей (имя → key_id). None — групп
+    нет и флаг выключен: маска прежняя, и choose их не ждёт.
+
+    Ключ группы обязан быть ключом события по реестру смыслов (schema,
+    правило веса per_event): ключ анкеты есть и в словаре, но в окне
+    события не встречается, и в группе он молча ничего бы не закрывал.
+    """
+
+    if not config.field_groups and not config.event_type_event_only:
+        return None
+
+    config.validate()
+
+    names = [key for group in config.field_groups for key in group]
+
+    if config.event_type_event_only:
+        names.append(EVENT_TYPE)
+
+    strangers = [key for key in names if key not in schema.keys or schema.keys[key].weight_rule != WEIGHT_PER_EVENT]
+
+    if strangers:
+        raise ConfigError(f"ключи {strangers} не ключи событий по реестру смыслов: группа их не закроет")
+
+    missing = [key for key in names if key not in key_vocab]
+
+    if missing:
+        raise ConfigError(f"ключей {missing} нет в словаре ключей (key_vocab.json)")
+
+    of_key = np.full(max(key_vocab.values()) + 1, -1, dtype=np.int64)
+
+    for number, group in enumerate(config.field_groups):
+        of_key[[key_vocab[key] for key in group]] = number
+
+    return FieldGroups(of_key, key_vocab[EVENT_TYPE] if config.event_type_event_only else -1)
 
 
 _EMPTY = np.zeros(0, dtype=np.int64)
@@ -310,13 +363,14 @@ def value_chances(values: Values, row: dict, config: MaskingConfig,
 
 
 def choose(group: str, row: dict, config: MaskingConfig,
-           weights: ValueWeights | None = None) -> Selection:
+           weights: ValueWeights | None = None, fields: FieldGroups | None = None) -> Selection:
     """
     Что спрятать у одного клиента.
 
     Клиент без допустимых целей даёт пустой выбор: это рабочий
     случай, а не ошибка. weights нужны при
-    informativeness_weighted_masking.
+    informativeness_weighted_masking; fields — при field_groups или
+    event_type_event_only (field_groups()), без них выбор прежний.
 
     Разбор строки один на все розыгрыши: значения целей и значения
     вне целей (для порчи контекста) — части одного разбора, в том же
@@ -379,8 +433,25 @@ def choose(group: str, row: dict, config: MaskingConfig,
     ).astype(np.uint8)
 
     picked = np.flatnonzero(reasons)
+    codes = reasons[picked]
 
     unknown = stream(_STREAM_UNKNOWN).randoms(picked.size) < config.unknown_probability
+
+    spoils = keys[chosen_keys]
+
+    # Группы и event_type — только после всех розыгрышей: ни один поток
+    # не тянет ни числом больше или меньше, поэтому решения и [UNK]
+    # остальных значений те же, что без них.
+    if fields is not None:
+
+        # event_type — цель только механизма event: его выбор механизмами
+        # key и value выбрасывается вместе с решением [UNK], а его
+        # контекст не портится.
+        kept = ~((values.key_id[picked] == fields.event_type) & (codes != REASONS.index(EVENT)))
+        picked, codes, unknown = picked[kept], codes[kept], unknown[kept]
+        spoils = spoils[spoils != fields.event_type]
+
+        picked, codes, unknown = _close_groups(values, picked, codes, unknown, fields.of_key)
 
     # Выбранный ключ портится и в контексте: каждое его значение вне
     # целей уходит в [UNK] с вероятностью
@@ -388,7 +459,7 @@ def choose(group: str, row: dict, config: MaskingConfig,
     # каждой пары (клиент, ключ), и розыгрыш идёт по вхождениям ключа
     # в порядке ленты: решение не зависит ни от порядка чтения, ни от
     # других ключей, а цели и их розыгрыш не меняются ни на бит.
-    candidates = np.flatnonzero(~inside & np.isin(found.key_id, keys[chosen_keys]))
+    candidates = np.flatnonzero(~inside & np.isin(found.key_id, spoils))
 
     spoiled = np.zeros(candidates.size, dtype=bool)
 
@@ -397,7 +468,59 @@ def choose(group: str, row: dict, config: MaskingConfig,
         spoiled[own] = KeyedRandom((config.seed, _STREAM_CONTEXT, client, key_id)).randoms(
             int(own.sum())) < config.key_context_corruption_probability
 
-    return Selection(int(eligible.size), values, picked, reasons[picked], unknown, found.take(candidates[spoiled]))
+    return Selection(int(eligible.size), values, picked, codes, unknown, found.take(candidates[spoiled]))
+
+
+def _close_groups(values: Values, picked: np.ndarray, codes: np.ndarray,
+                  unknown: np.ndarray, of_key: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Замыкание групп полей: цель value или key, чей ключ в группе,
+    закрывает все ещё не выбранные значения ключей той же группы в том
+    же событии. Партнёр получает сильнейшую причину своих источников
+    (меньший ненулевой код REASONS) и не уходит в [UNK]: он закрыт ради
+    цели, а не разыгран. Источник в [UNK] не цель и ничего не закрывает;
+    event закрывает событие и так. Значения у события только
+    присутствующие, поэтому отсутствующее поле группы не закрывается, а
+    текст закрывается целиком — подстановка идёт по диапазону значения.
+    """
+
+    group = np.full(len(values), -1, dtype=np.int64)
+    known = values.key_id < of_key.size
+    group[known] = of_key[values.key_id[known]]
+
+    sources = np.isin(codes, (REASONS.index(KEY), REASONS.index(VALUE))) & ~unknown & (group[picked] >= 0)
+
+    if not sources.any():
+        return picked, codes, unknown
+
+    # Пара (событие, группа) одним числом.
+    pair = values.event * (int(of_key.max()) + 1) + group
+
+    source_pair = pair[picked[sources]]
+    source_code = codes[sources]
+
+    # Сильнейшая причина пары — первая после сортировки по паре и коду.
+    order = np.lexsort((source_code, source_pair))
+    pairs, first = np.unique(source_pair[order], return_index=True)
+    strongest = source_code[order][first]
+
+    free = np.ones(len(values), dtype=bool)
+    free[picked] = False
+
+    candidates = np.flatnonzero(free & (group >= 0))
+    place = np.minimum(np.searchsorted(pairs, pair[candidates]), pairs.size - 1)
+    hit = pairs[place] == pair[candidates]
+
+    added = candidates[hit]
+
+    merged = np.concatenate([picked, added])
+    order = np.argsort(merged, kind="stable")
+
+    return (
+        merged[order],
+        np.concatenate([codes, strongest[place[hit]]])[order],
+        np.concatenate([unknown, np.zeros(added.size, dtype=bool)])[order],
+    )
 
 
 __all__ = [
@@ -406,9 +529,11 @@ __all__ = [
     "NONE",
     "VALUE",
     "Choice",
+    "FieldGroups",
     "Selection",
     "Value",
     "choose",
+    "field_groups",
     "value_chance",
     "values_of",
 ]

@@ -9,8 +9,8 @@ from typing import Any, Mapping
 # ИДЕЯ
 # ============================================================
 #
-# Всё, что решает человек, а не данные, живёт здесь: seed и
-# четыре вероятности.
+# Всё, что решает человек, а не данные, живёт здесь: seed,
+# вероятности механизмов и группы зависимых полей.
 #
 # Здесь нет ни одного значения, посчитанного по данным.
 #
@@ -26,6 +26,12 @@ from typing import Any, Mapping
 # ключуется seed, группой и клиентом, поэтому одинаков при каждом
 # чтении, в любом порядке и в любом процессе.
 # ============================================================
+
+
+# Имя ключа типа события в словаре ключей — то же, что
+# src.dataset.tokenized.EVENT_TYPE_KEY; здесь своё, чтобы конфиг маски
+# не тянул за собой словарь и набор.
+EVENT_TYPE = "event_type"
 
 
 class ConfigError(ValueError):
@@ -85,6 +91,19 @@ class MaskingConfig:
     min_value_probability: float = 0.05
     max_value_probability: float = 0.35
 
+    # Группы зависимых полей события (имена ключей словаря). Поле
+    # группы, ставшее целью механизмом value или key, закрывает все
+    # присутствующие поля своей группы в том же событии: они тоже
+    # становятся целями. Иначе цель восстанавливалась бы из видимого
+    # партнёра (merchant_name → mcc, direction → знак суммы), и loss
+    # мерил бы копирование. Пусто — правила нет, маска прежняя.
+    field_groups: tuple[tuple[str, ...], ...] = ()
+
+    # event_type — цель только механизма event: механизмы value и key
+    # его не выбирают. Фильтр стоит после всех розыгрышей, поэтому
+    # остальные цели и их [UNK] побитно те же, что без флага.
+    event_type_event_only: bool = False
+
     def validate(self) -> None:
 
         for name in (
@@ -107,6 +126,27 @@ class MaskingConfig:
                 f"max_value_probability {self.max_value_probability}"
             )
 
+        seen: set[str] = set()
+
+        for group in self.field_groups:
+
+            if len(group) < 2:
+                raise ConfigError(f"группа полей {list(group)} из одного ключа: ей нечего закрывать")
+
+            for key in group:
+
+                if key in seen:
+                    raise ConfigError(f"ключ {key} стоит в двух группах полей (или дважды в одной)")
+
+                seen.add(key)
+
+        # Замыкание сделало бы event_type целью value или key — ровно
+        # то, что флаг запрещает.
+        if self.event_type_event_only and EVENT_TYPE in seen:
+            raise ConfigError(
+                f"{EVENT_TYPE} в группе полей при event_type_event_only: замыкание делало бы его целью value/key"
+            )
+
     def as_dict(self) -> dict:
         return {
             "seed": self.seed,
@@ -118,6 +158,8 @@ class MaskingConfig:
             "informativeness_weighted_masking": self.informativeness_weighted_masking,
             "min_value_probability": self.min_value_probability,
             "max_value_probability": self.max_value_probability,
+            "field_groups": [list(group) for group in self.field_groups],
+            "event_type_event_only": self.event_type_event_only,
         }
 
     @staticmethod
@@ -147,6 +189,8 @@ class MaskingConfig:
             ),
             min_value_probability=float(data.get("min_value_probability", base.min_value_probability)),
             max_value_probability=float(data.get("max_value_probability", base.max_value_probability)),
+            field_groups=_groups(data.get("field_groups", base.field_groups)),
+            event_type_event_only=bool(data.get("event_type_event_only", base.event_type_event_only)),
         )
 
         config.validate()
@@ -164,7 +208,22 @@ class MaskingConfig:
         return MaskingConfig.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
+def _groups(data: Any) -> tuple[tuple[str, ...], ...]:
+    """
+    Группы полей из JSON: список списков имён ключей.
+    """
+
+    if not isinstance(data, (list, tuple)) or not all(isinstance(group, (list, tuple)) for group in data):
+        raise ConfigError(f"field_groups обязан быть списком списков имён ключей, получено {data!r}")
+
+    if not all(isinstance(key, str) for group in data for key in group):
+        raise ConfigError(f"в field_groups имена ключей обязаны быть строками, получено {data!r}")
+
+    return tuple(tuple(group) for group in data)
+
+
 __all__ = [
+    "EVENT_TYPE",
     "ConfigError",
     "MaskingConfig",
 ]

@@ -139,6 +139,35 @@ class MlmConfig:
     # знает давности (аудит 2026-10-05, E1′).
     usr_aux_weight: float = 1.0
 
+    # Нормировка цели [USR] в окне оптимизатора. False — как у
+    # эталона: среднее по ячейкам micro-batch'а, умноженное на число
+    # его целей MLM, так что вес клиента около 1/(клиентов в его
+    # micro-batch'е) и шаг зависит от разбиения окна (аудит
+    # 2026-11-02, Н1). True — член E1′ окна w · Σ aux_клиента / K, где
+    # K — среднее число клиентов на окно эпохи (клиенты эпохи / окна
+    # эпохи): у каждого клиента эпохи вес w/K, шаг не зависит от
+    # разбиения окна, и micro-batch без целей MLM тоже учит голову
+    # [USR]. Деление на клиентов самого окна этого не дало бы: при
+    # grad_accum_steps=1 окно с одним длинным клиентом весило бы
+    # столько же, сколько окно с десятью короткими.
+    aux_per_client: bool = False
+
+    # Порядок прохода train. False — порядок файла у каждой эпохи, как
+    # у эталона. True — каждая эпоха переставляет группы строк и
+    # клиентов внутри группы из stable_hash("order", seed, эпоха)
+    # (train.train_source): seed — этот же seed, и у реплики шумового
+    # пола порядок свой. Маска от порядка не зависит, val не
+    # перемешивается.
+    shuffle_order: bool = False
+
+    # E6. False — как у эталона: ключи всех токенов событий видны.
+    # True — у события, закрытого механизмом event, ключи всех токенов,
+    # кроме маркера [EVT], во входе закрыты [MASK], а голова получает
+    # исходный ключ цели запросом (Model.hide_event_keys): видимые
+    # ключи выдают тип события и схему полей. Без причин event (LoRA с
+    # ZERO_MASK, embed с пустыми причинами) ни на что не влияет.
+    hide_event_keys: bool = False
+
     def validate(self) -> None:
 
         if not 0.0 <= self.label_smoothing < 1.0:
@@ -228,6 +257,9 @@ class MlmConfig:
             "early_stopping_min_delta": self.early_stopping_min_delta,
             "loader_workers": self.loader_workers,
             "usr_aux_weight": self.usr_aux_weight,
+            "aux_per_client": self.aux_per_client,
+            "shuffle_order": self.shuffle_order,
+            "hide_event_keys": self.hide_event_keys,
         }
 
     @staticmethod
@@ -263,6 +295,9 @@ class MlmConfig:
             ),
             loader_workers=int(data.get("loader_workers", base.loader_workers)),
             usr_aux_weight=float(data.get("usr_aux_weight", base.usr_aux_weight)),
+            aux_per_client=bool(data.get("aux_per_client", base.aux_per_client)),
+            shuffle_order=bool(data.get("shuffle_order", base.shuffle_order)),
+            hide_event_keys=bool(data.get("hide_event_keys", base.hide_event_keys)),
         )
 
         config.validate()

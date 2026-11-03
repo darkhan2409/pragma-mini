@@ -12,7 +12,7 @@ from src.embedding.layer import InputEmbedding
 from src.mlm.inputs import IGNORE
 from src.mlm.model import RECENCY_CAP_DAYS, RECENT_DAYS, Model, Predicted, RecentTypes, pack
 from src.mlm.settings import TELEMETRY_FILE, checkpoint_path, train_dir
-from src.mlm.train import Scores, train
+from src.mlm.train import Scores, aux_loss, train
 from src.mlm.varlen import to_device
 
 from tests import world
@@ -197,7 +197,7 @@ def run(path: str, dropout: float, old: bool, monkeypatch, calls: list) -> dict:
         with autocast:
             out = old_forward(built, data, logits=False) if old else built(data, logits=False)
 
-        ((out.loss + 0.5 * out.aux) * out.count).backward()
+        ((out.loss + 0.5 * aux_loss(out.aux)) * out.count).backward()
 
     grads = {name: value.grad.clone() for name, value in built.named_parameters()}
     torch._foreach_div_([value.grad for value in built.parameters()], out.count)
@@ -514,7 +514,7 @@ def test_training_reads_the_numbers_of_its_passes_in_order(stage, monkeypatch):
             expected.add(out)
         losses.append(total / sum(out.count for out in window))
 
-    aux = float(np.mean([float(out.aux.detach()) for out in passes if out.count]))
+    aux = float(np.mean([float(aux_loss(out.aux.detach())) for out in passes if out.count]))
 
     assert len(passes) > 2
     assert [row["loss"] for row in rows if row["kind"] == "step"] == losses

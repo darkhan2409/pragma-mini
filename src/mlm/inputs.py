@@ -10,12 +10,16 @@ from torch.utils.data import IterableDataset
 
 from src.dataset.settings import dataset_dir
 from src.embedding.inputs import CALENDAR_PER_EVENT
+from src.generator.rng import stable_hash
 from src.masking.apply import apply_selection
-from src.masking.choose import choose
+from src.masking.choose import FieldGroups, choose, field_groups
 from src.masking.settings import MaskingConfig
 from src.masking.weights import ValueWeights, WeightsError, load_value_weights
 from src.temporal.position import TemporalError
 from src.temporal.samples import SamplesError, TemporalGroup
+from src.tokenization import finalvocab
+from src.tokenization.keyvocab import KeyVocabError, load_key_vocab
+from src.tokenization.schema import SemanticSchema
 from src.tokenization.specials import MASK, UNK, load_special_tokens
 
 
@@ -42,8 +46,10 @@ from src.tokenization.specials import MASK, UNK, load_special_tokens
 # нескольких клиентов (model.pack) тоже плоский: клиенты лежат
 # подряд, границы — в cu_seqlens.
 #
-# labels и reason в модель НЕ подаются. Первое уходит в потери,
-# второе — в разбивку val по механизму маски.
+# labels в модель НЕ подаются — они уходят в потери. reason идёт в
+# разбивку val по механизму маски, а в модель — только как
+# PackedBatch.event_masked (model.pack): какие события закрыты
+# механизмом event, для скрытия их ключей (MlmConfig.hide_event_keys).
 #
 # Группа строк набора здесь — только единица чтения. Сколько
 # клиентов модель считает за один проход, решает не она, а
@@ -155,6 +161,7 @@ class Source:
         self.masking = masking if masking is not None else MaskingConfig()
 
         self.directory = dataset_dir(group)
+        self.vocab_dir = finalvocab.VOCAB_DIR
 
         specials = load_special_tokens()
 
@@ -162,16 +169,21 @@ class Source:
         self.unknown_id = specials[UNK]
 
         self.weights = _weights(self.masking)
+        self.fields = _fields(self.masking)
 
         self._open()
 
         # Порядок групп строк прохода: по умолчанию — порядок файла.
         self.order = list(range(self.count))
 
+        # Seed перестановки клиентов внутри группы строк
+        # (train.train_source при shuffle_order); None — порядок файла.
+        self.shuffle: int | None = None
+
     def _open(self) -> None:
 
         try:
-            self._samples = TemporalGroup(self.group, self.directory)
+            self._samples = TemporalGroup(self.group, self.directory, self.vocab_dir)
         except SamplesError as error:
             raise InputError(str(error)) from error
 
@@ -183,7 +195,10 @@ class Source:
     def __getstate__(self) -> dict:
         return {
             name: getattr(self, name)
-            for name in ("group", "masking", "weights", "directory", "mask_id", "unknown_id", "order")
+            for name in (
+                "group", "masking", "weights", "fields", "directory", "vocab_dir", "mask_id", "unknown_id",
+                "order", "shuffle",
+            )
         }
 
     def __setstate__(self, state: dict) -> None:
@@ -209,6 +224,8 @@ class Source:
             rows = _rows(self._samples.row_group(index, columns=INPUT_COLUMNS))
         except TemporalError as error:
             raise InputError(str(error)) from error
+
+        rows = self._arranged(index, rows)
 
         return [self._client(index, row, self._mask(row)) for row in rows]
 
@@ -240,15 +257,32 @@ class Source:
 
             lengths = [pc.list_value_length(table.column(name)).to_pylist() for name in columns]
 
-            for tokens, profile in zip(*lengths):
+            for tokens, profile in self._arranged(index, list(zip(*lengths))):
                 yield Size(int(tokens), int(profile))
+
+    def _arranged(self, index: int, items: list) -> list:
+        """
+        Строки группы index в порядке прохода. batch и sizes зовут её
+        с одной группой и одним числом строк, поэтому перестановка у
+        них одна: на совпадении длин с клиентами стоят число
+        micro-batch'ей, K эпохи и горизонт. Перестановка зависит
+        только от seed и номера группы — не от того, какой процесс
+        Prefetch читает группу.
+        """
+
+        if self.shuffle is None:
+            return items
+
+        seed = stable_hash("order", self.shuffle, index) % 2 ** 32
+
+        return [items[place] for place in np.random.default_rng(seed).permutation(len(items)).tolist()]
 
     def _mask(self, row: dict) -> dict:
         """
         Маска клиента, разыгранная при чтении.
         """
 
-        selection = choose(self.group, row, self.masking, self.weights)
+        selection = choose(self.group, row, self.masking, self.weights, self.fields)
 
         return apply_selection(row["client_id"], row, selection, self.mask_id, self.unknown_id)
 
@@ -330,6 +364,25 @@ def _weights(masking: MaskingConfig) -> ValueWeights | None:
         raise InputError(str(error)) from error
 
 
+def _fields(masking: MaskingConfig) -> FieldGroups | None:
+    """
+    Группы полей маски в номерах ключей текущего словаря, сверенные с
+    реестром ключей событий; None — групп нет и флаг event_type
+    выключен, словарь ключей тогда не читается.
+
+    Строятся один раз на источник и едут в процессы подготовки вместе с
+    ним, как веса.
+    """
+
+    if not masking.field_groups and not masking.event_type_event_only:
+        return None
+
+    try:
+        return field_groups(masking, load_key_vocab(), SemanticSchema.open())
+    except KeyVocabError as error:
+        raise InputError(str(error)) from error
+
+
 def cost(client: Client) -> int:
     """
     Во сколько токенов обходится клиент одному проходу модели —
@@ -388,7 +441,8 @@ class Prefetch:
 
     Порядок клиентов тот же, что у source.clients(): процесс i берёт
     группы строк order[i], order[i + n], …, а DataLoader отдаёт их по
-    кругу.
+    кругу. Перестановка клиентов внутри группы (shuffle) едет в
+    процесс вместе с источником и зависит только от номера группы.
     Маска разыгрывается тем же кодом из той же строки, поэтому она
     побитно та же.
     """

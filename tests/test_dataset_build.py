@@ -686,3 +686,67 @@ def test_building_does_not_change_the_client(world):
         build_sample(world.artifacts, client, world.window, ContextPolicy(max_events=30, max_tokens=4096))
 
         assert client == before
+
+
+# ------------------------------------------------------------
+# отпечаток словаря в meta набора
+# ------------------------------------------------------------
+
+
+def built(world, directory) -> object:
+    """
+    Набор train мира в своём каталоге.
+    """
+
+    from src.dataset.build import build_group
+    from src.dataset.settings import DatasetConfig
+
+    build_group(world.artifacts, "train", DatasetConfig.load(None), directory)
+
+    return directory
+
+
+def test_dataset_meta_records_the_vocabulary(world, tmp_path):
+
+    from src.dataset.settings import META_FILE
+    from src.preprocessing.artifacts import read_json
+    from src.tokenization.finalvocab import vocabulary_digest
+
+    directory = built(world, tmp_path / "train")
+
+    assert read_json(directory / META_FILE)["vocabulary"] == vocabulary_digest()
+
+
+def test_samples_refuse_another_vocabulary_and_accept_legacy_meta(world, tmp_path):
+
+    from src.dataset.settings import META_FILE
+    from src.preprocessing.artifacts import read_json, write_json
+    from src.temporal.samples import SamplesError, SamplesGroup, TemporalGroup
+    from src.tokenization.finalvocab import vocabulary_digest
+
+    directory = built(world, tmp_path / "train")
+    path = directory / META_FILE
+
+    meta = read_json(path)
+
+    # Свой словарь — читается.
+    TemporalGroup("train", directory)
+
+    # Набор, закодированный другим словарём: номера токенов чужие.
+    other = "0" * 64
+    write_json(path, dict(meta, vocabulary=other))
+
+    for reader in (SamplesGroup, TemporalGroup):
+        with pytest.raises(SamplesError, match="словар") as error:
+            reader("train", directory)
+
+        assert other in str(error.value) and vocabulary_digest() in str(error.value)
+
+    # Набор, собранный до записи отпечатка (эталон на диске), —
+    # читается: сверять его не с чем.
+    legacy = {name: value for name, value in meta.items() if name != "vocabulary"}
+    write_json(path, legacy)
+
+    group = TemporalGroup("train", directory)
+
+    assert group.rows == meta["samples"]

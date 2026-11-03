@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -65,9 +66,10 @@ def tape() -> list[dict]:
     return events
 
 
-def fitted(stage, **encoders):
+def fitted(stage, events: list[dict] | None = None, **encoders):
     """
-    Диапазоны, выученные на train с данными кодировщиками.
+    Диапазоны, выученные на train с данными кодировщиками; events —
+    своя лента train вместо tape().
     """
 
     from src.tokenization.categorical import build_value_vocab
@@ -77,7 +79,7 @@ def fitted(stage, **encoders):
     from src.tokenization.schema import SemanticSchema
     from src.tokenization.specials import build_special_tokens
 
-    prepare(stage, tape(), QUIET_SNAPSHOT, group="train")
+    prepare(stage, tape() if events is None else events, QUIET_SNAPSHOT, group="train")
 
     config = TokenizerConfig.from_dict(
         {"numeric_min_values": 1, "numeric_min_clients": 1, "numeric_encoders": encoders}
@@ -261,3 +263,147 @@ def test_the_fitted_vocabulary_codes_an_event_by_its_direction(stage, tmp_path):
 
         expected = f"transaction_amount_{direction}_" if direction else "transaction_amount_no_direction_"
         assert expected in name, (event.values, name)
+
+
+# ------------------------------------------------------------
+# кандидат 4: шкала суммы по типу события
+# ------------------------------------------------------------
+
+
+CANDIDATE = (
+    Path(__file__).resolve().parents[1]
+    / "audit" / "2026-11-03-pretrain-fixes" / "configs" / "tokenizer-amount-by-type.json"
+)
+
+
+def by_type() -> dict:
+    """
+    Кодировщик суммы кандидата: умолчание, но шкала своя у каждого
+    event_type (в пояснении reason — event_type вместо direction).
+    """
+
+    default = TokenizerConfig().numeric_encoders["transaction_amount"].as_dict()
+    reason = default["reason"].replace("своя шкала на каждое direction", "своя шкала на каждый event_type")
+
+    assert reason != default["reason"]
+
+    return dict(default, split_by="event_type", reason=reason)
+
+
+def bounds(entries: dict, when: str) -> list[tuple[float | None, float | None]]:
+    """
+    Обычные диапазоны одного условия (без нулевого) в порядке файла.
+    """
+
+    return [
+        (item["min"], item["max"])
+        for item in entries.values()
+        if item["when"] == when and not (item["min"] == 0.0 and item["max"] == 0.0)
+    ]
+
+
+def test_amount_scale_by_event_type(stage):
+
+    _, buckets = fitted(stage, transaction_amount=by_type())
+
+    entries = buckets["transaction_amount"]
+
+    # У каждого типа ленты свои диапазоны, событий без типа нет.
+    assert {item["when"] for item in entries.values()} == {"purchase", "salary_credit", "app_operation"}
+    assert all(item["split_by"] == "event_type" for item in entries.values())
+    assert {name.rsplit("_bucket_", 1)[0] for name in entries} == {
+        "transaction_amount_purchase", "transaction_amount_salary_credit", "transaction_amount_app_operation",
+    }
+
+    find = lookup(buckets)
+    when = {item["id"]: item["when"] for item in entries.values()}
+
+    # Одна и та же сумма ищется среди диапазонов своего типа.
+    found = {kind: find("transaction_amount", 1_200, {"event_type": kind})
+             for kind in ("purchase", "salary_credit", "app_operation")}
+
+    assert {kind: when[number] for kind, number in found.items()} == {
+        kind: kind for kind in found
+    }
+
+    # Зарплаты разошлись по своей шкале, а не легли в верхний
+    # диапазон покупок.
+    salaries = {find("transaction_amount", 100_000 * n, {"event_type": "salary_credit"}) for n in range(1, 7)}
+    assert len(salaries) >= 3
+
+    # Тип, которого train не видел, шкалы не имеет: [UNK].
+    assert find("transaction_amount", 1_200, {"event_type": "loan_payment"}) is None
+
+
+def test_rare_condition_scale_has_increasing_boundaries(stage):
+    """
+    У типа три различные суммы при 16 корзинах: квантили совпадают,
+    но шкала из них — строго возрастающие границы без пустых
+    диапазонов, и каждая сумма кодируется.
+    """
+
+    from src.tokenization.numeric import quantile_boundaries
+
+    amounts = [100, 200, 300] * 4
+
+    events = [
+        raw_event(RAW_CLIENT, f"2025-03-{number + 1:02d}T10:00:00", {
+            "type": "purchase", "amount": amount, "direction": "debit", "status": "approved",
+        })
+        for number, amount in enumerate(amounts)
+    ]
+
+    # Совпавшие квантили схлопываются, граница на минимуме отброшена.
+    assert quantile_boundaries([float(amount) for amount in amounts], 16, "inverted_cdf") == (200.0, 300.0)
+
+    _, buckets = fitted(stage, events, transaction_amount=by_type())
+
+    entries = buckets["transaction_amount"]
+
+    assert bounds(entries, "purchase") == [(None, 200.0), (200.0, 300.0), (300.0, None)]
+
+    find = lookup(buckets)
+    found = [find("transaction_amount", amount, {"event_type": "purchase"}) for amount in (100, 200, 300)]
+
+    assert None not in found and len(set(found)) == 3
+
+
+# Отпечаток buckets.json, выученного на tape() с кодировщиками по
+# умолчанию, снят до изменений задачи 7: шкалы, где совпавших границ
+# нет, обязаны остаться побитно прежними.
+DEFAULT_BUCKETS_SHA256 = "11ead77a7d950eb3524c398dab5879b4144fb78131e73177761b344d555fbcc2"
+
+
+def test_default_scales_are_unchanged(stage):
+
+    import hashlib
+    import json
+
+    _, buckets = fitted(stage)
+
+    text = json.dumps(buckets, sort_keys=True, ensure_ascii=False)
+
+    assert hashlib.sha256(text.encode("utf-8")).hexdigest() == DEFAULT_BUCKETS_SHA256
+
+
+def test_candidate_tokenizer_config_loads():
+
+    import json
+
+    config = TokenizerConfig.load(CANDIDATE)
+
+    assert json.loads(CANDIDATE.read_text(encoding="utf-8")) == {"numeric_encoders": {"transaction_amount": by_type()}}
+
+    default = TokenizerConfig()
+
+    assert config.numeric_encoders["transaction_amount"].split_by == "event_type"
+    assert config.numeric_encoders["transaction_amount"].as_dict() == by_type()
+
+    # Всё, кроме шкалы суммы, — умолчание.
+    found = config.as_dict()
+    expected = default.as_dict()
+
+    found["numeric_encoders"].pop("transaction_amount")
+    expected["numeric_encoders"].pop("transaction_amount")
+
+    assert found == expected

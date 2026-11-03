@@ -14,6 +14,7 @@ from src.embedding.inputs import CALENDAR_PER_EVENT
 from src.embedding.layer import InputEmbedding
 from src.event.encoder import EventEncoder
 from src.history.encoder import HistoryEncoder
+from src.masking.choose import EVENT
 from src.profile.encoder import ProfileEncoder
 from src.tokenization.specials import EVT, USR, load_special_tokens
 
@@ -105,6 +106,7 @@ class PackedBatch:
     value_ids: torch.Tensor
     positions: torch.Tensor
     labels: torch.Tensor
+    event_masked: torch.Tensor    # [T] bool: токен события под маской event (событие целиком, кроме [EVT])
     events: VarlenLayout          # cu_seqlens_event [E + 1]
     event_of_token: torch.Tensor  # [T]
 
@@ -171,8 +173,10 @@ class Predicted:
     # вызывающий по logits.
     hits: tuple[torch.Tensor | int, torch.Tensor | int] | None = None
 
-    # Вспомогательная потеря [USR] (RecentTypes), связанная с графом;
-    # None — цели нет.
+    # Ошибки вспомогательной цели [USR] (RecentTypes) — предсказание
+    # минус цель, [клиенты, окна + 1, типы], fp32, связанные с графом;
+    # None — цели нет. Свёртку в потерю делает цикл обучения
+    # (train.aux_loss): она зависит от нормировки окна.
     aux: torch.Tensor | None = None
 
     @property
@@ -251,6 +255,22 @@ def pack(clients: list[Client], device: torch.device) -> PackedBatch:
     target_event = event_of_token[target_token]
     target_client = user_of_event[target_event]
 
+    # Событие под маской event — хотя бы один его токен с причиной
+    # event. Закрываются все его токены, кроме маркера [EVT]: значение,
+    # ушедшее при маске события в [UNK], причины не получает
+    # (masking.apply), а ключ его выдавал бы схему события.
+    by_reason = np.concatenate(
+        [np.asarray(client.reason, dtype=object) == EVENT for client in clients]
+    )
+    event_start = np.cumsum(event_lengths) - event_lengths
+
+    # У каждого события есть хотя бы маркер: начала строго растут, и
+    # reduceat сворачивает ровно токены события.
+    event_masked = (
+        np.logical_or.reduceat(by_reason, event_start)[event_of_token] if total_events else by_reason
+    )
+    event_masked[event_start] = False
+
     return PackedBatch(
         clients=size,
         events=events,
@@ -262,6 +282,9 @@ def pack(clients: list[Client], device: torch.device) -> PackedBatch:
                 "value_ids": join("value_ids", np.int64),
                 "positions": join("positions", np.int64),
                 "labels": labels,
+                # Свой буфер bool в to_device: значения прочих полей
+                # не меняются ни на бит.
+                "event_masked": event_masked,
                 "event_of_token": event_of_token,
                 "event_time_log": event_time_log,
                 "calendar": join("calendar", np.float32).reshape(-1, CALENDAR_PER_EVENT),
@@ -445,8 +468,9 @@ class RecentTypes(nn.Module):
 
     Цели — log1p числа событий типа в окне (пустое окно — ноль, и оно
     учится так же) и log1p давности последнего события типа, не больше
-    RECENCY_CAP_DAYS. Потеря — средний квадрат ошибки по всем клиентам,
-    типам и целям. Тип закрытого маской события берётся из его метки;
+    RECENCY_CAP_DAYS. Проход возвращает ошибки по каждой ячейке; потеря —
+    их средний квадрат, по всему micro-batch'у или по каждому клиенту
+    (MlmConfig.aux_per_client), и считает её цикл обучения. Тип закрытого маской события берётся из его метки;
     событие, тип которого маскер испортил в [UNK] без метки, не
     считается: его тип неизвестен.
     """
@@ -523,10 +547,20 @@ class RecentTypes(nn.Module):
         ).log1p()
 
     def forward(self, data: "PackedBatch", usr: torch.Tensor) -> torch.Tensor:
+        """
+        Ошибки [B, окна + 1, типы], fp32: предсказание минус цель.
+
+        Ошибки, а не их квадраты: средний квадрат по всему micro-batch'у
+        считается тем же ядром F.mse_loss, что у эталона, и шаг с
+        выключенным aux_per_client побитно прежний. Свёртка квадратов
+        mse_loss(reduction="none").mean() даёт тот же loss, но градиент
+        расходится в последнем бите: деление на число ячеек в ней стоит
+        до умножения на ошибку, а не после.
+        """
 
         predicted = self.proj(usr).float().view(data.clients, len(RECENT_DAYS) + 1, self.types)
 
-        return F.mse_loss(predicted, self.targets(data))
+        return predicted - self.targets(data)
 
 
 class Model(nn.Module):
@@ -566,8 +600,37 @@ class Model(nn.Module):
         # Вспомогательная цель [USR] (attach_recent); None — её нет.
         self.recent: RecentTypes | None = None
 
+        # Чем закрыт ключ у токенов события под маской event (hide_event_keys):
+        # у всех, кроме [EVT], если хотя бы один токен с причиной event;
+        # None — ключи видны.
+        self.hidden_key: int | None = None
+
     def attach_recent(self, recent: RecentTypes) -> None:
         self.recent = recent.to(self.embedding.weight.device)
+
+    def hide_event_keys(self, hidden: int) -> None:
+        """
+        У токенов события под маской event (событие целиком, кроме
+        [EVT]: достаточно одного токена с причиной event) ключ во входе
+        заменяется на hidden: иначе набор видимых ключей выдаёт тип
+        события и схему полей, и событие угадывается без истории. Какой ключ
+        предсказывать, голова узнаёт из запроса — эмбеддинга ключа
+        цели, прибавленного к вектору её токена.
+        """
+
+        self.hidden_key = int(hidden)
+
+    def _event_keys(self, data: PackedBatch) -> torch.Tensor:
+        """
+        Ключи токенов событий во входе энкодера события — одни на
+        пути flash и sdpa. data.key_ids не меняются: их читают
+        RecentTypes и запрос головы.
+        """
+
+        if self.hidden_key is None:
+            return data.key_ids
+
+        return data.key_ids.masked_fill(data.event_masked, self.hidden_key)
 
     def _history_input(
         self, data: PackedBatch, profile: torch.Tensor, dated: torch.Tensor
@@ -600,6 +663,13 @@ class Model(nn.Module):
             # Целей нет. Контекст пуст, но граф обязан остаться
             # связным, иначе backward на таком batch оборвётся.
             token_vectors = client_vectors[:0]
+
+        # Запрос головы: исходный ключ цели. Во входе он мог быть закрыт.
+        if self.hidden_key is not None:
+            keys = data.key_ids[data.target_token]
+            token_vectors = token_vectors + (
+                self.embedding.table(keys) * self.embedding.scale
+            ).to(token_vectors.dtype)
 
         event_rows = event_vectors[data.target_event]
         client_rows = client_vectors[data.target_client]
@@ -745,7 +815,7 @@ class Model(nn.Module):
 
         encoder = self.event
 
-        x = self.embedding.embed(data.key_ids, data.value_ids, data.positions, None)
+        x = self.embedding.embed(self._event_keys(data), data.value_ids, data.positions, None)
 
         for layer in encoder.layers:
             x = encoder_layer_varlen(layer, x, data.events)
@@ -822,7 +892,7 @@ class Model(nn.Module):
         [M, d] в порядке целей (None, если целей нет).
         """
 
-        keys = data.key_ids
+        keys = self._event_keys(data)
 
         dated_parts: list[torch.Tensor] = []
         dated_index: list[torch.Tensor] = []
