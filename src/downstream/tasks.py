@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pandas as pd
 
 from src.preprocessing.rawdata import read_manifest
 from src.preprocessing.settings import raw_group_dir
 
-from .settings import CHURN_FUTURE, CHURN_REPORTS, FUTURE_LABEL_GROUPS, cutoff
+from .settings import CHURN_FUTURE, CHURN_REPORTS, EMBEDDINGS_META, FUTURE_LABEL_GROUPS, cutoff, downstream_dir
 
 
 # ============================================================
@@ -155,6 +156,76 @@ def plus_usr(tag: str, used: tuple[str, ...], embedded: dict) -> dict | None:
     }
 
 
+def lora_rows(name: str, used: tuple[str, ...], embedded: dict) -> dict:
+    """
+    Прогнозы дообучения (python -m src.downstream.finetune --name
+    <name>): порог и строки (churn, score) по задаче и группе.
+
+    embedded — meta.json векторов пробы. Годится только дообучение
+    от того же эталона (sha256 и эпоха чекпойнта), на тех же группах
+    (оцениваемые — used без train; test только с --final-test) и тех
+    же выгрузках и источниках строк, что у пробы сейчас.
+    """
+
+    from src.mlm.train import file_digest
+
+    from .embed import raw_record
+    from .probe import PREDICTIONS_FILE
+
+    directory = downstream_dir(name)
+
+    for file in (EMBEDDINGS_META, PREDICTIONS_FILE):
+        if not (directory / file).exists():
+            raise FileNotFoundError(f"нет {directory / file}: python -m src.downstream.finetune --name {name}")
+
+    meta = json.loads((directory / EMBEDDINGS_META).read_text(encoding="utf-8"))
+
+    if meta.get("kind") != "lora":
+        raise ValueError(f"lora {name}: meta.json не дообучения (kind {meta.get('kind')!r}, а нужен 'lora')")
+
+    evaluated = used[1:]
+    predictions = pd.read_parquet(directory / PREDICTIONS_FILE)
+    problems = []
+
+    reference = meta["reference"]
+    checkpoint = file_digest(Path(embedded["checkpoint"]))
+
+    if reference["sha256"] != checkpoint:
+        problems.append("обучено от другого эталона (sha256 чекпойнта не тот, что у векторов)")
+    elif reference["epoch"] != embedded["epoch"]:
+        problems.append(f"эпоха эталона {reference['epoch']}, а у векторов {embedded['epoch']}")
+
+    found = sorted(set(predictions["group"]))
+
+    if found != sorted(evaluated):
+        problems.append(
+            f"прогнозы групп {', '.join(found)}, а нужны {', '.join(evaluated)}"
+            + (" (test считается только с --final-test)" if "test" in found else "")
+            + (" — python -m src.downstream.finetune --final-test" if "test" in evaluated else "")
+        )
+
+    for group in evaluated:
+        if meta["groups"].get(group) != {"cutoff": cutoff(group).isoformat(), **raw_record(group)}:
+            problems.append(f"выгрузка или T группы {group} не те, что при дообучении")
+        elif meta["sources"].get(group) != churn_sources(group):
+            problems.append(f"источники строк группы {group} не те, что при дообучении")
+
+    if set(predictions["set"]) != {"lora"} or set(predictions["task"]) != set(CHURN_TASKS):
+        problems.append("в прогнозах не только lora и задача churn_active90")
+
+    if problems:
+        raise ValueError(f"lora {name}: {'; '.join(problems)}")
+
+    rows = {}
+
+    for (task, group), part in predictions.groupby(["task", "group"]):
+        if part["client_id"].duplicated().any():
+            raise ValueError(f"lora {name}/{task}/{group}: клиент повторяется в прогнозах")
+        rows[(task, group)] = part.rename(columns={"y": "churn"}).set_index("client_id")[["churn", "score"]].sort_index()
+
+    return {"threshold": float(meta["threshold"]), "rows": rows, "meta": meta}
+
+
 def churn_rows(task: str, group: str) -> pd.DataFrame:
     """
     Строки задачи churn-бейзлайна в группе: client_id, churn и прогноз
@@ -168,10 +239,7 @@ def churn_rows(task: str, group: str) -> pd.DataFrame:
 
     churn_sources(group)
 
-    name = "train_rows.parquet" if group == "train" else "eval_rows.parquet"
-
-    rows = pd.read_parquet(CHURN_REPORTS / name)
-    rows = rows[(rows["task"] == task) & (rows["group"] == group)]
+    rows = _report_rows(task, group)
 
     moment = pd.Timestamp(cutoff(group))
 
@@ -186,11 +254,46 @@ def churn_rows(task: str, group: str) -> pd.DataFrame:
     return rows.set_index("client_id")[["churn", "score"]].sort_index()
 
 
+def churn_order(task: str, group: str) -> pd.Index:
+    """
+    client_id строк задачи в порядке файла отчёта, без сортировки: в
+    этом порядке churn.train.fit_task делит train на inner_train и
+    inner_holdout, и по нему же дообучение берёт ту же отложенную
+    часть. Источники и T сверяет churn_rows.
+    """
+
+    if task not in CHURN_TASKS:
+        raise ValueError(f"задача {task!r} не из {CHURN_TASKS}")
+
+    ids = pd.Index(_report_rows(task, group)["client_id"], name="client_id")
+
+    repeated = ids[ids.duplicated()]
+
+    if len(repeated):
+        raise ValueError(f"churn-бейзлайн {task}/{group}: клиент {repeated[0]} повторяется в строках отчёта")
+
+    return ids
+
+
+def _report_rows(task: str, group: str) -> pd.DataFrame:
+    """
+    Строки задачи и группы из отчёта churn-бейзлайна в порядке файла.
+    """
+
+    name = "train_rows.parquet" if group == "train" else "eval_rows.parquet"
+
+    rows = pd.read_parquet(CHURN_REPORTS / name)
+
+    return rows[(rows["task"] == task) & (rows["group"] == group)]
+
+
 __all__ = [
     "CHURN_TASKS",
     "PLUS_USR",
+    "churn_order",
     "churn_rows",
     "churn_sources",
     "churn_thresholds",
+    "lora_rows",
     "plus_usr",
 ]

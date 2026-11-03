@@ -41,6 +41,11 @@ from src.generator.config import DATA_DIR
 
 DOWNSTREAM_DIR = DATA_DIR / "13_downstream"
 
+# Каталоги прогонов: предобучения (src.mlm.train --out) и дообучения
+# LoRA (src.downstream.finetune) — общие имена, поэтому дообучение
+# занимает каталог, только если он новый или уже его.
+RUNS_DIR = DATA_DIR / "runs"
+
 # Окно метки после T, в сутках.
 HORIZON_DAYS = 60
 
@@ -108,6 +113,14 @@ def downstream_dir(tag: str) -> Path:
     return DOWNSTREAM_DIR / tag
 
 
+def run_dir(name: str) -> Path:
+    """
+    Каталог прогона: заплатки и телеметрия дообучения.
+    """
+
+    return RUNS_DIR / name
+
+
 __all__ = [
     "CHURN_FUTURE",
     "CHURN_REPORTS",
@@ -118,7 +131,9 @@ __all__ = [
     "GROUPS",
     "HORIZON_DAYS",
     "REPORT_FILE",
+    "RUNS_DIR",
     "cutoff",
     "downstream_dir",
     "groups",
+    "run_dir",
 ]

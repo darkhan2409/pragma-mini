@@ -1573,6 +1573,36 @@ python -m src.downstream.probe --tag <кандидат> --baseline <эталон
 модели держится около сильного task-specific бейзлайна или ниже (по таблице 2 у LTV около −5%
 PR-AUC), а выигрыш дают LoRA и масштаб.
 
+**Сценарий `lora`** — четвёртый, исключение из правила «три сценария» (решение владельца
+2026-11-02, дизайн — `docs/superpowers/specs/2026-11-02-lora-churn-design.md`). Режим статьи
+PRAGMA: заплатки LoRA внутри слоёв энкодеров и линейная голова на `[USR]` учатся под задачу
+`churn_active90`, эталон заморожен. Учится только на train задачи (20% клиентов отложены для
+ранней остановки, как у CatBoost), val оценивается, test не читается.
+
+```bash
+python -m src.downstream.finetune --checkpoint data/12_train/best_checkpoint.pt --name lora-ref \
+    [--seed 0] [--config ft.json] [--device auto] [--workers 2]
+python -m src.downstream.probe --tag ref-2026-10-09 --lora lora-ref
+python -m src.downstream.finetune --checkpoint data/12_train/best_checkpoint.pt --name lora-ref --final-test
+```
+
+`finetune` пишет `data/runs/<name>/lora.pt` (заплатки, голова, конфиг, отпечаток эталона по
+sha256 файла) и `telemetry.jsonl` (строка на эпоху: `held_log_loss`, `delta_ratio`,
+`cuda_peak_allocated_gib`), а также `data/13_downstream/<name>/predictions.parquet` и `meta.json`.
+`--name` не должен совпадать с тегом векторов или каталогом предобучения: чужое не
+перезаписывается. `--final-test` не обучает: он грузит готовый `lora.pt` (отказ, если он обучен
+на другом эталоне) и считает прогнозы val и test; их читает `probe --lora <name> --final-test`,
+а без `--final-test` проба такие прогнозы отвергает.
+
+Как читать результат `probe --lora` (PR-AUC на val, парный bootstrap по клиентам):
+- Δ к `usr` (`vs_usr`), интервал выше нуля — `lora` лучше замороженного вектора;
+- Δ к CatBoost (`vs_reference`), интервал не целиком ниже нуля — `lora` догнал CatBoost, выше нуля —
+  обогнал;
+- Δ у границы — ещё 2 seed.
+
+Правило принятия изменений backbone выше не меняется: `lora` — отдельный сценарий и в нём не
+участвует.
+
 Фрод на уровне операции здесь не оценивается: вектор нужен на момент каждой операции
 строго до неё (около миллиона на группу), а история в модели двунаправленная.
 

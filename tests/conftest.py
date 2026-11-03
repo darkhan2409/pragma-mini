@@ -56,6 +56,8 @@ PLACES = (
     ("src.downstream.tasks", "CHURN_REPORTS", "churn_baseline/reports"),
     ("src.downstream.settings", "CHURN_FUTURE", "churn_baseline/data/future"),
     ("src.downstream.tasks", "CHURN_FUTURE", "churn_baseline/data/future"),
+    # Прогоны дообучения LoRA: run_dir читает глобал в момент вызова.
+    ("src.downstream.settings", "RUNS_DIR", "runs"),
 )
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -44,9 +44,6 @@ from tests.test_profile_state import (
 #     ни метрики, ни сравнения. Только явный --final-test.
 # ============================================================
 
-
-NOTHING = dict(value_probability=0.0, event_probability=0.0, key_probability=0.0,
-               unknown_probability=0.0)
 
 FIELDS = (
     "key_ids", "value_ids", "positions", "labels", "event_starts", "event_lengths",
@@ -102,29 +99,34 @@ def same(left, right) -> None:
 # ============================================================
 
 
+@pytest.mark.parametrize("group", ["train", "val"])
 @pytest.mark.parametrize("anchor", ["last_event", "cutoff"])
-def test_input_at_the_group_cutoff_is_what_training_reads(stage, anchor: str):
+def test_zero_mask_input_is_the_cutoff_input(stage, anchor: str, group: str):
     """
-    T = конец окна val: вход в памяти побитно равен клиенту, которого
-    модель читает из набора 05 без масок, — при любой точке отсчёта
-    времени набора.
+    T = конец окна группы: вход в памяти побитно равен клиенту, которого
+    модель читает из набора 05 с нулевой маской дообучения, — при любой
+    точке отсчёта времени набора. Для train это вход дообучения LoRA:
+    он обязан быть входом на T train и не нести ни одной цели.
     """
 
     from src.downstream.at_cutoff import ClientsAtCutoff
-    from src.masking.settings import MaskingConfig
-    from src.mlm.inputs import Source
+    from src.downstream.finetune import ZERO_MASK
+    from src.mlm.inputs import IGNORE, Source
     from src.preprocessing.settings import PreprocessingConfig
 
     chain(stage, EARLY, QUIET_SNAPSHOT, anchor)
 
-    (stored,) = list(Source("val", masking=MaskingConfig(**NOTHING)).clients())
+    (stored,) = list(Source(group, masking=ZERO_MASK).clients())
 
-    end = PreprocessingConfig.load(None).windows["val"].final_cutoff
+    end = PreprocessingConfig.load(None).windows[group].final_cutoff
 
-    built = ClientsAtCutoff("val", end).client(RAW_CLIENT)
+    built = ClientsAtCutoff(group, end).client(RAW_CLIENT)
 
-    assert built.n_events == len(EARLY) and built.n_events > 0
+    # У train часть ленты лежит после конца его окна и во вход не идёт.
+    before = sum(datetime.fromisoformat(event["event_time"]) < end for event in EARLY)
+    assert built.n_events == before > 0
     same(built, stored)
+    assert (stored.labels == IGNORE).all() and (built.labels == IGNORE).all()
 
 
 @pytest.mark.parametrize("anchor", ["last_event", "cutoff"])
@@ -945,3 +947,195 @@ def test_catboost_plus_usr_of_other_vectors_or_sources_is_refused(stage):
     write(embedded, baseline["sources"])
     with pytest.raises(ValueError, match="--final-test"):
         plus_usr("m", ("train", "val", "test"), embedded)
+
+
+# ============================================================
+# LORA: ДООБУЧЕНИЕ В ПРОБЕ
+# ============================================================
+
+
+def write_lora(name: str, baseline: dict, damage: str | None = None, groups: tuple[str, ...] = ("val",)) -> None:
+    """
+    Прогнозы и meta дообучения в формате finetune.publish для групп
+    groups, от эталона — файла checkpoint в stage (его sha256 и эпоха 3
+    — в meta векторов, которые строит lora_world). damage — что в
+    них испортить.
+    """
+
+    from src.downstream import settings
+    from src.downstream.embed import raw_record
+    from src.downstream.tasks import churn_sources
+    from src.mlm.train import file_digest
+
+    rng = np.random.default_rng(5)
+    parts = []
+
+    for group in groups:
+        frame = baseline[group]["churn_active90"]
+        part = pd.DataFrame({
+            "task": "churn_active90", "set": "lora", "group": group, "client_id": frame.index,
+            "y": frame["churn"].to_numpy(), "score": rng.uniform(0.05, 0.95, len(frame)) * 0.5 + frame["churn"] * 0.4,
+        })
+        if group == "val" and damage == "extra_client":
+            part = pd.concat([part, part.iloc[:1].assign(client_id="val_stranger")], ignore_index=True)
+        if group == "val" and damage == "missing_client":
+            part = part.iloc[1:]
+        if group == "val" and damage == "label":
+            part.loc[part.index[0], "y"] = 1 - part["y"].iloc[0]
+        parts.append(part)
+
+    used = ("train", *groups)
+    meta = {
+        "kind": "not-lora" if damage == "kind" else "lora",
+        "name": name,
+        "reference": {
+            "checkpoint": "ref.pt",
+            "sha256": "0" * 64 if damage == "sha256" else file_digest(settings.DOWNSTREAM_DIR / "ref.pt"),
+            "epoch": 4 if damage == "epoch" else 3,
+        },
+        "groups": {group: {"cutoff": cutoff(group).isoformat(), **raw_record(group)} for group in used},
+        "sources": {group: churn_sources(group) for group in used},
+        "threshold": 0.37, "best_epoch": 5, "trainable": 1234, "seed": 42, "config": {}, "final_test": "test" in groups,
+    }
+
+    if damage == "sources":
+        meta["sources"]["val"] = {**meta["sources"]["val"], "feature_history_events_sha256": "другая"}
+    if damage == "groups":
+        meta["groups"]["val"] = {**meta["groups"]["val"], "raw_events_sha256": "другая"}
+
+    directory = downstream_dir(name)
+    directory.mkdir(parents=True, exist_ok=True)
+    pd.concat(parts, ignore_index=True).to_parquet(directory / "predictions.parquet", index=False)
+    (directory / "meta.json").write_text(json.dumps(meta))
+
+
+def lora_world(monkeypatch, final_test: bool = False) -> dict:
+    """
+    Мир пробы с векторами "m" от эталона ref.pt (эпоха 3) и отчётами
+    churn-бейзлайна всех групп.
+    """
+
+    baseline, _ = probe_world(monkeypatch)
+    used = ("train", "val", "test") if final_test else ("train", "val")
+    raw_groups("train", "val", "test")
+    write_vectors("m", ("train", "val", "test"))
+    write_churn_reports({**CHURN_ROWS, "test": [("x1", 1, True), ("x2", 0, True)]})
+
+    checkpoint = downstream_dir("m").parent / "ref.pt"
+    checkpoint.write_bytes(b"reference weights")
+
+    path = downstream_dir("m") / "meta.json"
+    meta = json.loads(path.read_text())
+    path.write_text(json.dumps({**meta, "checkpoint": str(checkpoint), "epoch": 3}))
+
+    assert used
+    return baseline
+
+
+def test_lora_scenario_is_compared_with_catboost_and_usr(stage, monkeypatch):
+    """
+    lora — готовый прогноз дообучения на тех же клиентах: порог из его
+    meta, парные интервалы против catboost и против usr — те же, что
+    считает paired вручную, а не пересчитанные другими выборками.
+    """
+
+    from src.downstream.probe import PREDICTIONS_FILE, at_threshold, run_probe, show
+
+    baseline = lora_world(monkeypatch)
+    write_lora("ft", baseline)
+
+    report = run_probe("m", draws=30, seed=2, lora="ft")
+    block = report["tasks"]["churn_active90"]
+    tuned = block["results"]["lora"]
+    predictions = pd.read_parquet(downstream_dir("m") / PREDICTIONS_FILE)
+
+    assert report["lora"] == "ft" and set(tuned["vs_reference"]) == set(tuned["vs_usr"]) == {"val"}
+    assert (tuned["threshold"], tuned["best_epoch"], tuned["trainable"], tuned["seed"]) == (0.37, 5, 1234, 42)
+
+    part = predictions[predictions["set"] == "lora"]
+    scores = part["score"].to_numpy()
+    y = part["y"].to_numpy()
+    catboost = predictions[predictions["set"] == "catboost"]["score"].to_numpy()
+    usr = predictions[predictions["set"] == "usr"]["score"].to_numpy()
+    assert part["client_id"].tolist() == list(baseline["val"]["churn_active90"].index)
+
+    assert tuned["vs_reference"]["val"] == paired(y, scores, catboost, 30, 2)
+    assert tuned["vs_usr"]["val"] == paired(y, scores, usr, 30, 2)
+
+    # F1 — по порогу из meta, не по подобранному на val.
+    assert {key: tuned["val"][key] for key in at_threshold(y, scores, 0.37)} == at_threshold(y, scores, 0.37)
+
+    text = show(report)
+    assert "lora " in text and "Δ lora − catboost (val)" in text and "Δ lora − usr (val)" in text
+    assert "lora нет" not in text
+
+    # Остальные сценарии те же, что без lora; --baseline lora не касается.
+    plain = run_probe("m", draws=30, seed=2)
+    assert "lora" not in plain["tasks"]["churn_active90"]["results"]
+    for name, result in plain["tasks"]["churn_active90"]["results"].items():
+        assert block["results"][name] == result
+
+
+@pytest.mark.parametrize("damage, final, message", [
+    ("extra_client", False, "другие клиенты или метки"),
+    ("missing_client", False, "другие клиенты или метки"),
+    ("label", False, "другие клиенты или метки"),
+    ("sha256", False, "другого эталона"),
+    ("epoch", False, "эпоха эталона 4, а у векторов 3"),
+    ("sources", False, "источники строк группы val"),
+    ("groups", False, "выгрузка или T группы val"),
+    ("kind", False, "не дообучения"),
+    ("test_without_final", False, "только с --final-test"),
+    ("test_missing", True, "а нужны val, test"),
+])
+def test_lora_of_other_clients_reference_or_sources_is_refused(stage, monkeypatch, damage, final, message):
+
+    from src.downstream.probe import run_probe
+
+    baseline = lora_world(monkeypatch, final_test=final)
+
+    if damage == "test_without_final":
+        write_lora("ft", baseline, groups=("val", "test"))
+    elif damage == "test_missing":
+        write_lora("ft", baseline)
+    else:
+        write_lora("ft", baseline, damage)
+
+    with pytest.raises(ValueError, match=message):
+        run_probe("m", draws=20, seed=0, lora="ft", final_test=final)
+
+
+def test_lora_without_files_is_refused(stage, monkeypatch):
+
+    from src.downstream.probe import run_probe
+
+    lora_world(monkeypatch)
+
+    with pytest.raises(FileNotFoundError, match="finetune"):
+        run_probe("m", draws=20, seed=0, lora="nothing")
+
+
+def test_lora_final_evaluation_adds_test_next_to_val(stage, monkeypatch):
+
+    from src.downstream.probe import run_probe
+
+    baseline = lora_world(monkeypatch, final_test=True)
+    write_lora("ft", baseline, groups=("val", "test"))
+
+    tuned = run_probe("m", draws=20, seed=0, lora="ft", final_test=True)["tasks"]["churn_active90"]["results"]["lora"]
+
+    assert set(tuned["vs_reference"]) == set(tuned["vs_usr"]) == {"val", "test"} and "test" in tuned
+
+
+def test_probe_without_lora_says_how_to_get_it(stage, monkeypatch):
+
+    from src.downstream.probe import run_probe, show
+
+    probe_world(monkeypatch)
+    raw_groups("train", "val")
+    write_vectors("m", ("train", "val"))
+
+    report = run_probe("m", draws=20, seed=0)
+
+    assert report["lora"] is None and "lora" not in report["tasks"]["churn_active90"]["results"]
+    assert "lora нет: python -m src.downstream.finetune" in show(report)

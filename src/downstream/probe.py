@@ -37,6 +37,10 @@ from .settings import EMBEDDINGS_META, REPORT_FILE, cutoff, downstream_dir, grou
 #   catboost_plus_usr  handcrafted-признаки и [USR] → CatBoost
 #                      (python -m churn.plus_usr, готовый прогноз; если
 #                      для этих векторов он не обучен — его нет)
+#   lora               дообучение эталона заплатками (python -m
+#                      src.downstream.finetune, готовый прогноз; только
+#                      с --lora <имя>): сравнивается с catboost и с usr,
+#                      порог — тот, что выбран при дообучении
 #
 # Голова над [USR] — логистическая регрессия со стандартизацией, сила
 # регуляризации выбирается 3-кратной кросс-валидацией на train по
@@ -64,7 +68,7 @@ from .settings import EMBEDDINGS_META, REPORT_FILE, cutoff, downstream_dir, grou
 TASKS = ("churn_active90",)
 
 # Сценарии в порядке отчёта.
-SCENARIOS = ("catboost", "usr", "catboost_plus_usr")
+SCENARIOS = ("catboost", "usr", "catboost_plus_usr", "lora")
 
 # Сценарии, по которым модели PRAGMA сравниваются друг с другом
 # (--baseline): те, что зависят от векторов модели.
@@ -301,9 +305,10 @@ def task_rows(task: str, churn: dict[str, dict[str, pd.DataFrame]]) -> dict[str,
     }
 
 
-def run_probe(tag: str, draws: int, seed: int, baseline: str | None = None, final_test: bool = False) -> dict:
+def run_probe(tag: str, draws: int, seed: int, baseline: str | None = None, final_test: bool = False,
+              lora: str | None = None) -> dict:
 
-    from .tasks import CHURN_TASKS, churn_rows, churn_thresholds, plus_usr
+    from .tasks import CHURN_TASKS, churn_rows, churn_thresholds, lora_rows, plus_usr
 
     used = groups(final_test)
 
@@ -314,11 +319,13 @@ def run_probe(tag: str, draws: int, seed: int, baseline: str | None = None, fina
     vectors = load_embeddings(tag, used)
     churn = {task: {group: churn_rows(task, group) for group in used} for task in CHURN_TASKS}
     thresholds = churn_thresholds()
-    plus = plus_usr(tag, used, vectors_meta(tag))
+    embedded = vectors_meta(tag)
+    plus = plus_usr(tag, used, embedded)
+    tuned = lora_rows(lora, used, embedded) if lora else None
 
     report: dict = {
         "tag": tag, "baseline": baseline, "draws": draws,
-        "final_test": final_test, "groups": list(used), "plus_usr": plus is not None, "tasks": {},
+        "final_test": final_test, "groups": list(used), "plus_usr": plus is not None, "lora": lora, "tasks": {},
     }
 
     # Прогнозы по строкам: по ним сравниваются модели между собой.
@@ -364,6 +371,17 @@ def run_probe(tag: str, draws: int, seed: int, baseline: str | None = None, fina
             }
             cut["catboost_plus_usr"] = plus["thresholds"][task]
 
+        if tuned is not None:
+            for group in evaluated:
+                other = tuned["rows"].get((task, group))
+                if other is None or not other.index.equals(rows[group].index) or not np.array_equal(
+                    other["churn"].to_numpy(), y[group]
+                ):
+                    raise ValueError(f"lora/{task}/{group}: другие клиенты или метки, чем у catboost")
+            scores["lora"] = {group: tuned["rows"][(task, group)]["score"].to_numpy() for group in evaluated}
+            # Порог выбран при дообучении на отложенной части train.
+            cut["lora"] = tuned["threshold"]
+
         for name, by_group in scores.items():
             for group in evaluated:
                 predictions.append(pd.DataFrame({
@@ -389,6 +407,13 @@ def run_probe(tag: str, draws: int, seed: int, baseline: str | None = None, fina
                     group: paired(y[group], by_group[group], scores[reference][group], draws, seed)
                     for group in evaluated
                 }
+            if name == "lora":
+                results[name]["vs_usr"] = {
+                    group: paired(y[group], by_group[group], scores["usr"][group], draws, seed)
+                    for group in evaluated
+                }
+                for key in ("best_epoch", "trainable", "seed"):
+                    results[name][key] = tuned["meta"][key]
             if before is not None and name in COMPARED:
                 results[name]["vs_baseline"] = {
                     group: vs_baseline(before, task, name, group, rows[group].index, y[group],
@@ -490,6 +515,15 @@ def show(report: dict) -> str:
                     f"{cells['log_loss']:8.4f} {cells['f1']:6.3f}   {shown}"
                 )
 
+            lora = block["results"].get("lora")
+
+            if lora is None:
+                lines.append("  lora нет: python -m src.downstream.finetune --checkpoint … --name …")
+            else:
+                for other, delta in (("catboost", lora["vs_reference"]), ("usr", lora["vs_usr"])):
+                    pr, roc = delta[group]["pr_auc"], delta[group]["roc_auc"]
+                    lines.append(f"  Δ lora − {other} ({group}): PR-AUC {interval(pr)}, ROC-AUC {interval(roc)}")
+
             plus = block["results"].get("catboost_plus_usr")
 
             if plus is None:
@@ -508,7 +542,7 @@ def run(args) -> int:
 
     try:
         with threadpool_limits(BLAS_THREADS):
-            report = run_probe(args.tag, args.draws, args.seed, args.baseline, args.final_test)
+            report = run_probe(args.tag, args.draws, args.seed, args.baseline, args.final_test, args.lora)
     except (FileNotFoundError, ValueError) as error:
         print(f"[probe] {error}")
         return EXIT_BLOCKED
@@ -527,6 +561,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m src.downstream.probe")
     parser.add_argument("--tag", required=True, help="каталог векторов в data/13_downstream")
     parser.add_argument("--baseline", default=None, help="тег модели для парного сравнения")
+    parser.add_argument("--lora", default=None, help="имя дообучения (python -m src.downstream.finetune --name)")
     parser.add_argument("--draws", type=int, default=1000, help="bootstrap-выборок")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
