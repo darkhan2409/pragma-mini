@@ -943,23 +943,26 @@ class DatasetGroup:
     registration_end: datetime
 
 
+# Размеры групп — решение владельца 2026-11-05: ×3 к прежним 8 500 /
+# 1 500 / 1 500, чтобы сузить интервал оценки на val и test (при 47
+# случаях оттока в val разница кандидатов тонула в шуме).
 DATASETS: dict[str, DatasetGroup] = {
     "train": DatasetGroup(
-        clients=8500,
+        clients=25_000,
         history_start=datetime(2024, 1, 1),
         history_end=datetime(2026, 1, 1),
         seed=564,
         registration_end=datetime(2026, 1, 1),
     ),
     "val": DatasetGroup(
-        clients=1500,
+        clients=6_000,
         history_start=datetime(2024, 1, 1),
         history_end=datetime(2026, 5, 1),
         seed=664,
         registration_end=datetime(2026, 5, 1),
     ),
     "test": DatasetGroup(
-        clients=1500,
+        clients=6_000,
         history_start=datetime(2024, 1, 1),
         history_end=datetime(2026, 9, 1),
         seed=764,

@@ -109,7 +109,13 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): _jsonable(item) for key, item in value.items()}
 
-    if isinstance(value, (list, tuple, set, frozenset)):
+    # Множество — отсортированным: порядок обхода множества строк свой
+    # в каждом процессе, и отпечаток параметров расходился между
+    # генерацией группы и её продолжением (найдено 2026-11-05).
+    if isinstance(value, (set, frozenset)):
+        return sorted((_jsonable(item) for item in value), key=lambda item: json.dumps(item, sort_keys=True, default=str))
+
+    if isinstance(value, (list, tuple)):
         return [_jsonable(item) for item in value]
 
     if isinstance(value, Path):

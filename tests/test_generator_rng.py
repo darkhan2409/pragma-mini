@@ -184,3 +184,25 @@ def test_real_stream_is_unchanged_and_reproducible():
     assert first == again
     assert first != other
     assert all(0.0 <= value < 1.0 for value in first + other)
+
+
+def test_the_params_fingerprint_does_not_depend_on_the_process() -> None:
+    """
+    Отпечаток параметров (generation_config_sha256 в manifest) один и тот
+    же в процессах с разной солью хеширования строк. Прежде множество
+    регионов в параметрах давало свой порядок в каждом процессе, и
+    продолжение выгрузки не сходилось с ней самой (найдено 2026-11-05).
+    """
+
+    import os
+    import subprocess
+    import sys
+
+    code = "from src.generator import params; print(params.load(None).fingerprint())"
+    prints = {
+        subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True,
+                       env={**os.environ, "PYTHONHASHSEED": str(seed)}).stdout.strip()
+        for seed in (1, 2, 3)
+    }
+
+    assert len(prints) == 1, prints

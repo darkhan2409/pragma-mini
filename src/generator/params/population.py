@@ -242,8 +242,11 @@ class PopulationParams:
     # (persona-16: бюджетники в нефтегазе и IT).
     industry_region_factor: dict = field(
         default_factory=lambda: {
-            "oil_and_gas": ({"Atyrau", "Mangystau", "West Kazakhstan", "Kyzylorda", "Aktobe"}, 5.0, 0.08),
-            "mining": ({"Karaganda", "Pavlodar", "East Kazakhstan", "Ulytau", "Kostanay", "Abai"}, 3.0, 0.15),
+            # Регионы — кортежем, не множеством: порядок множества строк
+            # свой в каждом процессе, и отпечаток параметров
+            # (generation_config_sha256) расходился между процессами.
+            "oil_and_gas": (("Aktobe", "Atyrau", "Kyzylorda", "Mangystau", "West Kazakhstan"), 5.0, 0.08),
+            "mining": (("Abai", "East Kazakhstan", "Karaganda", "Kostanay", "Pavlodar", "Ulytau"), 3.0, 0.15),
         }
     )
     state_industries: tuple = ("education", "healthcare", "government", "science", "utilities", "security")
