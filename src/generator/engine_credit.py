@@ -223,14 +223,31 @@ def _withdraw_from_deposit(state: ClientState, ts: datetime, target, amount: int
     return True
 
 
+def _topup_chance(state: ClientState, ts: datetime) -> float:
+    """
+    Подтянет ли клиент деньги к платежу: собранный — почти всегда,
+    под стрессом и без дисциплины — реже.
+    """
+
+    settings = params_module.active().products
+
+    discipline = state.persona.trait("financial_discipline", ts)
+
+    stress = stress_module.level_at(state.stress_episodes, ts)
+
+    return (
+        settings.loan_topup_from_other_bank_share
+        * (1.0 - settings.loan_topup_discipline_weight * (1.0 - discipline))
+        * (1.0 - settings.loan_topup_stress_cut * stress)
+    )
+
+
 def _topup_before_payment(state: ClientState, ts: datetime, amount: int, rng) -> bool:
     """
     Клиент переводит деньги из другого банка к сроку платежа.
     """
 
-    settings = params_module.active().products
-
-    if rng.random() >= settings.loan_topup_from_other_bank_share:
+    if rng.random() >= _topup_chance(state, ts):
         return False
 
     account = state.primary_card_account(ts)

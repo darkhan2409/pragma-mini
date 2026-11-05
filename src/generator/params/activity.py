@@ -96,9 +96,17 @@ class ActivityParams:
     # За сколько дней до платежа банк начинает напоминать.
     due_reminder_days: int = 5
 
+    # Дни просрочки, в которые коллекшн напоминает о долге
+    # (communications.collection_contacts). Синтетическое допущение:
+    # данных банка о графике коллекшна нет.
+    collection_dpd_steps: tuple = (1, 3, 7, 14, 21, 30, 45, 60, 90, 120, 150, 180)
+
     # Обращение по одному и тому же поводу не повторяется
-    # каждый день.
+    # каждый день. Просьба о реструктуризации — реже: прежде она
+    # повторялась каждые две недели по 10 месяцев (аудит 2026-11-05,
+    # M17).
     support_cooldown_days: int = 14
+    support_cooldown_days_by_cause: dict = field(default_factory=lambda: {"delinquency": 90})
 
     # Согласие на рассылку отзывают.
     consent_withdrawal_per_year: float = 0.06
@@ -195,10 +203,78 @@ class ActivityParams:
     night_hours: tuple = (0, 1, 2, 3, 4, 5)
     night_boost: float = 1.8
 
+    # Часы категории: окна (с часа, до часа, вес) поверх фона
+    # category_hour_floor. Общий профиль дня умножается на профиль
+    # категории (life/calendar.hour_weights): кофе — утром, обед — в
+    # полдень, бар — вечером и ночью, госуслуги — в рабочие часы.
+    # Прежде час у всех категорий был один, общий (аудит 2026-11-05,
+    # M2). Синтетическое допущение.
+    category_hour_floor: float = 0.15
+    category_hours: dict = field(
+        default_factory=lambda: {
+            "coffee": ((7, 11, 3.0), (14, 17, 1.0)),
+            "fastfood": ((12, 15, 2.5), (18, 22, 1.2)),
+            "restaurant": ((12, 15, 1.0), (18, 23, 2.5)),
+            "bars": ((19, 24, 3.0), (0, 3, 1.5)),
+            "grocery": ((10, 13, 0.8), (17, 21, 2.0)),
+            "market": ((8, 14, 2.5),),
+            "convenience": ((7, 10, 1.0), (18, 24, 1.5)),
+            "pharmacy": ((9, 21, 1.5),),
+            "medical": ((8, 18, 2.5),),
+            "lab": ((7, 12, 3.0),),
+            "government": ((9, 18, 3.0),),
+            "taxes": ((9, 22, 1.0),),
+            "education": ((9, 20, 1.5),),
+            "beauty": ((10, 20, 2.0),),
+            "car_service": ((9, 19, 2.5),),
+            "fuel": ((7, 10, 1.5), (17, 21, 1.5)),
+            "cinema": ((15, 24, 2.5),),
+            "entertainment": ((12, 23, 1.5),),
+            "flowers": ((9, 21, 1.5),),
+            "taxi": ((7, 10, 1.5), (18, 24, 2.0)),
+            "marketplace": ((19, 24, 2.0), (12, 14, 0.8)),
+            "ecom": ((19, 24, 2.0),),
+            "delivery": ((12, 14, 1.5), (18, 23, 2.5)),
+            "cash": ((9, 20, 1.5),),
+            "transfer": ((9, 13, 1.0), (18, 23, 1.5)),
+        }
+    )
+    # Часы работы каналов поддержки (с часа, до часа) и длительность
+    # обращения: медиана в минутах и разброс логнормали (синтетическое
+    # допущение).
+    support_channel_hours: dict = field(
+        default_factory=lambda: {"chat": (0, 24), "call_center": (8, 22), "branch": (9, 18), "email": (0, 24)}
+    )
+    support_duration_minutes: dict = field(
+        default_factory=lambda: {
+            "chat": (15.0, 1.2), "call_center": (8.0, 1.0), "branch": (30.0, 0.8), "email": (1_440.0, 0.9),
+        }
+    )
+    # Час обращения в поддержку: днём и вечером, ночью редко.
+    support_hour_profile: tuple = (
+        0.004, 0.002, 0.001, 0.001, 0.001, 0.002,
+        0.008, 0.025, 0.055, 0.080, 0.085, 0.085,
+        0.075, 0.075, 0.080, 0.078, 0.072, 0.065,
+        0.058, 0.050, 0.040, 0.030, 0.018, 0.010,
+    )
+
     # Мягкие ограничители.
     max_sessions_per_day: int = 9
     max_screens_per_session: int = 20
     max_purchases_per_day: int = 18
+    # Сколько раз за день категория встречается среди покупок дня
+    # (behaviour/needs.daily_intents): в кино ходят раз в день, проезд —
+    # дорога туда, обратно и редко ещё одна поездка. Прежде шаг
+    # распорядка разыгрывался с возвратом: кино дважды в день — 6.5%
+    # дней с кино, проезд трижды и больше — 5% (аудит 2026-11-05, M1).
+    # Синтетическое допущение.
+    daily_category_cap: dict = field(
+        default_factory=lambda: {
+            "cinema": 1, "transit": 3, "taxi": 3, "fuel": 1, "parking": 2, "hotel": 1, "car_rental": 1,
+            "beauty": 1, "furniture": 1, "appliances": 1, "electronics": 1, "government": 1, "fines": 1,
+            "education": 1, "airline": 1, "railway": 1,
+        }
+    )
 
     # Внешние переводы и наличные.
     transfers_per_month: dict = field(

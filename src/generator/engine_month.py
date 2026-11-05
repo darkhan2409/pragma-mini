@@ -262,6 +262,25 @@ def _withdraw_consent(state: ClientState, day: datetime) -> None:
     )
 
 
+def statement_day(contract_id: str) -> int:
+    """
+    День выписки договора: свой у каждого, 1–28 число. Прежде выписка
+    у всех карт шла в последний день месяца, и первое число давало
+    ×1.45 к среднему дню (аудит 2026-11-05, M18).
+    """
+
+    return 1 + stable_hash("statement", contract_id) % 28
+
+
+def card_statements(sim, state: ClientState, day: datetime) -> None:
+    """
+    Выписки договоров, у которых сегодня день выписки.
+    """
+
+    if state.card_credits:
+        _card_statement(sim, state, day, cal.month_start(day))
+
+
 def _card_statement(sim, state: ClientState, day: datetime, month: datetime) -> None:
     """
     Выписка по карте рассрочки.
@@ -275,7 +294,7 @@ def _card_statement(sim, state: ClientState, day: datetime, month: datetime) -> 
 
     for contract_id, credit in list(state.card_credits.items()):
 
-        if credit.closed:
+        if credit.closed or statement_day(contract_id) != day.day:
             continue
 
         contract = state.contracts.get(contract_id)
@@ -649,11 +668,41 @@ def _card_missed(state: ClientState, day, credit, contract_id, payment, due_even
             )
         )
 
+    if credit.dpd >= settings.card_block_dpd:
+        _block_for_debt(state, day, contract_id)
+
+
+def _block_for_debt(state: ClientState, day, contract_id: str) -> None:
+    """
+    Кредитка с просрочкой card_block_dpd и больше блокируется до
+    погашения. Блокировка с долгим сроком, а не навсегда: её снимает
+    погашение (_card_arrears_cleared), а не таймер.
+    """
+
+    ts = day.replace(hour=23, minute=30)
+
+    for card in state.cards.values():
+
+        if card.contract_id != contract_id or card.closed_at is not None or card.is_blocked_at(ts):
+            continue
+
+        card_rules.block(card, ts, "delinquency", days=3650)
+
+        state.emit(
+            state.factory.make("card_blocked", ts, dict(state.card_facts(card), reason="delinquency"))
+        )
+
 
 def _card_arrears_cleared(state: ClientState, day, credit, contract_id) -> None:
 
     if credit.dpd <= 0:
         return
+
+    from .engine_app import unblock_card
+
+    for card in state.cards.values():
+        if card.contract_id == contract_id and card.block_reason == "delinquency" and card.closed_at is None:
+            unblock_card(state, day.replace(hour=23, minute=29), card, "arrears_cleared")
 
     state.emit(
         state.factory.make(
@@ -693,7 +742,8 @@ def _sweep_bills(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
         rng = keyed_rng(NS_LEDGER, state.ordinal, ts.toordinal(), stable_hash(bill["kind"]) % 997)
 
-        moment = ts.replace(hour=int(rng.integers(10, 20)), minute=int(rng.integers(0, 60)))
+        moment = ts.replace(hour=int(rng.integers(10, 20)), minute=int(rng.integers(0, 60)),
+                            second=int(rng.integers(0, 60)))
 
         sources = state.ledger.payment_sources(moment, bill["amount"])
 
@@ -828,7 +878,6 @@ def month_end(sim, state: ClientState, day: datetime) -> None:
             )
         )
 
-    _card_statement(sim, state, day, month)
     _mature_contracts(state, day, month)
     _expire_cards(sim, state, day)
     _close_deposits_early(sim, state, day)
@@ -881,7 +930,8 @@ def _credit_deposit_interest(state: ClientState, ts: datetime, deposit, month: d
     return interest
 
 
-def _close_deposit(state: ClientState, ts: datetime, deposit, early: bool = False) -> None:
+def _close_deposit(state: ClientState, ts: datetime, deposit, early: bool = False,
+                   reason: str | None = None) -> None:
     """
     Срок вышел: депозит либо пролонгируется на действующих
     условиях, либо закрывается с переводом остатка на карту.
@@ -958,7 +1008,8 @@ def _close_deposit(state: ClientState, ts: datetime, deposit, early: bool = Fals
 
         return
 
-    reason = "early_closure" if early else "matured"
+    # Закрытие уходящим клиентом — по его просьбе (client_request).
+    reason = reason or ("early_closure" if early else "matured")
 
     target = state.primary_card_account(ts)
 
@@ -1323,4 +1374,4 @@ def _row(event) -> dict:
 _HANDLERS["bill_sweep"] = _sweep_bills
 
 
-__all__ = ["assign_balances", "finish", "month_end"]
+__all__ = ["assign_balances", "card_statements", "finish", "month_end"]

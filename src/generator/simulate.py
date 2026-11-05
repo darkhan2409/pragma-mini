@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
@@ -68,7 +70,12 @@ class ClientState:
     events: list = field(default_factory=list)
     profile_known: bool = False
 
+    # Последний день с просрочкой lifecycle.delinquent_dpd и больше:
+    # от него банк отсчитывает паузу в предложениях.
+    serious_dpd_at: datetime | None = None
     life_events: tuple = ()
+    # Покупки жизненных событий по порядковому дню (events.event_purchases).
+    event_purchases: dict = field(default_factory=dict)
     stress_episodes: tuple = ()
     fraud_episodes: tuple = ()
     # Отношения с банком: скрытое состояние, из которого рождается
@@ -121,6 +128,7 @@ class ClientState:
     # Покупки последних 30 дней по дням: давление бюджета скользит,
     # а не обнуляется с календарным месяцем (household.budget_pressure).
     spend_by_day: dict = field(default_factory=dict)
+    count_by_day: dict = field(default_factory=dict)
     pending_cashback: dict = field(default_factory=dict)
 
     profile_values: dict = field(default_factory=dict)
@@ -262,6 +270,39 @@ class ClientState:
 
     def add_spend(self, ts: datetime, amount: int) -> None:
         self.spend_by_day[ts.toordinal()] = self.spend_by_day.get(ts.toordinal(), 0) + int(amount)
+        self.count_by_day[ts.toordinal()] = self.count_by_day.get(ts.toordinal(), 0) + 1
+
+    def recent_spend(self, day: datetime, tracked_days: int, memory: float) -> tuple[float, float]:
+        """
+        Покупки последних 30 дней с затухающим весом exp(-давность /
+        memory) и сумма тех же весов по наблюдаемым дням: «сколько
+        потрачено» и «сколько дней бюджета этому соответствует».
+        """
+
+        self.spent(day)
+
+        today = day.toordinal()
+
+        spent = sum(amount * math.exp(-(today - key) / memory) for key, amount in self.spend_by_day.items())
+
+        days = sum(math.exp(-age / memory) for age in range(1, min(30, max(1, tracked_days)) + 1))
+
+        return spent, days
+
+    def typical_ticket(self, day: datetime) -> float | None:
+        """
+        Средний чек клиента за 30 дней до этого дня; None, пока покупок
+        меньше пяти.
+        """
+
+        first = day.toordinal() - 30
+
+        for key in [key for key in self.count_by_day if key < first]:
+            del self.count_by_day[key]
+
+        count = sum(self.count_by_day.values())
+
+        return self.spent(day) / count if count >= 5 else None
 
     def has_open_loan(self) -> bool:
         """
@@ -566,6 +607,7 @@ class CommunitySimulation:
         )
 
         state.life_events = life_events.plan_events(persona)
+        state.event_purchases = life_events.event_purchases(persona, state.life_events)
         state.stress_episodes = stress_module.plan_episodes(persona, state.life_events)
         state.fraud_episodes = fraud_plan.plan_episodes(persona, state.life_events)
         state.income_streams = income_module.build_streams(persona, state.life_events)

@@ -90,6 +90,9 @@ class Persona:
     gambles: bool = False
     scooter: bool = False
     cinema: bool = True
+    # Хронотип: на сколько часов позже (или раньше) обычного клиент
+    # живёт день (волна 6). Прежде у всех один часовой профиль.
+    chronotype: int = 0
 
     # --------------------------------------------------------
 
@@ -131,6 +134,15 @@ def _weighted(rng, mapping: dict) -> str:
         if draw <= running:
             return key
     return keys[-1]
+
+
+def pension_payday(birth_date: datetime) -> int:
+    """
+    День выплаты пенсии: график 1–15 числа по дате рождения, у
+    получателя постоянный (research.md). Прежде — случайный 3–10.
+    """
+
+    return min(15, (birth_date.day + 1) // 2)
 
 
 def employer_payday(employer_id: str) -> int:
@@ -328,7 +340,12 @@ def draw_persona(client_ordinal: int) -> Persona:
     declared_income = int(min(high_bound, max(low_bound, declared_income)))
 
     if income_type == "pensioner":
-        income_day = int(rng.integers(*settings.income.pension_day_range))
+        # Розыгрыш оставлен, чтобы не сдвинуть следующие черты.
+        rng.integers(3, 11)
+        income_day = pension_payday(birth_date)
+        # Пенсия не ниже минимальной (аудит 2026-11-05, M9).
+        true_income = max(true_income, settings.income.state_pension_floor)
+        declared_income = max(declared_income, int(round(true_income / 5000) * 5000))
     else:
         income_day = int(rng.integers(*settings.income.salary_day_range))
 
@@ -409,6 +426,8 @@ def draw_persona(client_ordinal: int) -> Persona:
         mix["car"] *= min(1.8, max(0.35, (true_income / 320_000) ** population.car_income_elasticity))
     transport = _weighted(habit_rng, mix)
 
+    chronotype = int(_weighted(keyed_rng(NS_PERSONA, client_ordinal, 92), population.chronotype_weights))
+
     traits = draw_traits(
         client_ordinal=client_ordinal,
         life_stage=life_stage,
@@ -456,6 +475,7 @@ def draw_persona(client_ordinal: int) -> Persona:
         gambles=gambles,
         scooter=scooter,
         cinema=cinema,
+        chronotype=chronotype,
     )
 
 
@@ -530,4 +550,5 @@ __all__ = [
     "consent_date",
     "draw_persona",
     "employer_payday",
+    "pension_payday",
 ]

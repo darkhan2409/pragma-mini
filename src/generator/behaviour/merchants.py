@@ -236,6 +236,7 @@ def purchase_amount(
     outlet: Outlet,
     ts: datetime,
     rng: KeyedRandom,
+    scale: float = 1.0,
 ) -> int:
     """
     Сумма покупки: цена точки (меню, корзина, прейскурант), её
@@ -243,6 +244,10 @@ def purchase_amount(
     зарплатного цикла, остатка, праздника — сумма НЕ зависит: они
     меняют частоту покупок (аудит 2026-11-05, C3). MCC на сумму
     напрямую не влияет.
+
+    scale — во сколько раз корзина больше обычной: крупная покупка и
+    покупки жизненного события (свадьба, ремонт). Тариф проезда и
+    штраф от него не зависят.
     """
 
     settings = params_module.active().amounts
@@ -265,7 +270,7 @@ def purchase_amount(
     segment = settings.price_segment_factor.get(outlet.price_segment, 1.0)
 
     if category in settings.menu_items:
-        return _menu_amount(category, outlet, rng, index * place * segment)
+        return _menu_amount(category, outlet, rng, index * place * segment * scale)
 
     if category == "fuel":
         return _fuel_amount(persona, ts, rng)
@@ -273,7 +278,7 @@ def purchase_amount(
     median = settings.basket_median.get(category, 5_000)
     sigma = settings.basket_sigma.get(category, 0.6)
 
-    amount = median * rng.lognormal(0.0, sigma) * segment * place * index
+    amount = median * rng.lognormal(0.0, sigma) * segment * place * index * scale
 
     income_ratio = max(0.25, persona.true_income / 320_000)
     amount *= income_ratio ** settings.income_elasticity

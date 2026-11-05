@@ -266,6 +266,13 @@ def _category_factor(category: str, ts: datetime, region: str | None) -> float:
     if context.post_holiday:
         factor *= settings.post_holiday_dip
 
+    peak = settings.date_peaks.get(ts.strftime("%m-%d"))
+    if peak:
+        factor *= peak["categories"].get(category, 1.0)
+
+    if ts.weekday() == 4:
+        factor *= settings.friday_factors.get(category, 1.0)
+
     if context.is_month_start:
         factor *= settings.month_start_boost.get(category, 1.0)
 
@@ -327,7 +334,11 @@ def month_factor(ts: datetime) -> float:
     Общий уровень трат месяца: декабрь дороже февраля.
     """
 
-    return float(params_module.active().seasonality.month_factor.get(ts.month, 1.0))
+    settings = params_module.active().seasonality
+
+    peak = settings.date_peaks.get(ts.strftime("%m-%d"))
+
+    return float(settings.month_factor.get(ts.month, 1.0) * (peak["rate"] if peak else 1.0))
 
 
 def payday_factor(ts: datetime, last_payday: datetime | None, next_payday: datetime | None) -> float:
@@ -358,31 +369,43 @@ def payday_factor(ts: datetime, last_payday: datetime | None, next_payday: datet
 # ============================================================
 
 
-def hour_weights(ts: datetime, night_segment: bool = False) -> tuple:
+def hour_weights(ts: datetime, night_segment: bool = False, chronotype: int = 0,
+                 category: str | None = None) -> tuple:
     """
     Часовой профиль дня. Будни и выходные различаются формой,
-    а не только уровнем.
+    а не только уровнем. Хронотип сдвигает профиль клиента на свои
+    часы, категория умножает его на свои часы (activity.category_hours).
     """
+
+    return _hour_weights(is_day_off(ts), night_segment, chronotype, category)
+
+
+@state_cache
+def _hour_weights(day_off: bool, night_segment: bool, chronotype: int, category: str | None) -> tuple:
 
     settings = params_module.active().activity
 
-    base = (
-        settings.hour_profile_weekend
-        if is_day_off(ts)
-        else settings.hour_profile_weekday
-    )
+    base = list(settings.hour_profile_weekend if day_off else settings.hour_profile_weekday)
 
-    if not night_segment:
-        return base
+    if night_segment:
+        for hour in settings.night_hours:
+            base[hour] *= settings.night_boost
 
-    boosted = list(base)
+    if chronotype:
+        base = [base[(hour - chronotype) % 24] for hour in range(24)]
 
-    for hour in settings.night_hours:
-        boosted[hour] *= settings.night_boost
+    windows = settings.category_hours.get(category) if category else None
 
-    total = sum(boosted)
+    if windows:
+        kernel = [settings.category_hour_floor] * 24
+        for low, high, weight in windows:
+            for hour in range(low, high):
+                kernel[hour % 24] += weight
+        base = [value * factor for value, factor in zip(base, kernel)]
 
-    return tuple(value / total for value in boosted)
+    total = sum(base)
+
+    return tuple(value / total for value in base)
 
 
 def earlier_same_day(ts: datetime, delta: timedelta) -> datetime:

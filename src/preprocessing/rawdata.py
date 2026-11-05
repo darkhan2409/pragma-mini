@@ -50,7 +50,7 @@ from src.generator.profile import LIFELONG_SOURCE_FIELD, LIFELONG_TYPES, PROFILE
 MANIFEST_NAME = "manifest.json"
 
 # 20 — original_amount с центами (float), генератор 2.0.0-a3 (аудит 2026-11-05, M7).
-EXPECTED_SCHEMA_VERSION = 20
+EXPECTED_SCHEMA_VERSION = 21
 
 # Файлы, без которых группа не обрабатывается. Справочников
 # рядом с выгрузкой нет: они остались входом генератора.

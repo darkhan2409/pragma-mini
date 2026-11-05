@@ -49,6 +49,14 @@ EVENT_KINDS = (
     "divorce",
 )
 
+# На сколько дней дальше горизонта планирования планируются события.
+# Часть последствий наступает РАНЬШЕ самого события: билет за 7–60
+# дней до поездки, декрет за 70 дней до родов, покупки к свадьбе и
+# рождению (event_purchases). Событие сразу за горизонтом даёт строки
+# до него, и без запаса поднятый PLANNING_END переписывал бы
+# последние недели прежнего окна. Запас длиннее любого такого сдвига.
+LOOKAHEAD = timedelta(days=180)
+
 # Событие -> какие поля профиля оно меняет.
 PROFILE_EFFECT = {
     "move": ("region", "city"),
@@ -87,6 +95,11 @@ class LifeEvent:
 def _rate(persona: Persona, kind: str) -> float:
 
     settings = params_module.active().lifecycle
+
+    # Рождения — кандидаты, которые принимаются по возрасту матери
+    # на свою дату (_birth_chance).
+    if kind == "child_birth":
+        return settings.birth_candidate_rate
 
     rate = settings.life_event_rate_per_year.get(kind, 0.0)
 
@@ -159,7 +172,9 @@ def plan_events(persona: Persona) -> tuple:
         if rate <= 0.0:
             continue
 
-        limit = settings.life_event_max.get(kind)
+        # Предел числа рождений считается по принятым кандидатам
+        # (_in_time_order), а не по всем.
+        limit = None if kind == "child_birth" else settings.life_event_max.get(kind)
 
         # Интервалы до следующего события — экспоненциальные со
         # ставкой вида: тот же процесс Пуассона, что и прежде, но
@@ -178,7 +193,7 @@ def plan_events(persona: Persona) -> tuple:
 
             ts = config.HISTORY_START + timedelta(days=int(clock), hours=int(item_rng.integers(8, 20)))
 
-            if ts >= config.PLANNING_END:
+            if ts >= config.PLANNING_END + LOOKAHEAD:
                 break
 
             # Цель переезда разыгрывается позже, по порядку времени
@@ -224,6 +239,15 @@ def plan_events(persona: Persona) -> tuple:
                     "destination": str(trip_rng.weighted(geo.domestic_destinations)),
                     "lead_days": int(trip_rng.integers(*geo.trip_ticket_lead_days)),
                     "flight": bool(abroad or trip_rng.random() < geo.domestic_flight_share),
+                }
+            elif kind == "child_birth":
+                low, high, _ = settings.return_to_work_days[
+                    int(item_rng.choice(len(settings.return_to_work_days),
+                                        p=[item[2] for item in settings.return_to_work_days]))
+                ]
+                payload = {
+                    "accept": float(item_rng.random()),
+                    "return_days": int(item_rng.integers(low, high)),
                 }
             elif kind == "renovation":
                 payload = {"months": int(item_rng.integers(1, 6))}
@@ -284,9 +308,13 @@ def _in_time_order(persona: Persona, events: list) -> list:
                и стресс;
       переезд — цель от того места, где человек живёт сейчас.
 
-    Событие, которое в этот момент невозможно, выпадает. Рождению
-    значение не нужно: анкета добавляет по ребёнку на каждое
-    сообщение банку.
+      рождение — кандидат принимается с долей по возрасту матери и
+               браку на свою дату (_birth_chance), не раньше чем через
+               birth_min_interval_days после прошлого и не больше
+               life_event_max за горизонт. Работающая мать уходит в
+               декрет: работу на это время она не меняет и не теряет.
+
+    Событие, которое в этот момент невозможно, выпадает.
     """
 
     settings = params_module.active().lifecycle
@@ -300,9 +328,24 @@ def _in_time_order(persona: Persona, events: list) -> list:
 
     settlement = persona.settlement
 
+    births: list[datetime] = []
+
     kept = []
 
     for event in events:
+
+        if event.kind == "child_birth":
+            if len(births) >= settings.life_event_max.get("child_birth", 99):
+                continue
+            if births and (event.ts - births[-1]).days < settings.birth_min_interval_days:
+                continue
+            if event.payload["accept"] >= _birth_chance(persona, event.ts, family_status) / settings.birth_candidate_rate:
+                continue
+            births.append(event.ts)
+            event = replace(event, payload={**event.payload, "order": persona.children + len(births)})
+            working = salaried and (working_from is None or event.ts >= working_from)
+            if persona.gender == "F" and working:
+                working_from = event.ts + timedelta(days=int(event.payload["return_days"]))
 
         if event.kind in ("wedding", "divorce"):
             if family_status not in settings.life_event_requires.get(event.kind, ()):
@@ -325,6 +368,27 @@ def _in_time_order(persona: Persona, events: list) -> list:
         kept.append(event)
 
     return kept
+
+
+def _birth_chance(persona: Persona, ts: datetime, family_status: str) -> float:
+    """
+    Рождений в год у клиента на дату: по возрасту матери (у мужчины —
+    партнёрши) и браку.
+    """
+
+    settings = params_module.active().lifecycle
+
+    age = persona.age_at(ts) - (settings.partner_age_gap if persona.gender == "M" else 0)
+
+    rate = 0.0
+    for since, value in settings.birth_rate_by_mother_age:
+        if age >= since:
+            rate = value
+
+    if age < settings.birth_rate_by_mother_age[0][0]:
+        rate = 0.0
+
+    return rate * settings.birth_family_factor.get(family_status, 0.25)
 
 
 def persona_changes(persona: Persona, events: tuple, streams: tuple) -> tuple:
@@ -401,6 +465,68 @@ def apply_changes(persona: Persona, changes: tuple) -> Persona:
     return replace(persona, **values)
 
 
+def event_purchases(persona: Persona, events: tuple) -> dict:
+    """
+    Покупки жизненных событий по порядковому дню: день -> ((категория,
+    во сколько раз чек больше обычного, номер покупки, час), ...).
+    Свадьба одевает и кормит гостей, болезнь ведёт в аптеку и клинику,
+    ремонт — в магазин товаров для дома, учёба — к оплате курса раз в
+    месяц, рождение — к детским товарам и врачу. Прежде у этих событий
+    трат не было вовсе (аудит 2026-11-05, M15).
+    """
+
+    settings = params_module.active().lifecycle
+
+    plan: dict[int, list] = {}
+
+    for event in events:
+
+        basket = settings.event_baskets.get(event.kind)
+
+        if not basket:
+            continue
+
+        kind = EVENT_KINDS.index(event.kind)
+
+        rng = keyed_rng(NS_LIFE, persona.client_ordinal, kind, 700 + event.serial)
+
+        span = _span_days(event)
+
+        number = 0
+
+        for category, low, high, first, last, scale_low, scale_high in basket:
+
+            last = span if last is None else last
+
+            if low is None:
+                days = list(range(first, max(first, last) + 1, 30))
+            else:
+                days = [int(rng.integers(first, max(first, last) + 1)) for _ in range(int(rng.integers(low, high + 1)))]
+
+            for offset in days:
+                day = (event.ts + timedelta(days=offset)).toordinal()
+                plan.setdefault(day, []).append(
+                    (category, float(rng.uniform(scale_low, scale_high)), number, int(rng.integers(10, 21)))
+                )
+                number += 1
+
+    return {day: tuple(items) for day, items in plan.items()}
+
+
+def _span_days(event: LifeEvent) -> int:
+    """
+    Сколько дней длится событие: болезнь — дни, ремонт и учёба — месяцы.
+    """
+
+    if "days" in event.payload:
+        return int(event.payload["days"])
+
+    if "months" in event.payload:
+        return 30 * int(event.payload["months"])
+
+    return 0
+
+
 def active_vacation(events: tuple, ts: datetime) -> LifeEvent | None:
 
     for item in events:
@@ -418,6 +544,7 @@ __all__ = [
     "LifeEvent",
     "active_vacation",
     "apply_changes",
+    "event_purchases",
     "persona_changes",
     "plan_events",
 ]

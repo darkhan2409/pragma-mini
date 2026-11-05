@@ -67,7 +67,9 @@ class World:
 
 
 def metric(rows: list, key: str, value, target: str, ok: bool | None, note: str = "") -> None:
-    rows.append({"key": key, "value": value, "target": target, "ok": ok, "note": note})
+    # bool(): сравнение numpy даёт np.bool_, и подсчёт `is True` его не видел —
+    # итог «прошло» занижался (найдено в волне 6).
+    rows.append({"key": key, "value": value, "target": target, "ok": None if ok is None else bool(ok), "note": note})
 
 
 def compute(w: World) -> list[dict]:
@@ -119,7 +121,7 @@ def compute(w: World) -> list[dict]:
     share = float(dec.account_id.isna().mean()) if len(dec) else float("nan")
     metric(rows, "C4 отказов transfer_out без счёта", round(share, 3), "0", share == 0)
 
-    loans = w.load("loans", ["client_id", "ts", "type", "contract_id", "principal_outstanding", "reason"])
+    loans = w.load("loans", ["client_id", "ts", "type", "contract_id", "installment_no", "principal_outstanding", "reason"])
     opened = pe[pe.type == "product_opened"]
     product_of = dict(zip(opened.contract_id.astype(str), opened.product_id.astype(str)))
     scheduled = set(loans.loc[loans.type == "schedule_created", "contract_id"].astype(str))
@@ -186,6 +188,33 @@ def compute(w: World) -> list[dict]:
     jan = float(first / base) if base else float("nan")
     metric(rows, "C5 первый день окна к среднему", round(jan, 2), "≤ 1.5", jan <= 1.5)
 
+    # --- M18: календарь — 1-е число, пики дат, налоги ---
+    all_ok = tx[tx.status == "approved"]
+    by_day = all_ok.groupby(all_ok.ts.dt.normalize()).size()
+    by_day = by_day[(by_day.index >= w.start) & (by_day.index < w.end)]
+    first_ratio = float(by_day[by_day.index.day == 1].mean() / by_day[by_day.index.day != 1].mean())
+    metric(rows, "M18 операций 1-го числа к другим дням", round(first_ratio, 2), "≤ 1.2", first_ratio <= 1.2)
+    def peak(month: int, dom: int, category: str | None = None) -> float:
+        x = p if category is None else p[p.merchant_category == category]
+        c = x.groupby("day").size()
+        days = c[(c.index.month == month) & (c.index.day == dom)]
+        rest = c[(c.index.month == month) & (abs(c.index.day - dom) >= 7)]
+        return float(days.mean() / rest.mean()) if len(days) and len(rest) else float("nan")
+    ny = peak(12, 31)
+    metric(rows, "M18 покупок 31.12 к обычному дню декабря", round(ny, 2), "≥ 1.3", ny >= 1.3)
+    fl = peak(3, 7, "flowers")
+    metric(rows, "M18 цветов 7.03 к обычному дню марта", round(fl, 2), "≥ 3", fl >= 3)
+    tax = p[p.merchant_category == "taxes"]
+    if len(tax):
+        md = tax.day.dt.month * 100 + tax.day.dt.day
+        share = float(((md >= 801) & (md <= 1231)).mean())
+        metric(rows, "M18 налогов в августе–декабре", round(share, 3), "≥ 0.9 (срок 1 октября)", share >= 0.9)
+
+    # --- M2: часы категорий ---
+    hours = {c: float(p[p.merchant_category == c].ts.dt.hour.median()) for c in ("coffee", "bars")}
+    ok2 = hours["coffee"] <= 11 and hours["bars"] >= 19
+    metric(rows, "M2 медианный час кофе / бара", f"{hours['coffee']:.0f} / {hours['bars']:.0f}", "≤ 11 / ≥ 19", ok2)
+
     # --- C6: персона ---
     g = p.merge(w.profile[["client_id", "gender", "age"]], on="client_id")
     def share(mask_rows, cats):
@@ -228,10 +257,40 @@ def compute(w: World) -> list[dict]:
     co = sup[sup.type == "case_opened"]
     s1320 = float(((co.ts.dt.hour == 13) & (co.ts.dt.minute == 20) & (co.ts.dt.second == 0)).mean()) if len(co) else float("nan")
     metric(rows, "M20 обращений ровно в 13:20:00", round(s1320, 3), "< 0.05", s1320 < 0.05)
+    sup2 = w.load("support", ["ts", "type", "channel"])
+    br = sup2[(sup2.channel == "branch") & sup2.type.isin(["case_opened", "case_resolved"])]
+    night = int(((br.ts.dt.hour < 9) | (br.ts.dt.hour >= 18)).sum())
+    metric(rows, "M20 событий отделения вне 9–18", night, "0", night == 0, f"из {len(br)}")
     mid = tx[tx.type.isin(["cash_deposit", "transfer_in"]) & (tx.ts == tx.day)]
     metric(rows, "M22 пополнений ровно в 00:00:00", len(mid), "0", len(mid) == 0)
     swk = float(sal.ts.dt.weekday.ge(5).mean()) if len(sal) else float("nan")
     metric(rows, "M8 зарплат в субботу и воскресенье", round(swk, 3), "< 0.01", swk < 0.01)
+
+    # --- M9: пенсии ---
+    pen = ok_tx[ok_tx.type == "pension_credit"][["client_id", "ts", "amount"]].copy()
+    if len(pen):
+        late = float(pen.ts.dt.day.gt(15).mean())
+        metric(rows, "M9 пенсий позже 15-го числа", round(late, 3), "0 (график 1–15)", late == 0)
+        low = int((pen[pen.ts.dt.year == 2024].amount < 87_000).sum())
+        metric(rows, "M9 пенсий 2024 ниже минимальной", low, "0", low == 0)
+        pen["year"] = pen.ts.dt.year
+        by = pen[pen.ts.dt.month.isin([6])].groupby(["client_id", "year"]).amount.max().unstack()
+        if 2024 in by and 2025 in by:
+            both = by[[2024, 2025]].dropna()
+            cut = float((both[2025] < both[2024]).mean()) if len(both) else float("nan")
+            metric(rows, "M9 пенсия 2025 меньше 2024 (июнь)", round(cut, 3), "0", cut == 0, f"получателей {len(both)}")
+
+    # --- M16: стресс и пропуск взноса ---
+    due = loans[(loans.type == "installment_due") & loans.installment_no.notna()][["client_id", "ts", "contract_id", "installment_no"]]
+    missed = set(zip(*[loans.loc[loans.type == "installment_missed", c].astype(str) for c in ("contract_id", "installment_no")]))
+    if len(due):
+        st = w.truth("states")[["client_id", "time", "stress"]].sort_values("time")
+        due = pd.merge_asof(due.sort_values("ts"), st.rename(columns={"time": "ts"}), on="ts", by="client_id", direction="backward")
+        due["miss"] = [(c, n) in missed for c, n in zip(due.contract_id.astype(str), due.installment_no.astype(str))]
+        hi, lo = due[due.stress >= 0.4].miss.mean(), due[due.stress.fillna(0) == 0].miss.mean()
+        ratio = float(hi / lo) if lo else float("nan")
+        metric(rows, "M16 пропуск взноса: стресс ≥0.4 к без стресса", round(ratio, 2), "≥ 1.5", ratio >= 1.5,
+               f"пропусков {due.miss.mean():.3f} (стресс {hi:.3f}, без {lo:.3f})")
 
     # --- M17: коллекшн ---
     comm = w.load("communications", ["client_id", "ts", "purpose"])
@@ -291,6 +350,20 @@ def compute(w: World) -> list[dict]:
     return rows
 
 
+# Рождений на женщину в год по возрасту матери: доли рождений БНС
+# 2024 (до 20 лет — 3.3%, 25–29 — 27.5%, 30–34 — 26.2%), нормированные
+# на СКР 2.8 (research.md).
+ASFR = ((15, 0.018), (20, 0.106), (25, 0.154), (30, 0.147), (35, 0.095), (40, 0.034), (45, 0.003), (50, 0.0))
+
+
+def _asfr(age: float) -> float:
+    rate = 0.0
+    for since, value in ASFR:
+        if age >= since:
+            rate = value
+    return rate if age >= ASFR[0][0] else 0.0
+
+
 def births(w: World) -> list[dict]:
     rows: list[dict] = []
     try:
@@ -307,25 +380,42 @@ def births(w: World) -> list[dict]:
         params_module.activate(settings)
         rng_module.configure(m["seed"], settings.fingerprint(), m["world_seed"])
         ids = set(w.profile.client_id)
-        n = ages = old = short = 0
-        years = 0.0
+        n = ages = old = short = weddings = divorces = 0
+        years = expected = 0.0
         for o in range(1, m["total_clients"] + 1):
             per = draw_persona(o)
             if per.client_id not in ids:
                 continue
             years += (w.end - w.start).days / 365.25
-            bs = sorted(e.ts for e in plan_events(per) if e.kind == "child_birth" and w.start <= pd.Timestamp(e.ts) < w.end)
+            # Ожидание по возрастной рождаемости БНС при возрасте клиента
+            # (у мужчины — партнёрши, на 3 года моложе), по месяцам окна.
+            for month in pd.date_range(w.start, w.end, freq="MS", inclusive="left"):
+                age = (month - pd.Timestamp(per.birth_date)).days / 365.25 - (3 if per.gender == "M" else 0)
+                expected += _asfr(age) / 12
+            events = [e for e in plan_events(per) if w.start <= pd.Timestamp(e.ts) < w.end]
+            weddings += sum(e.kind == "wedding" for e in events)
+            divorces += sum(e.kind == "divorce" for e in events)
+            bs = sorted(e.ts for e in events if e.kind == "child_birth")
             n += len(bs)
             short += sum((b - a).days < 270 for a, b in zip(bs, bs[1:]))
             if per.gender == "F":
                 for b in bs:
                     ages += 1
                     old += (pd.Timestamp(b) - pd.Timestamp(per.birth_date)).days / 365.25 >= 45
+        # Прежняя цель 15–25 на 1 000 была ошибкой аудита: это рождаемость
+        # на всё население, а рождение ребёнка — событие и матери, и отца.
+        # Ожидание здесь — возрастная рождаемость БНС на возраст клиентов.
         rate = 1000 * n / years
-        metric(rows, "M14 рождений на 1000 клиент-лет", round(rate, 1), "15–25", 15 <= rate <= 25)
+        ratio = n / expected if expected else float("nan")
+        metric(rows, "M14 рождений к ожиданию по возрасту (БНС)", round(ratio, 2), "0.75–1.25",
+               0.75 <= ratio <= 1.25, f"{rate:.1f} на 1000 клиент-лет, ожидание {1000 * expected / years:.1f}")
         share = old / ages if ages else float("nan")
         metric(rows, "M14 доля матерей 45+", round(share, 3), "< 0.02", share < 0.02)
         metric(rows, "M14 интервалов между рождениями < 270 дн", short, "0", short == 0)
+        wr, dr = 1000 * weddings / years, 1000 * divorces / years
+        metric(rows, "M14 свадеб на 1000 клиент-лет", round(wr, 1), "12–25 (БНС ≈ 18)", 12 <= wr <= 25)
+        metric(rows, "M14 разводов на 1000 клиент-лет", round(dr, 1), "3–8 (БНС ≈ 6)", 3 <= dr <= 8,
+               f"на свадьбу {divorces / max(1, weddings):.2f}")
     except Exception as error:  # noqa: BLE001 — метрика необязательна, причина печатается
         metric(rows, "M14 рождения", None, "—", None, f"не посчитано: {error}")
     return rows

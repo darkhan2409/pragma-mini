@@ -121,6 +121,14 @@ CATEGORIES: tuple[Category, ...] = (
              ("5942", "5943"), (0.55, 0.45), 0.40, False, "education"),
 
     # --- досуг и красота ---
+    # Бары, цветы и подарки — волна 6 аудита 2026-11-05 (M18): без
+    # них не было ни пятничного вечера, ни 7 марта.
+    Category("bars", "food_service", ("bar", "pub", "lounge"),
+             ("5813",), (1.0,), 0.02, False, "food_out", rural_available=False, hours=(16, 24)),
+    Category("flowers", "retail_goods", ("florist",),
+             ("5992",), (1.0,), 0.20, False, "gifts", hours=(8, 22)),
+    Category("gifts", "retail_goods", ("gift_shop", "souvenirs"),
+             ("5947",), (1.0,), 0.30, False, "gifts"),
     Category("entertainment", "leisure", ("park", "club", "event"),
              ("7996", "7999"), (0.45, 0.55), 0.35, False, "leisure"),
     Category("cinema", "leisure", ("cinema",),

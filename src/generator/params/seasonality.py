@@ -94,10 +94,38 @@ class SeasonalityParams:
         }
     )
 
+    # Пики конкретных дат: во сколько раз больше покупок за день (rate)
+    # и какие категории (categories). Прежде новогодний пик был размазан
+    # на 30 дней: 31.12 — 0.9 обычного дня, пика 7 марта не было вовсе
+    # (аудит 2026-11-05, M18). Синтетическое допущение по форме, без
+    # данных банка.
+    date_peaks: dict = field(
+        default_factory=lambda: {
+            "12-28": {"rate": 1.15, "categories": {"grocery": 1.3, "gifts": 2.5, "marketplace": 1.4}},
+            "12-29": {"rate": 1.30, "categories": {"grocery": 1.4, "gifts": 2.8, "clothing": 1.3}},
+            "12-30": {"rate": 1.55, "categories": {"grocery": 1.7, "gifts": 3.0, "market": 1.6, "flowers": 1.5}},
+            "12-31": {"rate": 2.00, "categories": {"grocery": 2.2, "market": 1.8, "gifts": 2.5,
+                                                   "convenience": 1.6, "flowers": 2.0}},
+            "02-14": {"rate": 1.05, "categories": {"flowers": 4.0, "gifts": 2.0, "restaurant": 1.4}},
+            "03-06": {"rate": 1.10, "categories": {"flowers": 3.0, "gifts": 2.5, "cosmetics": 1.6}},
+            "03-07": {"rate": 1.25, "categories": {"flowers": 8.0, "gifts": 3.5, "cosmetics": 2.0}},
+            "03-08": {"rate": 1.10, "categories": {"flowers": 4.0, "restaurant": 1.6, "bars": 1.4}},
+        }
+    )
+
+    # Налог на имущество и транспорт — к 1 октября (НК РК): доля
+    # заплативших позже срока и среднее число дней до срока у остальных
+    # (синтетическое допущение).
+    tax_late_share: float = 0.12
+    tax_days_before_mean: float = 12.0
+
+    # Пятница вечером — бары и рестораны.
+    friday_factors: dict = field(default_factory=lambda: {"bars": 1.8, "restaurant": 1.3, "delivery": 1.2})
+
     # Дней до праздника, когда начинается подготовка.
     pre_holiday_days: dict = field(
         default_factory=lambda: {
-            "new_year": 30,
+            "new_year": 10,
             "womens_day": 5,
             "nauryz": 6,
             "kurban_ait": 4,
@@ -168,10 +196,13 @@ class SeasonalityParams:
     # — первый) чуть чаще, последние перед ней — чуть реже. Прежде
     # ×1.45 / ×0.82 вместе с давлением остатка давали ×5.5 между
     # пятью днями после и до зарплаты (аудит 2026-11-05, C3).
+    # Волна 6: у клиентов с запасом на счёте ×1.25 / ×0.92 одни давали
+    # ×1.37 между неделями — на верху полосы 1.1–1.6 до всякого давления
+    # остатка; ×1.2 / ×0.95 дают около ×1.26 (синтетическое допущение).
     payday_window_days: int = 3
-    payday_boost: float = 1.25
+    payday_boost: float = 1.20
     pre_payday_days: int = 5
-    pre_payday_factor: float = 0.92
+    pre_payday_factor: float = 0.95
 
     # Начало и конец месяца.
     month_start_days: int = 3

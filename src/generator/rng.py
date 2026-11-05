@@ -193,6 +193,13 @@ NS_LOAN_RATE = 56
 NS_TRIP = 57
 # Поставщик счёта клиента (engine._bill_provider).
 NS_BILL_PROVIDER = 58
+# Время покупок жизненного события (engine, events.event_purchases).
+NS_EVENT_SPEND = 59
+# Коллекшн: напоминания по вехам просрочки (engine, communications).
+NS_COLLECTION = 60
+# Уход: вывод остатка, закрытие продуктов, транзит дохода (engine,
+# behaviour/engagement).
+NS_EXIT = 61
 
 
 # ============================================================

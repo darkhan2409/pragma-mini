@@ -35,6 +35,7 @@ class AmountParams:
             "government": 9_000, "fines": 15_000, "taxes": 30_000,
             "financial": 8_000, "charity": 3_000,
             "pets": 6_000, "tobacco": 2_400, "gambling": 8_000,
+            "bars": 9_000, "flowers": 12_000, "gifts": 9_000,
         }
     )
 
@@ -56,6 +57,7 @@ class AmountParams:
             "government": 0.65, "fines": 0.60, "taxes": 0.75,
             "financial": 0.70, "charity": 0.75,
             "pets": 0.60, "tobacco": 0.35, "gambling": 0.95,
+            "bars": 0.60, "flowers": 0.55, "gifts": 0.70,
         }
     )
 
@@ -91,10 +93,15 @@ class AmountParams:
     # месяца заканчиваются раньше времени.
     budget_pressure_strength: float = 2.4
     budget_pressure_floor: float = 0.12
+    # Память о тратах: вклад покупки в «уже потрачено» затухает с этим
+    # временем, дней. Прежде считались ровно 30 дней: всплеск после
+    # зарплаты держал траты 30 дней и выпадал из окна точно к
+    # следующей зарплате — цикл повторялся (аудит 2026-11-05, C3).
+    budget_memory_days: float = 10.0
+    # Во сколько раз привычный темп покупок может превышать бюджет
+    # покупок месяца (engine._money_factor): запас на крупные дни.
+    money_headroom: float = 1.2
 
-    # Сколько денег на счёте клиент считает нормальным запасом:
-    # ниже этого он заметно сбавляет траты.
-    comfortable_balance_share: float = 0.10
     # Пол частоты при пустом счёте: человек без денег на карте всё же
     # изредка платит ею (мелочь, остаток). Прежде 0.06 вместе с ценой
     # давал провал трат перед зарплатой (аудит 2026-11-05, C3).
@@ -155,6 +162,8 @@ class AmountParams:
             "coffee": (1_100, 0.30, 0.30),
             "fastfood": (1_500, 0.35, 0.90),
             "cinema": (2_200, 0.18, 0.80),
+            # Бар: напитки и закуски, обычно не одна позиция.
+            "bars": (2_400, 0.40, 1.60),
         }
     )
 
@@ -162,7 +171,7 @@ class AmountParams:
     # корзины и счета-итоги — любое целое, услуги — по прейскуранту.
     charm_categories: tuple = (
         "clothing", "shoes", "electronics", "appliances", "furniture", "home_goods", "books",
-        "sports", "kids", "cosmetics", "marketplace", "ecom",
+        "sports", "kids", "cosmetics", "marketplace", "ecom", "flowers", "gifts",
     )
     price_step: dict = field(
         default_factory=lambda: {
@@ -204,7 +213,8 @@ class AmountParams:
     )
     inflation_groups: dict = field(
         default_factory=lambda: {
-            "food": ("grocery", "market", "convenience", "coffee", "fastfood", "restaurant", "delivery", "tobacco"),
+            "food": ("grocery", "market", "convenience", "coffee", "fastfood", "restaurant", "delivery", "tobacco",
+                     "bars"),
             "services": ("taxi", "parking", "car_rental", "micromobility", "airline", "railway", "hotel",
                          "travel", "education", "entertainment", "cinema", "sports", "beauty", "medical",
                          "lab", "car_service", "financial", "kindergarten"),

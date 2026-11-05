@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from datetime import datetime, timedelta
 
 from . import params as params_module
@@ -40,6 +42,8 @@ from .rng import (
     NS_SUPPORT_CAUSE,
     NS_TRANSFER,
     NS_BILL_PROVIDER,
+    NS_EVENT_SPEND,
+    NS_EXIT,
     NS_TRIP,
     NS_WARM_SPEND,
     day_rng,
@@ -132,6 +136,11 @@ def run_community(community_id: int, ordinals: tuple) -> CommunityResult:
 
         sim.queue = []
 
+        # Выписка кредитки — в день выписки своего договора, а не у всех
+        # карт в последний день месяца (engine_month.card_statements).
+        for ordinal in sorted(sim.clients):
+            _card_statements(sim, sim.clients[ordinal], day)
+
         if (day + timedelta(days=1)).month != day.month:
             for ordinal in sorted(sim.clients):
                 _month_end(sim, sim.clients[ordinal], day)
@@ -180,13 +189,20 @@ def _warm_spend(state: ClientState) -> None:
         # Состояние отношений и остаток известны только на начало
         # окна: прогрев берёт их оттуда.
         factor = household_module.spending_factor(budget, persona)
-        factor *= household_module.budget_pressure(budget, state.spent(day), WARM_DAYS)
-        factor *= household_module.funds_pressure(state.ledger.payment_capacity(start), budget)
-        factor *= cal.payday_factor(day, state.last_payday, income_module.expected_payday(state.income_streams, day))
-        factor *= cal.month_factor(day)
-
         stress = stress_module.level_at(state.stress_episodes, day)
         stage = engagement_module.stage(persona, day, stress, state.worst_dpd())
+        factor *= _money_factor(state, day, stage, factor, engagement_module.silenced(state, start), budget)
+        factor *= household_module.budget_pressure(
+            budget, *state.recent_spend(day, WARM_DAYS, params_module.active().amounts.budget_memory_days)
+        )
+        next_payday = _next_payday(state, day, state.last_payday)
+        factor *= cal.payday_factor(day, state.last_payday, next_payday)
+        factor *= cal.month_factor(day)
+
+        factor *= household_module.funds_pressure(
+            state.ledger.payment_capacity(start), _days_left(day, next_payday),
+            _expected_spend(state, day, stage, factor, engagement_module.silenced(state, start), budget), budget,
+        )
 
         intents = needs_module.daily_intents(
             persona, state.habits, day, stage, factor,
@@ -351,6 +367,20 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
 
     silenced = engagement_module.silenced(state, day)
 
+    # --- уход: в день ухода клиент выводит остаток себе в другой банк
+    # и, бывает, закрывает вклады (behaviour/engagement) ---
+
+    leaving = engagement_module.exit_today(state, day)
+
+    if leaving is not None:
+        pick = keyed_rng(NS_EXIT, state.ordinal, day.toordinal(), 1)
+        add(
+            day.replace(hour=int(pick.integers(10, 21)), minute=int(pick.integers(0, 60)),
+                        second=int(pick.integers(0, 60))),
+            "exit_sweep",
+            {"close": leaving[1], "amount": None, "index": 700},
+        )
+
     month = cal.month_start(day)
 
     debt = loan_rules.debt_service(tuple(state.loans.values()), day)
@@ -370,14 +400,16 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
         if persona.relationship_start < config.HISTORY_START
         else (day - max(config.HISTORY_START, persona.relationship_start)).days
     )
-    factor *= household_module.budget_pressure(budget, state.spent(day), tracked)
-    factor *= household_module.funds_pressure(state.ledger.payment_capacity(day), budget)
+    factor *= _money_factor(state, day, state.state, factor, silenced, budget)
+
+    factor *= household_module.budget_pressure(
+        budget, *state.recent_spend(day, tracked, params_module.active().amounts.budget_memory_days)
+    )
 
     # После зарплаты тратят охотнее, перед ней придерживают.
     # Прошлая зарплата — из случившихся выплат, следующая — по
-    # графику сегодняшней работы (income.expected_payday).
-    next_payday = income_module.expected_payday(state.income_streams, day)
-
+    # графику сегодняшней работы (_next_payday).
+    #
     # Выплата сегодня — день выплаты уже первый день после неё. Прежде
     # последней зарплатой считалась только вчерашняя, а сегодняшняя
     # ставила «перед зарплатой»: в сам день выплаты трат было 0.58 от
@@ -385,8 +417,19 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
     today = [payout.ts for payout in state.payouts_by_day.get(day.toordinal(), ())
              if payout.kind in ("salary", "pension")]
 
-    factor *= cal.payday_factor(day, min(today) if today else state.last_payday, next_payday)
+    last_payday = min(today) if today else state.last_payday
+
+    next_payday = _next_payday(state, day, last_payday)
+
+    factor *= cal.payday_factor(day, last_payday, next_payday)
     factor *= cal.month_factor(day)
+
+    # Последним: деньги до следующей выплаты против привычного темпа
+    # при всех прочих множителях дня.
+    factor *= household_module.funds_pressure(
+        state.ledger.payment_capacity(day), _days_left(day, next_payday),
+        _expected_spend(state, day, state.state, factor, silenced, budget), budget,
+    )
 
     # --- регистрация клиента внутри окна ---
 
@@ -422,7 +465,7 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
         hour = int(rng.integers(6, 12)) if bill.autopay else int(rng.integers(9, 21))
 
         add(
-            day.replace(hour=hour, minute=int(rng.integers(0, 60))),
+            day.replace(hour=hour, minute=int(rng.integers(0, 60)), second=int(rng.integers(0, 60))),
             "bill",
             {"bill": bill, "index": index},
         )
@@ -449,7 +492,7 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
         rng = event_rng(NS_LEDGER, state.ordinal, day.toordinal(), 100 + index, COMPONENT_TIME)
 
         add(
-            day.replace(hour=subscription.hour, minute=int(rng.integers(0, 60))),
+            day.replace(hour=subscription.hour, minute=int(rng.integers(0, 60)), second=int(rng.integers(0, 60))),
             "subscription",
             {"subscription": subscription, "index": index},
         )
@@ -479,7 +522,9 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
 
     if needs_module.cash_need(persona, day, silenced, engagement_module.factor(state, "cash")):
         rng = keyed_rng(NS_LEDGER, state.ordinal, day.toordinal(), 7)
-        ts = day.replace(hour=int(rng.integers(9, 21)), minute=int(rng.integers(0, 60)))
+        # Час снятия — по суточному профилю клиента: прежде ровно 09–20,
+        # секунда :00 у всех снятий (аудит 2026-11-05, M21).
+        ts = _client_moment(persona, day, "cash", rng)
         add(ts, "cash_withdrawal", {"budget": budget, "trip": trip})
 
     # --- внесение наличных ---
@@ -487,8 +532,7 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
     if "cash" not in silenced and state.ledger.balance(state.ledger.cash_id) > persona.true_income * 0.4:
         rng = keyed_rng(NS_LEDGER, state.ordinal, day.toordinal(), 13)
         if rng.random() < 0.05 * engagement_module.factor(state, "cash"):
-            add(day.replace(hour=int(rng.integers(10, 20)), minute=int(rng.integers(0, 60))),
-                "cash_deposit", {})
+            add(_client_moment(persona, day, "cash", rng), "cash_deposit", {})
 
     # --- переводы ---
 
@@ -537,7 +581,7 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
             if rng.random() >= rate:
                 continue
 
-            ts = day.replace(hour=int(rng.integers(9, 22)), minute=int(rng.integers(0, 60)))
+            ts = _client_moment(persona, day, "transfer", rng)
 
             add(ts, "transfer", {"relation": relation, "index": index})
 
@@ -575,7 +619,7 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
         moment = day.replace(
             hour=int(rng.integers(8, 22)),
             minute=int(rng.integers(0, 60)),
-            second=0,
+            second=int(rng.integers(0, 60)),
         )
 
         add(moment, "inbound_transfer", {"relation": relation, "index": index})
@@ -646,6 +690,29 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
             if days_to_due is None or remaining < days_to_due:
                 days_to_due = remaining
 
+    # Просрочка кредитки — в днях от первой пропущенной выписки.
+    # Прежде её не видели ни рассылки, ни коллекшн.
+    for credit in state.card_credits.values():
+        if not credit.closed and credit.overdue_since is not None:
+            live_dpd = max(live_dpd, (day - credit.overdue_since).days + 1)
+
+    lifecycle = params_module.active().lifecycle
+
+    if live_dpd >= lifecycle.delinquent_dpd:
+        state.serious_dpd_at = day
+
+    # Предложений нет при любой текущей просрочке и offer_cooloff_days
+    # после серьёзной: частичная оплата, опустившая DPD ниже 30, не
+    # возвращает должника в маркетинг.
+    suppress_offers = live_dpd > 0 or (
+        state.serious_dpd_at is not None and (day - state.serious_dpd_at).days < lifecycle.offer_cooloff_days
+    )
+
+    # --- коллекшн: напоминание о долге в дни вех просрочки ---
+
+    for index, contact in enumerate(comm_module.collection_contacts(persona, day, live_dpd, app_adopted)):
+        add(contact.ts, "communication", {"contact": contact, "index": 100 + index, "candidates": ()})
+
     # --- коммуникации ---
 
     if state.consent_at is not None and day >= state.consent_at:
@@ -686,6 +753,7 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
             fraud_alert=state.fraud_alert_at is not None and (day - state.fraud_alert_at).days <= 5,
             days_to_due=days_to_due,
             responsiveness=engagement_module.factor(state, "response"),
+            suppress_offers=suppress_offers,
         )
 
         for index, contact in enumerate(contacts):
@@ -794,10 +862,48 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
                     ts=moment, category=category, zone="other"
                 ),
                 "index": 900 + event.serial,
-                "factor": factor * float(event.payload.get("amount_factor") or 1.0),
+                "factor": factor,
+                # Крупная покупка — крупный чек. С волны 3 аудита
+                # 2026-11-05 сумма не читает factor, и amount_factor
+                # события пропадал: покупка выходила обычной.
+                "scale": float(event.payload.get("amount_factor") or 1.0),
                 "stress": stress,
             },
         )
+
+    # --- налог на имущество и транспорт: раз в год, к 1 октября ---
+
+    if "purchases" not in silenced and _tax_day(state, day.year) == day.toordinal():
+        pick = event_rng(NS_EVENT_SPEND, state.ordinal, day.toordinal(), 500, COMPONENT_TIME)
+        moment = day.replace(hour=int(pick.integers(9, 23)), minute=int(pick.integers(0, 60)),
+                             second=int(pick.integers(0, 60)))
+        add(moment, "purchase", {
+            "intent": needs_module.Intent(ts=moment, category="taxes", zone="other"),
+            "index": 3500, "factor": factor, "scale": float(pick.uniform(0.4, 2.0)), "stress": stress,
+        })
+
+    # --- покупки жизненных событий: свадьба, болезнь, ремонт, учёба,
+    # рождение, переезд (life/events.event_purchases) ---
+
+    if "purchases" not in silenced:
+
+        for category, scale, number, hour in state.event_purchases.get(day.toordinal(), ()):
+
+            pick = event_rng(NS_EVENT_SPEND, state.ordinal, day.toordinal(), number, COMPONENT_TIME)
+
+            moment = day.replace(hour=hour, minute=int(pick.integers(0, 60)), second=int(pick.integers(0, 60)))
+
+            add(
+                moment,
+                "purchase",
+                {
+                    "intent": needs_module.Intent(ts=moment, category=category, zone="other"),
+                    "index": 3000 + number,
+                    "factor": factor,
+                    "scale": scale,
+                    "stress": stress,
+                },
+            )
 
     # --- мошеннические эпизоды ---
 
@@ -847,7 +953,8 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
                 card = usable[int(pick.integers(0, len(usable)))]
 
                 add(
-                    day.replace(hour=int(pick.integers(8, 22)), minute=int(pick.integers(0, 60))),
+                    day.replace(hour=int(pick.integers(8, 22)), minute=int(pick.integers(0, 60)),
+                                second=int(pick.integers(0, 60))),
                     "card_block_request",
                     {
                         "card_id": card.card_id,
@@ -905,10 +1012,17 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
 
         last = state.support_last_by_cause.get(cause)
 
-        cooldown = params_module.active().activity.support_cooldown_days
+        activity = params_module.active().activity
+
+        cooldown = activity.support_cooldown_days_by_cause.get(cause, activity.support_cooldown_days)
 
         if last is None or (day - last).days >= cooldown:
-            add(day.replace(hour=13, minute=20), "support_check", {"cause": cause, "stress": stress})
+            # Час обращения — днём и вечером, канал выбирается из
+            # открытых в этот час (support.open_case). Прежде 99% обращений
+            # открывались ровно в 13:20:00 (аудит 2026-11-05, M20).
+            hour = int(pick.choice(24, p=params_module.active().activity.support_hour_profile))
+            add(day.replace(hour=hour, minute=int(pick.integers(0, 60)), second=int(pick.integers(0, 60))),
+                "support_check", {"cause": cause, "stress": stress})
 
     # --- просроченные счета к оплате ---
 
@@ -957,6 +1071,164 @@ def _execute(sim: CommunitySimulation, action: Action) -> None:
         raise KeyError(f"нет обработчика для действия {action.kind!r}")
 
     handler(sim, state, action.ts, action.payload)
+
+
+def _on_exit_sweep(sim, state: ClientState, ts: datetime, payload: dict) -> None:
+    """
+    Вывод денег уходящим клиентом себе в другой банк: в день ухода —
+    остаток (и вклады, если клиент их закрывает), потом — приходящий
+    доход. Небольшую сдачу человек оставляет.
+    """
+
+    rng = event_rng(NS_EXIT, state.ordinal, ts.toordinal(), payload["index"], COMPONENT_CONTENT)
+
+    if payload.get("close"):
+        from .engine_month import _close_deposit
+        for deposit in list(state.deposits.values()):
+            contract = state.contracts.get(deposit.contract_id)
+            if not deposit.closed and contract is not None and contract.is_open_at(ts):
+                _close_deposit(state, ts, deposit, early=True, reason="client_request")
+                ts += timedelta(seconds=30)
+
+    account = state.primary_card_account(ts)
+
+    if account is None:
+        return
+
+    available = state.ledger.available_at(account.account_id, ts)
+
+    wanted = available if payload.get("amount") is None else min(available, int(payload["amount"]))
+
+    amount = int((wanted - int(rng.integers(0, 3)) * 1_000) // 1_000 * 1_000)
+
+    if amount < 5_000:
+        return
+
+    card = state.usable_card(account.account_id, ts)
+
+    _emit_money(
+        state, ts, "transfer_out", account.account_id, amount, "debit", state.ledger.other_bank_id,
+        {
+            "channel": CHANNEL_REMOTE,
+            "counterparty": "Own account",
+            "mcc": MCC_TRANSFER,
+            "merchant_country": "KZ",
+            "reason": "transfer",
+            "card_id": card.card_id if card is not None else None,
+            "transfer_id": _transfer_id(state.client_id, ts, payload["index"], "exit"),
+        },
+    )
+
+    _touch_client(state, ts)
+
+
+def _money_factor(state: ClientState, day: datetime, stage: str, factor: float, silenced: frozenset,
+                  budget) -> float:
+    """
+    Частота покупок не выше той, что позволяет бюджет покупок месяца
+    при среднем чеке клиента: режим активности задаёт привычку, деньги —
+    её предел. Прежде частота шла от режима активности независимо от
+    денег, и самые активные тратили зарплату за пару дней, а остаток
+    месяца сидели на пустом счёте (аудит 2026-11-05, C3).
+    """
+
+    expected = _expected_spend(state, day, stage, factor, silenced, budget)
+
+    allowed = household_module.purchase_budget(budget) / 30 * params_module.active().amounts.money_headroom
+
+    if expected <= 0 or state.typical_ticket(day) is None:
+        return 1.0
+
+    return min(1.0, allowed / expected)
+
+
+def _expected_spend(state: ClientState, day: datetime, stage: str, factor: float, silenced: frozenset,
+                    budget) -> float:
+    """
+    Сколько клиент потратил бы сегодня в привычном темпе: покупок в
+    день при множителях дня на его средний чек за 30 дней. Пока покупок
+    мало — бюджет покупок месяца на день.
+    """
+
+    ticket = state.typical_ticket(day)
+
+    if ticket is None:
+        return household_module.purchase_budget(budget) / 30
+
+    rate = needs_module.daily_purchase_rate(
+        state.persona, day, stage, factor, silenced, engagement_module.factor(state, "purchases")
+    )
+
+    return rate * ticket
+
+
+def _tax_day(state: ClientState, year: int) -> int | None:
+    """
+    День уплаты налога на имущество и транспорт за прошлый год:
+    у владельца жилья или машины, в основном в последние недели перед
+    сроком 1 октября, реже — позже срока. Прежде налоги шли случайной
+    покупкой равномерно по году (аудит 2026-11-05, M18).
+    """
+
+    persona = state.persona
+
+    if persona.transport != "car" and persona.housing_type not in ("own_apartment", "own_house"):
+        return None
+
+    settings = params_module.active().seasonality
+
+    rng = keyed_rng(NS_EVENT_SPEND, state.ordinal, stable_hash("tax", year) % 9973)
+
+    if rng.random() < settings.tax_late_share:
+        return (datetime(year, 10, 1) + timedelta(days=int(rng.integers(1, 90)))).toordinal()
+
+    # Ближе к сроку — чаще: дни до 1 октября по экспоненте.
+    before = min(60, int(-math.log(1.0 - rng.random()) * settings.tax_days_before_mean) + 1)
+
+    return (datetime(year, 10, 1) - timedelta(days=before)).toordinal()
+
+
+def _client_moment(persona, day: datetime, category: str, rng) -> datetime:
+    """
+    Момент действия клиента в этот день: час — по его суточному профилю
+    и профилю категории, с минутой и секундой.
+    """
+
+    hour = int(rng.choice(24, p=cal.hour_weights(day, persona.night_segment, persona.chronotype, category)))
+
+    return day.replace(hour=hour, minute=int(rng.integers(0, 60)), second=int(rng.integers(0, 60)))
+
+
+def _next_payday(state: ClientState, day: datetime, last_payday: datetime | None) -> datetime | None:
+    """
+    Ближайшая выплата, которую клиент ждёт. Выплата, пришедшая раньше
+    срока (перенос с выходного, ранний реестр), закрывает свой срок:
+    следующая — через цикл. Прежде клиент после ранней зарплаты ждал
+    «ещё одну» в плановый день через 1–3 дня, растягивать деньги было
+    не на что, и он тратил всё сразу — отсюда всплеск после зарплаты
+    (payday ×1.9–3.1; аудит 2026-11-05, C3).
+    """
+
+    planned = income_module.expected_payday(state.income_streams, day)
+
+    if planned is None or last_payday is None:
+        return planned
+
+    paid = last_payday.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    if 0 <= (planned - paid).days < params_module.active().income.early_payout_window_days:
+        return income_module.expected_payday(state.income_streams, planned + timedelta(days=1))
+
+    return planned
+
+
+def _days_left(day: datetime, next_payday: datetime | None) -> int:
+    """
+    Сколько дней растягивать деньги: до ближайшей выплаты по графику,
+    при нерегулярном доходе — полмесяца.
+    """
+
+    return 15 if next_payday is None else max(1, (next_payday - day).days)
 
 
 def _touch_client(state: ClientState, ts: datetime) -> None:
@@ -1276,9 +1548,13 @@ def _income_purpose(payout) -> str:
 # имя организации, одно у всех его сотрудников. Прежде у 100%
 # зарплат плательщиком была заглушка «Employer», и смену работы по
 # выписке не было видно (аудит 2026-11-05, C1).
+# Государственный плательщик по его ключу (life/income.STATE_PAYERS):
+# пенсии и бюджетные пособия платит ГК «Правительство для граждан»,
+# социальные выплаты — ГФСС.
 _INCOME_PAYERS = {
-    "pension": "НАО «ГК «Правительство для граждан»»",
-    "social_benefit": "АО «ГФСС»",
+    "state_pension": "НАО «ГК «Правительство для граждан»»",
+    "state_budget": "НАО «ГК «Правительство для граждан»»",
+    "state_benefit": "АО «ГФСС»",
 }
 
 _EMPLOYER_FORMS = (("ТОО", 0.70), ("АО", 0.09), ("КГУ", 0.08), ("ГККП", 0.05), ("ИП", 0.08))
@@ -1332,8 +1608,8 @@ def employer_name(payer: str) -> str:
 
 
 def _income_counterparty(payout) -> str:
-    if payout.kind in _INCOME_PAYERS:
-        return _INCOME_PAYERS[payout.kind]
+    if payout.payer in _INCOME_PAYERS:
+        return _INCOME_PAYERS[payout.payer]
     if payout.kind in ("salary", "severance") or str(payout.payer or "").startswith("emp_"):
         return employer_name(str(payout.payer))
     return masked_name(payout.payer)
@@ -1383,6 +1659,19 @@ def _on_income(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             "merchant_country": "KZ",
         },
     )
+
+    # Ушедший, чей доход приходит сюда, выводит его себе в другой банк
+    # через 1–3 дня. Прежде доход копился без единой траты: 639
+    # клиентов накопили больше миллиона (аудит 2026-11-05, M11, M23).
+    if engagement_module.transit(state):
+        rng = keyed_rng(NS_EXIT, state.ordinal, ts.toordinal(), stable_hash(payout.stream_id) % 9973)
+        moment = (ts + timedelta(days=int(rng.integers(1, 4)))).replace(
+            hour=int(rng.integers(9, 22)), minute=int(rng.integers(0, 60)), second=int(rng.integers(0, 60))
+        )
+        state.deferred.setdefault(moment.toordinal(), []).append(
+            (moment, "exit_sweep", {"close": False, "amount": int(amount * rng.uniform(0.85, 1.0)),
+                                    "index": 701 + stable_hash(payout.stream_id, ts.toordinal()) % 10_000})
+        )
 
 
 def _on_bill(sim, state: ClientState, ts: datetime, payload: dict) -> None:
@@ -1587,7 +1876,7 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         return
 
     amount = merchant_choice.purchase_amount(
-        persona, intent.category, choice.outlet, ts, rng
+        persona, intent.category, choice.outlet, ts, rng, payload.get("scale", 1.0)
     )
 
     sources = state.ledger.payment_sources(ts, amount)
@@ -1967,8 +2256,11 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
                 account = state.primary_card_account(ts)
 
                 if account is not None:
+                    # За 3 минуты до перевода, но в те же сутки и не ровно в
+                    # полночь: перевод бывает и ночью (аудит 2026-11-05, M22).
                     _emit_money(
-                        state, ts - timedelta(minutes=3), "transfer_in", account.account_id,
+                        state, ts - min(timedelta(minutes=3), (ts - ts.replace(hour=0, minute=0, second=0)) / 2),
+                        "transfer_in", account.account_id,
                         amount, "credit", state.ledger.other_bank_id,
                         {
                             # Деньги пришли из другого банка: этот
@@ -2214,6 +2506,7 @@ _HANDLERS.update(
         "cash_withdrawal": _on_cash,
         "transfer": _on_transfer,
         "inbound_transfer": _on_inbound_transfer,
+        "exit_sweep": _on_exit_sweep,
     }
 )
 
@@ -2225,6 +2518,7 @@ from .engine_products import _emit_case  # noqa: E402,F401
 from .engine_month import (  # noqa: E402
     _update_profile,
     finish as _finish,
+    card_statements as _card_statements,
     month_end as _month_end,
 )
 

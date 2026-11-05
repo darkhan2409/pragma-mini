@@ -93,9 +93,9 @@ def _category_weights(persona: Persona, habits: Habits, ts: datetime, trip: bool
 
         category = CATEGORY_BY_NAME[name]
 
-        if name in ("utilities", "telecom", "internet", "subscription"):
-            # Регулярные платежи идут по расписанию счетов,
-            # а не случайной покупкой.
+        if name in ("utilities", "telecom", "internet", "subscription", "taxes"):
+            # Регулярные платежи идут по расписанию счетов, налог — раз в
+            # год к сроку (engine._tax_day), а не случайной покупкой.
             continue
 
         if trip and name in home_only:
@@ -156,7 +156,7 @@ def _category_weights(persona: Persona, habits: Habits, ts: datetime, trip: bool
         if name == "gambling":
             weight *= 0.2 + 1.8 * persona.trait("risk_tolerance", ts)
 
-        if name in ("restaurant", "entertainment", "cinema", "beauty", "cosmetics"):
+        if name in ("restaurant", "entertainment", "cinema", "beauty", "cosmetics", "bars"):
             weight *= 0.4 + 1.4 * persona.trait("spending_impulsivity", ts)
 
         weights[name] = weight
@@ -217,9 +217,16 @@ def daily_intents(
 
     weights = _category_weights(persona, habits, ts, trip)
 
-    hours = cal.hour_weights(ts, persona.night_segment)
-
     intents: list[Intent] = []
+
+    # Шаг распорядка бывает раз в день, категория — не чаще своего
+    # предела (activity.daily_category_cap).
+    caps = settings.activity.daily_category_cap
+    used: set[int] = set()
+    counts: dict[str, int] = {}
+
+    def room(category: str) -> bool:
+        return counts.get(category, 0) < caps.get(category, settings.activity.max_purchases_per_day)
 
     for index in range(count):
 
@@ -228,15 +235,26 @@ def daily_intents(
 
         if item_rng.random() < routine_share and routine:
 
-            step = routine[item_rng.integers(0, len(routine))]
+            position = int(item_rng.integers(0, len(routine)))
+
+            step = routine[position]
 
             # Шаг распорядка — тоже покупка категории: без признака
             # участия (кино, самокат) или там, где категории нет, его
             # не бывает.
-            allowed = step.category in weights and (step.category != "cinema" or persona.cinema)
+            allowed = (
+                step.category in weights
+                and (step.category != "cinema" or persona.cinema)
+                and position not in used
+                and room(step.category)
+            )
 
             if allowed and item_rng.random() <= step.probability:
-                hour = item_rng.integers(step.hour_low, step.hour_high)
+                used.add(position)
+                counts[step.category] = counts.get(step.category, 0) + 1
+                # Хронотип сдвигает и распорядок: сова едет на работу и
+                # обедает позже.
+                hour = min(23, max(0, int(item_rng.integers(step.hour_low, step.hour_high)) + persona.chronotype))
                 moment = ts.replace(
                     hour=int(hour),
                     minute=int(time_rng.integers(0, 60)),
@@ -248,10 +266,17 @@ def daily_intents(
                 )
                 continue
 
-        names = list(weights)
+        names = [name for name in weights if room(name)]
+
+        if not names:
+            continue
+
         category = str(item_rng.choice(names, p=[weights[name] for name in names]))
 
-        hour = int(time_rng.choice(24, p=hours))
+        counts[category] = counts.get(category, 0) + 1
+
+        # Час — по профилю клиента и категории: кофе утром, бар вечером.
+        hour = int(time_rng.choice(24, p=cal.hour_weights(ts, persona.night_segment, persona.chronotype, category)))
 
         moment = ts.replace(
             hour=hour,

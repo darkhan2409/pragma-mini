@@ -133,7 +133,13 @@ def open_case(
         "email": 0.08,
     }
 
-    channel = rng.weighted(channel_weights)
+    # Канал — из открытых в этот час (support_channel_hours): отделение
+    # вечером закрыто, ночью отвечает только чат и почта.
+    hours = params_module.active().activity.support_channel_hours
+    open_now = {name: weight for name, weight in channel_weights.items()
+                if hours[name][0] <= ts.hour < hours[name][1]}
+
+    channel = rng.weighted(open_now or {"email": 1.0})
 
     options = RESOLUTION_BY_TOPIC.get(topic, ("explained",))
 
@@ -144,9 +150,19 @@ def open_case(
     if feasible and resolution not in feasible:
         resolution = feasible[0]
 
-    hours = rng.integers(1, 96)
+    # Длительность — с тяжёлым хвостом: чат и звонок решают за минуты,
+    # отделение — за полчаса, почта и эскалация — за дни. Решение
+    # приходит в рабочие часы канала: что не успели сегодня, решают
+    # назавтра. Прежде срок был целым числом часов, равномерно 1–95, а
+    # отделение закрывало обращения ночью (аудит 2026-11-05, M20).
+    median, sigma = params_module.active().activity.support_duration_minutes[channel]
+    if resolution == "escalated":
+        median *= 12
+    minutes = max(1.0, median * float(rng.lognormal(0.0, sigma)))
 
-    updated = ts + timedelta(hours=int(rng.integers(1, max(2, hours))))
+    resolved = _working_time(ts + timedelta(minutes=minutes), hours[channel], rng)
+
+    updated = ts + (resolved - ts) * float(rng.uniform(0.2, 0.8))
 
     return CasePlan(
         case_id=f"case_{stable_hash('case', persona.client_id, ts.toordinal(), index) % 10 ** 11:011d}",
@@ -154,8 +170,26 @@ def open_case(
         channel=channel,
         opened_at=ts,
         updated_at=updated if rng.random() < 0.55 else None,
-        resolved_at=ts + timedelta(hours=int(hours)),
+        resolved_at=resolved,
         resolution=resolution,
+    )
+
+
+def _working_time(moment: datetime, hours: tuple, rng) -> datetime:
+    """
+    Тот же момент, если канал в это время работает; иначе — начало
+    его следующего рабочего окна плюс несколько минут.
+    """
+
+    opening, closing = hours
+
+    if opening <= moment.hour < closing:
+        return moment
+
+    day = moment if moment.hour < opening else moment + timedelta(days=1)
+
+    return day.replace(hour=opening, minute=0, second=0, microsecond=0) + timedelta(
+        minutes=int(rng.integers(5, 90)), seconds=int(rng.integers(0, 60))
     )
 
 

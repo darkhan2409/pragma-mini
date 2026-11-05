@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from .. import config
 from .. import params as params_module
 from ..finance.cards import CLIENT_BLOCK_REASONS
-from ..rng import NS_ENGAGEMENT, keyed_rng, stable_hash
+from ..rng import NS_ENGAGEMENT, NS_EXIT, keyed_rng, stable_hash
 from ..truth import transition
 
 
@@ -105,6 +105,15 @@ class Engagement:
     winback_at: datetime | None = None
     complaint_at: datetime | None = None
     observed: bool = False
+
+    # Уход и возврат: день ухода, что клиент в этот день делает
+    # (вывод остатка, закрытие вкладов), выводит ли он приходящий
+    # доход транзитом, день возврата для разгона.
+    lapsed_at: datetime | None = None
+    exit_withdraw: bool = False
+    exit_close: bool = False
+    transit: bool = False
+    returned_at: datetime | None = None
 
     # Улики по дням: порядковый номер дня -> [(время, приоритет,
     # прибавка, доля снятия)]. В силу вступают со следующего дня.
@@ -507,6 +516,8 @@ def _step(state, day: datetime, stress: float, ties: float, life_change: float, 
         if pick_regime < _chance(return_hazard(engagement, day, stress)):
             engagement.regime = ACTIVE
             engagement.cause = ""
+            engagement.returned_at = day
+            engagement.transit = False
             _record(state, day, "regime", ACTIVE, "winback" if winback else "baseline")
 
     engagement.servicing = engagement.regime == LAPSED and obligated
@@ -551,9 +562,18 @@ def _step(state, day: datetime, stress: float, ties: float, life_change: float, 
 def _lapse(state, day: datetime, cause: str) -> None:
 
     engagement = state.engagement
+    settings = params_module.active().engagement
 
     engagement.regime = LAPSED
     engagement.cause = cause
+
+    # Что ушедший делает с деньгами: свои розыгрыши, ключ — день ухода.
+    rng = keyed_rng(NS_EXIT, state.ordinal, day.toordinal())
+    shares = settings.exit_withdraw_share
+    engagement.lapsed_at = day
+    engagement.exit_withdraw = rng.random() < shares.get(cause, shares["default"])
+    engagement.exit_close = engagement.exit_withdraw and rng.random() < settings.exit_close_share
+    engagement.transit = rng.random() < settings.exit_transit_share
 
     if engagement.away is not None:
         _record(state, day, "away", "end", engagement.away)
@@ -614,6 +634,45 @@ def silenced(state, ts: datetime) -> frozenset:
     return frozenset()
 
 
+def exit_today(state, day: datetime) -> tuple | None:
+    """
+    (вывести остаток, закрыть вклады), если клиент ушёл сегодня и
+    выводит деньги; иначе None.
+    """
+
+    engagement = state.engagement
+
+    if engagement.lapsed_at is None or engagement.lapsed_at.date() != day.date() or not engagement.exit_withdraw:
+        return None
+
+    return True, engagement.exit_close
+
+
+def transit(state) -> bool:
+    """
+    Ушедший выводит приходящий сюда доход в другой банк.
+    """
+
+    return state.engagement.regime == LAPSED and state.engagement.transit
+
+
+def _ramp(state) -> float:
+    """
+    Вернувшийся клиент набирает обычную активность не сразу.
+    """
+
+    engagement = state.engagement
+
+    if engagement.returned_at is None or engagement.regime != ACTIVE or state.today is None:
+        return 1.0
+
+    floor, days = params_module.active().engagement.return_ramp
+
+    elapsed = (state.today - engagement.returned_at).days
+
+    return 1.0 if elapsed >= days else floor + (1.0 - floor) * max(0, elapsed) / days
+
+
 def factor(state, stream: str) -> float:
     """
     Множитель частоты потока относительно обычной для клиента. При
@@ -624,7 +683,7 @@ def factor(state, stream: str) -> float:
     settings = params_module.active().engagement
 
     x = engagement.x
-    damp = math.exp(-settings.dampening * engagement.friction)
+    damp = math.exp(-settings.dampening * engagement.friction) * _ramp(state)
 
     if stream in ("purchases", "transfers"):
         return math.exp(engagement.sensitivity[stream] * x) * damp

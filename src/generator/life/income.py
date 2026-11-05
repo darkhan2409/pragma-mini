@@ -7,7 +7,7 @@ from .. import params as params_module
 from .. import config
 from ..rng import NS_EMPLOYMENT, NS_INCOME, keyed_rng, stable_hash
 from . import calendar as cal
-from .persona import PENSION_AGE, Persona, employer_payday
+from .persona import PENSION_AGE, Persona, employer_payday, pension_payday
 from .stress import level_at
 
 
@@ -32,6 +32,12 @@ from .stress import level_at
 CONFIRMABLE_KINDS: frozenset[str] = frozenset(
     {"salary", "pension", "business", "freelance", "rent"}
 )
+
+
+# Государственные плательщики: пенсия (ГК «Правительство для
+# граждан»), пособия ГФСС и бюджета. Платят по закону — в срок,
+# целиком, общим реестром, с индексацией одной для всех.
+STATE_PAYERS: frozenset[str] = frozenset({"state_pension", "state_benefit", "state_budget"})
 
 
 @dataclass(frozen=True)
@@ -113,6 +119,11 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
 
     payer = persona.employer_id or f"payer_{stable_hash('payer', persona.client_ordinal) % 10 ** 8:08d}"
 
+    # Пенсию платит государство, а не личный «плательщик»: прежде она
+    # опаздывала у 12% и приходила частями (аудит 2026-11-05, M9).
+    if primary_kind == "pension":
+        payer = "state_pension"
+
     streams: list[IncomeStream] = [
         IncomeStream(
             stream_id=f"inc_{persona.client_ordinal}_1",
@@ -156,13 +167,17 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
                 int(persona.true_income * pension_rng.uniform(*settings.state_pension_of_income)),
             )
 
+            # Розыгрыш дня оставлен, чтобы не сдвинуть следующие: день
+            # выплаты — по графику даты рождения.
+            pension_rng.integers(3, 11)
+
             streams.append(
                 IncomeStream(
                     stream_id=f"inc_{persona.client_ordinal}_pension",
                     kind="pension",
                     payer="state_pension",
                     schedule="monthly",
-                    payday=int(pension_rng.integers(*settings.pension_day_range)),
+                    payday=pension_payday(born),
                     landing=_landing(persona, "pension", pension_rng),
                     base_amount=amount,
                     valid_from=max(turns, min(config.HISTORY_START, persona.relationship_start)),
@@ -213,10 +228,27 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
 
     for event in events:
 
-        if event.kind not in ("job_loss", "job_change"):
+        if event.kind not in ("job_loss", "job_change", "child_birth"):
             continue
 
         primary = streams[primary_position]
+
+        if event.kind == "child_birth":
+
+            if persona.gender != "F":
+                continue
+
+            leave, benefits, back = _maternity(persona, event, primary, settings, income_shifts)
+
+            streams += benefits
+
+            if leave is not None:
+                streams[primary_position] = replace(primary, valid_to=leave)
+                if back is not None:
+                    streams.append(back)
+                    primary_position = len(streams) - 1
+
+            continue
 
         if primary.kind not in ("salary",):
             continue
@@ -255,20 +287,30 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
                     )
                 )
 
+            # Пособие ГФСС по потере работы: 45% дохода, 1–6 месяцев.
+            # Прежде — 15–40% до нового места, сколько бы ни искал.
             if item_rng.random() < settings.unemployment_benefit_share:
+                payday = int(item_rng.integers(5, 25))
+                landing = "hcb_account" if item_rng.random() < 0.55 else "other_bank"
+                months = int(item_rng.integers(*settings.unemployment_benefit_months))
+                begin = event.ts + timedelta(days=int(item_rng.integers(10, 45)))
                 streams.append(
                     IncomeStream(
                         stream_id=f"inc_{persona.client_ordinal}_benefit_{tag}",
                         kind="social_benefit",
                         payer="state_benefit",
                         schedule="monthly",
-                        payday=int(item_rng.integers(5, 25)),
-                        landing="hcb_account" if item_rng.random() < 0.55 else "other_bank",
+                        payday=payday,
+                        landing=landing,
                         base_amount=int(
-                            primary.base_amount * item_rng.uniform(*settings.unemployment_benefit_of_income)
+                            min(primary.base_amount, settings.social_income_cap_mzp * settings.mzp)
+                            * settings.unemployment_benefit_of_income
                         ),
-                        valid_from=event.ts + timedelta(days=int(item_rng.integers(10, 45))),
-                        valid_to=event.ts + timedelta(days=int(event.payload.get("recovery_days", 120))),
+                        valid_from=begin,
+                        valid_to=min(
+                            begin + timedelta(days=30 * months),
+                            event.ts + timedelta(days=int(event.payload.get("recovery_days", 120))),
+                        ),
                     )
                 )
 
@@ -308,11 +350,109 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
 
         primary_position = len(streams) - 1
 
-    # Изменение дохода касается каждого потока клиента.
+    # Изменение дохода касается каждого потока клиента, кроме
+    # государственных выплат: их сумму задаёт закон.
     if income_shifts:
-        streams = [replace(item, shifts=income_shifts) for item in streams]
+        streams = [item if item.payer in STATE_PAYERS else replace(item, shifts=income_shifts) for item in streams]
 
     return tuple(streams)
+
+
+def _maternity(persona: Persona, event, primary: IncomeStream, settings, income_shifts: tuple) -> tuple:
+    """
+    Деньги рождения у матери: (начало декрета или None, потоки пособий,
+    поток зарплаты после выхода или None).
+
+    Пособие при рождении — каждой. Работающая по найму уходит в декрет
+    за maternity_days_before до родов: ГФСС платит 126 дней разом, затем
+    40% дохода по уходу до полутора лет или до выхода на работу;
+    зарплата на это время останавливается и возобновляется у того же
+    работодателя. Неработающей по уходу платит бюджет. Прежде рождение
+    денег не меняло вовсе (аудит 2026-11-05, M15).
+    """
+
+    amounts = params_module.active().amounts
+
+    tag = int(event.ts.toordinal())
+
+    rng = keyed_rng(NS_INCOME, persona.client_ordinal, 13, tag)
+
+    landing = _landing(persona, "social_benefit", rng)
+
+    def delay() -> timedelta:
+        return timedelta(days=int(rng.integers(*settings.benefit_delay_days)))
+
+    def mrp(ts: datetime) -> int:
+        return amounts.mrp_by_year.get(ts.year, max(amounts.mrp_by_year.values()))
+
+    def stream(name: str, payer: str, schedule: str, amount: int, start: datetime, end: datetime) -> IncomeStream:
+        return IncomeStream(
+            stream_id=f"inc_{persona.client_ordinal}_{name}_{tag}",
+            kind="social_benefit",
+            payer=payer,
+            schedule=schedule,
+            payday=min(28, start.day),
+            landing=landing,
+            base_amount=int(amount),
+            valid_from=start,
+            valid_to=end,
+        )
+
+    order = int(event.payload.get("order", 1))
+
+    paid = event.ts + delay()
+
+    benefits = [
+        stream("birth", "state_budget", "once",
+               settings.birth_benefit_mrp[0 if order <= 3 else 1] * mrp(event.ts), paid, paid + timedelta(days=1)),
+    ]
+
+    leave = event.ts - timedelta(days=settings.maternity_days_before)
+
+    back_at = event.ts + timedelta(days=int(event.payload.get("return_days", settings.childcare_days)))
+
+    care_from = leave + timedelta(days=settings.maternity_days)
+
+    care_to = min(back_at, event.ts + timedelta(days=settings.childcare_days))
+
+    working = primary.kind == "salary" and primary.valid_from <= leave and primary.active_at(leave)
+
+    if not working:
+        if primary.kind == "salary" and primary.active_at(event.ts):
+            return None, benefits, None
+        share = settings.childcare_budget_mrp[min(order, len(settings.childcare_budget_mrp)) - 1]
+        start = event.ts + delay()
+        benefits.append(stream("childcare", "state_budget", "monthly", share * mrp(event.ts), start,
+                               event.ts + timedelta(days=settings.childcare_days)))
+        return None, benefits, None
+
+    income = min(
+        settings.social_income_cap_mzp * settings.mzp,
+        _amount_at(primary, leave, persona.client_ordinal, settings, income_shifts),
+    )
+
+    start = leave + delay()
+
+    benefits.append(stream("maternity", "state_benefit", "once", income * settings.maternity_days / 30.4,
+                           start, start + timedelta(days=1)))
+
+    if care_to > care_from:
+        start = care_from + delay()
+        benefits.append(stream("childcare", "state_benefit", "monthly", income * settings.childcare_share,
+                               start, max(start + timedelta(days=1), care_to)))
+
+    back = None
+
+    if back_at < config.PLANNING_END:
+        back = replace(
+            primary,
+            stream_id=f"inc_{persona.client_ordinal}_return_{tag}",
+            base_amount=_amount_at(primary, back_at, persona.client_ordinal, settings, income_shifts),
+            valid_from=back_at,
+            valid_to=None,
+        )
+
+    return leave, tuple(benefits), back
 
 
 def _amount_at(
@@ -330,6 +470,17 @@ def _amount_at(
     # Индексация считается от начала окна: доход до наблюдения
     # уже учтён в базовой сумме, и накручивать его нельзя.
     anchor = max(stream.valid_from, config.HISTORY_START)
+
+    # Государство: пенсия индексируется с 1 января одной ставкой для
+    # всех, пособие назначено суммой и не меняется. Без личных
+    # повышений и понижений.
+    if stream.payer in STATE_PAYERS:
+        amount = float(stream.base_amount)
+        if stream.kind == "pension":
+            for year, rate in sorted(settings.pension_indexation.items()):
+                if anchor < datetime(year, 1, 1) <= ts:
+                    amount *= 1.0 + rate
+        return int(round(amount))
 
     months = max(0, cal.month_index(ts) - cal.month_index(anchor))
 
@@ -398,6 +549,38 @@ def _bonus_moment(stream, day: datetime, rng) -> datetime:
 
     batch = day.replace(hour=int(payer.integers(*settings.payout_hour_range)), minute=int(payer.integers(0, 60)),
                         second=0, microsecond=0)
+
+    return batch + timedelta(seconds=int(rng.integers(0, 240)))
+
+
+def _state_day(planned: datetime) -> datetime:
+    """
+    День выплаты государства: с выходного — на рабочий день накануне,
+    но не в прошлый месяц. Выплата за месяц приходится на свой месяц,
+    иначе в одном месяце было бы две пенсии, а в следующем ни одной.
+    """
+
+    if cal.is_business_day(planned):
+        return planned
+
+    earlier = cal.previous_business_day(planned)
+
+    return earlier if earlier.month == planned.month else cal.next_business_day(planned)
+
+
+def _state_moment(stream: IncomeStream, day: datetime, rng) -> datetime:
+    """
+    Выплата государства — реестром дня: у всех получателей одного
+    плательщика и одного дня графика в одно время, строки реестра
+    расходятся на секунды–минуты.
+    """
+
+    settings = params_module.active().income
+
+    batch_rng = keyed_rng(NS_INCOME, stable_hash(stream.payer, day.toordinal()) % (2 ** 31), 15)
+
+    batch = day.replace(hour=int(batch_rng.integers(*settings.payout_hour_range)),
+                        minute=int(batch_rng.integers(0, 60)), second=0, microsecond=0)
 
     return batch + timedelta(seconds=int(rng.integers(0, 240)))
 
@@ -494,6 +677,24 @@ def payouts(persona: Persona, streams: tuple, stress_episodes: tuple) -> tuple:
 
             continue
 
+        # --- разовая выплата: пособие при рождении, декретные ---
+
+        if stream.schedule == "once":
+
+            rng = keyed_rng(NS_INCOME, persona.client_ordinal, 14, stable_hash(stream.stream_id) % (2 ** 31))
+
+            day = stream.valid_from if cal.is_business_day(stream.valid_from) else cal.next_business_day(stream.valid_from)
+
+            moment = _state_moment(stream, day, rng)
+
+            if config.HISTORY_START <= moment < config.PLANNING_END:
+                result.append(
+                    Payout(moment, moment, stream.stream_id, stream.kind, stream.base_amount,
+                           stream.landing, "on_time", stream.payer)
+                )
+
+            continue
+
         # --- регулярные выплаты ---
 
         paydays = [stream.payday]
@@ -501,9 +702,17 @@ def payouts(persona: Persona, streams: tuple, stress_episodes: tuple) -> tuple:
         if stream.schedule == "twice_monthly":
             paydays.append(((stream.payday + settings.second_payday_offset - 1) % 28) + 1)
 
+        # Выплата следующего за горизонтом месяца, пришедшая раньше
+        # срока или перенесённая с выходного, ложится ДО горизонта.
+        # Поэтому месяцы перебираются на месяц дальше него, а в ленту
+        # идёт только то, что раньше stop: иначе поднятый PLANNING_END
+        # дописывал бы выплаты в прежнее окно.
+        horizon = stream.valid_to is None or stream.valid_to >= config.PLANNING_END
+        last = config.PLANNING_END + timedelta(days=31) if horizon else stop
+
         month = cal.month_start(start)
 
-        while month < stop:
+        while month < last:
 
             base = _amount_at(stream, month, persona.client_ordinal, settings, stream.shifts)
 
@@ -525,6 +734,8 @@ def payouts(persona: Persona, streams: tuple, stress_episodes: tuple) -> tuple:
                 # для всех его сотрудников: день выплаты назначает он.
                 employer = stream.kind == "salary" and str(stream.payer or "").startswith("emp_")
 
+                state = stream.payer in STATE_PAYERS
+
                 calendar_rng = (
                     keyed_rng(
                         NS_INCOME, stable_hash(stream.payer) % (2 ** 31), 10,
@@ -538,7 +749,10 @@ def payouts(persona: Persona, streams: tuple, stress_episodes: tuple) -> tuple:
 
                 weights = dict(settings.payout_outcome)
 
-                if employer:
+                if state:
+                    # Государство платит в срок и целиком.
+                    outcome = "on_time"
+                elif employer:
                     # Реестр зарплаты общий у работодателя: срок,
                     # задержка и частичная выплата — его, а не стресс и
                     # дисциплина сотрудника. Прежде у коллег в один
@@ -569,7 +783,9 @@ def payouts(persona: Persona, streams: tuple, stress_episodes: tuple) -> tuple:
                 # Работодатель платит в рабочий день (ТК РК ст. 113: при
                 # выходном — накануне) всегда; прочие плательщики — не
                 # всегда.
-                if employer or calendar_rng.random() < settings.weekend_shift_share:
+                if state:
+                    moment = _state_moment(stream, _state_day(moment), rng)
+                elif employer or calendar_rng.random() < settings.weekend_shift_share:
                     moment = _shift_for_calendar(moment)
 
                 if employer:
@@ -582,7 +798,7 @@ def payouts(persona: Persona, streams: tuple, stress_episodes: tuple) -> tuple:
                         microsecond=0,
                     )
                     moment = batch + timedelta(seconds=int(rng.integers(0, 240)))
-                else:
+                elif not state:
                     moment = moment.replace(
                         hour=int(rng.integers(*settings.payout_hour_range)),
                         minute=int(rng.integers(0, 60)),
@@ -787,7 +1003,8 @@ def monthly_income(streams: tuple, ts: datetime) -> int:
     total = 0.0
 
     for stream in streams:
-        if stream.active_at(ts):
+        # Разовая выплата — не месячный доход.
+        if stream.active_at(ts) and stream.schedule != "once":
             amount = float(stream.base_amount)
             for moment, factor in stream.shifts:
                 if stream.valid_from <= moment <= ts:
@@ -878,6 +1095,7 @@ def employment(persona: Persona, events: tuple, streams: tuple) -> list[tuple[da
 
 
 __all__ = [
+    "STATE_PAYERS",
     "IncomeStream",
     "Payout",
     "build_streams",

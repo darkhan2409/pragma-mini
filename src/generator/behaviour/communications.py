@@ -5,7 +5,7 @@ from datetime import datetime
 
 from .. import params as params_module
 from ..life.persona import Persona
-from ..rng import COMPONENT_CONTENT, COMPONENT_TIME, NS_COMM, day_rng, event_rng, stable_hash
+from ..rng import COMPONENT_CONTENT, COMPONENT_TIME, NS_COLLECTION, NS_COMM, day_rng, event_rng, stable_hash
 from ..world.dictionaries import (
     CAMPAIGNS,
     CAMPAIGNS_BY_FAMILY,
@@ -137,6 +137,7 @@ def _campaign_weights(
     pending_notice: bool,
     fraud_alert: bool,
     days_to_due: int | None = None,
+    suppress_offers: bool = False,
 ) -> dict:
 
     weights: dict[str, float] = {}
@@ -166,11 +167,11 @@ def _campaign_weights(
         elif campaign.purpose == "collection":
             # Напоминание о платеже приходит ДО срока. Раньше
             # вес был нулевым, пока клиент не просрочил, и
-            # «платёж скоро» уходило уже после дефолта.
+            # «платёж скоро» уходило уже после дефолта. Просрочку
+            # ведёт коллекшн по своим вехам (collection_contacts), а
+            # не случайная рассылка.
             reminder = params_module.active().activity.due_reminder_days
-            if dpd > 0:
-                weight = 3.0 + 0.08 * min(90, dpd)
-            elif days_to_due is not None and 0 <= days_to_due <= reminder:
+            if dpd <= 0 and days_to_due is not None and 0 <= days_to_due <= reminder:
                 weight = 2.4
             else:
                 weight = 0.0
@@ -181,6 +182,13 @@ def _campaign_weights(
         if silent and campaign.purpose == "offer":
             # Клиенту, который замолчал, предложения почти не шлют.
             weight *= 0.15
+
+        # Должнику банк не продаёт и не зовёт назад: ни при текущей
+        # просрочке, ни какое-то время после серьёзной (suppress_offers
+        # решает engine). Прежде кредит и вклад предлагали и при DPD
+        # 180+ (аудит 2026-11-05, M17).
+        if (suppress_offers or dpd > params_module.active().lifecycle.delinquent_dpd) and campaign.purpose in ("offer", "winback"):
+            weight = 0.0
 
         elif campaign.purpose == "security":
             weight = 2.6 if fraud_alert else 0.25
@@ -333,6 +341,48 @@ def _template_for(campaign, persona, ts, owned_families, rng) -> str | None:
     return str(rng.choice(list(allowed), p=[value / total for value in weights]))
 
 
+def collection_contacts(persona: Persona, day: datetime, dpd: int, app_adopted: bool) -> tuple:
+    """
+    Коллекшн: напоминание в день вехи просрочки (activity.collection_dpd_steps)
+    — мягкое в первые недели, жёсткое после 30 дней, предложение
+    реструктуризации после 60. Это сервисное сообщение о долге:
+    согласия на рассылку оно не требует и от частоты кампаний не
+    зависит. Прежде у 85% должников за первые 30 дней не было ни
+    одного напоминания (аудит 2026-11-05, M17).
+    """
+
+    if dpd not in params_module.active().activity.collection_dpd_steps:
+        return ()
+
+    campaign = CAMPAIGN_BY_CODE["PAYMENT_REMINDER"]
+
+    rng = event_rng(NS_COLLECTION, persona.client_ordinal, day.toordinal(), dpd, COMPONENT_CONTENT)
+    time_rng = event_rng(NS_COLLECTION, persona.client_ordinal, day.toordinal(), dpd, COMPONENT_TIME)
+
+    channel = _channel(persona, campaign, day, app_adopted, rng)
+
+    ts = day.replace(
+        hour=int(time_rng.integers(10, 20)),
+        minute=int(time_rng.integers(0, 60)),
+        second=int(time_rng.integers(0, 60)),
+        microsecond=0,
+    )
+
+    return (
+        Contact(
+            ts=ts,
+            campaign_code=campaign.code,
+            purpose=campaign.purpose,
+            channel=channel,
+            template=_collection_template(dpd, None),
+            product_family=None,
+            delivered=_delivered(channel, persona, app_adopted, rng),
+            clicked=False,
+            offer_id=None,
+        ),
+    )
+
+
 def contacts_for_day(
     persona: Persona,
     day: datetime,
@@ -349,6 +399,7 @@ def contacts_for_day(
     fraud_alert: bool,
     days_to_due: int | None = None,
     responsiveness: float = 1.0,
+    suppress_offers: bool = False,
 ) -> tuple:
     """
     Отправки банка за день. Сколько и что слать, решает банк;
@@ -369,7 +420,7 @@ def contacts_for_day(
 
     weights = _campaign_weights(
         persona, day, owned_families, candidate_families, dpd, silent,
-        stress, pending_notice, fraud_alert, days_to_due,
+        stress, pending_notice, fraud_alert, days_to_due, suppress_offers,
     )
 
     if not weights:
@@ -405,7 +456,7 @@ def contacts_for_day(
         ts = day.replace(
             hour=hour,
             minute=int(time_rng.integers(0, 60)),
-            second=0,
+            second=int(time_rng.integers(0, 60)),
             microsecond=0,
         )
 
@@ -448,4 +499,4 @@ def campaign_for_family(family: str) -> str:
     return "SERVICE"
 
 
-__all__ = ["Contact", "campaign_for_family", "contacts_for_day", "daily_rate"]
+__all__ = ["Contact", "campaign_for_family", "collection_contacts", "contacts_for_day", "daily_rate"]

@@ -115,7 +115,7 @@ def purchase_budget(budget: MonthlyBudget) -> int:
     return int(available * settings.card_share_of_spend)
 
 
-def budget_pressure(budget: MonthlyBudget, spent: int, tracked_days: int) -> float:
+def budget_pressure(budget: MonthlyBudget, spent: float, days: float) -> float:
     """
     Во сколько раз клиент сбавляет траты, если потратил больше, чем
     позволяет месячный бюджет.
@@ -123,12 +123,14 @@ def budget_pressure(budget: MonthlyBudget, spent: int, tracked_days: int) -> flo
     Это не бухгалтерский лимит, а поведение: человек, уже
     потративший месячное, покупает заметно меньше и заметно дешевле.
 
-    spent — покупки последних 30 дней, tracked_days — сколько дней
-    из них уже наблюдается (в начале окна меньше 30). Окно скользит:
-    прежде траты считались с начала календарного месяца, счётчик
-    обнулялся в его конце, и у тех, кто тратит быстрее бюджета,
-    первое число месяца давало всплеск покупок вдвое против других
-    дней (проверка scratch 2026-10-06).
+    spent — недавние покупки с затухающим весом, days — сумма тех же
+    весов по наблюдаемым дням (ClientState.recent_spend): ожидаемо
+    потраченное — дневной бюджет на days. Память затухает, а не
+    обрывается: прежде окно было ровно 30 дней, и всплеск после
+    зарплаты выпадал из него точно к следующей — давление снималось и
+    всплеск повторялся (аудит 2026-11-05, C3). А ещё раньше траты
+    считались с начала календарного месяца, и первое число давало
+    всплеск вдвое против других дней (проверка scratch 2026-10-06).
     """
 
     settings = params_module.active().amounts
@@ -138,7 +140,7 @@ def budget_pressure(budget: MonthlyBudget, spent: int, tracked_days: int) -> flo
     if target <= 0:
         return 1.0
 
-    expected = target * min(30, max(1, tracked_days)) / 30
+    expected = target / 30 * days
 
     if expected <= 0 or spent <= expected:
         return 1.0
@@ -150,24 +152,33 @@ def budget_pressure(budget: MonthlyBudget, spent: int, tracked_days: int) -> flo
     return float(max(settings.budget_pressure_floor, min(1.0, pressure)))
 
 
-def funds_pressure(capacity: int, budget: MonthlyBudget) -> float:
+def funds_pressure(capacity: int, days_left: int, expected_daily: float, budget: MonthlyBudget) -> float:
     """
-    Пустой счёт виден клиенту раньше, чем банку: человек, у
-    которого не осталось денег, не ходит по магазинам и ждёт
-    зарплату, а не собирает отказы.
+    Человек растягивает деньги до следующей выплаты: в день тратит на
+    покупки не больше их доли в остатке (доля покупок в доходе месяца:
+    из того же остатка уйдут счета, переводы и взносы), делённой на дни
+    до выплаты. Если привычный темп
+    (expected_daily — сколько он потратил бы сегодня) быстрее, покупок
+    соразмерно меньше. Пустой счёт виден клиенту раньше, чем банку:
+    человек без денег не ходит по магазинам и ждёт выплату, а не
+    собирает отказы.
+
+    Прежде траты сбавлялись, только когда на счёте оставалось меньше
+    10% дохода: самые активные тратили зарплату за первые дни (×5
+    обычного на следующий день после неё), а перед следующей сидели на
+    полу частоты — payday 3.1 против 1.1–1.6 (аудит 2026-11-05, C3).
     """
 
     settings = params_module.active().amounts
 
-    if budget.income <= 0:
+    if expected_daily <= 0:
         return 1.0
 
-    comfortable = budget.income * settings.comfortable_balance_share
+    share = min(1.0, purchase_budget(budget) / budget.income) if budget.income > 0 else 1.0
 
-    if comfortable <= 0:
-        return 1.0
+    pace = capacity * share / max(1, days_left) / expected_daily
 
-    return float(max(settings.empty_wallet_floor, min(1.0, capacity / comfortable)))
+    return float(max(settings.empty_wallet_floor, min(1.0, pace)))
 
 
 __all__ = [

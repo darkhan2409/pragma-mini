@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pyarrow.parquet as pq
 import pytest
@@ -434,3 +434,319 @@ def test_demography_is_consistent(personas) -> None:
 
     pensioners = [item for item in personas if item.income_type == "pensioner"]
     assert 100_000 < median(pensioners) < 180_000
+
+
+# ============================================================
+# ВОЛНА 5: ЖИЗНЬ И ПОСЛЕДСТВИЯ (M9, M14–M17, M23)
+# ============================================================
+
+
+@pytest.fixture(scope="module")
+def lives(personas):
+
+    from src.generator.life import income
+    from src.generator.life.events import plan_events
+
+    result = []
+    for persona in personas:
+        events = plan_events(persona)
+        streams = income.build_streams(persona, events)
+        result.append((persona, events, streams))
+    return result
+
+
+def test_births_follow_the_mother(lives) -> None:
+    """Рожают в 15–49 лет, второй ребёнок — не раньше чем через 15 месяцев (M14)."""
+
+    gap = params_module.active().lifecycle.partner_age_gap
+    births = 0
+    for persona, events, _ in lives:
+        dates = [item.ts for item in events if item.kind == "child_birth"]
+        births += len(dates)
+        assert len(dates) <= params_module.active().lifecycle.life_event_max["child_birth"]
+        for earlier, later in zip(dates, dates[1:]):
+            assert (later - earlier).days >= 456, persona
+        for ts in dates:
+            mother = persona.age_at(ts) - (gap if persona.gender == "M" else 0)
+            assert 15 <= mother < 50, (persona.client_ordinal, mother)
+    assert births > 50
+
+
+def test_a_working_mother_goes_on_paid_leave(lives) -> None:
+    """Декрет: зарплата встаёт за 70 дней до родов, ГФСС платит 126 дней разом и
+    40% до полутора лет, после выхода — тот же работодатель (M9, M15)."""
+
+    from src.generator.life import income
+
+    settings = params_module.active().income
+    leaves = 0
+    for persona, events, streams in lives:
+        for birth in (item for item in events if item.kind == "child_birth"):
+            tag = birth.ts.toordinal()
+            by_name = {item.stream_id.rsplit("_", 2)[-2]: item for item in streams if item.stream_id.endswith(f"_{tag}")}
+            # Пособие при рождении и декрет — у матери; у отца доход не меняется.
+            if persona.gender == "M":
+                assert not by_name, persona.client_ordinal
+                continue
+            assert "birth" in by_name, persona.client_ordinal
+            if "maternity" not in by_name:
+                continue
+            leaves += 1
+            leave = birth.ts - timedelta(days=settings.maternity_days_before)
+            salary = [item for item in streams if item.kind == "salary" and item.valid_to == leave]
+            assert len(salary) == 1, persona.client_ordinal
+            assert by_name["maternity"].payer == "state_benefit"
+            care = by_name.get("childcare")
+            if care is not None:
+                assert care.payer == "state_benefit"
+                assert care.valid_to <= birth.ts + timedelta(days=settings.childcare_days)
+                # 40% дохода против 126 дней (4.1 месяца) разом.
+                ratio = by_name["maternity"].base_amount / care.base_amount
+                assert abs(ratio - settings.maternity_days / 30.4 / settings.childcare_share) < 0.01
+            back = by_name.get("return")
+            if back is not None:
+                assert back.payer == salary[0].payer and back.kind == "salary"
+            # Зарплаты в декрете нет.
+            paid = income.payouts(persona, streams, ())
+            end = back.valid_from if back is not None else datetime.max
+            assert not [item for item in paid if item.kind == "salary" and leave <= item.ts < end
+                        and item.outcome not in ("bonus", "annual_bonus")], persona.client_ordinal
+    assert leaves > 5
+
+
+def test_state_pays_on_schedule_in_full(lives) -> None:
+    """Пенсия 1–15 числа по дате рождения, в срок и целиком, не ниже минимальной,
+    индексация с января одна на всех; пособие по безработице — не дольше 6 месяцев (M9)."""
+
+    from src.generator.life import income
+
+    settings = params_module.active().income
+    checked = 0
+    for persona, _, streams in lives:
+        for stream in streams:
+            if stream.kind == "social_benefit" and "_benefit_" in stream.stream_id:
+                assert (stream.valid_to - stream.valid_from).days <= 6 * 30
+        pensions = [item for item in streams if item.kind == "pension"]
+        if not pensions:
+            continue
+        paid = [item for item in income.payouts(persona, streams, ()) if item.kind == "pension"]
+        by_month = defaultdict(list)
+        for item in paid:
+            assert item.outcome == "on_time" and item.payer == "state_pension"
+            assert item.ts.day <= 15 and cal.is_business_day(item.ts)
+            by_month[(item.ts.year, item.ts.month)].append(item.amount)
+        for (year, month), amounts in by_month.items():
+            assert len(amounts) == 1
+            assert amounts[0] >= settings.state_pension_floor
+        if (2024, 12) in by_month and (2025, 1) in by_month:
+            ratio = by_month[(2025, 1)][0] / by_month[(2024, 12)][0]
+            assert abs(ratio - (1 + settings.pension_indexation[2025])) < 1e-4
+            checked += 1
+    assert checked > 50
+
+
+def test_collection_follows_the_debt() -> None:
+    """Коллекшн пишет в дни вех просрочки; должнику с DPD > 30 не продают (M17)."""
+
+    from src.generator.behaviour import communications as comm
+
+    from src.generator.life.persona import draw_persona
+
+    persona = draw_persona(7)
+    day = datetime(2024, 6, 3)
+
+    for dpd in range(0, 200):
+        contacts = comm.collection_contacts(persona, day, dpd, True)
+        steps = params_module.active().activity.collection_dpd_steps
+        assert len(contacts) == (1 if dpd in steps else 0)
+        for contact in contacts:
+            assert contact.purpose == "collection" and contact.ts.second < 60
+            assert contact.template == ("PR_RESTRUCTURE" if dpd >= 60 else "PR_OVERDUE_HARD" if dpd >= 30 else "PR_OVERDUE_SOFT")
+
+    weights = comm._campaign_weights(persona, day, frozenset(), frozenset({"cash_loan", "deposit"}), 45,
+                                     True, 0.5, False, False, None)
+    purposes = {comm.CAMPAIGN_BY_CODE[code].purpose for code in weights}
+    assert not purposes & {"offer", "winback", "collection"}
+
+    # После частичной оплаты DPD ниже 30, но пауза в предложениях идёт.
+    weights = comm._campaign_weights(persona, day, frozenset(), frozenset({"cash_loan"}), 5,
+                                     False, 0.0, False, False, None, True)
+    assert not {comm.CAMPAIGN_BY_CODE[code].purpose for code in weights} & {"offer", "winback"}
+    weights = comm._campaign_weights(persona, day, frozenset(), frozenset({"cash_loan"}), 0,
+                                     False, 0.0, False, False, None, False)
+    assert "offer" in {comm.CAMPAIGN_BY_CODE[code].purpose for code in weights}
+
+
+def test_life_events_leave_spending(lives) -> None:
+    """Свадьба, болезнь, ремонт, учёба и рождение — с тратами своих категорий (M15)."""
+
+    from src.generator.life.events import event_purchases
+
+    expected = {
+        "wedding": {"clothing", "restaurant"}, "illness": {"pharmacy", "medical"},
+        "renovation": {"home_goods"}, "education": {"education"}, "child_birth": {"kids", "pharmacy"},
+    }
+    seen = defaultdict(set)
+    for persona, events, _ in lives[:1500]:
+        for event in events:
+            if event.kind not in expected:
+                continue
+            plan = event_purchases(persona, (event,))
+            categories = {item[0] for items in plan.values() for item in items}
+            seen[event.kind] |= categories
+            first = min(plan) if plan else None
+            assert first is None or first >= (event.ts - timedelta(days=180)).toordinal()
+    for kind, categories in expected.items():
+        assert categories <= seen[kind], (kind, seen[kind])
+
+
+def test_a_later_planning_horizon_keeps_the_consequences_before_it(personas, monkeypatch) -> None:
+    """События сразу за горизонтом дают строки до него (билет, декрет, покупки к
+    рождению): поднятый PLANNING_END не меняет ни плана, ни денег раньше прежнего."""
+
+    from src.generator import config
+    from src.generator.life import income
+    from src.generator.life.events import event_purchases, plan_events
+
+    old = config.PLANNING_END
+    sample = personas[:400]
+
+    def snapshot():
+        result = []
+        for persona in sample:
+            events = plan_events(persona)
+            streams = income.build_streams(persona, events)
+            paid = [item for item in income.payouts(persona, streams, ()) if item.ts < old]
+            spend = {day: items for day, items in event_purchases(persona, events).items() if day < old.toordinal()}
+            result.append(([item for item in events if item.ts < old], paid, spend))
+        return result
+
+    before = snapshot()
+    monkeypatch.setattr(config, "PLANNING_END", old + timedelta(days=365))
+    after = snapshot()
+    assert before == after
+
+
+def test_a_leaving_client_plans_the_exit() -> None:
+    """Уход: вывод остатка — в день ухода и только тогда; возврат с разгоном (M23)."""
+
+    from types import SimpleNamespace
+
+    from src.generator.behaviour import engagement
+
+    settings = params_module.active().engagement
+    day = datetime(2024, 5, 10)
+    withdrawn = 0
+    for ordinal in range(1, 401):
+        state = SimpleNamespace(ordinal=ordinal, client_id=f"c{ordinal}", today=day,
+                                engagement=engagement.Engagement(sensitivity={}, frailty=1.0, salary_threshold=0.5))
+        engagement._lapse(state, day, "migration")
+        plan = engagement.exit_today(state, day)
+        withdrawn += plan is not None
+        assert engagement.exit_today(state, day + timedelta(days=1)) is None
+        assert engagement.transit(state) == state.engagement.transit
+    assert 0.6 < withdrawn / 400 < 0.9
+
+    state.engagement.regime = engagement.ACTIVE
+    state.engagement.returned_at = day
+    floor, days = settings.return_ramp
+    assert engagement._ramp(state) == pytest.approx(floor)
+    state.today = day + timedelta(days=days)
+    assert engagement._ramp(state) == 1.0
+
+
+# ============================================================
+# ВОЛНА 6: РИТМ (C3, M1, M2, M18, M20, M21)
+# ============================================================
+
+
+def test_an_early_salary_closes_its_cycle() -> None:
+    """Зарплата, пришедшая раньше срока, закрывает свой срок: следующую клиент
+    ждёт через цикл, а не в плановый день через 1–3 дня (C3)."""
+
+    from types import SimpleNamespace
+
+    from src.generator import engine
+    from src.generator.life.income import IncomeStream
+
+    stream = IncomeStream("inc_1_1", "salary", "emp_1", "monthly", 10, "hcb_account", 300_000,
+                          datetime(2020, 1, 1), None)
+    state = SimpleNamespace(income_streams=(stream,))
+
+    assert engine._next_payday(state, datetime(2024, 5, 9), datetime(2024, 5, 8, 11)) == datetime(2024, 6, 10)
+    assert engine._next_payday(state, datetime(2024, 5, 9), datetime(2024, 4, 10, 11)) == datetime(2024, 5, 10)
+
+
+def test_a_day_repeats_neither_the_cinema_nor_the_commute(world) -> None:
+    """Кино — раз в день, проезд — не больше трёх раз (M1)."""
+
+    per_day = defaultdict(int)
+    for item in world["events"]:
+        if item["type"] == "purchase" and item.get("status") == "approved" \
+                and item.get("merchant_category") in ("cinema", "transit"):
+            per_day[(item["client_id"], item["ts"].date(), item["merchant_category"])] += 1
+    assert per_day
+    for (_, _, category), count in per_day.items():
+        assert count <= (1 if category == "cinema" else 3), category
+
+
+def test_hours_follow_the_client_and_the_category() -> None:
+    """Сова живёт позже жаворонка, кофе пьют утром, в бар ходят вечером (M2)."""
+
+    def mean_hour(weights):
+        return sum(hour * value for hour, value in enumerate(weights))
+
+    day = datetime(2024, 4, 10)
+    assert mean_hour(cal.hour_weights(day, False, 2)) - mean_hour(cal.hour_weights(day, False, -2)) > 2.5
+    assert mean_hour(cal.hour_weights(day, False, 0, "coffee")) + 4 < mean_hour(cal.hour_weights(day, False, 0, "bars"))
+
+
+def test_support_works_in_channel_hours(world) -> None:
+    """Отделение принимает и закрывает обращения в 9–18, колл-центр — в 8–22;
+    13:20:00 у всех больше нет (M20)."""
+
+    hours = params_module.active().activity.support_channel_hours
+    cases = [item for item in world["events"] if item["type"] in ("case_opened", "case_resolved")]
+    assert cases
+    for item in cases:
+        low, high = hours[item["channel"]]
+        assert low <= item["ts"].hour < high, item
+    opened = [item["ts"] for item in cases if item["type"] == "case_opened"]
+    assert sum(ts.hour == 13 and ts.minute == 20 and ts.second == 0 for ts in opened) <= 1
+
+
+def test_card_statements_spread_over_the_month() -> None:
+    """Выписка — в свой день договора, а не у всех карт в конце месяца (M18)."""
+
+    from src.generator.engine_month import statement_day
+
+    days = {statement_day(f"ctr_{index}") for index in range(400)}
+    assert days == set(range(1, 29))
+
+
+def test_taxes_are_paid_once_a_year_by_the_deadline(personas) -> None:
+    """Налог на имущество и транспорт — раз в год, у владельца, к 1 октября (M18)."""
+
+    from types import SimpleNamespace
+
+    from src.generator import engine
+
+    owners = 0
+    for persona in personas[:600]:
+        state = SimpleNamespace(persona=persona, ordinal=persona.client_ordinal)
+        day = engine._tax_day(state, 2024)
+        owner = persona.transport == "car" or persona.housing_type in ("own_apartment", "own_house")
+        assert (day is None) == (not owner)
+        if day is not None:
+            owners += 1
+            assert date(2024, 8, 1).toordinal() <= day <= date(2024, 12, 31).toordinal()
+    assert owners > 100
+
+
+def test_client_actions_have_seconds(world) -> None:
+    """Секунда :00 — не чаще, чем у случайного момента (M21)."""
+
+    kinds = ("purchase", "transfer_out", "p2p_out", "cash_withdrawal", "bill_payment", "cash_deposit")
+    moments = [item["ts"] for item in world["events"] if item["type"] in kinds]
+    assert len(moments) > 500
+    assert sum(ts.second == 0 for ts in moments) / len(moments) < 0.05

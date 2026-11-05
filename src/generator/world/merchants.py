@@ -113,6 +113,9 @@ REFERENCE_CATEGORY: dict[str, str | None] = {
     "kids": "kids",                 # сеть детских товаров (national_merchants)
     "books": "books",
     # --- досуг ---
+    "bars": "restaurant",           # бары справочник держит среди заведений
+    "flowers": None,                # цветочные салоны в справочнике не размечены
+    "gifts": None,                  # сувенирные лавки в справочнике не размечены
     "entertainment": "entertainment",  # развлекательные сети и продажа билетов
     "cinema": "cinema",
     "sports": "sports",

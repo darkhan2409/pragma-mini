@@ -286,28 +286,34 @@ class PopulationParams:
     # Прежде владение машиной падало с ростом дохода (persona-19).
     car_income_elasticity: float = 0.45
 
+    # Хронотип — сдвиг суточного профиля клиента, часов: жаворонки и
+    # совы (синтетическое допущение).
+    chronotype_weights: dict = field(
+        default_factory=lambda: {"-2": 0.08, "-1": 0.22, "0": 0.40, "1": 0.20, "2": 0.10}
+    )
+
     # Структура трат по полу и возрасту (синтетическое допущение по
     # направлению эффектов; прежде пол и возраст не меняли ни одной
     # доли категорий — аудит, C6, persona-02).
     category_gender_factor: dict = field(
         default_factory=lambda: {
             "F": {"beauty": 2.0, "cosmetics": 2.4, "clothing": 1.25, "shoes": 1.2, "kids": 1.3,
-                  "pharmacy": 1.15, "home_goods": 1.2},
+                  "pharmacy": 1.15, "home_goods": 1.2, "gifts": 1.3},
             "M": {"beauty": 0.5, "cosmetics": 0.35, "car_service": 1.5, "electronics": 1.3, "sports": 1.3,
-                  "fuel": 1.2, "fastfood": 1.15},
+                  "fuel": 1.2, "fastfood": 1.15, "bars": 1.6, "flowers": 1.8},
         }
     )
     # (возраст от, множители): берётся ступень с наибольшим «от» не
     # больше возраста.
     category_age_factor: tuple = (
         (18, {"education": 1.6, "fastfood": 1.3, "coffee": 1.2, "entertainment": 1.2, "sports": 1.2,
-              "pharmacy": 0.8, "medical": 0.7}),
+              "pharmacy": 0.8, "medical": 0.7, "bars": 1.6}),
         (30, {}),
         (45, {"pharmacy": 1.3, "medical": 1.3, "lab": 1.2, "fastfood": 0.75, "coffee": 0.8,
-              "entertainment": 0.7, "education": 0.5}),
+              "entertainment": 0.7, "education": 0.5, "bars": 0.5}),
         (60, {"pharmacy": 1.7, "medical": 1.6, "lab": 1.5, "fastfood": 0.45, "coffee": 0.5,
               "entertainment": 0.4, "marketplace": 0.6, "ecom": 0.6, "electronics": 0.6, "sports": 0.4,
-              "education": 0.2, "kids": 0.3}),
+              "education": 0.2, "kids": 0.3, "bars": 0.15}),
     )
     # Где категория вообще есть: кикшеринг, прокат авто и кино — в
     # городах (прежде кикшеринг и прокат были у 95–100% клиентов
@@ -316,6 +322,7 @@ class PopulationParams:
         default_factory=lambda: {
             "micromobility": ("metropolis", "major_city", "regional_centre"),
             "car_rental": ("metropolis", "major_city"),
+            "bars": ("metropolis", "major_city", "regional_centre", "industrial_town"),
             "cinema": ("metropolis", "major_city", "regional_centre", "industrial_town", "small_town"),
         }
     )
