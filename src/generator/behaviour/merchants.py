@@ -7,7 +7,7 @@ from datetime import datetime
 from .. import params as params_module
 from ..life import calendar as cal
 from ..life.persona import Persona
-from ..rng import KeyedRandom
+from ..rng import NS_MERCHANT, KeyedRandom, keyed_rng, stable_hash
 from ..world import geography, merchants as catalog
 from ..world.dictionaries import CATEGORY_BY_NAME
 from ..world.merchants import Outlet
@@ -112,9 +112,11 @@ def choose_outlet(
     rng: KeyedRandom,
     online_hint: bool | None = None,
     foreign_country: str | None = None,
+    settlement: str | None = None,
 ) -> Choice | None:
     """
-    Точка для покупки категории.
+    Точка для покупки категории. settlement — поселение поездки
+    внутри страны: покупка идёт там, а не дома.
     """
 
     settings = params_module.active()
@@ -125,7 +127,9 @@ def choose_outlet(
 
     era = habits.era_at(ts)
 
-    settlement_name = era.settlement
+    away = settlement is not None and settlement != era.settlement
+
+    settlement_name = settlement if away else era.settlement
 
     settlement = geography.by_name(settlement_name)
 
@@ -152,7 +156,7 @@ def choose_outlet(
         candidates = list(pool)
         wants_online = candidates[0].is_online
 
-    zone = ZONE_OTHER if wants_online else _zone(persona, era, ts, rng)
+    zone = ZONE_OTHER if wants_online or away else _zone(persona, era, ts, rng)
 
     target_district = (
         "online"
@@ -162,7 +166,8 @@ def choose_outlet(
 
     # --- любимое место ---
 
-    favourites = era.favourites.get(category, ())
+    # В чужом городе любимых мест нет.
+    favourites = () if away else era.favourites.get(category, ())
 
     if favourites and not wants_online and rng.random() < habits.loyalty:
 
@@ -230,27 +235,45 @@ def purchase_amount(
     category: str,
     outlet: Outlet,
     ts: datetime,
-    spending_factor: float,
     rng: KeyedRandom,
 ) -> int:
     """
-    Сумма покупки: корзина категории, ценовой уровень точки,
-    доход домохозяйства, чувствительность к цене, сезон и
-    размер семьи. MCC на сумму напрямую не влияет.
+    Сумма покупки: цена точки (меню, корзина, прейскурант), её
+    ценовой уровень, доход и семья клиента, инфляция на дату. От дня —
+    зарплатного цикла, остатка, праздника — сумма НЕ зависит: они
+    меняют частоту покупок (аудит 2026-11-05, C3). MCC на сумму
+    напрямую не влияет.
     """
 
     settings = params_module.active().amounts
 
+    if category == "transit":
+        return transit_fare(outlet.settlement, ts)
+
+    if category == "fines":
+        mrp = settings.mrp_by_year.get(ts.year, max(settings.mrp_by_year.values()))
+        sizes = list(settings.fine_mrp)
+        size = sizes[int(rng.choice(len(sizes), p=list(settings.fine_mrp.values())))]
+        return int(size * mrp)
+
+    index = cal.price_index(category, ts)
+
+    place = params_module.active().geography.price_level[
+        outlet.settlement_type if outlet.settlement_type != "foreign" else "metropolis"
+    ]
+
+    segment = settings.price_segment_factor.get(outlet.price_segment, 1.0)
+
+    if category in settings.menu_items:
+        return _menu_amount(category, outlet, rng, index * place * segment)
+
+    if category == "fuel":
+        return _fuel_amount(persona, ts, rng)
+
     median = settings.basket_median.get(category, 5_000)
     sigma = settings.basket_sigma.get(category, 0.6)
 
-    amount = median * rng.lognormal(0.0, sigma)
-
-    amount *= settings.price_segment_factor.get(outlet.price_segment, 1.0)
-
-    amount *= params_module.active().geography.price_level[
-        outlet.settlement_type if outlet.settlement_type != "foreign" else "metropolis"
-    ]
+    amount = median * rng.lognormal(0.0, sigma) * segment * place * index
 
     income_ratio = max(0.25, persona.true_income / 320_000)
     amount *= income_ratio ** settings.income_elasticity
@@ -261,19 +284,98 @@ def purchase_amount(
     if category in settings.household_size_categories:
         amount *= (1.0 + 0.2 * max(0, persona.household_size - 1)) ** settings.household_size_elasticity
 
-    amount *= cal.category_factor(category, ts, persona.region)
+    amount = max(amount, settings.min_amount.get(category, settings.amount_bounds[0]))
 
-    amount *= spending_factor
+    return int(min(settings.amount_bounds[1], _price_shape(category, amount, rng)))
 
-    low, high = settings.amount_bounds
 
-    step = settings.round_to
+def _price_shape(category: str, amount: float, rng: KeyedRandom) -> int:
+    """
+    Последние цифры суммы. Товар стоит «красивую» цену (…90, …990),
+    услуга — по шагу прейскуранта, корзина — любое целое: она сумма
+    многих цен. Прежде все суммы были кратны 10.
+    """
 
-    return int(min(high, max(low, round(amount / step) * step)))
+    settings = params_module.active().amounts
+
+    if category in settings.charm_categories:
+        step = 1_000 if amount >= 20_000 else 100
+        return int(max(step, round(amount / step) * step) - 10)
+
+    step = settings.price_step.get(category)
+
+    if step:
+        return int(max(step, round(amount / step) * step))
+
+    return int(round(amount))
+
+
+def _menu_amount(category: str, outlet: Outlet, rng: KeyedRandom, level: float) -> int:
+    """
+    Чек из меню точки: одна-несколько позиций. Меню общее у сети (у
+    безымянной точки — своё), поэтому у постоянного клиента
+    повторяются одни и те же суммы.
+    """
+
+    settings = params_module.active().amounts
+
+    base, spread, extra = settings.menu_items[category]
+
+    menu_rng = keyed_rng(NS_MERCHANT, stable_hash("menu", outlet.merchant_id or outlet.outlet_id) % (2 ** 31))
+
+    menu = [int(round(base * menu_rng.lognormal(0.0, spread) / 10) * 10) for _ in range(8)]
+
+    count = 1 + int(rng.poisson(extra))
+
+    total = sum(menu[int(rng.integers(0, len(menu)))] for _ in range(count)) * level
+
+    return int(max(settings.min_amount.get(category, 100), round(total / 10) * 10))
+
+
+def _fuel_amount(persona: Persona, ts: datetime, rng: KeyedRandom) -> int:
+    """
+    Заправка: круглой суммой или литрами по цене литра на дату.
+    """
+
+    settings = params_module.active().amounts
+
+    if rng.random() < settings.fuel_round_share:
+        values = list(settings.fuel_round_amounts)
+        return int(values[int(rng.choice(len(values), p=list(settings.fuel_round_amounts.values())))])
+
+    price = settings.fuel_price[0][1]
+    for since, value in settings.fuel_price:
+        if ts >= datetime.fromisoformat(since):
+            price = value
+
+    median, sigma = settings.fuel_liters
+
+    liters = max(5.0, median * rng.lognormal(0.0, sigma) * max(0.6, min(1.6, (persona.true_income / 320_000) ** 0.2)))
+
+    return int(round(liters * price))
+
+
+def transit_fare(settlement: str, ts: datetime) -> int:
+    """
+    Тариф проезда поселения на дату: одна поездка — одна цена.
+    """
+
+    table = params_module.active().amounts.transit_fares
+
+    steps = table.get(settlement) or table[""]
+
+    fare = steps[0][1]
+
+    for since, value in steps:
+        if ts >= datetime.fromisoformat(since):
+            fare = value
+
+    return int(fare)
 
 
 __all__ = [
     "Choice",
+    "transit_fare",
     "ZONE_HOME",
     "ZONE_OTHER",
     "ZONE_WORK",

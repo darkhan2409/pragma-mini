@@ -254,6 +254,9 @@ class CardCreditState:
     accrued_interest: int = 0
     dpd: int = 0
     delinquency_marks: tuple = ()
+    # С какой выписки идёт текущая просрочка: dpd считается в днях
+    # от неё, а не +30 за каждую пропущенную выписку.
+    overdue_since: datetime | None = None
     closed: bool = False
 
     def due_for(self, month_index: int) -> int:

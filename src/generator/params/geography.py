@@ -97,13 +97,16 @@ class GeographyParams:
     # Транспортная структура: чем добираются.
     transport_mix: dict = field(
         default_factory=lambda: {
+            # Доля машины — до поправки на доход (population.car_income_elasticity):
+            # около 250 легковых на 1000 жителей (research.md), в селе без
+            # машины ездят попутками и маршрутками (taxi, transit).
             "metropolis": {"transit": 0.36, "taxi": 0.26, "car": 0.30, "micromobility": 0.08},
-            "major_city": {"transit": 0.32, "taxi": 0.24, "car": 0.38, "micromobility": 0.06},
-            "regional_centre": {"transit": 0.28, "taxi": 0.22, "car": 0.46, "micromobility": 0.04},
-            "industrial_town": {"transit": 0.24, "taxi": 0.18, "car": 0.56, "micromobility": 0.02},
-            "small_town": {"transit": 0.16, "taxi": 0.18, "car": 0.64, "micromobility": 0.02},
-            "district_centre": {"transit": 0.10, "taxi": 0.16, "car": 0.73, "micromobility": 0.01},
-            "rural": {"transit": 0.05, "taxi": 0.10, "car": 0.85, "micromobility": 0.00},
+            "major_city": {"transit": 0.34, "taxi": 0.24, "car": 0.36, "micromobility": 0.06},
+            "regional_centre": {"transit": 0.32, "taxi": 0.24, "car": 0.40, "micromobility": 0.04},
+            "industrial_town": {"transit": 0.30, "taxi": 0.23, "car": 0.45, "micromobility": 0.02},
+            "small_town": {"transit": 0.24, "taxi": 0.25, "car": 0.49, "micromobility": 0.02},
+            "district_centre": {"transit": 0.20, "taxi": 0.27, "car": 0.52, "micromobility": 0.01},
+            "rural": {"transit": 0.12, "taxi": 0.33, "car": 0.55, "micromobility": 0.00},
         }
     )
 
@@ -132,6 +135,30 @@ class GeographyParams:
     )
 
     home_country: str = "KZ"
+
+    # Куда едут внутри страны (синтетическое допущение по
+    # популярным направлениям: курорты Бурабай — Щучинск, Капшагай —
+    # Конаев, Каспий — Актау, паломничество — Туркестан).
+    domestic_destinations: dict = field(
+        default_factory=lambda: {
+            "Almaty": 0.22, "Astana": 0.16, "Shchuchinsk": 0.14, "Konaev": 0.12,
+            "Aktau": 0.09, "Shymkent": 0.09, "Turkistan": 0.10, "Taldykorgan": 0.08,
+        }
+    )
+
+    # Билет на поездку покупают за столько дней до неё; внутри
+    # страны часть летит самолётом, остальные едут поездом.
+    trip_ticket_lead_days: tuple = (7, 60)
+    domestic_flight_share: float = 0.45
+
+    # Категории, которые живут только дома: в поездке их нет
+    # (аудит 2026-11-05, context-03 — налоги и дорога на работу за
+    # границей).
+    home_only_categories: tuple = (
+        "government", "taxes", "fines", "utilities", "telecom", "internet", "education",
+        "car_service", "parking", "transit", "fuel", "kids", "furniture", "appliances",
+        "home_goods", "pets", "medical", "lab", "market", "micromobility",
+    )
 
     # Доля покупок в домашней зоне, рабочей и прочих.
     zone_share: dict = field(

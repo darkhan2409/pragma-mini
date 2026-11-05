@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -263,13 +264,19 @@ def _bills(persona: Persona, events: tuple) -> tuple:
         if rng.random() < 0.72:
             add("internet", "internet")
 
-    if persona.children > 0 and rng.random() < 0.45:
-        add("kindergarten", "kids")
+    # Детский сад платят учреждению образования, а не детскому
+    # магазину: прежде счёт уходил «Детскому миру» и Orchestra
+    # (аудит 2026-11-05, M5).
+    # Детсад — у родителей маленьких детей: прежде его платили 18%
+    # клиентов 55–64 лет (аудит 2026-11-05, persona-05). Розыгрыш
+    # остаётся, чтобы не сдвинуть следующие счета.
+    if persona.children > 0 and rng.random() < 0.45 and persona.age_at(start) < 45:
+        add("kindergarten", "education")
 
     # Ребёнок рождается внутри окна: счёт появляется позже.
     for event in events:
         if event.kind == "child_birth" and rng.random() < 0.35:
-            add("kindergarten", "kids", 1.0, event.ts + timedelta(days=int(rng.integers(120, 540))))
+            add("kindergarten", "education", 1.0, event.ts + timedelta(days=int(rng.integers(120, 540))))
 
     # Через этот банк клиент платит не все счета: тихий клиент,
     # для которого банк не основной, платит их в другом месте.
@@ -282,6 +289,22 @@ def _bills(persona: Persona, events: tuple) -> tuple:
     ]
 
     return tuple(bills)
+
+
+def brand_key(name: str | None) -> str:
+    """
+    Имя сети без шума терминальной строки: «ЯНДЕКСПЛЮС», «Яндекс
+    Плюс» и «PAYBOX*ЯНДЕКС ПЛЮС #1» — один сервис.
+    """
+
+    text = re.sub(r"#\d+", "", (name or "").upper())
+    text = text.split("*")[-1]
+    return re.sub(r"[^0-9A-ZА-ЯЁ]", "", text)
+
+
+def _tariff(table: dict, name: str | None):
+    key = brand_key(name)
+    return next((value for brand, value in table.items() if brand_key(brand) == key), None) if key else None
 
 
 def _subscriptions(persona: Persona, settlement: str) -> tuple:
@@ -355,6 +378,22 @@ def _subscriptions(persona: Persona, settlement: str) -> tuple:
                 amount * (1.0 + direction * item_rng.uniform(*settings.subscription_price_change))
             )
             amount_after = max(500, int(round(amount_after / 50) * 50))
+
+        # Сервис из прейскуранта: тариф и повышение — общие для всех
+        # клиентов, а не свои у каждого (розыгрыши выше остаются,
+        # чтобы не сдвигать атрибуты подписки).
+        tariff = _tariff(settings.subscription_tariffs, outlet.merchant_name)
+
+        if tariff:
+            amount = int(tariff["tiers"][int(item_rng.integers(0, len(tariff["tiers"])))])
+            raise_ = tariff.get("raise")
+            if raise_:
+                moment = datetime.fromisoformat(raise_[0])
+                change_month = cal.month_index(moment)
+                amount_after = int(round(amount * float(raise_[1]) / 10) * 10)
+            else:
+                change_month = None
+                amount_after = amount
 
         day_of_month = int(item_rng.integers(1, 28))
 
@@ -480,6 +519,20 @@ def build_habits(persona: Persona, events: tuple) -> Habits:
 
 
 def bill_amount(bill: Bill, ts: datetime, region: str, rng) -> int:
+
+    settings = params_module.active().amounts
+
+    if bill.kind in settings.fixed_tariff_bills:
+        # Тариф клиента: база, проиндексированная каждый январь после
+        # начала счёта, с окончанием на 90.
+        years = max(0, ts.year - bill.valid_from.year)
+        value = bill.base_amount * (1.0 + settings.tariff_january_indexation) ** years
+        return int(max(990, round(value / 100) * 100 - 10))
+
+    return _variable_bill_amount(bill, ts, region, rng)
+
+
+def _variable_bill_amount(bill: Bill, ts: datetime, region: str, rng) -> int:
 
     amount = bill.base_amount * rng.lognormal(0.0, bill.sigma)
 

@@ -23,7 +23,7 @@ class AmountParams:
             "fastfood": 3_200, "restaurant": 9_500, "coffee": 1_600, "delivery": 5_200,
             "pharmacy": 4_100, "medical": 18_000, "lab": 12_000,
             "fuel": 12_000, "car_service": 32_000, "parking": 700,
-            "taxi": 1_800, "transit": 200, "car_rental": 18_000, "micromobility": 500,
+            "taxi": 1_400, "transit": 200, "car_rental": 18_000, "micromobility": 500,
             "airline": 95_000, "railway": 12_000, "hotel": 42_000, "travel": 180_000,
             "clothing": 18_000, "shoes": 22_000, "home_goods": 14_000, "furniture": 85_000,
             "electronics": 95_000, "appliances": 120_000,
@@ -95,7 +95,10 @@ class AmountParams:
     # Сколько денег на счёте клиент считает нормальным запасом:
     # ниже этого он заметно сбавляет траты.
     comfortable_balance_share: float = 0.10
-    empty_wallet_floor: float = 0.06
+    # Пол частоты при пустом счёте: человек без денег на карте всё же
+    # изредка платит ею (мелочь, остаток). Прежде 0.06 вместе с ценой
+    # давал провал трат перед зарплатой (аудит 2026-11-05, C3).
+    empty_wallet_floor: float = 0.15
 
     # Дешёвое покупают чаще дорогого. Вес категории в выборе
     # уменьшается с размером её корзины: кофе берут каждый день,
@@ -135,6 +138,106 @@ class AmountParams:
     reference_basket: int = 5_000
     frequency_from_basket: float = 0.62
     amount_bounds: tuple = (100, 8_000_000)
+
+    # --- Цена отдельно от частоты (аудит 2026-11-05, C3) ---
+    #
+    # Сумма покупки зависит от точки, корзины и клиента, но не от дня:
+    # зарплатный цикл, остаток и праздник меняют частоту покупок, а не
+    # цену чашки кофе. Прежде дневной множитель бюджета умножал и
+    # цену: пик ровно 100 ₸ (8% покупок), кофе 220–970 ₸.
+
+    # Меню точки: цена позиции (база в начале 2024 г.), её разброс по
+    # сетям и число дополнительных позиций в чеке (Пуассон). Позиции —
+    # общие у сети. Ориентиры research.md: кофе около 1 310 ₸, комбо
+    # фастфуда 3 400–4 000 ₸, кино 2 132 → 2 365 ₸.
+    menu_items: dict = field(
+        default_factory=lambda: {
+            "coffee": (1_100, 0.30, 0.30),
+            "fastfood": (1_500, 0.35, 0.90),
+            "cinema": (2_200, 0.18, 0.80),
+        }
+    )
+
+    # Шаг цены по категориям: товары — «красивые» цены …90 / …990,
+    # корзины и счета-итоги — любое целое, услуги — по прейскуранту.
+    charm_categories: tuple = (
+        "clothing", "shoes", "electronics", "appliances", "furniture", "home_goods", "books",
+        "sports", "kids", "cosmetics", "marketplace", "ecom",
+    )
+    price_step: dict = field(
+        default_factory=lambda: {
+            "gambling": 500, "charity": 500, "beauty": 500, "education": 1_000, "travel": 1_000,
+            "medical": 100, "lab": 100, "hotel": 100, "car_rental": 100, "entertainment": 100,
+            "financial": 100, "government": 10, "airline": 10, "railway": 10, "parking": 50,
+            "car_service": 100,
+        }
+    )
+    min_amount: dict = field(
+        default_factory=lambda: {"coffee": 400, "fastfood": 700, "cinema": 1_200, "parking": 100,
+                                 "micromobility": 150, "taxi": 600, "convenience": 150}
+    )
+
+    # Заправка: круглой суммой («на 5 000») или литрами по цене АИ-92
+    # на дату (research.md: 202 → 231–239 ₸/л в 2024–2025).
+    fuel_round_share: float = 0.55
+    fuel_round_amounts: dict = field(
+        default_factory=lambda: {3_000: 0.10, 5_000: 0.30, 10_000: 0.33, 15_000: 0.12, 20_000: 0.15}
+    )
+    fuel_liters: tuple = (28.0, 0.45)
+    fuel_price: tuple = (
+        ("2018-01-01", 180), ("2024-01-01", 205), ("2024-07-01", 210), ("2025-01-01", 216),
+        ("2025-07-01", 226), ("2025-10-01", 235), ("2026-01-01", 240),
+    )
+
+    # Инфляция — индекс цен по группам ИПЦ, годовой темп по годам,
+    # месячное начисление; база — январь 2024 (research.md: 2024 —
+    # продукты 5.5%, услуги 13.3%, ЖКУ 14.2%; 2025 — 12.3%, продукты
+    # 13.5%; 2026 — около 9%). Прочие темпы — синтетическое
+    # приближение. Прежде цены за два года не менялись (аудит, M7).
+    inflation: dict = field(
+        default_factory=lambda: {
+            "food": {2023: 0.10, 2024: 0.055, 2025: 0.135, 2026: 0.09},
+            "services": {2023: 0.12, 2024: 0.133, 2025: 0.12, 2026: 0.10},
+            "goods": {2023: 0.09, 2024: 0.075, 2025: 0.10, 2026: 0.08},
+            "utilities": {2023: 0.12, 2024: 0.142, 2025: 0.15, 2026: 0.10},
+        }
+    )
+    inflation_groups: dict = field(
+        default_factory=lambda: {
+            "food": ("grocery", "market", "convenience", "coffee", "fastfood", "restaurant", "delivery", "tobacco"),
+            "services": ("taxi", "parking", "car_rental", "micromobility", "airline", "railway", "hotel",
+                         "travel", "education", "entertainment", "cinema", "sports", "beauty", "medical",
+                         "lab", "car_service", "financial", "kindergarten"),
+            "utilities": ("utilities",),
+        }
+    )
+
+    # Комиссия банка за конвертацию валютной покупки к курсу НБК.
+    fx_margin: float = 0.015
+
+    # Проезд — тариф города по датам, ₸ за поездку при оплате картой:
+    # Алматы 120 с 03.08.2024, Астана 110 с 01.08.2024 (research.md);
+    # прежние тарифы и остальные города — синтетическое приближение.
+    # Прежде проезд стоил непрерывно от 110 до 2 770 ₸ (аудит
+    # 2026-11-05, M3).
+    transit_fares: dict = field(
+        default_factory=lambda: {
+            "Almaty": (("2018-01-01", 80), ("2024-08-03", 120)),
+            "Astana": (("2018-01-01", 90), ("2024-08-01", 110)),
+            "": (("2018-01-01", 90), ("2025-01-01", 110)),
+        }
+    )
+
+    # Штрафы — в МРП года (административный кодекс РК): размер в
+    # МРП и его вес (синтетическое допущение по частым нарушениям).
+    mrp_by_year: dict = field(default_factory=lambda: {2024: 3692, 2025: 3932, 2026: 4325})
+    fine_mrp: dict = field(default_factory=lambda: {1: 0.10, 2: 0.10, 3: 0.20, 5: 0.25, 10: 0.20, 15: 0.08, 20: 0.07})
+
+    # Связь и интернет — фиксированный тариф клиента (оканчивается
+    # на 90) с индексацией провайдера в январе. Прежде сумма была
+    # новой каждый месяц, CV 0.25 и 0.19 (аудит 2026-11-05, M3).
+    fixed_tariff_bills: tuple = ("telecom", "internet")
+    tariff_january_indexation: float = 0.08
 
     # Регулярные счета.
     bill_medians: dict = field(
@@ -180,3 +283,27 @@ class AmountParams:
         default_factory=lambda: {"start": 12, "stop": 14, "change": 12}
     )
     subscription_price_change: tuple = (0.08, 0.30)
+
+    # Прейскурант сервисов подписки, ₸ в месяц: тарифы одни для всех
+    # клиентов, повышение — одной датой у сервиса (дата, множитель).
+    # Цены — синтетическое приближение к казахстанским тарифам
+    # 2024–2025 (уверенность низкая: официальных прайсов research не
+    # нашёл). Прежде цена разыгрывалась у каждого клиента: у сервиса
+    # было 114–151 разная цена, NETFLIX от 550 до 10 650 ₸ (аудит
+    # 2026-11-05, C1).
+    subscription_tariffs: dict = field(
+        default_factory=lambda: {
+            "ЯНДЕКС ПЛЮС": {"tiers": (1290, 1990), "raise": ("2025-04-01", 1.16)},
+            "КИНОПОИСК": {"tiers": (1290, 1990), "raise": ("2025-04-01", 1.16)},
+            "ЯНДЕКС МУЗЫКА": {"tiers": (990,), "raise": ("2025-04-01", 1.10)},
+            "SPOTIFY": {"tiers": (1290, 1690, 2090), "raise": ("2025-07-01", 1.08)},
+            "YOUTUBE PREMIUM": {"tiers": (1690, 2490), "raise": None},
+            "NETFLIX": {"tiers": (3490, 4990, 6490), "raise": ("2025-01-01", 1.10)},
+            "APPLE MUSIC": {"tiers": (1190, 1790), "raise": None},
+            "APPLE TV": {"tiers": (1790,), "raise": None},
+            "MEGOGO": {"tiers": (1490, 2990), "raise": ("2025-02-01", 1.10)},
+            "IVI": {"tiers": (1190,), "raise": None},
+            "APP STORE": {"tiers": (490, 990, 1990, 4990), "raise": None},
+            "GOOGLE PLAY": {"tiers": (490, 990, 1990, 4990), "raise": None},
+        }
+    )

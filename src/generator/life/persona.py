@@ -83,6 +83,14 @@ class Persona:
     # --- скрытый портрет ---
     traits: Traits
 
+    # --- признаки участия (волна 4 аудита 2026-11-05) ---
+    # Без признака категории трат нет вовсе: некурящий не покупает
+    # табак, не играющий не делает ставок.
+    smokes: bool = False
+    gambles: bool = False
+    scooter: bool = False
+    cinema: bool = True
+
     # --------------------------------------------------------
 
     def age_at(self, ts: datetime) -> int:
@@ -95,8 +103,12 @@ class Persona:
     def age(self) -> int:
         return self.age_at(config.HISTORY_START)
 
+    @property
+    def pension_age(self) -> int:
+        return config.PENSION_AGE_BY_GENDER.get(self.gender, PENSION_AGE)
+
     def is_pensioner_at(self, ts: datetime) -> bool:
-        return self.income_type == "pensioner" or self.age_at(ts) >= PENSION_AGE
+        return self.income_type == "pensioner" or self.age_at(ts) >= self.pension_age
 
     def relationship_months_at(self, ts: datetime) -> int:
         months = (ts.year - self.relationship_start.year) * 12 + (
@@ -145,7 +157,12 @@ def draw_persona(client_ordinal: int) -> Persona:
     # --- география ---
 
     places = geography.settlements()
-    weights = [item.population_weight for item in places]
+    weights = [
+        item.population_weight
+        * (population.rural_weight_factor if item.settlement_type == "rural" else 1.0)
+        * population.region_weight_factor.get(item.region, 1.0)
+        for item in places
+    ]
     total_weight = sum(weights)
 
     draw = float(rng.random()) * total_weight
@@ -199,12 +216,31 @@ def draw_persona(client_ordinal: int) -> Persona:
     # --- образование и жильё ---
 
     education = _weighted(rng, population.education_by_settlement_type[settlement.settlement_type])
+
+    # Высшее к 22 годам ещё не получено, учёная степень — не раньше 26:
+    # прежде высшее было у 36% клиентов 20–21 года (аудит 2026-11-05,
+    # persona-03). Розыгрыш тот же, меняется только недостижимое.
+    if age < 22 and education in ("higher", "academic_degree"):
+        education = "incomplete_higher"
+    elif age < 26 and education == "academic_degree":
+        education = "higher"
+
     # С родителями живут молодые: с with_parents_until_age вес этого
     # варианта почти обнуляется. Розыгрыш тот же, меняются веса.
     housing_weights = dict(population.housing_by_settlement_type[settlement.settlement_type])
 
     if age >= population.with_parents_until_age:
         housing_weights["with_parents"] *= population.with_parents_after_age_factor
+
+    # Своё жильё к 20 годам — редкость, аренда после 70 — тоже
+    # (persona-20: своё жильё у 60% 20–21-летних).
+    if age < 25:
+        for name in housing_weights:
+            if name.startswith("own"):
+                housing_weights[name] *= 0.3
+        housing_weights["with_parents"] = housing_weights.get("with_parents", 0.0) * 2.5
+    elif age >= 70 and "rented" in housing_weights:
+        housing_weights["rented"] *= 0.4
 
     housing_type = _weighted(rng, housing_weights)
 
@@ -218,8 +254,18 @@ def draw_persona(client_ordinal: int) -> Persona:
 
     income_type = _weighted(rng, income_weights)
 
+    industry_weights = dict(population.industry_weights)
+
+    for name, (regions, inside, outside) in population.industry_region_factor.items():
+        if name in industry_weights:
+            industry_weights[name] *= inside if settlement.region in regions else outside
+
+    if income_type == "state_employee":
+        industry_weights = {name: weight for name, weight in industry_weights.items()
+                            if name in population.state_industries}
+
     industry = (
-        _weighted(rng, population.industry_weights)
+        _weighted(rng, industry_weights)
         if income_type in population.industry_income_types
         else None
     )
@@ -263,7 +309,15 @@ def draw_persona(client_ordinal: int) -> Persona:
         * population.income_education_factor[education]
     )
 
-    raw_income = float(rng.lognormal(mean=math.log(median * scale), sigma=population.income_sigma))
+    scale *= population.income_region_factor.get(settlement.region, 1.0)
+    scale *= population.income_gender_factor.get(gender, 1.0)
+
+    sigma = population.income_sigma
+
+    if income_type == "pensioner":
+        median, scale, sigma = population.pension_income_median, 1.0, population.pension_income_sigma
+
+    raw_income = float(rng.lognormal(mean=math.log(median * scale), sigma=sigma))
 
     low_bound, high_bound = population.income_bounds
 
@@ -336,6 +390,25 @@ def draw_persona(client_ordinal: int) -> Persona:
 
     night_segment = bool(rng.random() < settings.activity.night_segment_share)
 
+    # Признаки участия и машина — своим потоком: прежние розыгрыши
+    # персоны не сдвигаются.
+    habit_rng = keyed_rng(NS_PERSONA, client_ordinal, 91)
+
+    def habit(name: str) -> bool:
+        share = population.habit_shares[name][gender]
+        factor = 1.0
+        for since, value in population.habit_age_factor[name]:
+            if age >= since:
+                factor = value
+        return bool(habit_rng.random() < share * factor)
+
+    smokes, gambles, scooter, cinema = habit("smokes"), habit("gambles"), habit("scooter"), habit("cinema")
+
+    mix = dict(settings.geography.transport_mix[settlement.settlement_type])
+    if "car" in mix:
+        mix["car"] *= min(1.8, max(0.35, (true_income / 320_000) ** population.car_income_elasticity))
+    transport = _weighted(habit_rng, mix)
+
     traits = draw_traits(
         client_ordinal=client_ordinal,
         life_stage=life_stage,
@@ -379,6 +452,10 @@ def draw_persona(client_ordinal: int) -> Persona:
         activity_mode=activity_mode,
         night_segment=night_segment,
         traits=traits,
+        smokes=smokes,
+        gambles=gambles,
+        scooter=scooter,
+        cinema=cinema,
     )
 
 

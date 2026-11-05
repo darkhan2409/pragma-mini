@@ -329,6 +329,7 @@ def apply_card_payment(state: "CardCreditState", amount: int, month_index: int) 
     if state.outstanding <= 0:
         state.dpd = 0
         state.delinquency_marks = ()
+        state.overdue_since = None
 
     return paid
 

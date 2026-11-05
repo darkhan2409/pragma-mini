@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from datetime import datetime, timedelta
 
 from . import params as params_module
@@ -147,7 +149,13 @@ def _on_installment_due(sim, state: ClientState, ts: datetime, payload: dict) ->
 
     if loan.autopay:
         owed = max(int(item.amount), loan_rules.arrears_amount(loan))
-        repay_loan(state, ts + timedelta(minutes=5), loan, owed, "system")
+        # Автосписание — в утреннем окне обработки банка, свой час у
+        # договора и месяца. Прежде оно шло в 00:05, и пополнение под
+        # него ложилось ровно на 00:00:00 (аудит 2026-11-05, M22).
+        batch = keyed_rng(NS_REPAY, state.ordinal, stable_hash(loan.contract_id) % 9973, ts.toordinal(), 7)
+        moment = ts.replace(hour=int(batch.integers(9, 14)), minute=int(batch.integers(0, 60)),
+                            second=int(batch.integers(0, 60)))
+        repay_loan(state, moment, loan, owed, "system")
 
 
 def _payment_sources(state: ClientState, ts: datetime, amount: int) -> list:
@@ -235,6 +243,16 @@ def _topup_before_payment(state: ClientState, ts: datetime, amount: int, rng) ->
     if shortfall <= 0:
         return False
 
+    # Человек докладывает круглую сумму с запасом, а не недостающую до
+    # тенге: наличные — купюрами, перевод — до тысяч. Прежде после
+    # платежа оставался ровно ноль в 42–54% случаев (аудит
+    # 2026-11-05, M6).
+    step = 1_000 if shortfall < 20_000 else 5_000
+    need = shortfall
+    rounded = int(math.ceil(shortfall * (1.0 + 0.25 * rng.random()) / step) * step)
+
+    moment = _topup_moment(ts, rng)
+
     # Деньги берут откуда есть: со счёта в другом банке или
     # наличными через банкомат.
     sources = state.ledger.hidden_sources(shortfall)
@@ -243,15 +261,17 @@ def _topup_before_payment(state: ClientState, ts: datetime, amount: int, rng) ->
         # Наличных и другого банка не хватило: остаётся вклад, если
         # его условия разрешают снятие. Это отдельная операция с
         # проверкой условий, а не платёж со вклада напрямую.
-        return _withdraw_from_deposit(state, cal.earlier_same_day(ts, timedelta(minutes=12)), account, shortfall)
+        return _withdraw_from_deposit(state, moment, account, shortfall)
 
     hidden = sources[0]
 
     from_cash = hidden.account_id == state.ledger.cash_id
 
+    shortfall = max(need, min(rounded, int(hidden.balance)))
+
     _emit_money(
         state,
-        cal.earlier_same_day(ts, timedelta(minutes=12)),
+        moment,
         "cash_deposit" if from_cash else "transfer_in",
         account.account_id,
         shortfall,
@@ -275,16 +295,38 @@ def _topup_before_payment(state: ClientState, ts: datetime, amount: int, rng) ->
     return True
 
 
+def _topup_moment(ts: datetime, rng) -> datetime:
+    """
+    Пополнение под платёж — за 1–4 часа до списания, днём того же
+    дня (раньше 07:00 — только если само списание раньше).
+    """
+
+    earliest = ts.replace(hour=7, minute=0, second=0, microsecond=0)
+
+    moment = ts - timedelta(minutes=int(rng.integers(60, 240)), seconds=int(rng.integers(0, 60)))
+
+    if moment < earliest:
+        moment = max(earliest, ts - timedelta(minutes=10)) if ts > earliest else cal.earlier_same_day(ts, timedelta(minutes=12))
+
+    return moment
+
+
 def _decline_payment(state: ClientState, ts: datetime, loan, item, amount: int) -> None:
     """
     Неудачное автосписание: банк попробовал и не смог.
+
+    Списывал он с основного карточного счёта — отказ называет его,
+    как и прошедший платёж. Без счёта отказ отличался от платежа
+    набором полей (аудит 2026-11-05, money-20).
     """
+
+    account = state.primary_card_account(ts)
 
     _emit_money(
         state,
         ts,
         "loan_payment",
-        None,
+        account.account_id if account is not None else None,
         max(1, int(amount)),
         "debit",
         "external:none",
@@ -326,6 +368,12 @@ def repay_loan(
         return
 
     settings = params_module.active().products
+
+    # Был ли договор в просрочке ДО платежа. finance.loans.apply
+    # пересчитывает dpd прямо при оплате, и проверка «dpd > 0» после
+    # неё уже видела ноль: у кредитов не было ни одного
+    # arrears_cleared (аудит 2026-11-05, M13).
+    delinquent = loan.dpd > 0 or bool(loan.delinquency_marks)
 
     sources = _payment_sources(state, ts, amount)
 
@@ -434,7 +482,7 @@ def repay_loan(
             )
         )
 
-    if loan.dpd > 0 and loan_rules.arrears_amount(loan) == 0:
+    if delinquent and loan_rules.arrears_amount(loan) == 0:
         _clear_arrears(state, ts, loan)
 
 
@@ -531,6 +579,13 @@ def _on_loan_check(sim, state: ClientState, ts: datetime, payload: dict) -> None
     dpd = loan_rules.days_past_due(loan, ts)
 
     loan.dpd = dpd
+
+    # Безнадёжный долг банк продаёт коллектору: договор закрывается,
+    # а не молчит до конца окна после последнего срока графика
+    # (70 договоров, 21 млн ₸; аудит 2026-11-05, M13).
+    if dpd >= settings.debt_sale_dpd:
+        close_loan(state, ts, loan, early=False, reason="debt_sold")
+        return
 
     milestone = loan_rules.milestone_reached(loan, dpd)
 

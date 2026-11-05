@@ -32,11 +32,12 @@ from .rng import (
     NS_CONSENT,
     NS_DEPOSIT,
     NS_DEPOSIT_CLOSE,
+    NS_CLOSURE,
     NS_LEDGER,
     keyed_rng,
     stable_hash,
 )
-from .simulate import ClientState, CommunityResult
+from .simulate import ClientState, CommunityResult, _transfer_id
 from .world.dictionaries import MCC_CASH, MCC_TRANSFER
 
 
@@ -79,6 +80,113 @@ def _expire_cards(sim, state: ClientState, day: datetime) -> None:
         moment = day.replace(hour=23, minute=40 + int(stable_hash(card.card_id) % 10))
 
         _reissue_card(state, card, moment, reason="expiry")
+
+
+def _mature_contracts(state: ClientState, day: datetime, month: datetime) -> None:
+    """
+    Срок полиса и облигаций. Полис продлевается с новой премией или
+    закрывается, облигации гасятся номиналом с купоном за срок на
+    карту клиента. Прежде такие договоры не закрывались никогда
+    (аудит 2026-11-05, M10).
+    """
+
+    settings = params_module.active().products
+
+    for contract in list(state.open_contracts(day)):
+
+        family = contract.product_family
+
+        if family not in ("insurance", "bonds") or not contract.term:
+            continue
+
+        # Ближайшая годовщина срока, не раньше этого месяца:
+        # продлённый полис доходит до неё снова через срок.
+        cycles = 1
+        due = cal.add_months(contract.opened_at, int(contract.term))
+        while due < month:
+            cycles += 1
+            due = cal.add_months(contract.opened_at, int(contract.term) * cycles)
+
+        if due > day.replace(hour=23, minute=59):
+            continue
+
+        ts = day.replace(hour=23, minute=30, second=0, microsecond=0)
+
+        target = state.primary_card_account(ts)
+
+        amount = int(contract.amount_or_limit or 0)
+
+        if family == "bonds":
+
+            if target is None:
+                # Гасить некуда: облигации ждут карты.
+                continue
+
+            payout = int(round(amount * (1.0 + float(contract.rate or 0.0) * int(contract.term) / 12.0)))
+
+            _emit_money(
+                state, ts, "transfer_in", target.account_id, payout, "credit", COUNTERPART_BANK,
+                {
+                    "channel": "system",
+                    "contract_id": contract.contract_id,
+                    "counterparty": "Securities account",
+                    "reason": "bond_redemption",
+                    "mcc": MCC_TRANSFER,
+                    "merchant_country": "KZ",
+                    "transfer_id": _transfer_id(
+                        state.client_id, ts, stable_hash(contract.contract_id) % 10 ** 6, scope="bond_redemption"
+                    ),
+                },
+            )
+
+        else:
+
+            rng = keyed_rng(NS_CLOSURE, state.ordinal, day.toordinal(), stable_hash(contract.contract_id) % 9973)
+
+            renew = (
+                target is not None
+                and rng.random() < settings.insurance_renewal_share
+                and state.ledger.can_debit(target.account_id, amount, ts)
+            )
+
+            if renew:
+
+                state.emit(
+                    state.factory.make(
+                        "product_renewed",
+                        ts,
+                        {
+                            "product_id": contract.product_id,
+                            "contract_id": contract.contract_id,
+                            "account_id": target.account_id,
+                            "amount_or_limit": amount,
+                            "term": contract.term,
+                            "rate": contract.rate,
+                            "reason": "rollover",
+                        },
+                    )
+                )
+
+                _emit_money(
+                    state, ts + timedelta(minutes=3), "purchase", target.account_id, amount, "debit",
+                    COUNTERPART_BANK,
+                    {
+                        "channel": "system",
+                        "contract_id": contract.contract_id,
+                        "reason": "insurance_premium",
+                        "mcc": "6300",
+                        "merchant_country": "KZ",
+                        "is_online": True,
+                        "is_subscription": False,
+                    },
+                )
+
+                continue
+
+        contract.status = CONTRACT_CLOSED
+        contract.closed_at = ts
+
+        emit_product_closed(state, ts, contract, "matured")
 
 
 def _close_deposits_early(sim, state: ClientState, day: datetime) -> None:
@@ -196,10 +304,12 @@ def _card_statement(sim, state: ClientState, day: datetime, month: datetime) -> 
                     "reason": "periodic_contract_rule",
                     "merchant_country": "KZ",
                 },
+                # Проценты банк начисляет и сверх лимита. Прежде их
+                # «отклоняли», и 58% всех fee_charge были отказами
+                # начисления процентов (аудит 2026-11-05, money-05).
+                overlimit=True,
             )
 
-            # Отклонённое списание в долг не ложится: иначе клиент
-            # платил бы проценты, которых нет в проводках.
             if charged.payload.get("status") == "approved":
                 credit.accrued_interest += interest
 
@@ -229,18 +339,23 @@ def _card_statement(sim, state: ClientState, day: datetime, month: datetime) -> 
 
         paid = _pay_card(sim, state, day, credit, contract_id, payment, due_event, month_index)
 
-        if paid:
+        # Просрочку снимает только полный минимальный платёж.
+        # Частичный уменьшает долг, но выписка остаётся пропущенной:
+        # прежде 20% минимума снимали просрочку любой глубины (174 из
+        # 174 случаев, до DPD 660; аудит 2026-11-05, money-03).
+        if paid >= payment:
             _card_arrears_cleared(state, day, credit, contract_id)
             continue
 
-        _card_missed(state, day, credit, contract_id, payment, due_event)
+        _card_missed(state, day, credit, contract_id, payment, due_event, paid or None)
 
 
-def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_event, month_index) -> bool:
+def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_event, month_index) -> int:
     """
     Платёж по карте: перевод со своего счёта на счёт карты.
     Обе стороны помечены Own account, поэтому деньги клиента не
-    исчезают и не появляются.
+    исчезают и не появляются. Возвращает внесённую сумму (0 —
+    платежа не было).
     """
 
     rng = keyed_rng(NS_CARD_CREDIT, state.ordinal, day.toordinal(), stable_hash(contract_id) % 9973)
@@ -254,7 +369,7 @@ def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_ev
     band = "high" if discipline > high else "mid" if discipline > low else "low"
 
     if rng.random() >= settings.on_time_payment_probability[band]:
-        return False
+        return 0
 
     # Момент списания по выписке. Счета и суммы выбираются по
     # остатку ИМЕННО НА ЭТОТ МОМЕНТ: выписка закрывается в конце
@@ -321,7 +436,7 @@ def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_ev
             sources = own_sources(payment)
 
     if not sources or payment <= 0:
-        return False
+        return 0
 
     source = sources[0]
 
@@ -337,14 +452,14 @@ def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_ev
         # всё ещё частичный платёж по правилам продукта. Ниже
         # порога выписка считается пропущенной.
         if capacity <= 0 or capacity < settings.partial_payment_min_share * minimum:
-            return False
+            return 0
 
         payment = int(capacity)
 
         sources = own_sources(payment)
 
         if not sources:
-            return False
+            return 0
 
         source = sources[0]
 
@@ -372,7 +487,7 @@ def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_ev
     # отказа быть не может — иначе долг по карте уменьшался бы
     # без движения денег, а выписка считалась бы закрытой.
     if paid.payload.get("status") != "approved":
-        return False
+        return 0
 
     _emit_money(
         state,
@@ -393,12 +508,12 @@ def _pay_card(sim, state: ClientState, day, credit, contract_id, payment, due_ev
         post=False,
     )
 
-    _card_paid(state, day, moment, credit, contract_id, payment, month_index)
+    _card_paid(state, day, moment, credit, contract_id, payment, month_index, minimum)
 
-    return True
+    return payment
 
 
-def _pay_card_from_outside(state: ClientState, day, moment, credit, contract_id, minimum, month_index) -> bool:
+def _pay_card_from_outside(state: ClientState, day, moment, credit, contract_id, minimum, month_index) -> int:
     """
     Выписка по карте без своего счёта в банке: деньги приходят на
     счёт карты из другого банка или наличными. Не хватает на
@@ -420,7 +535,7 @@ def _pay_card_from_outside(state: ClientState, day, moment, credit, contract_id,
         )
 
         if fullest.balance <= 0 or fullest.balance < settings.partial_payment_min_share * minimum:
-            return False
+            return 0
 
         payment = int(fullest.balance)
         sources = [fullest]
@@ -447,12 +562,12 @@ def _pay_card_from_outside(state: ClientState, day, moment, credit, contract_id,
         },
     )
 
-    _card_paid(state, day, moment, credit, contract_id, payment, month_index)
+    _card_paid(state, day, moment, credit, contract_id, payment, month_index, minimum)
 
-    return True
+    return payment
 
 
-def _card_paid(state: ClientState, day, moment, credit, contract_id, payment, month_index) -> None:
+def _card_paid(state: ClientState, day, moment, credit, contract_id, payment, month_index, minimum) -> None:
     """
     Деньги легли на счёт карты: долг гасится, исполнение записано.
     """
@@ -466,7 +581,7 @@ def _card_paid(state: ClientState, day, moment, credit, contract_id, payment, mo
             {
                 "contract_id": contract_id,
                 "installment_no": None,
-                "amount_due": payment,
+                "amount_due": minimum,
                 "amount_paid": applied,
                 "principal_outstanding": credit.outstanding,
                 "days_past_due": 0,
@@ -477,14 +592,21 @@ def _card_paid(state: ClientState, day, moment, credit, contract_id, payment, mo
     )
 
 
-def _card_missed(state: ClientState, day, credit, contract_id, payment, due_event) -> None:
+def _card_missed(state: ClientState, day, credit, contract_id, payment, due_event, paid=None) -> None:
     """
-    Неоплаченная выписка: пропуск, рост просрочки и вехи.
+    Неоплаченная (или оплаченная не полностью) выписка: пропуск,
+    просрочка в днях от первой пропущенной выписки и все пройденные
+    вехи. Прежде просрочка росла ступенями по 30 за выписку, а вехи
+    регистрировались по одной и отставали на выписку (аудит
+    2026-11-05, money-04).
     """
 
     settings = params_module.active().products
 
-    credit.dpd += 30
+    if credit.overdue_since is None:
+        credit.overdue_since = day
+
+    credit.dpd = (day - credit.overdue_since).days + 1
 
     state.emit(
         state.factory.make(
@@ -494,7 +616,7 @@ def _card_missed(state: ClientState, day, credit, contract_id, payment, due_even
                 "contract_id": contract_id,
                 "installment_no": None,
                 "amount_due": payment,
-                "amount_paid": None,
+                "amount_paid": paid,
                 "principal_outstanding": credit.outstanding,
                 "days_past_due": credit.dpd,
                 "due_date": day.date().isoformat(),
@@ -527,8 +649,6 @@ def _card_missed(state: ClientState, day, credit, contract_id, payment, due_even
             )
         )
 
-        break
-
 
 def _card_arrears_cleared(state: ClientState, day, credit, contract_id) -> None:
 
@@ -554,6 +674,7 @@ def _card_arrears_cleared(state: ClientState, day, credit, contract_id) -> None:
 
     credit.dpd = 0
     credit.delinquency_marks = ()
+    credit.overdue_since = None
 
 
 def _sweep_bills(sim, state: ClientState, ts: datetime, payload: dict) -> None:
@@ -614,6 +735,12 @@ def month_end(sim, state: ClientState, day: datetime) -> None:
             continue
 
         if state.ledger.get(deposit.account_id) is None:
+            continue
+
+        # Вклад, открытый уже после момента начисления, процентов за
+        # этот месяц не получает (аудит 2026-11-05, links-10).
+        contract = state.contracts.get(contract_id)
+        if contract is not None and contract.opened_at > ts:
             continue
 
         _credit_deposit_interest(state, ts, deposit, month)
@@ -678,7 +805,10 @@ def month_end(sim, state: ClientState, day: datetime) -> None:
 
     threshold = 0.08 if silent_month else 0.35
 
-    for account in state.ledger.visible_accounts(day):
+    # Открытость счёта — на момент снимка, а не на начало дня:
+    # закрытый днём счёт снимка уже не получает (773 случая; аудит
+    # 2026-11-05, links-10).
+    for account in state.ledger.visible_accounts(ts.replace(minute=55)):
 
         if account.account_id not in moved and snapshot_rng.random() >= threshold:
             continue
@@ -699,6 +829,7 @@ def month_end(sim, state: ClientState, day: datetime) -> None:
         )
 
     _card_statement(sim, state, day, month)
+    _mature_contracts(state, day, month)
     _expire_cards(sim, state, day)
     _close_deposits_early(sim, state, day)
     _withdraw_consent(state, day)
@@ -828,6 +959,16 @@ def _close_deposit(state: ClientState, ts: datetime, deposit, early: bool = Fals
         return
 
     reason = "early_closure" if early else "matured"
+
+    target = state.primary_card_account(ts)
+
+    # Остаток уходит на карту клиента. Карты нет — вклад не
+    # закрывается: закрытый договор с деньгами внутри и без выплаты
+    # терял деньги (122 вклада, 221 млн ₸; аудит 2026-11-05, M11).
+    # Досрочно без карты не закрывают вовсе, по сроку вклад ждёт
+    # карты и проверяется в следующем месяце.
+    if target is None and account.balance > 0:
+        return
 
     if early:
 

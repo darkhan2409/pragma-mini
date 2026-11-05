@@ -185,6 +185,14 @@ NS_EMPLOYMENT = 53
 # Отношения клиента с банком (behaviour/engagement). Номер 7
 # (NS_LIFECYCLE) принадлежал плану пауз и больше не используется.
 NS_ENGAGEMENT = 54
+# Прогрев трат за 30 дней до окна (engine._warm_spend).
+NS_WARM_SPEND = 55
+# Ставка кредита внутри диапазона каталога (simulate._loan_rate).
+NS_LOAN_RATE = 56
+# Поездка: страна, город, билет (life/events, план отпуска).
+NS_TRIP = 57
+# Поставщик счёта клиента (engine._bill_provider).
+NS_BILL_PROVIDER = 58
 
 
 # ============================================================

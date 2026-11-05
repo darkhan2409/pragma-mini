@@ -143,7 +143,7 @@ def build_streams(persona: Persona, events: tuple) -> tuple:
         born = persona.birth_date
 
         turns = born.replace(
-            year=born.year + PENSION_AGE,
+            year=born.year + persona.pension_age,
             day=28 if (born.month, born.day) == (2, 29) else born.day,
         )
 
@@ -383,6 +383,25 @@ def _indexation_month(stream: IncomeStream) -> int:
     return 1
 
 
+def _bonus_moment(stream, day: datetime, rng) -> datetime:
+    """
+    Премия — в рабочий день, во время реестра работодателя. Прежде
+    100% премий приходили ровно в 12:00:00 или 11:00:00, а годовую
+    все получали 26 декабря (аудит 2026-11-05, M8).
+    """
+
+    settings = params_module.active().income
+
+    day = _shift_for_calendar(day)
+
+    payer = keyed_rng(NS_INCOME, stable_hash(stream.payer, "bonus", cal.month_index(day)) % (2 ** 31), 12)
+
+    batch = day.replace(hour=int(payer.integers(*settings.payout_hour_range)), minute=int(payer.integers(0, 60)),
+                        second=0, microsecond=0)
+
+    return batch + timedelta(seconds=int(rng.integers(0, 240)))
+
+
 def _shift_for_calendar(planned: datetime) -> datetime:
 
     settings = params_module.active().income
@@ -518,42 +537,63 @@ def payouts(persona: Persona, streams: tuple, stress_episodes: tuple) -> tuple:
                 stress = level_at(stress_episodes, planned)
 
                 weights = dict(settings.payout_outcome)
-                weights["late"] += settings.stress_late_boost * stress
-                weights["skipped"] += settings.stress_skip_boost * stress * stress
-                weights["partial"] += settings.stress_partial_boost * stress
-                weights["on_time"] *= discipline_of_payer
 
-                outcome = rng.weighted(weights)
+                if employer:
+                    # Реестр зарплаты общий у работодателя: срок,
+                    # задержка и частичная выплата — его, а не стресс и
+                    # дисциплина сотрудника. Прежде у коллег в один
+                    # день выплаты разошлись на часы, а опаздывали 27%
+                    # выплат (аудит 2026-11-05, M8). Работодатель не
+                    # «пропускает» месяц: долг он выплачивает задержкой.
+                    weights["late"] += weights.pop("skipped")
+                    outcome = calendar_rng.weighted(weights)
+                else:
+                    weights["late"] += settings.stress_late_boost * stress
+                    weights["skipped"] += settings.stress_skip_boost * stress * stress
+                    weights["partial"] += settings.stress_partial_boost * stress
+                    weights["on_time"] *= discipline_of_payer
+                    outcome = rng.weighted(weights)
 
                 if outcome == "skipped":
                     continue
 
                 moment = planned
 
+                timing_rng = calendar_rng if employer else rng
+
                 if outcome == "early":
-                    moment -= timedelta(days=int(rng.integers(*settings.early_days)))
+                    moment -= timedelta(days=int(timing_rng.integers(*settings.early_days)))
                 elif outcome == "late":
-                    moment += timedelta(days=int(rng.integers(*settings.late_days)))
+                    moment += timedelta(days=int(timing_rng.integers(*settings.late_days)))
 
-                if employer:
-                    # Место личного розыгрыша переноса пустое: иначе
-                    # сдвинулись бы час и частичная выплата.
-                    rng.random()
-
-                if calendar_rng.random() < settings.weekend_shift_share:
+                # Работодатель платит в рабочий день (ТК РК ст. 113: при
+                # выходном — накануне) всегда; прочие плательщики — не
+                # всегда.
+                if employer or calendar_rng.random() < settings.weekend_shift_share:
                     moment = _shift_for_calendar(moment)
 
-                moment = moment.replace(
-                    hour=int(rng.integers(*settings.payout_hour_range)),
-                    minute=int(rng.integers(0, 60)),
-                    second=int(rng.integers(0, 60)),
-                    microsecond=0,
-                )
+                if employer:
+                    # Пачка реестра — в один момент у всех сотрудников,
+                    # строки одного реестра расходятся на секунды–минуты.
+                    batch = moment.replace(
+                        hour=int(calendar_rng.integers(*settings.payout_hour_range)),
+                        minute=int(calendar_rng.integers(0, 60)),
+                        second=0,
+                        microsecond=0,
+                    )
+                    moment = batch + timedelta(seconds=int(rng.integers(0, 240)))
+                else:
+                    moment = moment.replace(
+                        hour=int(rng.integers(*settings.payout_hour_range)),
+                        minute=int(rng.integers(0, 60)),
+                        second=int(rng.integers(0, 60)),
+                        microsecond=0,
+                    )
 
                 amount = per_payday
 
                 if outcome == "partial":
-                    share = rng.uniform(*settings.partial_share)
+                    share = (calendar_rng if employer else rng).uniform(*settings.partial_share)
                     first = int(amount * share)
 
                     if start <= moment < stop and first > 0:
@@ -570,12 +610,18 @@ def payouts(persona: Persona, streams: tuple, stress_episodes: tuple) -> tuple:
                             )
                         )
 
-                    topup = moment + timedelta(days=int(rng.integers(*settings.partial_topup_days)))
+                    topup = _shift_for_calendar(
+                        moment + timedelta(days=int((calendar_rng if employer else rng).integers(*settings.partial_topup_days)))
+                    )
 
                     if start <= topup < stop and amount - first > 0:
                         result.append(
                             Payout(
-                                ts=topup.replace(hour=int(rng.integers(*settings.payout_hour_range))),
+                                # Доплата — своим моментом, а не с минутой
+                                # и секундой первой части (аудит
+                                # 2026-11-05, income: 1809 пар).
+                                ts=topup.replace(hour=int(rng.integers(*settings.payout_hour_range)),
+                                                 minute=int(rng.integers(0, 60)), second=int(rng.integers(0, 60))),
                                 planned_ts=planned,
                                 stream_id=stream.stream_id,
                                 kind=stream.kind,
@@ -617,7 +663,7 @@ def payouts(persona: Persona, streams: tuple, stress_episodes: tuple) -> tuple:
 
                 if quarterly and bonus_rng.random() < settings.quarterly_bonus_share:
                     amount = int(base * bonus_rng.uniform(*settings.bonus_share_of_income) * 0.5)
-                    ts = cal.day_in_month(month, min(28, stream.payday + 2)).replace(hour=12)
+                    ts = _bonus_moment(stream, cal.day_in_month(month, min(28, stream.payday + 2)), bonus_rng)
                     if start <= ts < stop:
                         result.append(
                             Payout(ts, ts, stream.stream_id, stream.kind, amount,
@@ -626,7 +672,7 @@ def payouts(persona: Persona, streams: tuple, stress_episodes: tuple) -> tuple:
 
                 if month.month == settings.annual_bonus_month and bonus_rng.random() < settings.annual_bonus_share:
                     amount = int(base * bonus_rng.uniform(*settings.bonus_share_of_income))
-                    ts = cal.day_in_month(month, 26).replace(hour=11)
+                    ts = _bonus_moment(stream, cal.day_in_month(month, 15 + stable_hash("annual", stream.payer) % 13), bonus_rng)
                     if start <= ts < stop:
                         result.append(
                             Payout(ts, ts, stream.stream_id, stream.kind, amount,
@@ -675,8 +721,15 @@ def vacation_payouts(persona: Persona, streams: tuple, events: tuple) -> tuple:
 
         amount = int(salary.base_amount * rng.uniform(*settings.vacation_pay_of_income))
 
+        # Отпускные — в рабочий день, не позже чем за 3 рабочих дня до
+        # отпуска (ТК РК ст. 92), во время реестра работодателя.
+        # Прежде они приходили ровно в 10:00:00, в том числе в
+        # воскресенье (аудит 2026-11-05, M8).
+        day = _shift_for_calendar(min(ts, event.ts - timedelta(days=3)).replace(hour=0, minute=0, second=0, microsecond=0))
+        moment = _bonus_moment(salary, day, rng)
+
         result.append(
-            Payout(ts.replace(hour=10), ts, salary.stream_id, salary.kind, amount,
+            Payout(moment, ts, salary.stream_id, salary.kind, amount,
                    salary.landing, "vacation_pay", salary.payer)
         )
 

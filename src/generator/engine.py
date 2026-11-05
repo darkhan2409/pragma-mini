@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from . import params as params_module
+from .params import fx as fx_rates
 from .behaviour import adoption as adoption_module
 from .behaviour import communications as comm_module
 from .behaviour import engagement as engagement_module
@@ -38,9 +39,13 @@ from .rng import (
     NS_INBOUND,
     NS_SUPPORT_CAUSE,
     NS_TRANSFER,
+    NS_BILL_PROVIDER,
+    NS_TRIP,
+    NS_WARM_SPEND,
     day_rng,
     event_rng,
     keyed_rng,
+    stable_hash,
 )
 from .simulate import (
     Action,
@@ -95,6 +100,7 @@ def run_community(community_id: int, ordinals: tuple) -> CommunityResult:
         # окна, получает первую версию в момент регистрации.
         if state.persona.relationship_start < config.HISTORY_START:
             _update_profile(state, config.HISTORY_START, moment=config.HISTORY_START)
+            _warm_spend(state)
 
     day = config.HISTORY_START
 
@@ -135,6 +141,70 @@ def run_community(community_id: int, ordinals: tuple) -> CommunityResult:
     return _finish(sim)
 
 
+WARM_DAYS = 30
+
+
+def _warm_spend(state: ClientState) -> None:
+    """
+    Траты последних 30 дней до окна — по тем же правилам дня, но
+    без денег и событий: только счётчик трат и последняя зарплата.
+
+    Давление бюджета смотрит на траты скользящих 30 дней. Без
+    прогрева у давнего клиента в первый день окна их ноль, давления
+    нет, и 1 января 2024 давало ×3–5 покупок против обычного дня
+    (аудит 2026-11-05, C5). Розыгрыши — по дням до окна в своём
+    пространстве, поэтому ни один розыгрыш окна не сдвигается.
+    """
+
+    persona = state.persona
+
+    start = config.HISTORY_START
+
+    for offset in range(WARM_DAYS, 0, -1):
+
+        day = start - timedelta(days=offset)
+
+        for payout in state.payouts_by_day.get(day.toordinal() - 1, ()):
+            if payout.kind in ("salary", "pension"):
+                state.last_payday = payout.ts
+
+        if day < persona.relationship_start:
+            continue
+
+        month = cal.month_start(day)
+        debt = loan_rules.debt_service(tuple(state.loans.values()), day)
+        budget = household_module.budget_for_month(
+            persona, month, state.income_streams, state.stress_episodes, debt
+        )
+
+        # Состояние отношений и остаток известны только на начало
+        # окна: прогрев берёт их оттуда.
+        factor = household_module.spending_factor(budget, persona)
+        factor *= household_module.budget_pressure(budget, state.spent(day), WARM_DAYS)
+        factor *= household_module.funds_pressure(state.ledger.payment_capacity(start), budget)
+        factor *= cal.payday_factor(day, state.last_payday, income_module.expected_payday(state.income_streams, day))
+        factor *= cal.month_factor(day)
+
+        stress = stress_module.level_at(state.stress_episodes, day)
+        stage = engagement_module.stage(persona, day, stress, state.worst_dpd())
+
+        intents = needs_module.daily_intents(
+            persona, state.habits, day, stage, factor,
+            engagement_module.silenced(state, start),
+            engagement_module.factor(state, "purchases"),
+        )
+
+        for index, intent in enumerate(intents):
+            rng = event_rng(NS_WARM_SPEND, state.ordinal, day.toordinal(), index, COMPONENT_CONTENT)
+            choice = merchant_choice.choose_outlet(persona, state.habits, intent.category, intent.ts, rng)
+            if choice is None:
+                continue
+            state.add_spend(
+                intent.ts,
+                merchant_choice.purchase_amount(persona, intent.category, choice.outlet, intent.ts, rng),
+            )
+
+
 # Возврат назначается уже во время дня, поэтому своего номера
 # в плане у него нет: внутри одной секунды он идёт последним.
 REFUND_ORDER = 10_000
@@ -154,6 +224,67 @@ CHANNEL_REMOTE = "ecom"
 # ============================================================
 # ПЛАН ДНЯ
 # ============================================================
+
+
+def _trip_on(state: ClientState, day: datetime):
+    """
+    Поездка, в которой клиент находится этот день (на полдень), если
+    она уводит его из дома: за границу или в другое поселение.
+    """
+
+    vacation = life_events_module.active_vacation(state.life_events, day.replace(hour=12))
+
+    if vacation is None:
+        return None
+
+    if vacation.payload.get("abroad"):
+        return vacation
+
+    home = state.habits.era_at(day).settlement
+
+    return vacation if vacation.payload.get("destination") not in (None, home) else None
+
+
+def _trip_purchases(state: ClientState, day: datetime) -> list:
+    """
+    Билет за lead_days до поездки (онлайн, из дома) и отель в день
+    приезда: (намерение, номер, поездка, в которой платят). Прежде отелей было 0.3% трат и 97% из них — в родном
+    городе, а билет перед поездкой встречался не чаще случайного
+    (аудит 2026-11-05, context-03, context-10).
+    """
+
+    result = []
+
+    home = state.habits.era_at(day).settlement
+
+    for event in state.life_events:
+
+        if event.kind != "vacation":
+            continue
+
+        trip = event.payload
+
+        if not trip.get("abroad") and trip.get("destination") in (None, home):
+            continue
+
+        rng = event_rng(NS_TRIP, state.ordinal, day.toordinal(), event.serial, COMPONENT_TIME)
+
+        lead = trip.get("lead_days")
+
+        if lead and (event.ts - timedelta(days=int(lead))).date() == day.date():
+            moment = day.replace(hour=int(rng.integers(9, 23)), minute=int(rng.integers(0, 60)),
+                                 second=int(rng.integers(0, 60)))
+            category = "airline" if trip.get("flight") else "railway"
+            result.append((needs_module.Intent(ts=moment, category=category, zone="other", online_hint=True),
+                           900 + event.serial, None))
+
+        if event.ts.date() == day.date():
+            moment = min(day.replace(hour=23, minute=0), event.ts + timedelta(hours=int(rng.integers(2, 6)),
+                                                                              minutes=int(rng.integers(0, 60))))
+            result.append((needs_module.Intent(ts=moment, category="hotel", zone="other", online_hint=False),
+                           950 + event.serial, event))
+
+    return result
 
 
 def _action_order(action: Action) -> tuple:
@@ -232,7 +363,13 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
 
     # Деньги месяца не бесконечны: потратив их раньше срока,
     # клиент покупает реже и дешевле, а не упирается в отказы.
-    tracked = (day - max(config.HISTORY_START, persona.relationship_start)).days
+    # Давний клиент тратил и до окна (_warm_spend): его 30 дней
+    # наблюдаются полностью с первого дня окна.
+    tracked = (
+        WARM_DAYS
+        if persona.relationship_start < config.HISTORY_START
+        else (day - max(config.HISTORY_START, persona.relationship_start)).days
+    )
     factor *= household_module.budget_pressure(budget, state.spent(day), tracked)
     factor *= household_module.funds_pressure(state.ledger.payment_capacity(day), budget)
 
@@ -241,7 +378,14 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
     # графику сегодняшней работы (income.expected_payday).
     next_payday = income_module.expected_payday(state.income_streams, day)
 
-    factor *= cal.payday_factor(day, state.last_payday, next_payday)
+    # Выплата сегодня — день выплаты уже первый день после неё. Прежде
+    # последней зарплатой считалась только вчерашняя, а сегодняшняя
+    # ставила «перед зарплатой»: в сам день выплаты трат было 0.58 от
+    # среднего (аудит 2026-11-05, C3).
+    today = [payout.ts for payout in state.payouts_by_day.get(day.toordinal(), ())
+             if payout.kind in ("salary", "pension")]
+
+    factor *= cal.payday_factor(day, min(today) if today else state.last_payday, next_payday)
     factor *= cal.month_factor(day)
 
     # --- регистрация клиента внутри окна ---
@@ -310,23 +454,33 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
             {"subscription": subscription, "index": index},
         )
 
+    # --- поездка: билет заранее, отель в первый день ---
+
+    trip = _trip_on(state, day)
+
+    if "purchases" not in silenced:
+        for intent, index, where in _trip_purchases(state, day):
+            add(intent.ts, "purchase",
+                {"intent": intent, "index": index, "factor": 1.0, "stress": stress, "trip": where})
+
     # --- покупки ---
 
     for index, intent in enumerate(
         needs_module.daily_intents(
             persona, state.habits, day, state.state, factor, silenced,
             engagement_module.factor(state, "purchases"),
+            trip=trip is not None,
         )
     ):
         add(intent.ts, "purchase",
-            {"intent": intent, "index": index, "factor": factor, "stress": stress})
+            {"intent": intent, "index": index, "factor": factor, "stress": stress, "trip": trip})
 
     # --- наличные ---
 
     if needs_module.cash_need(persona, day, silenced, engagement_module.factor(state, "cash")):
         rng = keyed_rng(NS_LEDGER, state.ordinal, day.toordinal(), 7)
         ts = day.replace(hour=int(rng.integers(9, 21)), minute=int(rng.integers(0, 60)))
-        add(ts, "cash_withdrawal", {"budget": budget})
+        add(ts, "cash_withdrawal", {"budget": budget, "trip": trip})
 
     # --- внесение наличных ---
 
@@ -912,9 +1066,13 @@ def _emit_money(
     status: str = "approved",
     post: bool = True,
     releases=None,
+    overlimit: bool = False,
 ):
     """
     Одна денежная операция: проводка и событие с balance_after.
+
+    overlimit — начисление банка, которое проводится и сверх
+    кредитного лимита (проценты по карте): его не «отклоняют».
     Отклонённая операция проводки не создаёт.
 
     post=False — вторая нога перевода между своими счетами:
@@ -950,6 +1108,7 @@ def _emit_money(
         and post
         and direction == "debit"
         and account is not None
+        and not overlimit
         and state.ledger.available_at(account_id, ts) < int(amount)
     ):
         status = "declined"
@@ -973,11 +1132,15 @@ def _emit_money(
 
         code = fx.country_currency.get(country)
 
-        rate = fx.fx_rates.get(code) if code else None
+        # Среднемесячный курс НБК с комиссией конвертации; сумма в
+        # валюте — с центами. Прежде курс был постоянным все окно, а
+        # валютная сумма — целой и у 2.6% покупок равной нулю (аудит
+        # 2026-11-05, M7).
+        rate = fx_rates.rate(code, ts) if code else None
 
         if rate:
             body["original_currency"] = code
-            body["original_amount"] = int(round(int(amount) / rate))
+            body["original_amount"] = max(0.01, round(int(amount) / (rate * (1.0 + fx.fx_margin)), 2))
 
     event = state.factory.make(event_type, ts, body)
 
@@ -1036,6 +1199,40 @@ def _decline(state: ClientState, ts: datetime, event_type: str, account_id: str 
     )
 
 
+def _human_round(amount: int, rng) -> int:
+    """
+    Сумма, которую человек набирает сам: чем больше, тем круглее.
+    """
+
+    point = rng.random()
+
+    if amount >= 10_000:
+        step = 1_000 if point < 0.7 else 500 if point < 0.9 else 100
+    elif amount >= 2_000:
+        step = 1_000 if point < 0.5 else 500 if point < 0.8 else 100
+    else:
+        step = 100
+
+    return int(max(step, round(amount / step) * step))
+
+
+def _attempt(state: ClientState, ts: datetime) -> tuple[str | None, dict]:
+    """
+    Счёт и карта, с которых клиент пытался заплатить, когда денег
+    не хватило: основной карточный счёт. Отказ без счёта и карты
+    отличался набором полей от любой прошедшей операции.
+    """
+
+    account = state.primary_card_account(ts)
+
+    if account is None:
+        return None, {}
+
+    card = state.usable_card(account.account_id, ts)
+
+    return account.account_id, {"card_id": card.card_id if card else None}
+
+
 # --- обработчики ----------------------------------------------
 
 
@@ -1074,16 +1271,72 @@ def _income_purpose(payout) -> str:
 # назван так же, как любой другой контрагент, государство — своим
 # именем. Выходное пособие платит тот же работодатель, что и
 # зарплату, и подписано оно так же.
+#
+# Работодатель назван, как в настоящей выписке: правовая форма и
+# имя организации, одно у всех его сотрудников. Прежде у 100%
+# зарплат плательщиком была заглушка «Employer», и смену работы по
+# выписке не было видно (аудит 2026-11-05, C1).
 _INCOME_PAYERS = {
-    "salary": "Employer",
-    "severance": "Employer",
-    "pension": "State pension fund",
-    "social_benefit": "State benefits",
+    "pension": "НАО «ГК «Правительство для граждан»»",
+    "social_benefit": "АО «ГФСС»",
 }
+
+_EMPLOYER_FORMS = (("ТОО", 0.70), ("АО", 0.09), ("КГУ", 0.08), ("ГККП", 0.05), ("ИП", 0.08))
+
+_EMPLOYER_ROOTS = (
+    "Береке", "Алтын", "Нур", "Тулпар", "Сункар", "Шанырак", "Атамекен", "Достык", "Болашак",
+    "Кайнар", "Арман", "Жетысу", "Сарыарка", "Каспий", "Шыгыс", "Тенгри", "Байтерек", "Медеу",
+    "Алатау", "Ертис", "Есиль", "Капитал", "Евразия", "Орда", "Самал", "Акжол", "Бирлик", "Даму",
+)
+
+_EMPLOYER_TAILS = (
+    "Строй", "Трейд", "Логистик", "Сервис", "Агро", "Мунай", "Энерго", "Фарм", "Инвест", "Групп",
+    "Транс", "Медикал", "Тех", "Пром", "Маркет", "Холдинг", "Ойл", "Консалт", "Девелопмент", "Фуд",
+)
+
+_STATE_NAMES = (
+    "Школа-гимназия №{n}", "Городская поликлиника №{n}", "Ясли-сад №{n}", "Колледж №{n}",
+    "Областная больница", "Управление образования", "Аппарат акима района", "Центр занятости",
+)
+
+
+def employer_name(payer: str) -> str:
+    """
+    Название работодателя по его идентификатору: детерминировано и
+    одно у всех его сотрудников.
+    """
+
+    key = stable_hash("employer_name", payer)
+
+    total = sum(weight for _, weight in _EMPLOYER_FORMS)
+    point = (key % 10_000) / 10_000 * total
+    form = _EMPLOYER_FORMS[-1][0]
+    for name, weight in _EMPLOYER_FORMS:
+        if point < weight:
+            form = name
+            break
+        point -= weight
+
+    if form in ("КГУ", "ГККП"):
+        title = _STATE_NAMES[(key // 10_000) % len(_STATE_NAMES)].format(n=1 + (key // 100_000) % 140)
+        return f"{form} «{title}»"
+
+    root = _EMPLOYER_ROOTS[(key // 10_000) % len(_EMPLOYER_ROOTS)]
+
+    if form == "ИП":
+        return f"ИП «{root}»"
+
+    tail = _EMPLOYER_TAILS[(key // 1_000_000) % len(_EMPLOYER_TAILS)]
+
+    return f"{form} «{root} {tail}»"
 
 
 def _income_counterparty(payout) -> str:
-    return _INCOME_PAYERS.get(payout.kind) or masked_name(payout.payer)
+    if payout.kind in _INCOME_PAYERS:
+        return _INCOME_PAYERS[payout.kind]
+    if payout.kind in ("salary", "severance") or str(payout.payer or "").startswith("emp_"):
+        return employer_name(str(payout.payer))
+    return masked_name(payout.payer)
 
 
 def _on_income(sim, state: ClientState, ts: datetime, payload: dict) -> None:
@@ -1151,11 +1404,7 @@ def _on_bill(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         account = candidate
         break
 
-    choice = merchant_choice.choose_outlet(
-        state.persona, state.habits, bill.category, ts, rng, online_hint=True
-    )
-
-    merchant = choice.outlet if choice else None
+    merchant = _bill_provider(state, bill, payload["index"], ts)
 
     body = {
         # Счёт оплачен без сессии приложения, значит и каналом
@@ -1193,8 +1442,11 @@ def _on_bill(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         fail_rng = keyed_rng(NS_LEDGER, state.ordinal, ts.toordinal(), 71)
 
         if fail_rng.random() < params_module.active().activity.autopay_attempt_share:
-            _decline(state, ts, "bill_payment", None, amount, "debit", body,
-                     "insufficient_funds")
+            # Автоплатёж списывает с привязанного счёта.
+            account_id, fields = _attempt(state, ts)
+            if account_id is not None:
+                _decline(state, ts, "bill_payment", account_id, amount, "debit",
+                         {**body, **fields}, "insufficient_funds")
 
         return
 
@@ -1207,6 +1459,39 @@ def _on_bill(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         merchant_catalog.counterpart(merchant) if merchant else COUNTERPART_GOVERNMENT,
         body,
     )
+
+
+def _bill_provider(state: ClientState, bill, index: int, ts: datetime):
+    """
+    Поставщик счёта закреплён за счётом клиента: оператор связи — за
+    клиентом везде, коммуналка и интернет — за поселением, где он
+    живёт (меняются с переездом). Прежде поставщик разыгрывался при
+    каждом платеже: одного оператора держали 8–11% клиентов, а
+    коммуналку платили предприятию чужого города (аудит 2026-11-05,
+    C1, context-11).
+    """
+
+    settlement = state.habits.era_at(ts).settlement
+
+    pool = merchant_catalog.outlets_of(settlement, bill.category)
+
+    if not pool:
+        return None
+
+    # Свой город — раньше подставленного областного центра.
+    local = [item for item in pool if item.settlement == settlement and item.merchant_name]
+    named = [item for item in pool if item.merchant_name]
+    candidates = local or named or list(pool)
+
+    national = bill.kind == "telecom"
+
+    rng = keyed_rng(NS_BILL_PROVIDER, state.ordinal, index, stable_hash(bill.kind, "" if national else settlement) % 9973)
+
+    brands = sorted({item.merchant_id or item.outlet_id for item in candidates})
+
+    brand = brands[int(rng.integers(0, len(brands)))]
+
+    return next(item for item in candidates if (item.merchant_id or item.outlet_id) == brand)
 
 
 def _on_subscription(sim, state: ClientState, ts: datetime, payload: dict) -> None:
@@ -1247,8 +1532,11 @@ def _on_subscription(sim, state: ClientState, ts: datetime, payload: dict) -> No
         fail_rng = keyed_rng(NS_LEDGER, state.ordinal, ts.toordinal(), 72)
 
         if fail_rng.random() < params_module.active().activity.autopay_attempt_share:
-            _decline(state, ts, "purchase", None, amount, "debit", body,
-                     "insufficient_funds")
+            # Продление списывают с привязанной карты.
+            account_id, fields = _attempt(state, ts)
+            if account_id is not None:
+                _decline(state, ts, "purchase", account_id, amount, "debit",
+                         {**body, **fields}, "insufficient_funds")
             return
 
         return
@@ -1281,25 +1569,25 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
     # бюджет месяца, остаток на счёте и зарплатный цикл.
     factor = payload["factor"]
 
-    foreign = None
+    # Страна и город — поездки, а не покупки (_trip_on).
+    trip = payload.get("trip")
 
-    vacation = life_events_module.active_vacation(state.life_events, ts)
+    foreign = trip.payload["country"] if trip is not None and trip.payload.get("abroad") else None
 
-    if vacation is not None and vacation.payload.get("abroad"):
-        foreign = str(
-            rng.weighted(params_module.active().geography.foreign_countries)
-        )
+    away = trip.payload.get("destination") if trip is not None and foreign is None else None
 
     choice = merchant_choice.choose_outlet(
         persona, state.habits, intent.category, ts, rng,
+        online_hint=intent.online_hint,
         foreign_country=foreign,
+        settlement=away,
     )
 
     if choice is None:
         return
 
     amount = merchant_choice.purchase_amount(
-        persona, intent.category, choice.outlet, ts, factor, rng
+        persona, intent.category, choice.outlet, ts, rng
     )
 
     sources = state.ledger.payment_sources(ts, amount)
@@ -1307,7 +1595,9 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
     # Оплата по QR это тот же поход в магазин, но другой канал.
     channel = choice.channel
 
-    if channel == "pos" and state.app_adopted_at is not None and ts >= state.app_adopted_at:
+    # QR — казахстанская оплата: за границей её нет (было 18% зарубежных
+    # покупок; аудит 2026-11-05, context-03).
+    if channel == "pos" and foreign is None and state.app_adopted_at is not None and ts >= state.app_adopted_at:
 
         activity = params_module.active().activity
 
@@ -1348,13 +1638,14 @@ def _on_purchase(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             attempt = state.primary_card_account(ts)
             card = state.usable_card(attempt.account_id, ts) if attempt is not None else None
 
-            if card is None and not choice.outlet.is_online:
+            # Онлайн-оплата тоже идёт картой: без карты попытки нет, и
+            # отказа без счёта не бывает (аудит 2026-11-05, money-20).
+            if card is None:
                 return
 
-            if card is not None:
-                body["card_id"] = card.card_id
+            body["card_id"] = card.card_id
 
-            _decline(state, ts, "purchase", attempt.account_id if card is not None else None,
+            _decline(state, ts, "purchase", attempt.account_id,
                      amount, "debit", body, "insufficient_funds")
             _touch_client(state, ts)
             return
@@ -1527,7 +1818,11 @@ def _on_cash(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     amount = _money(max(2_000, budget.income * rng.uniform(low, high)))
 
-    amount = int(round(amount / 1_000) * 1_000)
+    # Банкомат выдаёт купюрами, и снимают «круглые» суммы: 10, 20,
+    # 50 тысяч. Прежде кратных 5 000 среди снятий было 19% (аудит
+    # 2026-11-05, M6).
+    step = 5_000 if amount >= 10_000 and rng.random() < 0.65 else 1_000
+    amount = int(max(step, round(amount / step) * step))
 
     # В банкомате снимают то, что есть, а не задуманную сумму.
     capacity = state.ledger.payment_capacity(ts)
@@ -1539,10 +1834,16 @@ def _on_cash(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     sources = state.ledger.payment_sources(ts, amount)
 
+    trip = payload.get("trip")
+
     body = {
         "channel": "atm",
         "mcc": MCC_CASH,
-        "merchant_country": "KZ",
+        # За границей снимают в банкомате страны поездки: валюта и
+        # курс — в _emit_money. Прежде за рубежом банкоматов не было, а
+        # в 29% поездок наличные снимались дома (аудит 2026-11-05,
+        # context-03).
+        "merchant_country": trip.payload["country"] if trip is not None and trip.payload.get("abroad") else "KZ",
         "is_online": False,
         "reason": "cash_need",
     }
@@ -1552,8 +1853,11 @@ def _on_cash(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         settings = params_module.active().activity
 
         if rng.random() < settings.decline_attempt_share and state.may_decline(ts):
-            _decline(state, ts, "cash_withdrawal", None, amount, "debit", body,
-                     "insufficient_funds")
+            # Банкомат отказывает карте: без карты попытки нет.
+            account_id, fields = _attempt(state, ts)
+            if account_id is not None and fields.get("card_id"):
+                _decline(state, ts, "cash_withdrawal", account_id, amount, "debit",
+                         {**body, **fields}, "insufficient_funds")
             return
 
         return
@@ -1614,17 +1918,25 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     rng = event_rng(NS_TRANSFER, state.ordinal, ts.toordinal(), payload["index"] + 200, COMPONENT_OUTCOME)
 
-    amount = int(rng.integers(max(1_000, relation.typical_amount_low),
-                              max(2_000, relation.typical_amount_high)))
+    low, high = max(1_000, relation.typical_amount_low), max(2_000, relation.typical_amount_high)
+
+    # Привычная сумма связи: аренда и помощь родным повторяются из
+    # месяца в месяц. Прежде каждый перевод одному адресату был новым
+    # (CV 0.85), а «красивых» сумм не было (аудит 2026-11-05, M6).
+    habit = keyed_rng(NS_TRANSFER, state.ordinal, stable_hash(relation.counterpart.counterpart_id) % 9973, 1)
+    habitual = _human_round(int(habit.integers(low, high)), habit)
+
+    if relation.relation_type == "landlord" or rng.random() < 0.5:
+        amount = habitual
+    else:
+        amount = _human_round(int(rng.integers(low, high)), rng)
 
     own = relation.relation_type == "own_account_other_bank"
 
     # Переезжая в другой банк, клиент переводит туда и накопленное:
     # суммы себе растут вместе с частотой (behaviour/engagement).
     if own:
-        amount = int(amount * engagement_module.outflow(state))
-
-    amount = int(round(amount / 100) * 100)
+        amount = _human_round(int(amount * engagement_module.outflow(state)), rng)
 
     counterpart = relation.counterpart
 
@@ -1686,14 +1998,25 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             if not state.may_decline(ts):
                 return
 
+            # Отказ — попытка списать со счёта: у неё тот же набор
+            # полей, что у прошедшего перевода. Без счёта и номера
+            # операции легальный отказ отличался от мошеннического, и
+            # набор полей выдавал метку (аудит 2026-11-05, C4).
+            account_id, fields = _attempt(state, ts)
+
+            if account_id is None:
+                return
+
             _decline(
-                state, ts, "p2p_out" if internal else "transfer_out", None, amount, "debit",
+                state, ts, "p2p_out" if internal else "transfer_out", account_id, amount, "debit",
                 {
                     "channel": CHANNEL_REMOTE,
                     "counterparty": "Own account" if own else counterpart.masked_name,
                     "mcc": MCC_TRANSFER,
                     "merchant_country": "KZ",
                     "reason": "transfer",
+                    **fields,
+                    "transfer_id": _transfer_id(state.client_id, ts, payload["index"]),
                 },
                 "insufficient_funds",
             )

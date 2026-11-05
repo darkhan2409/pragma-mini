@@ -28,7 +28,30 @@ FIXED_HOLIDAYS = (
     (8, 30, "constitution_day"),
     (10, 25, "republic_day"),
     (12, 16, "independence_day"),
-    (12, 17, "independence_day"),
+)
+
+# Годы, в которые праздник действует (включительно): День
+# Конституции 30 августа исключён из праздников с 01.07.2026.
+# 17 декабря выходным не является с 2022 года (аудит 2026-11-05,
+# context-06) и в таблицу не входит.
+HOLIDAY_YEARS = {
+    "constitution_day": (None, 2025),
+}
+
+# Праздник, совпавший с выходным, переносит выходной на следующий
+# рабочий день (Закон РК «О праздниках»), кроме религиозных.
+TRANSFER_EXEMPT = ("orthodox_christmas", "kurban_ait")
+
+# Переносы постановлениями правительства (приказы Минтруда):
+# выходной в будни и рабочая суббота или воскресенье.
+EXTRA_DAYS_OFF = (
+    (2024, 5, 8),
+    (2025, 1, 3),
+)
+
+WORKING_WEEKENDS = (
+    (2024, 5, 4),
+    (2025, 1, 5),
 )
 
 # Курбан айт по годам окна наблюдения.
@@ -44,6 +67,10 @@ class SeasonalityParams:
 
     fixed_holidays: tuple = FIXED_HOLIDAYS
     kurban_ait: dict = field(default_factory=lambda: dict(KURBAN_AIT))
+    holiday_years: dict = field(default_factory=lambda: dict(HOLIDAY_YEARS))
+    transfer_exempt: tuple = TRANSFER_EXEMPT
+    extra_days_off: tuple = EXTRA_DAYS_OFF
+    working_weekends: tuple = WORKING_WEEKENDS
 
     # Множители трат в праздничные окна по категориям.
     holiday_factors: dict = field(
@@ -137,10 +164,14 @@ class SeasonalityParams:
         }
     )
 
-    payday_window_days: int = 4
-    payday_boost: float = 1.45
+    # Мягкий зарплатный цикл: первые дни после выплаты (день выплаты
+    # — первый) чуть чаще, последние перед ней — чуть реже. Прежде
+    # ×1.45 / ×0.82 вместе с давлением остатка давали ×5.5 между
+    # пятью днями после и до зарплаты (аудит 2026-11-05, C3).
+    payday_window_days: int = 3
+    payday_boost: float = 1.25
     pre_payday_days: int = 5
-    pre_payday_factor: float = 0.82
+    pre_payday_factor: float = 0.92
 
     # Начало и конец месяца.
     month_start_days: int = 3
@@ -150,13 +181,16 @@ class SeasonalityParams:
 
     # Зимние регионы: коммуналка дороже.
     winter_months: tuple = (11, 12, 1, 2, 3)
+    # Ключ — регион анкеты (persona.region). Прежде ключами были
+    # города, и в 10 из 20 регионов множитель не срабатывал (аудит
+    # 2026-11-05, context-16).
     winter_region_factor: dict = field(
         default_factory=lambda: {
-            "Astana": 1.22, "Petropavl": 1.22, "Kostanay": 1.18, "Pavlodar": 1.16,
-            "Oskemen": 1.14, "Karaganda": 1.14, "Aktobe": 1.10, "Oral": 1.10,
-            "Semey": 1.12, "Kokshetau": 1.18, "Taldykorgan": 1.04, "Atyrau": 1.02,
-            "Aktau": 0.96, "Almaty": 1.00, "Taraz": 0.94, "Kyzylorda": 0.94,
-            "Shymkent": 0.88, "Turkistan": 0.88, "Konaev": 1.00, "Zhezkazgan": 1.16,
+            "Astana": 1.22, "North Kazakhstan": 1.22, "Kostanay": 1.18, "Pavlodar": 1.16,
+            "East Kazakhstan": 1.14, "Karaganda": 1.14, "Aktobe": 1.10, "West Kazakhstan": 1.10,
+            "Abai": 1.12, "Akmola": 1.18, "Zhetisu": 1.04, "Atyrau": 1.02,
+            "Mangystau": 0.96, "Almaty": 1.00, "Zhambyl": 0.94, "Kyzylorda": 0.94,
+            "Shymkent": 0.88, "Turkistan": 0.88, "Almaty region": 1.00, "Ulytau": 1.16,
         }
     )
 

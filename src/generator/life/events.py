@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 from .. import params as params_module
 from .. import config
-from ..rng import NS_LIFE, keyed_rng
+from ..rng import NS_LIFE, NS_TRIP, keyed_rng
 from ..world import geography
 from .persona import Persona
 
@@ -210,9 +210,20 @@ def plan_events(persona: Persona) -> tuple:
             elif kind == "illness":
                 payload = {"days": int(item_rng.integers(5, 60))}
             elif kind == "vacation":
+                abroad = bool(item_rng.random() < 0.35 + 0.4 * persona.trait("mobility"))
+                # Куда и чем едут — одна поездка, один раз. Прежде
+                # страна разыгрывалась на каждую покупку отпуска, и
+                # поездка шла по 5–13 странам (аудит 2026-11-05, C1).
+                # Свой поток: розыгрыши события выше не сдвигаются.
+                geo = params_module.active().geography
+                trip_rng = keyed_rng(NS_TRIP, persona.client_ordinal, index)
                 payload = {
                     "days": int(item_rng.integers(5, 21)),
-                    "abroad": bool(item_rng.random() < 0.35 + 0.4 * persona.trait("mobility")),
+                    "abroad": abroad,
+                    "country": str(trip_rng.weighted(geo.foreign_countries)),
+                    "destination": str(trip_rng.weighted(geo.domestic_destinations)),
+                    "lead_days": int(trip_rng.integers(*geo.trip_ticket_lead_days)),
+                    "flight": bool(abroad or trip_rng.random() < geo.domestic_flight_share),
                 }
             elif kind == "renovation":
                 payload = {"months": int(item_rng.integers(1, 6))}
@@ -244,7 +255,18 @@ def plan_events(persona: Persona) -> tuple:
 
     events.sort(key=lambda item: (item.ts, item.kind))
 
-    return tuple(_in_time_order(persona, events))
+    # Новый отпуск не начинается, пока не кончился прежний: иначе
+    # человек был бы в двух поездках сразу (аудит 2026-11-05, C1).
+    kept: list[LifeEvent] = []
+    away_until = None
+    for item in events:
+        if item.kind == "vacation":
+            if away_until is not None and item.ts < away_until:
+                continue
+            away_until = item.ts + timedelta(days=int(item.payload.get("days", 0)) + 7)
+        kept.append(item)
+
+    return tuple(_in_time_order(persona, kept))
 
 
 def _in_time_order(persona: Persona, events: list) -> list:

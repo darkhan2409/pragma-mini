@@ -72,7 +72,7 @@ def daily_purchase_rate(
 
     rate *= 0.75 + params_module.active().traits.impulsivity_rate_factor * impulsivity
 
-    if ts.weekday() >= 5:
+    if cal.is_day_off(ts):
         rate *= settings.weekend_factor_purchases
 
     rate *= spending_factor
@@ -81,11 +81,13 @@ def daily_purchase_rate(
     return float(max(0.0, rate))
 
 
-def _category_weights(persona: Persona, habits: Habits, ts: datetime) -> dict:
+def _category_weights(persona: Persona, habits: Habits, ts: datetime, trip: bool = False) -> dict:
 
     weights: dict[str, float] = {}
 
     era = habits.era_at(ts)
+
+    home_only = params_module.active().geography.home_only_categories
 
     for name in CATEGORY_NAMES:
 
@@ -94,6 +96,11 @@ def _category_weights(persona: Persona, habits: Habits, ts: datetime) -> dict:
         if name in ("utilities", "telecom", "internet", "subscription"):
             # Регулярные платежи идут по расписанию счетов,
             # а не случайной покупкой.
+            continue
+
+        if trip and name in home_only:
+            # В поездке нет домашних дел: налогов, дороги на работу,
+            # детсада, ремонта (аудит 2026-11-05, context-03).
             continue
 
         weight = 1.0 if category.essential else 0.45
@@ -117,11 +124,34 @@ def _category_weights(persona: Persona, habits: Habits, ts: datetime) -> dict:
         if category.need == "kids" and persona.children == 0:
             weight *= 0.05
 
-        if name == "fuel" and persona.transport != "car":
-            weight *= 0.10
+        population = params_module.active().population
+
+        if persona.transport != "car" and name in population.car_categories:
+            weight *= population.car_categories[name]
 
         if name in ("transit", "taxi") and persona.transport == "car":
             weight *= 0.35
+
+        # Структурные нули: без признака участия категории нет вовсе.
+        if (name == "tobacco" and not persona.smokes) or (name == "gambling" and not persona.gambles) \
+                or (name == "micromobility" and not persona.scooter):
+            continue
+
+        if name == "cinema" and not persona.cinema:
+            weight *= 0.03
+
+        allowed = population.category_settlement_types.get(name)
+        if allowed and persona.settlement_type not in allowed:
+            continue
+
+        weight *= population.category_gender_factor.get(persona.gender, {}).get(name, 1.0)
+
+        age = persona.age_at(ts)
+        factor_by_age: dict = {}
+        for since, table in population.category_age_factor:
+            if age >= since:
+                factor_by_age = table
+        weight *= factor_by_age.get(name, 1.0)
 
         if name == "gambling":
             weight *= 0.2 + 1.8 * persona.trait("risk_tolerance", ts)
@@ -142,9 +172,11 @@ def daily_intents(
     spending_factor: float,
     silenced: frozenset,
     share_factor: float = 1.0,
+    trip: bool = False,
 ) -> tuple:
     """
-    Намерения покупок на день.
+    Намерения покупок на день. trip — день поездки: распорядок
+    выходного дня и без домашних категорий.
     """
 
     settings = params_module.active()
@@ -165,8 +197,12 @@ def daily_intents(
 
     has_job = persona.income_type in ("employed", "state_employee", "self_employed", "business_owner")
 
+    # Нерабочий будний день (праздник, перенос) и поездка живут как
+    # выходной.
+    day_off = trip or cal.is_day_off(ts)
+
     routine = routine_for(
-        weekday=ts.weekday(),
+        weekday=5 if day_off else min(4, ts.weekday()),
         transport=persona.transport,
         has_job=has_job,
         household_size=persona.household_size,
@@ -175,11 +211,11 @@ def daily_intents(
 
     routine_share = (
         settings.merchants.routine_share_weekend
-        if ts.weekday() >= 5
+        if day_off
         else settings.merchants.routine_share_weekday
     )
 
-    weights = _category_weights(persona, habits, ts)
+    weights = _category_weights(persona, habits, ts, trip)
 
     hours = cal.hour_weights(ts, persona.night_segment)
 
@@ -194,7 +230,12 @@ def daily_intents(
 
             step = routine[item_rng.integers(0, len(routine))]
 
-            if item_rng.random() <= step.probability:
+            # Шаг распорядка — тоже покупка категории: без признака
+            # участия (кино, самокат) или там, где категории нет, его
+            # не бывает.
+            allowed = step.category in weights and (step.category != "cinema" or persona.cinema)
+
+            if allowed and item_rng.random() <= step.probability:
                 hour = item_rng.integers(step.hour_low, step.hour_high)
                 moment = ts.replace(
                     hour=int(hour),

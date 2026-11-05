@@ -36,7 +36,7 @@ from .rng import (
     keyed_rng,
     stable_hash,
 )
-from .simulate import ClientState, _application_id
+from .simulate import ClientState, _application_id, _transfer_id, expected_rate
 from .world import geography, merchants as merchant_catalog, products as product_catalog
 from .world.dictionaries import FUNNEL_SCREENS, MCC_CASH, MCC_TRANSFER
 from .world.relationships import masked_name
@@ -110,7 +110,13 @@ def _prospective_payment(state: ClientState, candidate, ts: datetime, amount, te
 
     if rate is None:
         by_term = terms.get("rate_by_term") or {}
-        rate = by_term.get(str(term)) or by_term.get(term) or 0.28
+        rate = by_term.get(str(term)) or by_term.get(term)
+
+    if rate is None and "rate_min" in terms:
+        rate = expected_rate(terms)
+
+    if rate is None:
+        rate = 0.28
 
     return int(loan_rules.annuity_payment(int(amount), float(rate), int(term or 12)))
 
@@ -161,7 +167,11 @@ def _approval(
     if family in CREDIT_FAMILIES and not _debt_service_fits(state, candidate, ts, amount, term):
         return False, "debt_service_ratio"
 
-    if family == "refinance" and state.primary_card_account(ts) is None:
+    # Кредит выдаётся и гасится через основную карту: без неё банк
+    # отказывает сразу. Прежде так было только у рефинансирования, а
+    # наличные и рассрочка одобрялись, открывались и висели без
+    # выдачи и графика (637 договоров; аудит 2026-11-05, M10).
+    if family in LOAN_FAMILIES and state.primary_card_account(ts) is None:
         return False, "documents_invalid"
 
     base = settings.approval_base.get(family, 0.9)
@@ -218,7 +228,7 @@ def _funnel(state: ClientState, application: Application, ts: datetime, approved
     """
 
     session_id = (
-        f"ses_{stable_hash('application', state.client_id, application.application_id) % 10 ** 12:012d}"
+        f"ses_{stable_hash('application', state.client_id, application.application_id) % 10 ** 16:016d}"
     )
 
     login_ts = ts - timedelta(seconds=20 + stable_hash("login", application.application_id) % 100)
@@ -592,8 +602,8 @@ def _gather_on_card(state: ClientState, ts: datetime, amount: int) -> bool:
 
 def _cancel_unfunded(state: ClientState, ts: datetime, contract) -> None:
     """
-    Договор вклада, под который не нашлось денег, аннулируется
-    сразу. Открытый вклад с нулевым остатком не зарабатывает и не
+    Договор, под который не нашлось денег или карты (вклад, кредит,
+    полис, облигации), аннулируется сразу. Открытый вклад с нулевым остатком не зарабатывает и не
     заканчивается, а в ленте выглядел бы живым продуктом.
     """
 
@@ -627,7 +637,10 @@ def _activate_product(
 
     if family in LOAN_FAMILIES:
 
+        # Карта могла пропасть между решением и выдачей: договор
+        # аннулируется, а не висит открытым без денег.
         if not _can_activate(state, family, contract.amount_or_limit, ts):
+            _cancel_unfunded(state, ts, contract)
             return
 
         account = state.primary_card_account(ts)
@@ -657,7 +670,7 @@ def _activate_product(
         loan = loan_rules.open_loan(
             contract.contract_id,
             int(contract.amount_or_limit),
-            float(contract.rate or 0.28),
+            float(contract.rate if contract.rate is not None else 0.28),
             int(contract.term or 12),
             ts,
             autopay=rng.random() < params_module.active().products.autopay_share,
@@ -767,7 +780,11 @@ def _activate_product(
 
         sources = state.ledger.payment_sources(ts, amount)
 
+        # Полис без оплаченной премии не действует: договор
+        # аннулируется. Прежде 52% полисов висели открытыми без
+        # премии (аудит 2026-11-05, M10).
         if not sources or amount <= 0:
+            _cancel_unfunded(state, ts, contract)
             return
 
         _emit_money(
@@ -787,6 +804,40 @@ def _activate_product(
                 "merchant_country": "KZ",
                 "is_online": True,
                 "is_subscription": False,
+            },
+        )
+
+        return
+
+    if family == "bonds":
+
+        amount = int(contract.amount_or_limit or 0)
+
+        sources = state.ledger.payment_sources(ts, amount)
+
+        # Облигации покупаются деньгами со счёта и гасятся по сроку
+        # (engine_month._redeem_bonds). Прежде покупка не двигала
+        # денег вовсе (аудит 2026-11-05, M10).
+        if not sources or amount <= 0:
+            _cancel_unfunded(state, ts, contract)
+            return
+
+        _emit_money(
+            state,
+            ts + timedelta(minutes=3),
+            "transfer_out",
+            sources[0].account_id,
+            amount,
+            "debit",
+            COUNTERPART_BANK,
+            {
+                "channel": "system",
+                "contract_id": contract.contract_id,
+                "counterparty": "Securities account",
+                "reason": "bond_purchase",
+                "transfer_id": _transfer_id(state.client_id, ts, stable_hash(contract.contract_id) % 10 ** 6, scope="bond"),
+                "mcc": MCC_TRANSFER,
+                "merchant_country": "KZ",
             },
         )
 
@@ -907,7 +958,12 @@ def _fraud_purchase(state: ClientState, account, card, ts, amount, episode, step
 
     category = str(pick_rng.weighted(settings.material_categories))
 
-    country = _foreign_country(state, pick_rng) if step.foreign else None
+    # Страна эпизода одна: скомпрометированной картой не платят за час
+    # в Турции и в ОАЭ (аудит 2026-11-05, C1).
+    country = (
+        _foreign_country(state, keyed_rng(NS_FRAUD_MATERIAL, state.ordinal, stable_hash("country", episode.start) % 9973))
+        if step.foreign else None
+    )
 
     choice = merchant_choice.choose_outlet(
         state.persona,
@@ -986,6 +1042,11 @@ def _fraud_transfer(state: ClientState, account, ts, amount, episode, step, rng)
         "mcc": MCC_TRANSFER,
         "merchant_country": "KZ",
         "reason": "transfer",
+        # Номер операции и карта счёта — как у любого перевода:
+        # без них мошенническую ногу выдавал набор полей (аудит
+        # 2026-11-05, C4).
+        "card_id": card.card_id if (card := state.usable_card(account.account_id, ts)) else None,
+        "transfer_id": _transfer_id(state.client_id, ts, ts.hour * 3600 + ts.minute * 60 + ts.second, scope="fraud"),
     }
 
     # Социальную инженерию переводит сам клиент, захват доступа
@@ -1025,7 +1086,7 @@ def _emit_takeover_login(state: ClientState, ts: datetime) -> None:
     if state.app_adopted_at is None or ts < state.app_adopted_at:
         return
 
-    session_id = f"ses_{stable_hash('takeover', state.client_id, ts.toordinal()) % 10 ** 12:012d}"
+    session_id = f"ses_{stable_hash('takeover', state.client_id, ts.toordinal()) % 10 ** 16:016d}"
 
     state.emit(
         state.factory.make(

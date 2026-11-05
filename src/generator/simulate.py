@@ -4,6 +4,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
 from . import params as params_module
+from .params import fx as fx_rates
 from .behaviour import adoption as adoption_module
 from .behaviour import engagement as engagement_module
 from .behaviour import habits as habits_module
@@ -36,6 +37,7 @@ from .life.traits import event_shift
 from .observe.envelope import Event, EventFactory
 from .rng import (
     NS_PREHISTORY,
+    NS_LOAN_RATE,
     NS_ADOPTION,
     NS_CARD,
     NS_LEDGER,
@@ -475,6 +477,38 @@ def in_window(ts: datetime) -> bool:
     return config.HISTORY_START <= ts < config.HISTORY_END
 
 
+def expected_rate(terms: dict) -> float:
+    """
+    Ставка, на которую клиент и банк рассчитывают до решения:
+    середина диапазона каталога.
+    """
+
+    return (float(terms["rate_min"]) + float(terms.get("rate_max", terms["rate_min"]))) / 2.0
+
+
+def _loan_rate(state, terms: dict, contract_id: str, ts: datetime) -> float:
+    """
+    Ставка договора внутри диапазона каталога [rate_min, rate_max]:
+    чем ниже финансовая дисциплина, тем выше ставка (оценка риска
+    банком). Прежде диапазон не читался, и все кредиты, включая
+    промо-рассрочку 0-0-24, шли по 28% (аудит 2026-11-05, M12).
+    """
+
+    low = float(terms["rate_min"])
+    high = float(terms.get("rate_max", low))
+
+    if high <= low:
+        return low
+
+    rng = keyed_rng(NS_LOAN_RATE, state.ordinal, stable_hash(contract_id) % 1_000_003)
+
+    risk = 1.0 - state.persona.trait("financial_discipline", ts)
+    risk = min(1.0, max(0.0, risk + float(rng.normal(0.0, 0.15))))
+
+    # Ставка с шагом 0.5 п.п., как в тарифах.
+    return round((low + (high - low) * risk) * 200) / 200
+
+
 def _transfer_id(client_id: str, ts: datetime, index: int, scope: str = "transfer") -> str:
     """
     Идентификатор перевода: общий у обеих его ног.
@@ -673,6 +707,9 @@ class CommunitySimulation:
         if rate is None and "rate_by_term" in version.terms and term:
             rate = version.terms["rate_by_term"].get(term) or version.terms["rate_by_term"].get(str(term))
 
+        if rate is None and "rate_min" in version.terms:
+            rate = _loan_rate(state, version.terms, contract_id, ts)
+
         contract = Contract(
             contract_id=contract_id,
             client_id=state.client_id,
@@ -720,6 +757,18 @@ class CommunitySimulation:
 
         if family in ("debit_card", "credit_card"):
 
+            years = 12 * int(self.settings.products.card_expiry_years)
+
+            expires_at = cal.add_months(ts, years)
+
+            # Карта предыстории, чей срок вышел до окна, перевыпускалась
+            # молча до окна: в окно она входит с ближайшим будущим
+            # сроком. Раньше такая карта жила 6–8 лет без перевыпуска
+            # (аудит 2026-11-05, links-09): срок проверяется только в
+            # днях окна.
+            while expires_at <= config.HISTORY_START:
+                expires_at = cal.add_months(expires_at, years)
+
             card = Card(
                 card_id=_card_id(state.client_id, contract_id, index),
                 account_id=contract.account_id,
@@ -727,9 +776,7 @@ class CommunitySimulation:
                 contract_id=contract_id,
                 product_code=view.code,
                 issued_at=ts,
-                expires_at=cal.add_months(
-                    ts, 12 * int(self.settings.products.card_expiry_years)
-                ),
+                expires_at=expires_at,
             )
 
             state.cards[card.card_id] = card
@@ -827,16 +874,26 @@ class CommunitySimulation:
         rng = keyed_rng(NS_LEDGER, state.ordinal, 1)
 
         # Первая дебетовая карта в день прихода в банк.
-        view = self._pick_product(state, "debit_card", persona.relationship_start)
+        opened = persona.relationship_start
+
+        view = self._pick_product(state, "debit_card", opened)
+
+        if view is None:
+            # До реестра (REGISTRY_START) в каталоге нет ни одной
+            # карты. Давний клиент без неё оставался без счёта вовсе:
+            # 6% клиентов жили одними отказами (аудит 2026-11-05, C2).
+            # Его карта видна в реестре с начала реестра.
+            opened = max(opened, REGISTRY_START)
+            view = self._pick_product(state, "debit_card", opened)
 
         if view is not None:
             self._open_contract(
                 state,
                 view,
-                persona.relationship_start.replace(hour=11, minute=30),
+                opened.replace(hour=11, minute=30),
                 amount=None,
                 term=None,
-                emit_events=persona.relationship_start >= REGISTRY_START,
+                emit_events=opened >= REGISTRY_START,
             )
 
         span = max(1, (config.HISTORY_START - persona.relationship_start).days)
@@ -1027,7 +1084,7 @@ class CommunitySimulation:
         loan = loan_rules.open_loan(
             contract.contract_id,
             int(contract.amount_or_limit),
-            float(contract.rate or 0.28),
+            float(contract.rate if contract.rate is not None else 0.28),
             int(contract.term),
             contract.opened_at,
             autopay=rng.random() < self.settings.products.autopay_share,
@@ -1060,6 +1117,9 @@ class CommunitySimulation:
         by_term = terms.get("rate_by_term") or {}
 
         value = by_term.get(str(term)) or by_term.get(term)
+
+        if value is None and "rate_min" in terms:
+            value = expected_rate(terms)
 
         return float(value) if value is not None else 0.28
 
@@ -1214,7 +1274,7 @@ class CommunitySimulation:
             return price, int(terms.get("term_months", 12))
 
         if family == "bonds":
-            rate = self.settings.amounts.fx_rates.get("USD", 500.0)
+            rate = fx_rates.rate("USD", ts) or 500.0
             amount = int(int(terms.get("min_amount_usd", 1_000)) * rate)
             return amount, int(terms.get("term_max_months", 12))
 

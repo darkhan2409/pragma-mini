@@ -49,6 +49,9 @@ def _holiday_map() -> dict:
     for year in range(2017, 2031):
 
         for month, day, name in settings.fixed_holidays:
+            first, last = settings.holiday_years.get(name, (None, None))
+            if (first is not None and year < first) or (last is not None and year > last):
+                continue
             try:
                 table[date(year, month, day)] = name
             except ValueError:
@@ -113,7 +116,7 @@ def day_context(ts: datetime) -> DayContext:
     return DayContext(
         ts=ts,
         weekday=ts.weekday(),
-        is_weekend=ts.weekday() >= 5,
+        is_weekend=is_day_off(ts),
         is_holiday=holiday is not None,
         holiday=holiday,
         pre_holiday=_pre_holiday_map().get(day),
@@ -126,8 +129,62 @@ def day_context(ts: datetime) -> DayContext:
     )
 
 
+@state_cache
+def _days_off() -> frozenset:
+    """
+    Нерабочие будни: праздники в будни, перенесённые с выходных
+    праздники и выходные по постановлениям. Рабочие выходные — в
+    _working_weekends.
+    """
+
+    settings = params_module.active().seasonality
+
+    holidays = _holiday_map()
+
+    working = _working_weekends()
+
+    off: set[date] = {day for day in holidays if day.weekday() < 5}
+    off |= {date(*item) for item in settings.extra_days_off}
+
+    def free(day: date) -> bool:
+        return (day.weekday() >= 5 and day not in working) or day in off or day in holidays
+
+    for day in sorted(holidays):
+
+        if day.weekday() < 5 or holidays[day] in settings.transfer_exempt:
+            continue
+
+        moved = day + timedelta(days=1)
+        while free(moved):
+            moved += timedelta(days=1)
+        off.add(moved)
+
+    return frozenset(off)
+
+
+@state_cache
+def _working_weekends() -> frozenset:
+    return frozenset(date(*item) for item in params_module.active().seasonality.working_weekends)
+
+
+def is_day_off(ts: datetime) -> bool:
+    """
+    Нерабочий день по производственному календарю: выходной (кроме
+    рабочих выходных по переносу), праздник или перенесённый
+    выходной. Прежде праздник в будни жил как рабочий день, а
+    переносов не было вовсе (аудит 2026-11-05, context-05).
+    """
+
+    day = ts.date()
+
+    if day in _working_weekends():
+        return False
+
+    return ts.weekday() >= 5 or day in _days_off() or day in _holiday_map()
+
+
 def is_business_day(ts: datetime) -> bool:
-    return ts.weekday() < 5 and _holiday_map().get(ts.date()) is None
+    return not is_day_off(ts)
 
 
 def previous_business_day(ts: datetime) -> datetime:
@@ -218,6 +275,53 @@ def _category_factor(category: str, ts: datetime, region: str | None) -> float:
     return float(factor)
 
 
+def price_index(category: str, ts: datetime) -> float:
+    """
+    Индекс цен категории к январю 2024: годовой темп группы ИПЦ,
+    начисляемый помесячно (params.amounts.inflation).
+    """
+
+    settings = params_module.active().amounts
+
+    if _INDEX_OF[0] is not settings:
+        _INDEX.clear()
+        _INDEX_OF[0] = settings
+
+    key = (category, ts.year, ts.month)
+
+    cached = _INDEX.get(key)
+
+    if cached is not None:
+        return cached
+
+    group = next((name for name, members in settings.inflation_groups.items() if category in members), "goods")
+
+    rates = settings.inflation[group]
+
+    months = (ts.year - 2024) * 12 + (ts.month - 1)
+
+    index = 1.0
+
+    if months >= 0:
+        for step in range(months):
+            year = 2024 + (step // 12)
+            index *= (1.0 + rates.get(year, rates[max(rates)])) ** (1 / 12)
+    else:
+        for step in range(-months):
+            year = 2023 - (step // 12)
+            index /= (1.0 + rates.get(year, rates[min(rates)])) ** (1 / 12)
+
+    _INDEX[key] = index
+
+    return index
+
+
+# Индекс цен спрашивают на каждой покупке: кэш по (категория, год,
+# месяц), сбрасывается со сменой параметров.
+_INDEX: dict = {}
+_INDEX_OF: list = [None]
+
+
 def month_factor(ts: datetime) -> float:
     """
     Общий уровень трат месяца: декабрь дороже февраля.
@@ -236,9 +340,10 @@ def payday_factor(ts: datetime, last_payday: datetime | None, next_payday: datet
     factor = 1.0
 
     if last_payday is not None:
-        elapsed = (ts - last_payday).days
+        elapsed = (ts.date() - last_payday.date()).days
         if 0 <= elapsed <= settings.payday_window_days:
-            factor *= settings.payday_boost
+            # Только что получили: «перед зарплатой» уже не про сегодня.
+            return float(settings.payday_boost)
 
     if next_payday is not None:
         remaining = (next_payday - ts).days
@@ -263,7 +368,7 @@ def hour_weights(ts: datetime, night_segment: bool = False) -> tuple:
 
     base = (
         settings.hour_profile_weekend
-        if ts.weekday() >= 5
+        if is_day_off(ts)
         else settings.hour_profile_weekday
     )
 
@@ -329,6 +434,8 @@ __all__ = [
     "day_in_month",
     "hour_weights",
     "is_business_day",
+    "price_index",
+    "is_day_off",
     "month_end",
     "month_index",
     "month_start",

@@ -210,6 +210,121 @@ class PopulationParams:
 
     income_bounds: tuple = (75_000, 4_500_000)
 
+    # --- Анкета → поведение и доход (аудит 2026-11-05, волна 4) ---
+
+    # Средняя зарплата региона к средней по стране (БНС 2025:
+    # Мангистау 623, Атырау 613, Астана 594, Алматы 556, Шымкент 344,
+    # Туркестанская 319 тыс. ₸ при 443 по стране; прочие — синтетическое
+    # приближение). Прежде регион на доход не влиял: Шымкент выходил
+    # богаче Атырау (аудит, M8, persona-15).
+    income_region_factor: dict = field(
+        default_factory=lambda: {
+            "Mangystau": 1.41, "Atyrau": 1.38, "Astana": 1.34, "Almaty": 1.26, "Shymkent": 0.78,
+            "Turkistan": 0.72, "Karaganda": 0.92, "Pavlodar": 0.93, "East Kazakhstan": 0.90,
+            "Ulytau": 1.05, "Aktobe": 0.88, "West Kazakhstan": 0.92, "Kostanay": 0.82,
+            "North Kazakhstan": 0.80, "Akmola": 0.84, "Abai": 0.82, "Zhetisu": 0.76,
+            "Almaty region": 0.85, "Zhambyl": 0.74, "Kyzylorda": 0.80,
+        }
+    )
+    # Разрыв в оплате: зарплата женщин около 0.78 мужской (БНС;
+    # уверенность средняя). Прежде медианы совпадали (persona-01).
+    income_gender_factor: dict = field(default_factory=lambda: {"M": 1.12, "F": 0.88})
+
+    # Пенсия — государственная выплата: не зависит ни от поселения, ни
+    # от этапа жизни, средняя около 131–143 тыс. ₸ (research.md).
+    # Прежде медиана 110 тыс. умножалась на множители поселения и этапа,
+    # и 53% пенсионеров сидели на нижней границе 75 тыс. (persona-18).
+    pension_income_median: int = 135_000
+    pension_income_sigma: float = 0.30
+
+    # Отрасль по региону: нефтегаз — в нефтяных регионах, горнодобыча —
+    # в промышленных; бюджетник работает в бюджетной сфере
+    # (persona-16: бюджетники в нефтегазе и IT).
+    industry_region_factor: dict = field(
+        default_factory=lambda: {
+            "oil_and_gas": ({"Atyrau", "Mangystau", "West Kazakhstan", "Kyzylorda", "Aktobe"}, 5.0, 0.08),
+            "mining": ({"Karaganda", "Pavlodar", "East Kazakhstan", "Ulytau", "Kostanay", "Abai"}, 3.0, 0.15),
+        }
+    )
+    state_industries: tuple = ("education", "healthcare", "government", "science", "utilities", "security")
+
+    # Сколько клиентов банка из сёл и регионов: веса поселений к
+    # населению (БНС: сельских около 37%, Туркестанская 10.5% и
+    # Алматинская 7.6% населения). Клиентская база банка городская
+    # сильнее населения, поэтому поправка частичная.
+    rural_weight_factor: float = 1.5
+    region_weight_factor: dict = field(
+        default_factory=lambda: {"Turkistan": 1.8, "Almaty region": 2.0, "Zhetisu": 1.3, "Zhambyl": 1.1,
+                                 "Almaty": 0.85}
+    )
+
+    # Признаки участия: доля людей, которые вообще так тратят, по полу и
+    # возрасту (синтетическое допущение; курение — по GATS Казахстан:
+    # мужчины около 36%, женщины около 6%). Без признака категории нет
+    # вовсе — структурный ноль. Прежде табак покупали 84% клиентов, а
+    # ставки делали 59%, у женщин 65+ — 67% и 47% (аудит, C6).
+    habit_shares: dict = field(
+        default_factory=lambda: {
+            "smokes": {"M": 0.36, "F": 0.06},
+            "gambles": {"M": 0.12, "F": 0.025},
+            "scooter": {"M": 0.30, "F": 0.22},
+            "cinema": {"M": 0.45, "F": 0.50},
+        }
+    )
+    # Как признак меняется с возрастом: (возраст от, множитель).
+    habit_age_factor: dict = field(
+        default_factory=lambda: {
+            "smokes": ((18, 0.8), (25, 1.0), (55, 0.8), (70, 0.5)),
+            "gambles": ((18, 1.3), (30, 1.0), (45, 0.5), (60, 0.15)),
+            "scooter": ((18, 1.6), (30, 0.8), (40, 0.35), (55, 0.05)),
+            "cinema": ((18, 1.4), (30, 1.0), (45, 0.6), (60, 0.25)),
+        }
+    )
+
+    # Машина — по доходу: вероятность из транспортной смеси поселения
+    # умножается на (доход / 320 тыс.)^0.45 в пределах [0.35, 1.8].
+    # Прежде владение машиной падало с ростом дохода (persona-19).
+    car_income_elasticity: float = 0.45
+
+    # Структура трат по полу и возрасту (синтетическое допущение по
+    # направлению эффектов; прежде пол и возраст не меняли ни одной
+    # доли категорий — аудит, C6, persona-02).
+    category_gender_factor: dict = field(
+        default_factory=lambda: {
+            "F": {"beauty": 2.0, "cosmetics": 2.4, "clothing": 1.25, "shoes": 1.2, "kids": 1.3,
+                  "pharmacy": 1.15, "home_goods": 1.2},
+            "M": {"beauty": 0.5, "cosmetics": 0.35, "car_service": 1.5, "electronics": 1.3, "sports": 1.3,
+                  "fuel": 1.2, "fastfood": 1.15},
+        }
+    )
+    # (возраст от, множители): берётся ступень с наибольшим «от» не
+    # больше возраста.
+    category_age_factor: tuple = (
+        (18, {"education": 1.6, "fastfood": 1.3, "coffee": 1.2, "entertainment": 1.2, "sports": 1.2,
+              "pharmacy": 0.8, "medical": 0.7}),
+        (30, {}),
+        (45, {"pharmacy": 1.3, "medical": 1.3, "lab": 1.2, "fastfood": 0.75, "coffee": 0.8,
+              "entertainment": 0.7, "education": 0.5}),
+        (60, {"pharmacy": 1.7, "medical": 1.6, "lab": 1.5, "fastfood": 0.45, "coffee": 0.5,
+              "entertainment": 0.4, "marketplace": 0.6, "ecom": 0.6, "electronics": 0.6, "sports": 0.4,
+              "education": 0.2, "kids": 0.3}),
+    )
+    # Где категория вообще есть: кикшеринг, прокат авто и кино — в
+    # городах (прежде кикшеринг и прокат были у 95–100% клиентов
+    # райцентров; аудит, context-12).
+    category_settlement_types: dict = field(
+        default_factory=lambda: {
+            "micromobility": ("metropolis", "major_city", "regional_centre"),
+            "car_rental": ("metropolis", "major_city"),
+            "cinema": ("metropolis", "major_city", "regional_centre", "industrial_town", "small_town"),
+        }
+    )
+    # Машинные траты — у водящих: парковка, автосервис, штрафы ГАИ
+    # (прежде парковку платили 93.5% клиентов без машины; context-13).
+    car_categories: dict = field(
+        default_factory=lambda: {"fuel": 0.02, "parking": 0.03, "car_service": 0.03, "fines": 0.10}
+    )
+
     # Обязательные расходы как доля дохода домохозяйства.
     mandatory_share_by_stage: dict = field(
         default_factory=lambda: {

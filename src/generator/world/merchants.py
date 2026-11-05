@@ -184,6 +184,10 @@ class Outlet:
     popularity: float
     country: str
     is_online: bool
+    # Категория магазина, которую видит банк: у названной точки —
+    # категория сети (табак в «Magnum Express» — покупка в магазине
+    # у дома, а не в табачном). None — та же, что category.
+    public_category: str | None = None
 
 
 # ============================================================
@@ -217,15 +221,22 @@ def _regional_names(settlement: geography.Settlement, source: str) -> tuple[str,
     return ()
 
 
+# Городские сервисы привязаны к своему городу: транспортная карта
+# Тараза в Шу не работает. Для них уровня «крупнейший город области»
+# нет — без своей записи точка безымянная (аудит 2026-11-05,
+# context-12, TulparCard в Шу).
+CITY_BOUND_SOURCES = ("transit", "parking", "utilities")
+
+
 def _place_names(settlement: geography.Settlement, source: str) -> tuple[str, ...]:
     """
     Названия первого непустого уровня: поселение, крупнейший город
-    области, точки без города.
+    области (кроме городских сервисов), точки без города.
     """
 
     return (
         reference.names_in(settlement.name, source)
-        or _regional_names(settlement, source)
+        or (() if source in CITY_BOUND_SOURCES else _regional_names(settlement, source))
         or reference.cityless_names(source)
     )
 
@@ -275,13 +286,15 @@ def brands_for(category_name: str, settlement_name: str) -> tuple:
 
     for index, name in enumerate(order):
 
-        # Сегмент привязан к сети, а не к точке: одна и та же
-        # сеть стоит одинаково во всех поселениях.
-        item_rng = keyed_rng(NS_MERCHANT, stable_hash("brand", category_name, name) % (2 ** 31))
+        # Сегмент и идентификатор привязаны к сети, а не к точке и не
+        # к потребности: одна сеть стоит одинаково во всех поселениях
+        # и категориях, где её названия подтверждены. Прежде сеть
+        # получала свой id в каждой категории (аудит 2026-11-05, M5).
+        item_rng = keyed_rng(NS_MERCHANT, stable_hash("brand", source, name) % (2 ** 31))
 
         brands.append(
             Brand(
-                merchant_id=f"mc_{stable_hash('merchant', category_name, name) % 10 ** 10:010d}",
+                merchant_id=f"mc_{stable_hash('merchant', source, name) % 10 ** 10:010d}",
                 name=name,
                 category=category_name,
                 sector=category.sector,
@@ -337,6 +350,15 @@ def outlet_count(settlement_name: str, category_name: str) -> int:
     return scaled
 
 
+_TRANSLIT = {
+    "А": "A", "Б": "B", "В": "V", "Г": "G", "Д": "D", "Е": "E", "Ё": "E", "Ж": "ZH", "З": "Z",
+    "И": "I", "Й": "Y", "К": "K", "Л": "L", "М": "M", "Н": "N", "О": "O", "П": "P", "Р": "R",
+    "С": "S", "Т": "T", "У": "U", "Ф": "F", "Х": "KH", "Ц": "TS", "Ч": "CH", "Ш": "SH", "Щ": "SCH",
+    "Ъ": "", "Ы": "Y", "Ь": "", "Э": "E", "Ю": "YU", "Я": "YA",
+    "Ә": "A", "Ғ": "G", "Қ": "K", "Ң": "N", "Ө": "O", "Ұ": "U", "Ү": "U", "Һ": "H", "І": "I",
+}
+
+
 def _terminal_name(brand: Brand, settlement: geography.Settlement, index: int, rng,
                    online: bool = False) -> str:
     """
@@ -365,7 +387,10 @@ def _terminal_name(brand: Brand, settlement: geography.Settlement, index: int, r
     elif variant == "title":
         text = base
     elif variant == "translit":
-        text = base.upper().replace("Z", "J").replace("KH", "H")
+        # Кириллица терминальной строки латиницей. Прежде здесь
+        # латинскую Z меняли на J: KOLESA.KZ → KOLESA.KJ, PIZZA →
+        # PIJJA (аудит 2026-11-05, amounts-08).
+        text = "".join(_TRANSLIT.get(char, char) for char in base.upper())
     elif variant == "with_branch":
         text = base.upper() if online else f"{base.upper()} #{index + 1}"
     else:
@@ -473,6 +498,18 @@ def outlet(settlement_name: str, category_name: str, index: int) -> Outlet:
 
     mcc = str(rng.choice(category.mccs, p=category.mcc_weights))
 
+    public_category = None
+
+    if brand is not None:
+        # MCC назначает эквайер сети, а не точке: у сети один MCC её
+        # типа магазина. Прежде у 46% операций сеть имела 2–3 MCC
+        # (аудит 2026-11-05, M5).
+        public = REFERENCE_CATEGORY[category_name] or category_name
+        kind = CATEGORY_BY_NAME[public]
+        mcc_rng = keyed_rng(NS_MERCHANT, stable_hash("brand_mcc", brand.merchant_id) % (2 ** 31))
+        mcc = str(mcc_rng.choice(kind.mccs, p=kind.mcc_weights))
+        public_category = public if public != category_name else None
+
     base_popularity = brand.popularity if brand is not None else 1.0
 
     popularity = base_popularity / ((index + 1) ** settings.merchants.outlet_zipf_alpha)
@@ -496,6 +533,7 @@ def outlet(settlement_name: str, category_name: str, index: int) -> Outlet:
         popularity=popularity,
         country=settings.geography.home_country,
         is_online=is_online,
+        public_category=public_category,
     )
 
 
@@ -591,7 +629,7 @@ def payload_fields(item: Outlet | None) -> dict:
     return {
         "merchant_id": item.merchant_id,
         "merchant_name": item.merchant_name,
-        "merchant_category": item.category,
+        "merchant_category": item.public_category or item.category,
         # Точка сельской территории города не называет: корзина
         # области это не населённый пункт. За границей город
         # неизвестен по той же причине — его там никто не писал.

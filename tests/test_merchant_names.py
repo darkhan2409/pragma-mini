@@ -213,7 +213,25 @@ def test_a_name_from_elsewhere_does_not_shift_the_other_outlet_attributes(monkey
     assert all(item.merchant_name for item in named)
     assert not any(item.merchant_name for item in anonymous)
 
-    kept = ("outlet_id", "district", "channel", "opening_hour", "closing_hour", "is_online", "mcc", "subcategory")
+    # MCC — свойство сети, а не точки (аудит 2026-11-05, M5): у
+    # названной точки он берётся от её сети, у безымянной — от
+    # розыгрыша точки. Остальные атрибуты имя не сдвигает.
+    kept = ("outlet_id", "district", "channel", "opening_hour", "closing_hour", "is_online", "subcategory")
 
     for one, other in zip(named, anonymous):
         assert {name: asdict(one)[name] for name in kept} == {name: asdict(other)[name] for name in kept}
+
+
+def test_a_chain_has_one_mcc_everywhere():
+    """Одна сеть — один MCC во всех точках и поселениях (аудит 2026-11-05, M5)."""
+
+    by_chain: dict = {}
+
+    for place in ("Almaty", "Astana", "Shymkent", "Karaganda"):
+        for category in ("grocery", "convenience", "tobacco", "pharmacy", "fastfood"):
+            for item in merchants.outlets_of(place, category):
+                if item.merchant_id:
+                    by_chain.setdefault(item.merchant_id, set()).add(item.mcc)
+
+    assert by_chain
+    assert all(len(codes) == 1 for codes in by_chain.values())

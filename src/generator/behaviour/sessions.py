@@ -384,7 +384,7 @@ def plan_sessions(
 
         device_id, _ = device_for(persona, device_index)
 
-        session_id = f"ses_{stable_hash('session', persona.client_id, ordinal, index) % 10 ** 12:012d}"
+        session_id = f"ses_{stable_hash('session', persona.client_id, ordinal, index) % 10 ** 16:016d}"
 
         steps = _build_steps(
             persona=persona,
