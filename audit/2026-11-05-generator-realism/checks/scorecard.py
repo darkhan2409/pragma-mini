@@ -77,7 +77,7 @@ def compute(w: World) -> list[dict]:
     rows: list[dict] = []
     tx = w.load("transactions", ["client_id", "ts", "seq", "type", "status", "amount", "merchant_category",
                                  "merchant_name", "merchant_country", "original_currency", "original_amount",
-                                 "counterparty", "account_id", "transfer_id", "is_subscription", "balance_after"])
+                                 "counterparty", "account_id", "transfer_id", "is_subscription", "balance_after", "session_id"])
     tx["day"] = tx.ts.dt.normalize()
     ok_tx = tx[tx.status == "approved"]
     p = ok_tx[ok_tx.type == "purchase"]
@@ -209,6 +209,28 @@ def compute(w: World) -> list[dict]:
         md = tax.day.dt.month * 100 + tax.day.dt.day
         share = float(((md >= 801) & (md <= 1231)).mean())
         metric(rows, "M18 налогов в августе–декабре", round(share, 3), "≥ 0.9 (срок 1 октября)", share >= 0.9)
+
+    # --- волна 7: мелкие находки аудита ---
+    pe7 = w.load("product_events", ["ts", "type", "reason"])
+    act = pe7[pe7.type == "card_activated"]
+    night = float(act.ts.dt.hour.lt(7).mean()) if len(act) else float("nan")
+    metric(rows, "W7 активаций карт в 0–6 ч", round(night, 3), "< 0.02", night < 0.02)
+    back = tx[tx.type.isin(["refund", "reversal"])]
+    night = float(back.ts.dt.hour.lt(7).mean()) if len(back) else float("nan")
+    metric(rows, "W7 возвратов и отмен в 0–6 ч", round(night, 3), "< 0.02", night < 0.02)
+    top = float(p.amount.max()) if len(p) else 0.0
+    metric(rows, "W7 крупнейшая покупка, ₸", int(top), "≤ 1 500 000 (дневной лимит)", top <= 1_500_000)
+    ops = w.load("app_operations", ["operation", "status"])
+    pay = ops[ops.operation.astype(str).str.startswith("pay_")]
+    good = float((pay.status == "success").mean()) if len(pay) else float("nan")
+    metric(rows, "W7 успешных оплат в приложении", round(good, 3), "≥ 0.7", good >= 0.7)
+    sent = tx[(tx.type.isin(["p2p_out", "transfer_out"])) & (tx.status == "approved")
+              & (tx.counterparty.astype(str) != "Own account")]
+    in_app = float(sent.session_id.notna().mean()) if len(sent) else float("nan")
+    metric(rows, "W7 переводов людям из приложения", round(in_app, 3), "≥ 0.5", in_app >= 0.5)
+    early = pe7[(pe7.type == "product_closed") & (pe7.reason == "early_closure")]
+    last = float((early.ts.dt.is_month_end & early.ts.dt.hour.ge(23)).mean()) if len(early) else float("nan")
+    metric(rows, "W7 досрочных закрытий вклада в 23 ч последнего дня", round(last, 3), "< 0.1", last < 0.1)
 
     # --- M2: часы категорий ---
     hours = {c: float(p[p.merchant_category == c].ts.dt.hour.median()) for c in ("coffee", "bars")}

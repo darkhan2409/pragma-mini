@@ -116,7 +116,9 @@ def _on_session(sim, state: ClientState, ts: datetime, payload: dict) -> None:
             feasible = False
 
         if operation and operation.startswith("pay_"):
-            target_bill = state.open_bills[0] if state.open_bills else None
+            # Оплачивается тот счёт, ради которого клиент зашёл.
+            target_bill = next((item for item in state.open_bills if item["kind"] == step.target),
+                               state.open_bills[0] if state.open_bills else None)
             if target_bill is None:
                 feasible = False
             elif not state.ledger.payment_sources(step.ts, target_bill["amount"]):
@@ -685,6 +687,73 @@ def _transfer_in_app(
         state, ts, "transfer_out", account.account_id, amount, "debit",
         f"external:{counterpart.counterpart_id}", body,
     )
+
+
+def app_session_for_transfer(state: ClientState, ts: datetime, rng) -> str | None:
+    """
+    Идёт ли плановый перевод через приложение: у клиента, который им
+    пользуется для переводов, — почти всегда. Возвращает номер сессии
+    или None. Прежде 87% переводов p2p шли вне сессии приложения, хотя
+    в Казахстане их делают в нём (аудит 2026-11-05, minor).
+    """
+
+    from .behaviour import sessions as session_module
+
+    if state.app_adopted_at is None or ts < state.app_adopted_at:
+        return None
+
+    digital = round(state.persona.trait("digital_affinity", ts), 3)
+
+    if "transfers" not in session_module.adopted_domains(state.ordinal, digital):
+        return None
+
+    if rng.random() >= params_module.active().activity.app_transfer_share:
+        return None
+
+    return f"ses_{stable_hash('transfer-session', state.client_id, ts.toordinal(), _second_of_day(ts)) % 10 ** 16:016d}"
+
+
+def emit_app_transfer(state: ClientState, ts: datetime, session_id: str, operation: str, amount: int,
+                      approved: bool, rng) -> None:
+    """
+    Сессия планового перевода в приложении: вход, раздел переводов,
+    ввод получателя, подтверждение и сама операция — до денежного
+    события ts, в те же сутки.
+    """
+
+    entry = {"transfer_card": "s_202_transfer_card"}.get(operation, "s_201_transfer_phone")
+
+    midnight = ts.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    lead = min(timedelta(seconds=int(rng.integers(60, 240))), (ts - midnight) / 2)
+
+    moment = ts - lead
+
+    step = lead / 6
+
+    def screen(domain: str, name: str) -> None:
+        nonlocal moment
+        moment += step
+        state.emit(state.factory.make("app_screen", moment, {
+            "firebase_screen": name, "domain": domain, "product_id": None, "funnel_stage": None,
+            "reject_reason": None, "session_id": session_id, "application_id": None,
+        }))
+
+    def action(domain: str, name: str, status: str, value: int | None) -> None:
+        state.emit(state.factory.make("app_operation", moment, {
+            "domain": domain, "operation": name, "status": status, "amount": value,
+            "error_code": str(rng.choice(list(ERROR_CODES))) if status == "failed" else None,
+            "device_new": False, "session_id": session_id, "contract_id": None,
+        }))
+
+    biometry = rng.random() < 0.35 + 0.45 * state.persona.trait("digital_affinity", ts)
+    action("auth", "biometry_login" if biometry else "login", "success", None)
+    screen("home", "s_000_home")
+    screen("transfers", "s_200_transfers")
+    screen("transfers", entry)
+    screen("transfers", "s_203_transfer_confirm")
+    moment += step
+    action("transfers", operation, "success" if approved else "failed", int(amount))
 
 
 def _app_payee(sim, state: ClientState, ts: datetime, session):

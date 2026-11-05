@@ -629,11 +629,14 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
     app_adopted = state.app_adopted_at is not None and day >= state.app_adopted_at
 
     context = session_module.SessionContext(
+        # Счёт к оплате — выставленный, ещё не оплаченный, и на него
+        # хватает денег: платить идут, увидев баланс. Прежде им считался
+        # любой счёт с днём в последние 6 дней, в том числе уже
+        # оплаченный автоплатежом или без денег на карте, и оплата в
+        # приложении проходила в 7–18% случаев (аудит 2026-11-05, minor).
         due_bills=tuple(
-            bill.kind
-            for bill in state.habits.bills
-            if bill.valid_from <= day and cal.day_in_month(day, bill.day_of_month) >= day - timedelta(days=6)
-            and cal.day_in_month(day, bill.day_of_month) <= day
+            item["kind"] for item in state.open_bills
+            if item["amount"] <= state.ledger.payment_capacity(day)
         ),
         card_blocked=any(card.is_blocked_at(day) for card in state.cards.values()),
         # Оффер напоминает о себе месяц, а не всю оставшуюся жизнь.
@@ -871,6 +874,13 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
             },
         )
 
+    # --- досрочное закрытие вклада ---
+
+    if state.deposits:
+        from .engine_month import early_closures
+        for moment, contract_id in early_closures(state, day):
+            add(moment, "deposit_close_early", {"contract_id": contract_id})
+
     # --- налог на имущество и транспорт: раз в год, к 1 октября ---
 
     if "purchases" not in silenced and _tax_day(state, day.year) == day.toordinal():
@@ -1044,6 +1054,9 @@ def _plan_day(sim: CommunitySimulation, state: ClientState, day: datetime) -> li
 
     for index, event in enumerate(state.life_events):
         if event.known_to_bank_at is not None and event.known_to_bank_at.date() == day.date():
+            # Событие до прихода в банк уже в анкете дня прихода.
+            if persona.registered_in_window and event.ts < persona.relationship_start:
+                continue
             add(event.known_to_bank_at, "profile_change", {"event": event, "index": index})
 
     return actions
@@ -1231,6 +1244,35 @@ def _days_left(day: datetime, next_payday: datetime | None) -> int:
     return 15 if next_payday is None else max(1, (next_payday - day).days)
 
 
+def _day_limit(state: ClientState, ts: datetime, event_type: str, payload: dict, amount: int) -> int | None:
+    """
+    Лимит, который операция превысила бы (None — укладывается, и сумма
+    засчитана в день). Покупки — по карте, переводы клиента — по
+    клиенту; переводы себе и операции банка лимитом не ограничены.
+    """
+
+    products = params_module.active().products
+
+    if event_type == "purchase" and payload.get("card_id"):
+        key, limit = ("card", payload["card_id"]), products.card_purchase_limit_per_day
+    elif event_type in ("transfer_out", "p2p_out") and payload.get("counterparty") != "Own account":
+        key, limit = ("transfer", state.client_id), products.transfer_limit_per_day
+    else:
+        return None
+
+    day, spent = state.day_limits.get(key, (ts.toordinal(), 0))
+
+    if day != ts.toordinal():
+        spent = 0
+
+    if spent + amount > limit:
+        return limit
+
+    state.day_limits[key] = (ts.toordinal(), spent + amount)
+
+    return None
+
+
 def _touch_client(state: ClientState, ts: datetime) -> None:
     """
     Клиентское действие: от последнего банк отсчитывает тишину
@@ -1387,6 +1429,15 @@ def _emit_money(
         payload = dict(payload)
         payload.setdefault("decline_reason", "insufficient_funds")
 
+    # Дневной лимит операций по карте и переводов: сверх него банк
+    # отказывает. Прежде лимитов не было, и мошенническая покупка
+    # проходила на 24 млн ₸ (аудит 2026-11-05, minor).
+    if status == "approved" and post and direction == "debit" and not overlimit:
+        limit = _day_limit(state, ts, event_type, payload, int(amount))
+        if limit is not None:
+            status = "declined"
+            payload = dict(payload, decline_reason="limit_exceeded")
+
     body = dict(payload)
     body["amount"] = int(amount)
     body["direction"] = direction
@@ -1519,8 +1570,34 @@ def _on_registration(sim, state: ClientState, ts: datetime, payload: dict) -> No
 
     _touch_client(state, ts)
 
+    _profile_at_registration(state)
+
     # Профиль появляется вместе с клиентом, а не в конце месяца.
     _update_profile(state, ts, moment=ts)
+
+
+def _profile_at_registration(state: ClientState) -> None:
+    """
+    Анкета клиента, пришедшего внутри окна, — на день прихода: переезд,
+    свадьба, рождение, смена работы до регистрации уже в ней, клиент
+    сам указал их при оформлении. Отдельным изменением анкеты такое
+    событие потом не приходит (_plan_day). Прежде анкета описывала его на
+    1 января 2024 года (аудит 2026-11-05, minor).
+    """
+
+    from .engine_products import CLEAR, _new_profile_value
+
+    for event in state.life_events:
+
+        if event.ts >= state.persona.relationship_start:
+            break
+
+        for name in event.changes_profile:
+
+            value = _new_profile_value(state, name, event)
+
+            if value is not None:
+                state.profile_values[name] = None if value is CLEAR else value
 
 
 # Назначение платежа, которое банк видит у зачисления. Сроки
@@ -2222,6 +2299,17 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
 
     own = relation.relation_type == "own_account_other_bank"
 
+    # Перевод из приложения — внутри своей сессии (engine_app).
+    from .engine_app import app_session_for_transfer, emit_app_transfer
+
+    app_rng = event_rng(NS_TRANSFER, state.ordinal, ts.toordinal(), payload["index"] + 300, COMPONENT_CHANNEL)
+
+    session_id = app_session_for_transfer(state, ts, app_rng)
+
+    app = {"channel": "app", "session_id": session_id} if session_id else {}
+
+    operation = "transfer_card" if own else "transfer_phone"
+
     # Переезжая в другой банк, клиент переводит туда и накопленное:
     # суммы себе растут вместе с частотой (behaviour/engagement).
     if own:
@@ -2309,9 +2397,12 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
                     "reason": "transfer",
                     **fields,
                     "transfer_id": _transfer_id(state.client_id, ts, payload["index"]),
+                    **app,
                 },
                 "insufficient_funds",
             )
+            if session_id:
+                emit_app_transfer(state, ts, session_id, operation, amount, False, app_rng)
             _touch_client(state, ts)
             return
 
@@ -2333,6 +2424,7 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         "card_id": state.usable_card(account.account_id, ts).card_id
         if state.usable_card(account.account_id, ts)
         else None,
+        **app,
     }
 
     if internal:
@@ -2379,6 +2471,9 @@ def _on_transfer(sim, state: ClientState, ts: datetime, payload: dict) -> None:
         )
 
     _touch_client(state, ts)
+
+    if session_id:
+        emit_app_transfer(state, ts, session_id, operation, amount, sent.payload.get("status") == "approved", app_rng)
 
     # Денег не ушло — не за что брать и комиссию.
     if sent.payload.get("status") != "approved":

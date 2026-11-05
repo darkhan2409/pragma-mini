@@ -191,11 +191,17 @@ def plan_refunds(purchases: list) -> list:
 
         if rng.random() < settings.reversal_share:
             hours = rng.integers(*settings.reversal_delay_hours)
+            moment = event.event_time + timedelta(hours=int(hours))
+            # Отмену проводит точка или процессинг утром, а не глубокой
+            # ночью: прежде 40% возвратов приходились на 0–6 ч (аудит
+            # 2026-11-05, minor).
+            if moment.hour < 7:
+                moment = moment.replace(hour=int(rng.integers(7, 11)), minute=int(rng.integers(0, 60)))
             planned.append(
                 {
                     "kind": "reversal",
                     "cause": event,
-                    "ts": event.event_time + timedelta(hours=int(hours)),
+                    "ts": moment,
                     "amount": amount,
                 }
             )
@@ -209,7 +215,13 @@ def plan_refunds(purchases: list) -> list:
                 {
                     "kind": "refund",
                     "cause": event,
-                    "ts": event.event_time + timedelta(days=int(days), hours=int(rng.integers(9, 20))),
+                    # Возврат — в рабочие часы дня возврата. Прежде к
+                    # времени покупки прибавлялось 9–20 часов, и возврат
+                    # покупки в 15:00 приходил ночью.
+                    "ts": (event.event_time + timedelta(days=int(days))).replace(
+                        hour=int(rng.integers(9, 20)), minute=int(rng.integers(0, 60)),
+                        second=int(rng.integers(0, 60)), microsecond=0,
+                    ),
                     "amount": min(amount, value),
                 }
             )

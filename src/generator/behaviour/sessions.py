@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
 from .. import params as params_module
@@ -408,6 +408,13 @@ def plan_sessions(
             )
         )
 
+        # Оплаченный счёт второй раз за день не оплачивают: прежде каждая
+        # сессия дня шла платить тот же счёт, и повторные оплаты
+        # проваливались (аудит 2026-11-05, minor).
+        if any(step.operation and step.operation.startswith("pay_") for step in steps):
+            context = replace(context, due_bills=())
+            weights = _goal_weights(persona, day, context, adopted)
+
     sessions.sort(key=lambda item: item.started_at)
 
     return tuple(sessions)
@@ -613,6 +620,12 @@ def _build_steps(
         )
 
         return steps
+
+    # Без выставленного счёта платёжный раздел только смотрят: прежде
+    # заход заканчивался оплатой, которой не было что оплачивать, и
+    # pay_utility проходила в 7% случаев (аудит 2026-11-05, minor).
+    if goal == GOAL_PAYMENT:
+        operation = None
 
     if goal == GOAL_TRANSFER:
 

@@ -170,8 +170,14 @@ class ActivityParams:
     )
 
     # Вес цели «перевод» у сессии клиента, подключившего переводы
-    # (у «баланса» — 3.0).
-    transfer_goal_weight: float = 0.6
+    # (у «баланса» — 3.0). С волны 7 плановые переводы людям идут через
+    # свои сессии приложения (app_transfer_share), и эта цель — только
+    # разовые переводы сверх них: 0.6 → 0.3.
+    transfer_goal_weight: float = 0.3
+    # Доля плановых переводов, которые клиент с переводами в приложении
+    # делает в нём (engine_app.app_session_for_transfer); остальное —
+    # веб и банкомат. Синтетическое допущение.
+    app_transfer_share: float = 0.85
 
     weekend_factor_purchases: float = 1.10
     weekend_factor_sessions: float = 0.92

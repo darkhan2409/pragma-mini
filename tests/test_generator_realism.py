@@ -750,3 +750,98 @@ def test_client_actions_have_seconds(world) -> None:
     moments = [item["ts"] for item in world["events"] if item["type"] in kinds]
     assert len(moments) > 500
     assert sum(ts.second == 0 for ts in moments) / len(moments) < 0.05
+
+
+# ============================================================
+# ВОЛНА 7: МЕЛКИЕ НАХОДКИ АУДИТА
+# ============================================================
+
+
+def test_a_newcomer_profile_describes_the_day_of_arrival(personas, lives) -> None:
+    """Анкета пришедшего внутри окна — на день прихода: переезд и свадьба до
+    регистрации уже в ней."""
+
+    from types import SimpleNamespace
+
+    from src.generator import engine
+    from src.generator.simulate import CommunitySimulation
+    from src.generator.world import geography
+
+    checked = 0
+    for persona, events, streams in lives:
+        if not persona.registered_in_window:
+            continue
+        before = [item for item in events if item.ts < persona.relationship_start and item.kind in ("move", "wedding")]
+        if not before:
+            continue
+        state = SimpleNamespace(persona=persona, ordinal=persona.client_ordinal, life_events=events, income_streams=streams,
+                                profile_values=CommunitySimulation._initial_profile(None, persona))
+        engine._profile_at_registration(state)
+        moves = [item for item in before if item.kind == "move"]
+        if moves:
+            expected = geography.by_name(moves[-1].payload["settlement"]).public_name
+            assert state.profile_values["city"] == expected
+        weddings = [item for item in before if item.kind == "wedding"]
+        if weddings:
+            assert state.profile_values["family_status"] == weddings[-1].payload["family_status_after"]
+        checked += 1
+    assert checked > 3
+
+
+def test_activations_and_refunds_happen_in_the_daytime(world) -> None:
+    """Возврат и отмена — не ночью, активация карты — почти всегда днём."""
+
+    backs = [item for item in world["events"] if item["type"] in ("refund", "reversal")]
+    assert backs
+    assert all(item["ts"].hour >= 7 for item in backs)
+    activations = [item["ts"] for item in world["events"] if item["type"] == "card_activated"]
+    assert activations
+    assert sum(ts.hour < 7 for ts in activations) / len(activations) < 0.05
+
+
+def test_daily_limits_hold(world) -> None:
+    """Покупки по карте и переводы людям за день — не выше дневного лимита."""
+
+    products = params_module.active().products
+    cards, transfers = defaultdict(int), defaultdict(int)
+    for item in world["events"]:
+        if item.get("status") != "approved":
+            continue
+        if item["type"] == "purchase" and item.get("card_id"):
+            cards[(item["card_id"], item["ts"].date())] += int(item["amount"])
+        elif item["type"] in ("transfer_out", "p2p_out") and item.get("counterparty") != "Own account":
+            transfers[(item["client_id"], item["ts"].date())] += int(item["amount"])
+    assert cards and transfers
+    assert max(cards.values()) <= products.card_purchase_limit_per_day
+    assert max(transfers.values()) <= products.transfer_limit_per_day
+
+
+def test_an_app_transfer_belongs_to_its_session(world) -> None:
+    """Перевод из приложения — внутри сессии со входом и операцией перевода."""
+
+    sessions = defaultdict(set)
+    for item in world["events"]:
+        if item["type"] == "app_operation":
+            sessions[item["session_id"]].add(item["operation"])
+    app = [item for item in world["events"] if item["type"] in ("transfer_out", "p2p_out") and item.get("session_id")]
+    assert app
+    for item in app:
+        operations = sessions.get(item["session_id"], set())
+        assert operations & {"login", "biometry_login"}, item
+        assert operations & {"transfer_phone", "transfer_card", "transfer_own", "transfer_template"}, item
+
+
+def test_app_payments_have_something_to_pay(world) -> None:
+    """Оплата в приложении — только по выставленному счёту и в основном проходит."""
+
+    pays = [item for item in world["events"] if item["type"] == "app_operation" and str(item["operation"]).startswith("pay_")]
+    assert pays
+    assert sum(item["status"] == "success" for item in pays) / len(pays) > 0.6
+
+
+def test_early_deposit_closures_happen_on_any_day(world) -> None:
+    """Досрочно вклад закрывают днём в любой день, а не в 23:52 последнего дня."""
+
+    early = [item for item in world["events"] if item["type"] == "product_closed" and item.get("reason") == "early_closure"]
+    for item in early:
+        assert 10 <= item["ts"].hour <= 20, item

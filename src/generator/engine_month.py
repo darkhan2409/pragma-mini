@@ -189,10 +189,11 @@ def _mature_contracts(state: ClientState, day: datetime, month: datetime) -> Non
         emit_product_closed(state, ts, contract, "matured")
 
 
-def _close_deposits_early(sim, state: ClientState, day: datetime) -> None:
+def early_closures(state: ClientState, day: datetime) -> list:
     """
-    Досрочное закрытие вклада: деньги понадобились раньше срока.
-    В трудный период это случается чаще.
+    Досрочные закрытия вкладов на этот день: [(момент, договор)].
+    Деньги понадобились раньше срока; в трудный период это случается
+    чаще. План дня ставит их действием на свой момент (engine._plan_day).
     """
 
     settings = params_module.active().products
@@ -202,10 +203,14 @@ def _close_deposits_early(sim, state: ClientState, day: datetime) -> None:
     boost = 1.0 + params_module.active().stress.deposit_close_boost * stress
 
     # Клиент, переносящий жизнь в другой банк, забирает и вклад.
-    monthly = (
-        settings.deposit_early_close_share_per_year / 12.0 * boost
+    # Закрывают в любой день, а не только в последний день месяца
+    # (аудит 2026-11-05, minor): вероятность — на день.
+    daily = (
+        settings.deposit_early_close_share_per_year / 365.25 * boost
         / engagement_module.factor(state, "deposits")
     )
+
+    planned = []
 
     for contract_id, deposit in list(state.deposits.items()):
 
@@ -219,14 +224,27 @@ def _close_deposits_early(sim, state: ClientState, day: datetime) -> None:
 
         rng = keyed_rng(NS_DEPOSIT_CLOSE, state.ordinal, day.toordinal(), stable_hash(contract_id) % 9973)
 
-        if rng.random() >= monthly:
+        if rng.random() >= daily:
             continue
 
-        # После начисления процентов месяца (23:50) и до снимка
-        # остатков (23:55): штраф считается от всего начисленного,
-        # и лента не показывает процент, пришедший на уже закрытый
-        # счёт.
-        _close_deposit(state, day.replace(hour=23, minute=52), deposit, early=True)
+        # Днём, в часы, когда клиент делает операции; штраф — от
+        # начисленного к этому дню.
+        planned.append((day.replace(hour=int(rng.integers(10, 20)), minute=int(rng.integers(0, 60)),
+                                    second=int(rng.integers(0, 60))), contract_id))
+
+    return planned
+
+
+def _on_deposit_close_early(sim, state: ClientState, ts: datetime, payload: dict) -> None:
+
+    deposit = state.deposits.get(payload["contract_id"])
+
+    contract = state.contracts.get(payload["contract_id"])
+
+    if deposit is None or deposit.closed or contract is None or not contract.is_open_at(ts):
+        return
+
+    _close_deposit(state, ts, deposit, early=True)
 
 
 def _withdraw_consent(state: ClientState, day: datetime) -> None:
@@ -828,7 +846,7 @@ def month_end(sim, state: ClientState, day: datetime) -> None:
         if value <= 0:
             continue
 
-        _emit_money(
+        credited = _emit_money(
             state, ts.replace(minute=45), "cashback_credit", account_id, value, "credit",
             COUNTERPART_BANK,
             {
@@ -839,6 +857,13 @@ def month_end(sim, state: ClientState, day: datetime) -> None:
                 "merchant_country": "KZ",
             },
         )
+
+        # Кешбэк на кредитку гасит её долг, как платёж: прежде остаток
+        # счёта рос, а долг договора и минимальный платёж оставались
+        # прежними (аудит 2026-11-05, minor).
+        credit = state.card_credits.get(contract_id)
+        if credit is not None and not credit.closed and credited.payload.get("status") == "approved":
+            card_rules.apply_card_payment(credit, value, cal.month_index(month))
 
     state.pending_cashback = {}
 
@@ -880,7 +905,6 @@ def month_end(sim, state: ClientState, day: datetime) -> None:
 
     _mature_contracts(state, day, month)
     _expire_cards(sim, state, day)
-    _close_deposits_early(sim, state, day)
     _withdraw_consent(state, day)
 
     # --- счётчики месяца ---
@@ -1374,4 +1398,7 @@ def _row(event) -> dict:
 _HANDLERS["bill_sweep"] = _sweep_bills
 
 
-__all__ = ["assign_balances", "card_statements", "finish", "month_end"]
+_HANDLERS["deposit_close_early"] = _on_deposit_close_early
+
+
+__all__ = ["assign_balances", "card_statements", "early_closures", "finish", "month_end"]

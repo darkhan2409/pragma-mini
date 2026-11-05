@@ -1131,7 +1131,12 @@ def _on_fraud_step(sim, state: ClientState, ts: datetime, payload: dict) -> None
     if step.kind == "probe":
         amount = int(step.amount_hint)
     else:
-        limit = max(50_000, account.balance + account.credit_limit)
+        # Мошенник берёт часть доступного, но не больше дневного лимита
+        # канала: крупнее лимита операция всё равно получит отказ.
+        products = params_module.active().products
+        cap = products.transfer_limit_per_day if episode.kind in settings.transfer_kinds \
+            else products.card_purchase_limit_per_day
+        limit = max(50_000, min(account.balance + account.credit_limit, cap))
         amount = int(max(5_000, limit * step.amount_hint))
 
     amount = int(round(amount / 100) * 100)

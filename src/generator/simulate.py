@@ -129,6 +129,8 @@ class ClientState:
     # а не обнуляется с календарным месяцем (household.budget_pressure).
     spend_by_day: dict = field(default_factory=dict)
     count_by_day: dict = field(default_factory=dict)
+    # Израсходованный дневной лимит: (карта или клиент) -> (день, сумма).
+    day_limits: dict = field(default_factory=dict)
     pending_cashback: dict = field(default_factory=dict)
 
     profile_values: dict = field(default_factory=dict)
@@ -876,7 +878,14 @@ class CommunitySimulation:
 
             low, high = self.settings.products.card_activation_delay_days
 
-            activation = ts + timedelta(days=int(rng.integers(low, high + 1)), hours=int(rng.integers(1, 20)))
+            # Активация — днём или вечером дня активации, не раньше выдачи.
+            # Прежде к моменту выдачи прибавлялось 1–19 часов, и 31%
+            # активаций приходились на ночь (аудит 2026-11-05, minor).
+            day = ts + timedelta(days=int(rng.integers(low, high + 1)))
+            activation = day.replace(hour=int(rng.integers(9, 23)), minute=int(rng.integers(0, 60)),
+                                     second=int(rng.integers(0, 60)), microsecond=0)
+            if activation <= ts:
+                activation = ts + timedelta(minutes=int(rng.integers(5, 90)))
 
             card.activated_at = activation
             card.status = CARD_ACTIVE
