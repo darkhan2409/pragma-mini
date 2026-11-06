@@ -40,7 +40,9 @@ from .settings import EMBEDDINGS_META, REPORT_FILE, cutoff, downstream_dir, grou
 #   lora               дообучение эталона заплатками (python -m
 #                      src.downstream.finetune, готовый прогноз; только
 #                      с --lora <имя>): сравнивается с catboost и с usr,
-#                      порог — тот, что выбран при дообучении
+#                      порог — тот, что выбран при дообучении; с
+#                      --lora-baseline <имя> — ещё и с другой LoRA (эталона
+#                      или другого seed) парным bootstrap на тех же клиентах
 #
 # Голова над [USR] — логистическая регрессия со стандартизацией, сила
 # регуляризации выбирается 3-кратной кросс-валидацией на train по
@@ -306,7 +308,7 @@ def task_rows(task: str, churn: dict[str, dict[str, pd.DataFrame]]) -> dict[str,
 
 
 def run_probe(tag: str, draws: int, seed: int, baseline: str | None = None, final_test: bool = False,
-              lora: str | None = None) -> dict:
+              lora: str | None = None, lora_baseline: str | None = None) -> dict:
 
     from .tasks import CHURN_TASKS, churn_rows, churn_thresholds, lora_rows, plus_usr
 
@@ -323,9 +325,21 @@ def run_probe(tag: str, draws: int, seed: int, baseline: str | None = None, fina
     plus = plus_usr(tag, used, embedded)
     tuned = lora_rows(lora, used, embedded) if lora else None
 
+    # LoRA другой модели (эталона или другого seed) на тех же клиентах:
+    # её эталон с векторами пробы не сверяется — он и есть другой.
+    if lora_baseline and not lora:
+        raise ValueError("--lora-baseline сравнивает с --lora: задайте оба")
+    other_lora = lora_rows(lora_baseline, used, None) if lora_baseline else None
+    if other_lora is not None and other_lora["meta"]["config"] != tuned["meta"]["config"]:
+        raise ValueError(
+            f"lora {lora} и {lora_baseline}: разные конфиги дообучения "
+            f"({tuned['meta']['config']} и {other_lora['meta']['config']}) — сравнение не парное"
+        )
+
     report: dict = {
         "tag": tag, "baseline": baseline, "draws": draws,
-        "final_test": final_test, "groups": list(used), "plus_usr": plus is not None, "lora": lora, "tasks": {},
+        "final_test": final_test, "groups": list(used), "plus_usr": plus is not None, "lora": lora,
+        "lora_baseline": lora_baseline, "tasks": {},
     }
 
     # Прогнозы по строкам: по ним сравниваются модели между собой.
@@ -382,6 +396,17 @@ def run_probe(tag: str, draws: int, seed: int, baseline: str | None = None, fina
             # Порог выбран при дообучении на отложенной части train.
             cut["lora"] = tuned["threshold"]
 
+        versus_lora: dict[str, np.ndarray] = {}
+
+        if other_lora is not None:
+            for group in evaluated:
+                other = other_lora["rows"].get((task, group))
+                if other is None or not other.index.equals(rows[group].index) or not np.array_equal(
+                    other["churn"].to_numpy(), y[group]
+                ):
+                    raise ValueError(f"lora {lora_baseline}/{task}/{group}: другие клиенты или метки, чем у catboost")
+                versus_lora[group] = other["score"].to_numpy()
+
         for name, by_group in scores.items():
             for group in evaluated:
                 predictions.append(pd.DataFrame({
@@ -414,6 +439,15 @@ def run_probe(tag: str, draws: int, seed: int, baseline: str | None = None, fina
                 }
                 for key in ("best_epoch", "trainable", "seed"):
                     results[name][key] = tuned["meta"][key]
+                if versus_lora:
+                    results[name]["vs_lora_baseline"] = {
+                        group: paired(y[group], by_group[group], versus_lora[group], draws, seed)
+                        for group in evaluated
+                    }
+                    results[name]["lora_baseline"] = {
+                        "name": lora_baseline, "seed": other_lora["meta"]["seed"],
+                        **{group: metrics(y[group], versus_lora[group]) for group in evaluated},
+                    }
             if before is not None and name in COMPARED:
                 results[name]["vs_baseline"] = {
                     group: vs_baseline(before, task, name, group, rows[group].index, y[group],
@@ -523,6 +557,14 @@ def show(report: dict) -> str:
                 for other, delta in (("catboost", lora["vs_reference"]), ("usr", lora["vs_usr"])):
                     pr, roc = delta[group]["pr_auc"], delta[group]["roc_auc"]
                     lines.append(f"  Δ lora − {other} ({group}): PR-AUC {interval(pr)}, ROC-AUC {interval(roc)}")
+                if "vs_lora_baseline" in lora:
+                    pr, roc = lora["vs_lora_baseline"][group]["pr_auc"], lora["vs_lora_baseline"][group]["roc_auc"]
+                    base = lora["lora_baseline"]
+                    lines.append(
+                        f"  Δ lora − lora {base['name']} ({group}): PR-AUC {interval(pr)}, ROC-AUC {interval(roc)}; "
+                        f"PR-AUC {lora[group]['pr_auc']:.3f} против {base[group]['pr_auc']:.3f}, "
+                        f"log-loss {lora[group]['log_loss']:.4f} против {base[group]['log_loss']:.4f}"
+                    )
 
             plus = block["results"].get("catboost_plus_usr")
 
@@ -542,7 +584,8 @@ def run(args) -> int:
 
     try:
         with threadpool_limits(BLAS_THREADS):
-            report = run_probe(args.tag, args.draws, args.seed, args.baseline, args.final_test, args.lora)
+            report = run_probe(args.tag, args.draws, args.seed, args.baseline, args.final_test, args.lora,
+                               args.lora_baseline)
     except (FileNotFoundError, ValueError) as error:
         print(f"[probe] {error}")
         return EXIT_BLOCKED
@@ -562,6 +605,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tag", required=True, help="каталог векторов в data/13_downstream")
     parser.add_argument("--baseline", default=None, help="тег модели для парного сравнения")
     parser.add_argument("--lora", default=None, help="имя дообучения (python -m src.downstream.finetune --name)")
+    parser.add_argument(
+        "--lora-baseline", default=None,
+        help="имя другого дообучения для парного сравнения с --lora (LoRA эталона, другой seed)",
+    )
     parser.add_argument("--draws", type=int, default=1000, help="bootstrap-выборок")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(

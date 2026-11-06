@@ -954,7 +954,8 @@ def test_catboost_plus_usr_of_other_vectors_or_sources_is_refused(stage):
 # ============================================================
 
 
-def write_lora(name: str, baseline: dict, damage: str | None = None, groups: tuple[str, ...] = ("val",)) -> None:
+def write_lora(name: str, baseline: dict, damage: str | None = None, groups: tuple[str, ...] = ("val",),
+               seed: int = 5, config: dict | None = None) -> None:
     """
     Прогнозы и meta дообучения в формате finetune.publish для групп
     groups, от эталона — файла checkpoint в stage (его sha256 и эпоха 3
@@ -967,7 +968,7 @@ def write_lora(name: str, baseline: dict, damage: str | None = None, groups: tup
     from src.downstream.tasks import churn_sources
     from src.mlm.train import file_digest
 
-    rng = np.random.default_rng(5)
+    rng = np.random.default_rng(seed)
     parts = []
 
     for group in groups:
@@ -995,7 +996,8 @@ def write_lora(name: str, baseline: dict, damage: str | None = None, groups: tup
         },
         "groups": {group: {"cutoff": cutoff(group).isoformat(), **raw_record(group)} for group in used},
         "sources": {group: churn_sources(group) for group in used},
-        "threshold": 0.37, "best_epoch": 5, "trainable": 1234, "seed": 42, "config": {}, "final_test": "test" in groups,
+        "threshold": 0.37, "best_epoch": 5, "trainable": 1234, "seed": 42, "config": config or {},
+        "final_test": "test" in groups,
     }
 
     if damage == "sources":
@@ -1125,6 +1127,67 @@ def test_lora_final_evaluation_adds_test_next_to_val(stage, monkeypatch):
     tuned = run_probe("m", draws=20, seed=0, lora="ft", final_test=True)["tasks"]["churn_active90"]["results"]["lora"]
 
     assert set(tuned["vs_reference"]) == set(tuned["vs_usr"]) == {"val", "test"} and "test" in tuned
+
+
+def test_lora_is_compared_with_another_lora_on_the_same_clients(stage, monkeypatch):
+    """
+    --lora-baseline: Δ LoRA пробы и другой LoRA — тот же парный
+    bootstrap, что считает paired вручную; эталон другой LoRA с
+    векторами пробы не сверяется (это LoRA другой модели), а её метрики
+    и log-loss стоят рядом. Остальные сценарии не меняются.
+    """
+
+    from src.downstream.probe import PREDICTIONS_FILE, metrics, run_probe, show
+
+    baseline = lora_world(monkeypatch)
+    write_lora("ft", baseline)
+    write_lora("ref-lora", baseline, damage="sha256", seed=11)
+
+    report = run_probe("m", draws=30, seed=2, lora="ft", lora_baseline="ref-lora")
+    tuned = report["tasks"]["churn_active90"]["results"]["lora"]
+
+    predictions = pd.read_parquet(downstream_dir("m") / PREDICTIONS_FILE)
+    part = predictions[predictions["set"] == "lora"]
+    y, scores = part["y"].to_numpy(), part["score"].to_numpy()
+    other = pd.read_parquet(downstream_dir("ref-lora") / PREDICTIONS_FILE).set_index("client_id").loc[
+        part["client_id"]]["score"].to_numpy()
+
+    assert not np.array_equal(scores, other)
+    assert report["lora_baseline"] == "ref-lora"
+    assert tuned["vs_lora_baseline"]["val"] == paired(y, scores, other, 30, 2)
+    assert {key: tuned["lora_baseline"]["val"][key] for key in metrics(y, other)} == metrics(y, other)
+    assert tuned["lora_baseline"]["name"] == "ref-lora"
+    assert "Δ lora − lora ref-lora (val)" in show(report)
+
+    plain = run_probe("m", draws=30, seed=2, lora="ft")
+    for name, result in plain["tasks"]["churn_active90"]["results"].items():
+        expected = {k: v for k, v in tuned.items() if k not in ("vs_lora_baseline", "lora_baseline")} \
+            if name == "lora" else report["tasks"]["churn_active90"]["results"][name]
+        assert result == expected
+
+
+@pytest.mark.parametrize("damage, message", [
+    ("extra_client", "другие клиенты или метки"),
+    ("missing_client", "другие клиенты или метки"),
+    ("label", "другие клиенты или метки"),
+    ("sources", "источники строк группы val"),
+    ("kind", "не дообучения"),
+    ("config", "разные конфиги дообучения"),
+    ("alone", "задайте оба"),
+])
+def test_other_lora_of_other_clients_or_config_is_refused(stage, monkeypatch, damage, message):
+
+    from src.downstream.probe import run_probe
+
+    baseline = lora_world(monkeypatch)
+    write_lora("ft", baseline)
+    if damage == "config":
+        write_lora("ref-lora", baseline, seed=11, config={"rank": 4})
+    else:
+        write_lora("ref-lora", baseline, damage=None if damage == "alone" else damage, seed=11)
+
+    with pytest.raises(ValueError, match=message):
+        run_probe("m", draws=10, seed=2, lora=None if damage == "alone" else "ft", lora_baseline="ref-lora")
 
 
 def test_probe_without_lora_says_how_to_get_it(stage, monkeypatch):

@@ -156,7 +156,7 @@ def plus_usr(tag: str, used: tuple[str, ...], embedded: dict) -> dict | None:
     }
 
 
-def lora_rows(name: str, used: tuple[str, ...], embedded: dict) -> dict:
+def lora_rows(name: str, used: tuple[str, ...], embedded: dict | None) -> dict:
     """
     Прогнозы дообучения (python -m src.downstream.finetune --name
     <name>): порог и строки (churn, score) по задаче и группе.
@@ -164,7 +164,9 @@ def lora_rows(name: str, used: tuple[str, ...], embedded: dict) -> dict:
     embedded — meta.json векторов пробы. Годится только дообучение
     от того же эталона (sha256 и эпоха чекпойнта), на тех же группах
     (оцениваемые — used без train; test только с --final-test) и тех
-    же выгрузках и источниках строк, что у пробы сейчас.
+    же выгрузках и источниках строк, что у пробы сейчас. None — без
+    сверки эталона: так читается LoRA другой модели, с которой
+    сравнивается LoRA пробы (--lora-baseline).
     """
 
     from src.mlm.train import file_digest
@@ -188,12 +190,13 @@ def lora_rows(name: str, used: tuple[str, ...], embedded: dict) -> dict:
     problems = []
 
     reference = meta["reference"]
-    checkpoint = file_digest(Path(embedded["checkpoint"]))
 
-    if reference["sha256"] != checkpoint:
-        problems.append("обучено от другого эталона (sha256 чекпойнта не тот, что у векторов)")
-    elif reference["epoch"] != embedded["epoch"]:
-        problems.append(f"эпоха эталона {reference['epoch']}, а у векторов {embedded['epoch']}")
+    if embedded is not None:
+        checkpoint = file_digest(Path(embedded["checkpoint"]))
+        if reference["sha256"] != checkpoint:
+            problems.append("обучено от другого эталона (sha256 чекпойнта не тот, что у векторов)")
+        elif reference["epoch"] != embedded["epoch"]:
+            problems.append(f"эпоха эталона {reference['epoch']}, а у векторов {embedded['epoch']}")
 
     found = sorted(set(predictions["group"]))
 
