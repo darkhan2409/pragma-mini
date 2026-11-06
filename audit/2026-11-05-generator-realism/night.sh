@@ -11,7 +11,7 @@
 #   gen_*     генерация data/01_raw/train, val, test (размеры — config.DATASETS)
 #   future    продолжение train на 60 суток — метки churn train (churn_baseline/README.md)
 #   pipeline  этапы 02–07 (python -m src.pipeline)
-#   train     предобучение, умолчания кода (accepted.json аудита 2026-11-03 пуст), EPOCHS эпох
+#   train     предобучение, умолчания кода (accepted.json аудита 2026-11-03 пуст), EPOCHS эпох (по умолчанию 10)
 #   embed     векторы [USR] на T для train и val
 #   churn_*   признаки и CatBoost churn-бейзлайна на новом мире
 #   plus_usr  CatBoost на признаках + [USR]
@@ -23,7 +23,12 @@
 # останавливает цепочку; продолжить можно с упавшего шага вручную (генерация — --resume,
 # конвейер — --from <этап>, обучение — --resume).
 #
-# Переменные для пробного прогона на крошечном мире: EPOCHS (по умолчанию 5), MAX_STEPS.
+# Переменные: EPOCHS (по умолчанию 10 — решение владельца 2026-11-06), MAX_STEPS — для пробы на крошечном мире.
+#
+# FROM=<шаг> — продолжить с этого шага на уже готовых данных предыдущих (прежние data/ тогда не
+# переносятся): gen_train, gen_val, gen_test, future, pipeline, train, embed, churn_build_train,
+# churn_build_val, churn_train, plus_usr, probe — или этап конвейера (preprocess, fit, encode,
+# dataset, embeddings, backbone): тогда конвейер идёт с него (src.pipeline --from).
 
 set -uo pipefail
 
@@ -33,8 +38,16 @@ if [ "$#" -ne 1 ]; then
 fi
 
 NAME=$1
-EPOCHS=${EPOCHS:-5}
+EPOCHS=${EPOCHS:-10}
 MAX_STEPS=${MAX_STEPS:-}
+FROM=${FROM:-}
+PIPELINE_FROM=""
+
+case "$FROM" in
+    ""|gen_train|gen_val|gen_test|future|pipeline|train|embed|churn_build_train|churn_build_val|churn_train|plus_usr|probe) ;;
+    preprocess|fit|encode|dataset|embeddings|backbone) PIPELINE_FROM=$FROM; FROM=pipeline ;;
+    *) echo "[night] неизвестный шаг FROM=$FROM" >&2; exit 2 ;;
+esac
 
 if ! [[ "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
     echo "[night] недопустимое имя прогона: $NAME" >&2
@@ -52,7 +65,11 @@ TIME=/usr/bin/time
 
 cd "$REPO" || exit 2
 
-for path in "$RUN" "$BACKUP" "$VECTORS" "$REPO/churn_baseline/reports/plus_usr/$NAME"; do
+# Резервная копия делается только с начала цепочки (FROM пуст).
+CHECK=("$RUN" "$VECTORS" "$REPO/churn_baseline/reports/plus_usr/$NAME")
+[ -z "$FROM" ] && CHECK+=("$BACKUP")
+
+for path in "${CHECK[@]}"; do
     if [ -e "$path" ]; then
         echo "[night] $path уже существует: другое имя или удалите его вручную" >&2
         exit 2
@@ -107,7 +124,7 @@ for link in data churn_baseline .venv; do
 done
 
 {
-    echo "start $(date -Is) name=$NAME epochs=$EPOCHS max_steps=${MAX_STEPS:-нет}"
+    echo "start $(date -Is) name=$NAME epochs=$EPOCHS max_steps=${MAX_STEPS:-нет} from=${FROM:-начало}${PIPELINE_FROM:+ (конвейер с $PIPELINE_FROM)}"
     echo "tree $TREE"
     echo "head $(git rev-parse HEAD)"
     echo "code $COPY"
@@ -128,10 +145,20 @@ esac
 
 "$PY" -c "from src.generator import config; print('datasets', {k: v.clients for k, v in config.DATASETS.items()}, 'version', config.GENERATOR_VERSION)" >> "$STATUS"
 
+# До шага FROM шаги пропускаются: их результат уже на месте.
+STARTED=$([ -z "$FROM" ] && echo 1 || echo 0)
+
 # step <шаг> <каталог> <команда…>: лог <шаг>.log, пиковая память и код — в status, ошибка — стоп.
 step() {
     local label=$1 directory=$2
     shift 2
+    if [ "$STARTED" != 1 ]; then
+        if [ "$label" != "$FROM" ]; then
+            note "$label skipped (FROM=$FROM)"
+            return 0
+        fi
+        STARTED=1
+    fi
     note "$label start"
     (cd "$directory" && "$TIME" -v -o "$RUN/$label.time" "$@") > "$RUN/$label.log" 2>&1
     local result=$?
@@ -146,6 +173,10 @@ step() {
 
 # ---------- прежние данные — в сторону, без удаления ----------
 
+if [ -n "$FROM" ]; then
+    note "backup skipped (FROM=$FROM: данные прежних шагов уже новые)"
+else
+
 note "backup start"
 mkdir "$BACKUP" || { note "backup FAILED"; exit 1; }
 for stage in 01_raw 02_preprocessed 03_vocab 04_tokenized 05_dataset 06_embeddings 07_backbone; do
@@ -159,13 +190,15 @@ if [ -e "$REPO/churn_baseline/data/future/train" ]; then
 fi
 note "backup done $BACKUP"
 
+fi
+
 # ---------- данные ----------
 
 step gen_train "$COPY" "$PY" -m src.generator.emit train
 step gen_val "$COPY" "$PY" -m src.generator.emit val
 step gen_test "$COPY" "$PY" -m src.generator.emit test
 step future "$COPY" "$PY" -m src.generator.continuation train --days 60 --out churn_baseline/data/future/train
-step pipeline "$COPY" "$PY" -m src.pipeline --report "$RUN/pipeline-timing.json"
+step pipeline "$COPY" "$PY" -m src.pipeline --report "$RUN/pipeline-timing.json" ${PIPELINE_FROM:+--from "$PIPELINE_FROM"}
 
 # ---------- модель и оценка ----------
 

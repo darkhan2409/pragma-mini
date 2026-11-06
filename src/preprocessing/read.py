@@ -392,9 +392,11 @@ class Group:
         и в history-обходе.
         """
 
-        path = self.directory / EVENTS_FILE
-
-        cursors = [_ClientCursor(path, number) for number in range(self._events.num_row_groups)]
+        # Один ParquetFile на все курсоры: у каждого своего объекта своя
+        # копия разобранного заголовка файла (~21 МБ при 392 группах строк
+        # и 62 колонках), и на 25 тыс. клиентов курсоры съедали ~8 ГБ —
+        # обучение словаря падало по памяти (2026-11-06).
+        cursors = [_ClientCursor(self._events, number) for number in range(self._events.num_row_groups)]
 
         empty = self._events.schema_arrow.empty_table()
 
@@ -417,10 +419,10 @@ class _ClientCursor:
     кусками фиксированного размера. Вся группа в памяти не лежит.
     """
 
-    BATCH_ROWS = 2048
+    BATCH_ROWS = 256
 
-    def __init__(self, path: Path, row_group: int):
-        self._batches = pq.ParquetFile(path).iter_batches(batch_size=self.BATCH_ROWS, row_groups=[row_group])
+    def __init__(self, events: pq.ParquetFile, row_group: int):
+        self._batches = events.iter_batches(batch_size=self.BATCH_ROWS, row_groups=[row_group])
         self._rest: pa.Table | None = None
         self._next()
 
