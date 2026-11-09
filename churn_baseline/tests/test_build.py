@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from churn.build import KEYS, build
-from churn.config import HORIZON, RECENT, cutoff, month_start
+from churn.config import HORIZON, LONG_WINDOW, RECENT, cutoff, month_start
 from churn.target import task_rows
 from world import LOCAL, UTC, event, login, profile, profile_change, purchase, push, salary, write_future, write_group
 
@@ -142,6 +142,100 @@ def test_window_edges(tmp_path) -> None:
     assert table.loc["c", "purchase_count_7"] == 1
     assert table.loc["c", "purchase_count_30"] == 2
     assert table.loc["c", "purchase_sum_30"] == 30
+
+
+def transfer(client: str, moment: datetime, counterparty: str, reason: str = "transfer") -> dict:
+    return event(
+        client, moment, "transactions", type="transfer_out", channel="app", reason=reason, counterparty=counterparty,
+        amount=50000, direction="debit", status="approved", account_id=f"acc_{client}",
+    )
+
+
+def test_withdrawal_to_own_account_elsewhere_does_not_keep_a_client(tmp_path) -> None:
+    """
+    Ушедший выводит остаток и приходящий доход себе в другой банк: такой
+    вывод не держит клиента ни в окне метки, ни в популяции active90.
+    Перевод человеку и между своими счетами в банке — действия.
+    """
+    clients = ("gone", "paying", "internal", "sweeping")
+    events = [row for client in clients[:3] for row in base(client)]
+    events += [
+        transfer("gone", T + timedelta(days=3), "Own account"),
+        transfer("gone", T + timedelta(days=33), "Own account"),
+        transfer("paying", T + timedelta(days=3), "A. Person"),
+        transfer("internal", T + timedelta(days=3), "Own account", reason="own_transfer"),
+        purchase("sweeping", T - timedelta(days=200)),
+        transfer("sweeping", T - timedelta(days=20), "Own account"),
+    ]
+    table = run(tmp_path, events, [profile(c, AS_OF) for c in clients])
+    assert table.loc["gone", "churn"] == 1
+    assert table.loc["paying", "churn"] == 0
+    assert table.loc["internal", "churn"] == 0
+    # Давно ушедший, который только выводит доход, — не недавно активный,
+    # но сам вывод остаётся в признаках переводов.
+    assert not table.loc["sweeping", "active90"]
+    assert table.loc["sweeping", "act_count_90"] == 0
+    assert table.loc["sweeping", "transfer_count_30"] == 1
+
+
+def snapshot(client: str, moment: datetime, account: str, balance: int) -> dict:
+    return event(client, moment, "transactions", type="balance_snapshot", account_id=account, balance_after=balance, currency="KZT")
+
+
+def test_balance_total_sums_the_last_balance_of_every_account(tmp_path) -> None:
+    """
+    Остаток клиента — сумма последних остатков всех его счетов. Снимки
+    всех счетов пишутся в одну минуту, и «последний остаток по любому
+    счёту» брал случайный счёт, а изменение за 30 дней вычитало остаток
+    одного счёта из остатка другого.
+    """
+    events = [
+        login("c", T - timedelta(days=3), session="c_s1"),
+        snapshot("c", T - timedelta(days=40), "acc_card", 1000),
+        snapshot("c", T - timedelta(days=40), "acc_deposit", 500_000),
+        purchase("c", T - timedelta(days=10), amount=600, account_id="acc_card", balance_after=400),
+        snapshot("c", T - timedelta(days=1), "acc_deposit", 510_000),
+        snapshot("c", T - timedelta(days=1), "acc_credit", -20_000),
+    ]
+    table = run(tmp_path, events, [profile("c", AS_OF)])
+    now, before = 400 + 510_000 - 20_000, 1000 + 500_000
+    assert table.loc["c", "balance_total"] == now
+    assert table.loc["c", "balance_total_30d_ago"] == before
+    assert table.loc["c", "balance_change_30"] == now - before
+
+
+def test_a_balance_without_an_account_is_refused(tmp_path) -> None:
+    events = base("c") + [purchase("c", T - timedelta(days=2), balance_after=100)]
+    with pytest.raises(ValueError, match="account_id"):
+        run(tmp_path, events, [profile("c", AS_OF)])
+
+
+def test_history_older_than_the_long_window_changes_no_feature(tmp_path) -> None:
+    """
+    Признаки не мерят длину выгрузки: события старше LONG_WINDOW дней до T
+    не меняют ни одного признака — как если бы выгрузка начиналась позже.
+    """
+    old = T - timedelta(days=LONG_WINDOW + 30)
+    premium = {"reason": "insurance_premium", "channel": "system"}
+    recent = base("c") + [
+        purchase("c", T - timedelta(days=LONG_WINDOW - 5)),
+        purchase("c", T - timedelta(days=100), **premium),
+    ]
+    longer = recent + [purchase("c", old), purchase("c", old, **premium), login("c", old, session="c_old")]
+    short = run(tmp_path, recent, [profile("c", AS_OF)], name="short")
+    long = run(tmp_path, longer, [profile("c", AS_OF)], name="long")
+    pd.testing.assert_frame_equal(short, long)
+    assert long.loc["c", f"act_days_since_first_{LONG_WINDOW}"] == pytest.approx(LONG_WINDOW - 5)
+    assert long.loc["c", f"act_count_{LONG_WINDOW}"] == 3
+    assert long.loc["c", f"insurance_premium_count_{LONG_WINDOW}"] == 1
+
+
+def test_a_history_shorter_than_the_long_window_is_refused(tmp_path) -> None:
+    root = tmp_path / "w"
+    start = T - timedelta(days=LONG_WINDOW - 1)
+    write_group(root / "raw", "val", END, base("c"), [profile("c", AS_OF)], period_start=start)
+    with pytest.raises(ValueError, match="короче"):
+        build("val", raw_dir=root / "raw", data_dir=root / "data", reports_dir=root / "reports")
 
 
 def test_future_does_not_change_features(tmp_path) -> None:

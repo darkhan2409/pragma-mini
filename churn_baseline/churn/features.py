@@ -5,7 +5,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
-from .config import LOCAL_OFFSET, WINDOWS
+from .config import LOCAL_OFFSET, LONG_WINDOW, WINDOWS
 
 
 # ============================================================
@@ -14,7 +14,8 @@ from .config import LOCAL_OFFSET, WINDOWS
 #
 # Всё считается только по событиям строго раньше T: блок событий
 # обрезается в самом начале, и ни одна функция ниже не видит момента T
-# и позже. Окно «за w дней» — события с T - w <= t < T.
+# и позже. Окно «за w дней» — события с T - w <= t < T. Окна не длиннее
+# LONG_WINDOW: признак за всю историю мерил бы длину выгрузки.
 #
 # Имя признака и его описание рождаются в одном месте (Table.put),
 # поэтому список признаков в отчёте не расходится с кодом.
@@ -104,15 +105,28 @@ class Past:
         counts = frame.drop_duplicates().groupby("code").size()
         return counts.reindex(range(self.n), fill_value=0).to_numpy(dtype=float)
 
-    def last_value(self, mask: np.ndarray, values: pd.Series, before_days: float = 0.0) -> np.ndarray:
+    def account_total(self, values: pd.Series, before_days: float = 0.0) -> np.ndarray:
         """
-        Последнее значение по времени среди событий старше before_days суток.
-        События внутри клиента уже упорядочены по времени.
+        Сумма по счетам клиента последнего значения каждого счёта среди
+        событий старше before_days суток. События внутри клиента уже
+        упорядочены по времени. Последнее значение по всем счетам сразу
+        брало бы случайный счёт: в 23:55 конца месяца снимки пишут все
+        счета клиента в одну минуту.
         """
-        mask = mask & (self.age > before_days) & values.notna().to_numpy()
-        frame = pd.DataFrame({"code": self.code[mask], "value": values.to_numpy(dtype=float, na_value=np.nan)[mask]})
-        last = frame.groupby("code")["value"].last()
-        return last.reindex(range(self.n)).to_numpy(dtype=float)
+        account = self.col("account_id")
+        known = values.notna().to_numpy()
+        if (known & account.isna().to_numpy()).any():
+            raise ValueError("остаток balance_after без account_id: неизвестно, чей это счёт")
+        mask = known & (self.age > before_days)
+        frame = pd.DataFrame(
+            {
+                "code": self.code[mask],
+                "account": account.to_numpy()[mask],
+                "value": values.to_numpy(dtype=float, na_value=np.nan)[mask],
+            }
+        )
+        last = frame.groupby(["code", "account"], sort=False)["value"].last()
+        return last.groupby(level="code").sum().reindex(range(self.n)).to_numpy(dtype=float)
 
     def _reduce(self, mask: np.ndarray, values: np.ndarray, how: str) -> np.ndarray:
         series = pd.Series(values[mask]).groupby(self.code[mask]).agg(how)
@@ -148,8 +162,12 @@ def compute(events: pd.DataFrame, cutoff: datetime, action: np.ndarray) -> tuple
 def _activity(table: Table, past: Past) -> None:
     act = past.action
     table.put("act_days_since_last", past.since_last(act), "дней от последнего действия клиента до T")
-    table.put("act_days_since_first", past.since_first(act), "дней от первого действия клиента в выгрузке до T")
-    table.put("act_count_all", past.count(act), "действий клиента за всю историю до T")
+    table.put(
+        f"act_days_since_first_{LONG_WINDOW}",
+        past.since_first(past.within(act, LONG_WINDOW)),
+        f"дней от первого действия клиента за {LONG_WINDOW} дней до T",
+    )
+    table.put(f"act_count_{LONG_WINDOW}", past.count(act, LONG_WINDOW), f"действий клиента за {LONG_WINDOW} дней до T")
     for days in WINDOWS:
         table.put(f"act_count_{days}", past.count(act, days), f"действий клиента за {days} дней до T")
 
@@ -269,12 +287,15 @@ def _money(table: Table, past: Past) -> None:
     table.put("transfer_in_sum_90", past.total(incoming, amount, 90), "сумма входящих переводов KZT за 90 дней")
 
     balance = past.col("balance_after")
-    has_balance = balance.notna().to_numpy()
-    last = past.last_value(has_balance, balance)
-    earlier = past.last_value(has_balance, balance, before_days=30)
-    table.put("balance_last", last, "последний остаток balance_after до T (по любому счёту)")
-    table.put("balance_30d_ago", earlier, "последний остаток balance_after раньше T - 30 дней")
-    table.put("balance_change_30", last - earlier, "изменение остатка за последние 30 дней")
+    total = past.account_total(balance)
+    earlier = past.account_total(balance, before_days=30)
+    table.put(
+        "balance_total",
+        total,
+        "сумма остатков всех счетов до T: последний balance_after каждого счёта, долг кредитной карты — с минусом",
+    )
+    table.put("balance_total_30d_ago", earlier, "сумма остатков всех счетов раньше T - 30 дней")
+    table.put("balance_change_30", total - earlier, "изменение суммы остатков всех счетов за последние 30 дней")
 
     table.put("fee_count_90", past.count((kind == "fee_charge").to_numpy(), 90), "списаний комиссий за 90 дней")
     short = (past.col("decline_reason") == "insufficient_funds").to_numpy()
@@ -297,9 +318,9 @@ def _products(table: Table, past: Past) -> None:
         "различных договоров с начислением процентов (вклады) за 90 дней",
     )
     table.put(
-        "insurance_premium_count",
-        past.count(((kind == "purchase") & (past.col("reason") == "insurance_premium")).to_numpy()),
-        "списаний страховых премий за всю историю до T",
+        f"insurance_premium_count_{LONG_WINDOW}",
+        past.count(((kind == "purchase") & (past.col("reason") == "insurance_premium")).to_numpy(), LONG_WINDOW),
+        f"списаний страховых премий за {LONG_WINDOW} дней до T",
     )
 
     submitted = (kind == "application_submitted").to_numpy()

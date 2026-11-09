@@ -85,7 +85,7 @@ def login(client: str, moment: datetime, session: str = "ses_1", status: str = "
 
 
 def salary(client: str, moment: datetime, amount: int = 300000) -> dict:
-    return event(client, moment, "transactions", type="salary_credit", channel="system", reason="salary", amount=amount, direction="credit", status="approved", balance_after=amount)
+    return event(client, moment, "transactions", type="salary_credit", channel="system", reason="salary", amount=amount, direction="credit", status="approved", account_id=f"acc_{client}", balance_after=amount)
 
 
 def push(client: str, moment: datetime, template: str = "DEP_STANDARD") -> dict:
@@ -127,7 +127,15 @@ def profile(client: str, as_of: datetime, **overrides) -> dict:
     return row
 
 
-def write_group(raw_dir: Path, group: str, period_end: datetime, events: list[dict], profiles: list[dict], row_group_size: int = 4) -> Path:
+def write_group(
+    raw_dir: Path,
+    group: str,
+    period_end: datetime,
+    events: list[dict],
+    profiles: list[dict],
+    row_group_size: int = 4,
+    period_start: datetime = datetime(2024, 1, 1, tzinfo=LOCAL),
+) -> Path:
     """
     Выгрузка одной группы: события по клиенту и времени, как у генератора.
     Малый row_group_size заставляет клиентов пересекать границы групп строк.
@@ -142,7 +150,7 @@ def write_group(raw_dir: Path, group: str, period_end: datetime, events: list[di
     pq.write_table(table, out / "events.parquet", row_group_size=row_group_size)
     pq.write_table(pa.Table.from_pylist(profiles, schema=PROFILE_SCHEMA), out / "profile.parquet")
     manifest = {
-        "period_start": "2024-01-01T00:00:00+05:00",
+        "period_start": period_start.astimezone(LOCAL).isoformat(),
         "period_end": period_end.astimezone(LOCAL).isoformat(),
         "events_sha256": f"synthetic-{group}",
         "profile_sha256": f"synthetic-profile-{group}",

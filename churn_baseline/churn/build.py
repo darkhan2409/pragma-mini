@@ -2,12 +2,25 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 
 from .activity import is_client_action
-from .config import DATA_DIR, FINAL_GROUP, FUTURE_DIR, FUTURE_LABEL_GROUPS, GROUPS, RAW_DIR, RECENT, REPORTS_DIR, cutoff
+from .config import (
+    DATA_DIR,
+    FINAL_GROUP,
+    FUTURE_DIR,
+    FUTURE_LABEL_GROUPS,
+    GROUPS,
+    LONG_WINDOW,
+    RAW_DIR,
+    RECENT,
+    REPORTS_DIR,
+    cutoff,
+    manifest,
+)
 from .features import compute
 from .profile import CATEGORICAL, DESCRIPTIONS as PROFILE_DESCRIPTIONS, profile_at
 from .raw import client_blocks, read_profile
@@ -38,6 +51,12 @@ def build(
         raise ValueError(f"группа {group!r} не из {GROUPS}")
 
     moment = cutoff(group, raw_dir)
+    start = datetime.fromisoformat(manifest(group, raw_dir)["period_start"])
+    if moment - start < timedelta(days=LONG_WINDOW):
+        raise ValueError(
+            f"история {group} до T {moment.isoformat()} короче {LONG_WINDOW} дней: "
+            "окна признаков упёрлись бы в начало выгрузки"
+        )
     sources = provenance(group, raw_dir, future_dir)
     future = group in FUTURE_LABEL_GROUPS
     acting = acting_clients(group, raw_dir, future_dir) if future else None

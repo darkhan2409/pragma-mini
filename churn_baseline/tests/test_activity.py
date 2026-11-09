@@ -20,7 +20,9 @@ CASES = [
     ({"type": "app_screen"}, True),
     ({"type": "app_operation", "channel": None}, True),
     ({"type": "purchase", "reason": "purchase", "channel": "pos"}, True),
-    ({"type": "transfer_out", "reason": "own_transfer", "channel": "app"}, True),
+    ({"type": "transfer_out", "reason": "own_transfer", "counterparty": "Own account", "channel": "app"}, True),
+    ({"type": "transfer_out", "reason": "transfer", "counterparty": "A. Person", "channel": "app"}, True),
+    ({"type": "transfer_out", "reason": "transfer", "channel": "ecom"}, True),
     ({"type": "p2p_out"}, True),
     ({"type": "cash_withdrawal", "channel": "atm"}, True),
     ({"type": "cash_deposit", "channel": "atm"}, True),
@@ -47,6 +49,10 @@ CASES = [
     ({"type": "cash_deposit", "reason": "payment_topup", "channel": "atm"}, False),
     ({"type": "cash_deposit", "reason": "card_statement", "channel": "atm"}, False),
     ({"type": "transfer_in", "reason": "payment_topup", "counterparty": "Own account"}, False),
+    # вывод денег себе в другой банк: так выводит остаток и доход ушедший
+    # клиент (решение владельца 2026-11-09)
+    ({"type": "transfer_out", "reason": "transfer", "counterparty": "Own account", "channel": "app"}, False),
+    ({"type": "transfer_out", "reason": "transfer", "counterparty": "Own account", "channel": "ecom"}, False),
     # банк, автоматика, третьи лица
     ({"type": "purchase", "reason": "subscription", "channel": "ecom"}, False),
     ({"type": "purchase", "reason": "insurance_premium", "channel": "system"}, False),

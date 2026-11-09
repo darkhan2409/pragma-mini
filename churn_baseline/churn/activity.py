@@ -29,6 +29,14 @@ import pandas as pd
 # обслуживать долг. Досрочное погашение остаётся действием: его клиент
 # выбирает сам.
 #
+# Вывод денег себе в другой банк — не действие (решение владельца
+# 2026-11-09): transfer_out с reason transfer на «Own account». Так
+# ушедший клиент выводит остаток в день ухода и потом доход, который
+# ещё приходит сюда, и метка считала его оставшимся. У действующего
+# клиента кроме такого вывода есть и другие действия. Перевод между
+# своими счетами в банке (own_transfer) и приход со своего счёта в
+# другом банке остаются действиями.
+#
 # Действие, визит и целевое действие — три разных понятия:
 #   is_client_action   всё, что начал клиент (метка churn, act_*);
 #   is_visit           успешный вход в приложение: так визит считает
@@ -45,7 +53,6 @@ ALWAYS: frozenset[str] = frozenset(
     {
         "app_screen",
         "app_operation",
-        "transfer_out",
         "p2p_out",
         "cash_withdrawal",
         "early_repayment",
@@ -78,13 +85,16 @@ def is_client_action(events: pd.DataFrame) -> np.ndarray:
     reason = events["reason"]
     channel = events["channel"]
 
+    own_account = events["counterparty"] == OWN_ACCOUNT
+
     action = kind.isin(ALWAYS)
+    action |= (kind == "transfer_out") & ~((reason == "transfer") & own_account)
     action |= (kind == "purchase") & (reason == "purchase")
     action |= (kind == "cash_deposit") & ~reason.isin(OBLIGATION_TOPUP)
     action |= (kind == "bill_payment") & channel.notna() & (channel != "system")
     action |= (kind == "deposit_topup") & (events["direction"] == "debit")
     action |= (kind == "deposit_withdrawal") & (reason == "early_closure") & (events["direction"] == "debit")
-    action |= (kind == "transfer_in") & (reason == "transfer") & (events["counterparty"] == OWN_ACCOUNT)
+    action |= (kind == "transfer_in") & (reason == "transfer") & own_account
     action |= (kind == "card_blocked") & reason.isin(CLIENT_CARD_BLOCK)
     action |= (kind == "card_unblocked") & reason.isin(CLIENT_CARD_UNBLOCK)
     action |= (kind == "product_closed") & (reason == "early_closure")
